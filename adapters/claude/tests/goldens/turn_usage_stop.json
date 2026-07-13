@@ -1,0 +1,737 @@
+{
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "claude-code"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "claude-code"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "dogfood"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "golden@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "cardinalhq"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-claude-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "claude-opus-4-7"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "12"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "340"
+                      }
+                    },
+                    {
+                      "key": "cache_creation_input_tokens",
+                      "value": {
+                        "intValue": "4500"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "91000"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Read"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "/work/src/app.py"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Bash"
+                      }
+                    },
+                    {
+                      "key": "bash_class",
+                      "value": {
+                        "stringValue": "test"
+                      }
+                    },
+                    {
+                      "key": "bash_multi",
+                      "value": {
+                        "boolValue": true
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "claude-haiku-4-5"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "8"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "120"
+                      }
+                    },
+                    {
+                      "key": "cache_creation_input_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "95000"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Write"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "/work/src/app.py"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "NotebookEdit"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "/work/nb.ipynb"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "mcp__cardinal__lakerunner__list_services"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "3"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Bash"
+                      }
+                    },
+                    {
+                      "key": "bash_class",
+                      "value": {
+                        "stringValue": "file-read"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "claude-opus-4-7"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "5"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "60"
+                      }
+                    },
+                    {
+                      "key": "cache_creation_input_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "96000"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "stdout": null,
+  "returncode": 0
+}

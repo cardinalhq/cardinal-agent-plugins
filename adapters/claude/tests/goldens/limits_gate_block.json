@@ -1,0 +1,8 @@
+{
+  "batches": [],
+  "stdout": {
+    "decision": "block",
+    "reason": "Cardinal spend limit reached \u2014 set by your lead. Run /cardinal:override to proceed anyway."
+  },
+  "returncode": 0
+}

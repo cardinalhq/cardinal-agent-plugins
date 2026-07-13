@@ -1,0 +1,12 @@
+{
+  "batches": [],
+  "stdout": {
+    "hookSpecificOutput": {
+      "hookEventName": "UserPromptSubmit",
+      "additionalContext": "Cardinal budget standing: 90% consumed. Economize."
+    },
+    "systemMessage": "You're at 90% of the weekly Cardinal budget."
+  },
+  "returncode": 0,
+  "ack_band": 2
+}
