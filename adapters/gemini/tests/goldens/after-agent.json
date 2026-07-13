@@ -121,6 +121,12 @@
                       }
                     },
                     {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-2.0-pro"
+                      }
+                    },
+                    {
                       "key": "total_tokens",
                       "value": {
                         "intValue": "4200"

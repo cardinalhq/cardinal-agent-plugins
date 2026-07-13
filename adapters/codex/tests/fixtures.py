@@ -354,6 +354,7 @@ def scenario_telemetry(hook: Path) -> dict[str, Any]:
                 "subagent_type": "explorer",
                 "agent_id": "agent-7",
                 "description": "Scan for credential leaks",
+                "model": "gpt-5-codex",
                 "total_tokens": 4321,
             })
             assert r.returncode == 0, r.stderr

@@ -237,6 +237,7 @@ def scenarios() -> list[dict[str, Any]]:
             "steps": [
                 ("AfterAgent", {"session_id": "s-sub",
                                 "subagent_type": "code-reviewer",
+                                "model": "gemini-2.0-pro",
                                 "usage": {"total_tokens": 4200}}),
                 ("AfterAgent", {"session_id": "s-sub",
                                 "description": "review the diff for bugs"}),

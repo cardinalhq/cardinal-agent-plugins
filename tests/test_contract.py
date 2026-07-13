@@ -82,7 +82,10 @@ REQUIRED_KEYS: dict[str, set[str]] = {
         "session_id", "tool_name", "success", "agent_runtime",
     },
     "cardinal.subagent_usage": {
-        "session_id", "subagent_description",
+        # model: the latent-subagent-mining clustering signal — dominant
+        # model by worked tokens (claude), payload-probed (codex/cursor/
+        # gemini), engine-injected context.model (omnigent).
+        "session_id", "subagent_description", "model",
     },
     "cardinal.plan_state": {
         "session_id", "plan_type", "ts",
