@@ -1,0 +1,401 @@
+{
+  "steps": [
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": ""
+    }
+  ],
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.git_state"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.git_state"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-agent"
+                      }
+                    },
+                    {
+                      "key": "cardinal_cwd",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "cardinal_head_sha",
+                      "value": {
+                        "stringValue": "68760765e4c705e4927fff7ce38595483837877a"
+                      }
+                    },
+                    {
+                      "key": "cardinal_branch",
+                      "value": {
+                        "stringValue": "feat/outcomes-observability"
+                      }
+                    },
+                    {
+                      "key": "cardinal_repo",
+                      "value": {
+                        "stringValue": "cardinalhq/fixture-repo"
+                      }
+                    },
+                    {
+                      "key": "cardinal_remote_url",
+                      "value": {
+                        "stringValue": "git@github.com:cardinalhq/fixture-repo.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_name",
+                      "value": {
+                        "stringValue": "outcomes-observability"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_type",
+                      "value": {
+                        "stringValue": "feature"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.git_state"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.git_state"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-agent"
+                      }
+                    },
+                    {
+                      "key": "cardinal_cwd",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "cardinal_head_sha",
+                      "value": {
+                        "stringValue": "68760765e4c705e4927fff7ce38595483837877a"
+                      }
+                    },
+                    {
+                      "key": "cardinal_branch",
+                      "value": {
+                        "stringValue": "feat/outcomes-observability"
+                      }
+                    },
+                    {
+                      "key": "cardinal_repo",
+                      "value": {
+                        "stringValue": "cardinalhq/fixture-repo"
+                      }
+                    },
+                    {
+                      "key": "cardinal_remote_url",
+                      "value": {
+                        "stringValue": "git@github.com:cardinalhq/fixture-repo.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_name",
+                      "value": {
+                        "stringValue": "outcomes-observability"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_type",
+                      "value": {
+                        "stringValue": "feature"
+                      }
+                    },
+                    {
+                      "key": "cardinal_command",
+                      "value": {
+                        "stringValue": "code-review"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.git_state"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.git_state"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-agent"
+                      }
+                    },
+                    {
+                      "key": "cardinal_cwd",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "cardinal_head_sha",
+                      "value": {
+                        "stringValue": "68760765e4c705e4927fff7ce38595483837877a"
+                      }
+                    },
+                    {
+                      "key": "cardinal_branch",
+                      "value": {
+                        "stringValue": "feat/outcomes-observability"
+                      }
+                    },
+                    {
+                      "key": "cardinal_repo",
+                      "value": {
+                        "stringValue": "cardinalhq/fixture-repo"
+                      }
+                    },
+                    {
+                      "key": "cardinal_remote_url",
+                      "value": {
+                        "stringValue": "git@github.com:cardinalhq/fixture-repo.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_name",
+                      "value": {
+                        "stringValue": "outcomes-observability"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_type",
+                      "value": {
+                        "stringValue": "feature"
+                      }
+                    },
+                    {
+                      "key": "cardinal_command",
+                      "value": {
+                        "stringValue": "cardinal:status"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
