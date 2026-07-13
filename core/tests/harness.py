@@ -63,14 +63,24 @@ class StubIngest:
             self.server.server_close()
 
     def normalized_batches(self) -> list[dict[str, Any]]:
-        """Batches with volatile fields normalized for golden comparison:
-        timestamps zeroed, cardinal.core_version pinned. Everything else —
-        event names, attribute keys and values, record ordering — must be
-        byte-stable across a migration."""
+        """Batches with volatile fields normalized for golden comparison
+        (core 0.2.0 gap #6 — every P1–P4 agent re-implemented these two
+        rules locally):
+        - timestamps zeroed; `ts` attribute value pinned
+        - `cardinal.core_version` attribute DROPPED (pre-migration goldens
+          lack the key entirely; pinning can't reconcile presence/absence)
+        - `cardinal.plugin_version` attribute value pinned, and scope
+          version pinned (release bumps must not break goldens)
+        Everything else — event names, attribute keys and values, record
+        ordering — must be byte-stable across a migration."""
         out = []
         for batch in self.log_batches:
             out.append(_normalize(batch))
         return out
+
+
+_PINNED_ATTR_KEYS = ("ts", "cardinal.plugin_version")
+_DROPPED_ATTR_KEYS = ("cardinal.core_version",)
 
 
 def _normalize(node: Any) -> Any:
@@ -79,12 +89,17 @@ def _normalize(node: Any) -> Any:
         for k, v in node.items():
             if k in ("timeUnixNano", "observedTimeUnixNano"):
                 result[k] = "0"
+            elif k == "scope" and isinstance(v, dict) and "version" in v:
+                result[k] = {**_normalize(v), "version": "<normalized>"}
             elif k == "attributes" and isinstance(v, list):
-                result[k] = [
-                    a if not (isinstance(a, dict) and a.get("key") in ("ts", "cardinal.core_version"))
-                    else {**a, "value": {"stringValue": "<normalized>"}}
-                    for a in (_normalize(x) for x in v)
-                ]
+                kept = []
+                for a in (_normalize(x) for x in v):
+                    if isinstance(a, dict) and a.get("key") in _DROPPED_ATTR_KEYS:
+                        continue
+                    if isinstance(a, dict) and a.get("key") in _PINNED_ATTR_KEYS:
+                        a = {**a, "value": {"stringValue": "<normalized>"}}
+                    kept.append(a)
+                result[k] = kept
             else:
                 result[k] = _normalize(v)
         return result

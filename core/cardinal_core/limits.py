@@ -29,7 +29,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from .paths import AgentPaths, atomic_write_json_compact, read_json
 
@@ -106,10 +107,15 @@ def maybe_refresh_verdict(
     branch: str | None,
     force: bool = False,
     timeout: float = FETCH_TIMEOUT_SEC,
+    api_key: str | None = None,
 ) -> dict | None:
     """Refresh the session's verdict file if its server-assigned TTL has
     lapsed (or force=True). Returns the current verdict (fresh or cached),
-    or None when limits aren't configured / everything failed."""
+    or None when limits aren't configured / everything failed.
+
+    `api_key` overrides the default secrets-file sourcing — the Claude
+    adapter reads its credential from Claude Code's OTel settings, and a
+    server-side consumer supplies its own (core 0.2.0 gap #2)."""
     cfg = limits_config(paths)
     if not cfg:
         return None
@@ -121,7 +127,8 @@ def maybe_refresh_verdict(
         if isinstance(fetched_at, (int, float)) and time.time() - fetched_at < float(ttl):
             return existing
 
-    api_key = ingest_api_key(paths)
+    if api_key is None:
+        api_key = ingest_api_key(paths)
     if not api_key:
         return existing
 
@@ -133,27 +140,36 @@ def maybe_refresh_verdict(
     return verdict
 
 
-def gate_output(
-    paths: AgentPaths,
-    session_id: str,
-    *,
-    hook_event_name: str,
-) -> dict[str, Any] | None:
+@dataclass(frozen=True)
+class GateDecision:
+    """The gate's POLICY outcome, channel-agnostic (core 0.2.0 gap #1).
+
+    Adapters render this into their hook's output schema:
+    hookSpecificOutput JSON (claude/codex/gemini — see gate_output),
+    `{continue: false, user_message}` + notify staging (cursor), or a
+    PolicyResult (omnigent). Renderers that surface a warn/notify band
+    must call ack_band() afterward — the decision itself never writes
+    hysteresis state.
+    """
+
+    tier: Literal["block", "warn", "notify"]  # after override downgrade
+    band: int
+    reason: str | None          # server block_reason / fallback copy (block only)
+    agent_context: str | None
+    user_message: str | None
+    is_new_band: bool           # hysteresis: band rose vs last ack
+
+
+def gate_decision(paths: AgentPaths, session_id: str) -> GateDecision | None:
     """The sync half of the spend-limits gate. File I/O only — never
-    touches the network. Returns the hook-output JSON to print, or None
-    (fail open).
+    touches the network. Returns None to fail open (no verdict, band 0,
+    or verdict stale).
 
-    Severity → channel mapping (the server decides severity; we route it):
-      decision=allow, band>0 → additionalContext only (model economizes).
-      decision=warn          → additionalContext + systemMessage.
-      decision=block         → {"decision": "block", reason}; an override
-                               file downgrades it to warn-tier surfacing.
-    Warn/notify obey band hysteresis (only speak when the band RISES);
-    a block is enforced every turn while in force.
-
-    `hook_event_name` is the agent's prompt-time event (UserPromptSubmit
-    for Claude/Codex, BeforeAgent for Gemini); Cursor's divergent output
-    schema is handled adapter-side and does not call this function.
+    Severity semantics (the server decides severity; we route it):
+      block  → enforced every turn while in force; an override file
+               downgrades it to warn-tier surfacing.
+      warn   → agent_context + user_message, band hysteresis.
+      notify → agent_context only (model economizes), band hysteresis.
     """
     verdict = read_verdict(paths, session_id)
     if not verdict:
@@ -171,14 +187,23 @@ def gate_output(
         else float("inf")
     )
 
+    agent_context = verdict.get("agent_context")
+    agent_context = agent_context if isinstance(agent_context, str) and agent_context else None
+    user_message = verdict.get("user_message")
+    user_message = user_message if isinstance(user_message, str) and user_message else None
+
     if decision == "block" and age <= BLOCK_MAX_AGE_SEC:
         if not paths.override_path(session_id).exists():
             reason = (
                 verdict.get("block_reason")
-                or verdict.get("user_message")
+                or user_message
                 or "A Cardinal spend limit for this work has been reached."
             )
-            return {"decision": "block", "reason": reason}
+            return GateDecision(
+                tier="block", band=band, reason=reason,
+                agent_context=agent_context, user_message=user_message,
+                is_new_band=True,
+            )
         decision = "warn"  # overridden: keep the human-visible standing
 
     if band <= 0 or age > WARN_MAX_AGE_SEC:
@@ -189,25 +214,87 @@ def gate_output(
         last_band = int(ack.get("band") or 0)
     except (TypeError, ValueError):
         last_band = 0
-    if band <= last_band:
-        return None
 
-    out: dict[str, Any] = {}
-    agent_context = verdict.get("agent_context")
-    if isinstance(agent_context, str) and agent_context:
-        out["hookSpecificOutput"] = {
-            "hookEventName": hook_event_name,
-            "additionalContext": agent_context,
-        }
-    user_message = verdict.get("user_message")
-    if decision == "warn" and isinstance(user_message, str) and user_message:
-        out["systemMessage"] = user_message
-    if not out:
-        return None
+    return GateDecision(
+        tier="warn" if decision == "warn" else "notify",
+        band=band,
+        reason=None,
+        agent_context=agent_context,
+        user_message=user_message,
+        is_new_band=band > last_band,
+    )
+
+
+def ack_band(paths: AgentPaths, session_id: str, band: int) -> None:
+    """Record that `band` was surfaced to the user/agent — the hysteresis
+    write. Renderers call this after actually delivering a warn/notify."""
     atomic_write_json_compact(
         paths.ack_path(session_id), {"band": band, "surfaced_at": time.time()}
     )
+
+
+def gate_output(
+    paths: AgentPaths,
+    session_id: str,
+    *,
+    hook_event_name: str,
+) -> dict[str, Any] | None:
+    """hookSpecificOutput renderer over gate_decision() — the channel
+    shape shared by claude/codex/gemini prompt-time hooks. Returns the
+    hook-output JSON to print, or None (fail open).
+
+    `hook_event_name` is the agent's prompt-time event (UserPromptSubmit
+    for Claude/Codex, BeforeAgent for Gemini); Cursor's divergent output
+    schema renders GateDecision itself and does not call this function.
+    """
+    d = gate_decision(paths, session_id)
+    if d is None:
+        return None
+    if d.tier == "block":
+        return {"decision": "block", "reason": d.reason}
+    if not d.is_new_band:
+        return None
+
+    out: dict[str, Any] = {}
+    if d.agent_context:
+        out["hookSpecificOutput"] = {
+            "hookEventName": hook_event_name,
+            "additionalContext": d.agent_context,
+        }
+    if d.tier == "warn" and d.user_message:
+        out["systemMessage"] = d.user_message
+    if not out:
+        return None
+    ack_band(paths, session_id, d.band)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Staged-notify channel (core 0.2.0 gap #5 — Cursor Divergence E, and any
+# adapter whose prompt-time hook lacks a non-blocking message slot)
+# ---------------------------------------------------------------------------
+
+def stage_notify(paths: AgentPaths, session_id: str, message: str, band: int) -> None:
+    """Stage a standing message for delivery on the next available
+    channel (e.g. Cursor's postToolUse additional_context)."""
+    atomic_write_json_compact(
+        paths.notify_path(session_id),
+        {"message": message, "band": band, "staged_at": time.time()},
+    )
+
+
+def consume_notify(paths: AgentPaths, session_id: str) -> str | None:
+    """One-shot read-and-delete of a staged notify message."""
+    path = paths.notify_path(session_id)
+    blob = read_json(path)
+    message = blob.get("message")
+    if not isinstance(message, str) or not message:
+        return None
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return message
 
 
 def standing_lines(verdict: dict) -> list[str]:

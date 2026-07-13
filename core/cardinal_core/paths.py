@@ -142,6 +142,9 @@ class AgentPaths:
     def override_path(self, session_id: str) -> Path:
         return self.limits_dir / f"{safe_session(session_id)}.override.json"
 
+    def notify_path(self, session_id: str) -> Path:
+        return self.limits_dir / f"{safe_session(session_id)}.notify.json"
+
     def read_state(self) -> dict[str, Any]:
         return read_json(self.state_path)
 

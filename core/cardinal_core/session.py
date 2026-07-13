@@ -56,18 +56,26 @@ def convention_prompt(agent_label: str) -> str:
     )
 
 
-def budget_standing(paths: AgentPaths, session_id: str | None, cwd: str) -> str | None:
+def budget_standing(
+    paths: AgentPaths,
+    session_id: str | None,
+    cwd: str,
+    api_key: str | None = None,
+) -> str | None:
     """One synchronous limits fetch at session start (short timeout, fail
     open) so the budget is part of the session's standing context from
     turn one. Also warm-writes the verdict file the per-turn sync gate
-    reads. No-op when the backend doesn't advertise the limits protocol."""
+    reads. No-op when the backend doesn't advertise the limits protocol.
+    `api_key` passes through to maybe_refresh_verdict for adapters whose
+    credential lives outside the secrets file (core 0.2.0 gap #2)."""
     if not session_id:
         return None
     if not limits.limits_config(paths):
         return None
     repo, branch = git_facts(cwd)
     verdict = limits.maybe_refresh_verdict(
-        paths, session_id=session_id, repo=repo, branch=branch, force=True, timeout=1.5
+        paths, session_id=session_id, repo=repo, branch=branch, force=True,
+        timeout=1.5, api_key=api_key,
     )
     if not verdict:
         return None
