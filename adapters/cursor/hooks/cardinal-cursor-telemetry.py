@@ -48,12 +48,7 @@ from cardinal_core.initiative import (  # noqa: E402,F401
     resolve_initiative,
     strip_worktree_noise,
 )
-from cardinal_core.paths import (  # noqa: E402
-    AgentPaths,
-    atomic_write_json_compact,
-    read_json,
-    safe_session,
-)
+from cardinal_core.paths import AgentPaths  # noqa: E402
 
 PLUGIN_VERSION = _plugin_version.plugin_version()
 SCOPE_NAME = "cardinal-cursor-plugin"
@@ -263,50 +258,26 @@ def output_success(tool_output: Any) -> str:
 
 # ---------------------------------------------------------------------------
 # Spend-limits gate (beforeSubmitPrompt) — the three-tier resolution from
-# docs/specs/cursor-parity.md Divergence E. Core's limits.gate_output()
-# renders the hookSpecificOutput schema Claude/Codex/Gemini share; Cursor
-# cannot use it, so the band/age/override/hysteresis policy walk is
-# reimplemented here over core's lower-level primitives (read_verdict,
-# age constants, ack/override paths) with Cursor's channel mapping.
+# docs/specs/cursor-parity.md Divergence E. Core 0.2.0's
+# limits.gate_decision() owns the policy walk (block age check, override
+# downgrade, band hysteresis); this adapter only renders the decision
+# into Cursor's channels: `{continue:false, user_message}` on the submit
+# path for a block (or a strict-warn escalation), and core's
+# staged-notify channel (`<conv>.notify.json`, limits.stage_notify /
+# consume_notify) for warn/notify, surfaced on the next postToolUse.
 # ---------------------------------------------------------------------------
 
 def strict_warn_enabled() -> bool:
     return os.environ.get(STRICT_WARN_ENV) == "1"
 
 
-def notify_path(conv_id: str) -> Path:
-    """`<conv>.notify.json` — the staged notify/warn message pending
-    delivery on the next postToolUse (unique to the Cursor adapter;
-    Claude/Codex use systemMessage inline on the submit hook)."""
-    return PATHS.limits_dir / f"{safe_session(conv_id)}.notify.json"
-
-
-def consume_notify(conv_id: str) -> str | None:
-    """Read-and-delete the staged notify message for this conversation.
-
-    Called from `postToolUse` on the first tool call following a
-    beforeSubmitPrompt that staged a notify/warn context. Returns None
-    when nothing is staged. The one-shot semantics are intentional: the
-    standing surfaces once per band change; hysteresis lives in ack.json.
-    """
-    path = notify_path(conv_id)
-    data = read_json(path)
-    msg = data.get("message") if isinstance(data, dict) else None
-    if isinstance(msg, str) and msg:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        return msg
-    return None
-
-
 def limits_gate_output(conv_id: str) -> dict[str, Any] | None:
-    """Cursor sync gate. Returns the beforeSubmitPrompt output JSON
-    (`{"continue": false, "user_message": ...}` for a block, `None`
-    otherwise). Notify/warn context is STAGED as `<conv>.notify.json`
-    for the next postToolUse to surface — the Cursor beforeSubmitPrompt
-    output schema has no `additional_context` slot.
+    """Cursor renderer over core `limits.gate_decision()`. Returns the
+    beforeSubmitPrompt output JSON (`{"continue": false, "user_message":
+    ...}` for a block, `None` otherwise). Notify/warn context is STAGED
+    via `limits.stage_notify()` for the next postToolUse to surface —
+    the Cursor beforeSubmitPrompt output schema has no
+    `additional_context` slot.
 
     Severity → channel mapping:
       block                       → {continue:false, user_message}
@@ -316,72 +287,43 @@ def limits_gate_output(conv_id: str) -> dict[str, Any] | None:
                                     postToolUse surfaces it once as
                                     additional_context.
     Warn/notify obey band hysteresis (only stage when the band RISES);
-    a block is enforced every turn while in force.
+    a block — including a strict-warn escalation — is enforced every
+    turn while in force. ack_band() is written only when a warn/notify
+    is actually staged, matching core's "renderers ack what they
+    surface" contract.
     """
-    verdict = limits.read_verdict(PATHS, conv_id)
-    if not verdict:
+    d = limits.gate_decision(PATHS, conv_id)
+    if d is None:
         return None
 
-    decision = verdict.get("decision")
-    try:
-        band = int(verdict.get("band") or 0)
-    except (TypeError, ValueError):
-        band = 0
-    fetched_at = verdict.get("fetched_at")
-    age = (
-        time.time() - fetched_at
-        if isinstance(fetched_at, (int, float))
-        else float("inf")
-    )
+    if d.tier == "block":
+        return {"continue": False, "user_message": d.reason}
 
-    def _block_body(source_decision: str) -> dict[str, Any]:
-        reason = (
-            verdict.get("block_reason")
-            or verdict.get("user_message")
-            or "A Cardinal spend limit for this work has been reached."
-        )
-        if source_decision == "warn":
-            reason = (
-                verdict.get("user_message")
-                or f"[warn escalated to block via {STRICT_WARN_ENV}]\n{reason}"
+    if d.tier == "warn" and strict_warn_enabled():
+        reason = d.user_message
+        if not reason:
+            # Preserve the pre-0.2.0 escalation copy exactly: fall back
+            # to the verdict's block_reason (GateDecision carries reason
+            # only for block tier), then the stock limit-reached line.
+            verdict = limits.read_verdict(PATHS, conv_id) or {}
+            fallback = (
+                verdict.get("block_reason")
+                or "A Cardinal spend limit for this work has been reached."
             )
+            reason = f"[warn escalated to block via {STRICT_WARN_ENV}]\n{fallback}"
         return {"continue": False, "user_message": reason}
 
-    if decision == "block" and age <= limits.BLOCK_MAX_AGE_SEC:
-        if not PATHS.override_path(conv_id).exists():
-            return _block_body("block")
-        decision = "warn"  # overridden: keep the human-visible standing
-
-    if band <= 0 or age > limits.WARN_MAX_AGE_SEC:
-        return None
-
-    if decision == "warn" and strict_warn_enabled():
-        return _block_body("warn")
-
-    # Non-blocking band — stage a notify message for postToolUse.
-    ack = read_json(PATHS.ack_path(conv_id))
-    try:
-        last_band = int(ack.get("band") or 0)
-    except (TypeError, ValueError):
-        last_band = 0
-    if band <= last_band:
+    if not d.is_new_band:
         return None
 
     parts: list[str] = []
-    agent_context = verdict.get("agent_context")
-    if isinstance(agent_context, str) and agent_context:
-        parts.append(agent_context)
-    user_message = verdict.get("user_message")
-    if decision == "warn" and isinstance(user_message, str) and user_message:
-        parts.append(user_message)
+    if d.agent_context:
+        parts.append(d.agent_context)
+    if d.tier == "warn" and d.user_message:
+        parts.append(d.user_message)
     if parts:
-        atomic_write_json_compact(
-            notify_path(conv_id),
-            {"message": "\n\n".join(parts), "band": band, "staged_at": time.time()},
-        )
-        atomic_write_json_compact(
-            PATHS.ack_path(conv_id), {"band": band, "surfaced_at": time.time()}
-        )
+        limits.stage_notify(PATHS, conv_id, "\n\n".join(parts), d.band)
+        limits.ack_band(PATHS, conv_id, d.band)
     return None
 
 
@@ -519,7 +461,7 @@ def handle_post_tool_use(payload: dict[str, Any]) -> None:
     # is the Cursor adapter's substitute for Claude's inline
     # systemMessage on the submit hook — see Divergence E.
     try:
-        msg = consume_notify(conv_id)
+        msg = limits.consume_notify(PATHS, conv_id)
         if msg:
             sys.stdout.write(json.dumps({"additional_context": msg}))
             sys.stdout.flush()
