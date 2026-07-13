@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""Connect Codex to Cardinal telemetry and MCP.
+
+Runs Cardinal's device-code flow, mints ingest and MCP keys, verifies both
+endpoints, writes a managed [mcp_servers.cardinal] block into
+~/.codex/config.toml, and installs managed Codex hooks that emit Cardinal
+agent-session telemetry.
+
+The device flow, endpoint probes, and atomic file helpers come from
+cardinal_core (vendored next to hooks/); the TOML config writer and the
+Codex hooks.json writer are Codex-specific and stay here.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shlex
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+from cardinal_core import deviceflow  # noqa: E402
+from cardinal_core.paths import atomic_write, atomic_write_secret, backup  # noqa: E402
+
+
+def _load_plugin_version() -> str:
+    """Read the canonical version from the sibling plugin.json.
+
+    Same pattern as hooks/_plugin_version.py — one source of truth, no
+    hardcoded constants that drift out of sync with releases.
+    """
+    manifest = Path(__file__).resolve().parent.parent / ".codex-plugin" / "plugin.json"
+    try:
+        return json.loads(manifest.read_text(encoding="utf-8")).get("version") or "unknown"
+    except (OSError, ValueError):
+        return "unknown"
+
+
+PLUGIN_VERSION = _load_plugin_version()
+CLIENT_ID = "cardinal-codex-plugin"
+MCP_SERVER_NAME = "cardinal"
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+HOOK_SCRIPT = PLUGIN_ROOT / "hooks" / "cardinal-codex-telemetry.py"
+
+CODEX_DIR = Path.home() / ".codex"
+CONFIG_PATH = CODEX_DIR / "config.toml"
+HOOKS_PATH = CODEX_DIR / "hooks.json"
+STATE_PATH = CODEX_DIR / "cardinal.json"
+SECRETS_PATH = CODEX_DIR / "cardinal-secrets.json"
+PENDING_PATH = CODEX_DIR / "cardinal-pending.json"
+
+BEGIN_MARKER = "# BEGIN cardinal-codex-plugin managed MCP server"
+END_MARKER = "# END cardinal-codex-plugin managed MCP server"
+
+UNMANAGED_CARDINAL_TABLE_RE = re.compile(
+    r'(?m)^\s*\[mcp_servers\.(?:"cardinal"|cardinal)\]\s*$'
+)
+
+
+def toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def write_pending(grant: dict) -> None:
+    payload = {
+        "verification_uri": grant.get("verification_uri", ""),
+        "user_code": grant.get("user_code", ""),
+        "expires_in": grant.get("expires_in", deviceflow.DEFAULT_POLL_TIMEOUT_SECS),
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "plugin_version": PLUGIN_VERSION,
+    }
+    atomic_write(PENDING_PATH, json.dumps(payload, indent=2) + "\n")
+
+
+def clear_pending() -> None:
+    try:
+        PENDING_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+_ANY_TABLE_HEADER_RE = re.compile(r"^\s*\[")
+_CARDINAL_TABLE_HEADER_RE = re.compile(
+    r'^\s*\[mcp_servers\.(?:"cardinal"|cardinal)(?:\]|\.)'
+)
+
+
+def strip_managed_block(text: str) -> tuple[str, bool]:
+    """Remove the plugin-managed Cardinal MCP config from config.toml.
+
+    The BEGIN/END markers are ADVISORY, not a deletion span: Codex rewrites
+    config.toml itself and can move its own sections (e.g. [desktop],
+    [hooks.state]) inside the marker span (issue #10). Removal is therefore
+    parse-aware — only the marker comment lines and the
+    [mcp_servers.cardinal] table (header through the line before the next
+    table header), wherever they sit, are removed. Foreign content that
+    drifted between the markers is preserved verbatim.
+
+    The BEGIN marker still gates the whole operation: without it the file
+    is considered unmanaged and returned untouched, so a hand-written
+    [mcp_servers.cardinal] table is never deleted.
+
+    Keep this function in lockstep with cardinal-disconnect.
+    """
+    if BEGIN_MARKER not in text:
+        return text, False
+    out: list[str] = []
+    in_cardinal = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith(BEGIN_MARKER) or stripped.startswith(END_MARKER):
+            continue
+        if in_cardinal:
+            if _ANY_TABLE_HEADER_RE.match(line):
+                in_cardinal = False  # table ended; fall through for this line
+            else:
+                continue
+        if _CARDINAL_TABLE_HEADER_RE.match(line):
+            in_cardinal = True
+            continue
+        out.append(line)
+    new_text = re.sub(r"\n{3,}", "\n\n", "".join(out)).strip("\n")
+    return (new_text + "\n" if new_text else ""), True
+
+
+def build_managed_block(mcp_url: str, api_key: str) -> str:
+    return (
+        f"{BEGIN_MARKER}\n"
+        f"[mcp_servers.{MCP_SERVER_NAME}]\n"
+        f"url = {toml_string(mcp_url)}\n"
+        f'http_headers = {{ "X-CardinalHQ-API-Key" = {toml_string(api_key)} }}\n'
+        f"{END_MARKER}\n"
+    )
+
+
+def write_codex_config(mcp_url: str, api_key: str) -> Path | None:
+    text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else ""
+    text_without_managed, _ = strip_managed_block(text)
+    if UNMANAGED_CARDINAL_TABLE_RE.search(text_without_managed):
+        sys.exit(
+            f"Refusing to write because {CONFIG_PATH} already contains an unmanaged "
+            "[mcp_servers.cardinal] table. Remove or rename that table, then rerun."
+        )
+
+    block = build_managed_block(mcp_url, api_key)
+    new_text = text_without_managed.rstrip()
+    if new_text:
+        new_text += "\n\n"
+    new_text += block
+
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = backup(CONFIG_PATH)
+    atomic_write(CONFIG_PATH, new_text)
+    return backup_path
+
+
+def load_json_object(path: Path, label: str) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        sys.exit(f"Refusing to write: {label} ({path}) is not valid JSON ({exc}).")
+    if not isinstance(data, dict):
+        sys.exit(f"Refusing to write: {label} ({path}) is not a JSON object.")
+    return data
+
+
+def managed_hook_command(event_name: str) -> str:
+    return (
+        f"python3 {shlex.quote(str(HOOK_SCRIPT))} "
+        f"--event {shlex.quote(event_name)} # cardinal-codex-plugin"
+    )
+
+
+def managed_hook_group(event_name: str, timeout: int, status_message: str | None = None) -> dict:
+    hook = {
+        "type": "command",
+        "command": managed_hook_command(event_name),
+        "timeout": timeout,
+    }
+    if status_message:
+        hook["statusMessage"] = status_message
+    return {
+        "matcher": "",
+        "hooks": [hook],
+    }
+
+
+def strip_managed_hooks(data: dict) -> dict:
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        data["hooks"] = {}
+        return data
+    for event_name, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            continue
+        kept_groups = []
+        for group in groups:
+            if not isinstance(group, dict):
+                kept_groups.append(group)
+                continue
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list):
+                kept_groups.append(group)
+                continue
+            kept_handlers = [
+                h for h in handlers
+                if not (
+                    isinstance(h, dict)
+                    and "cardinal-codex-plugin" in str(h.get("command") or "")
+                )
+            ]
+            if kept_handlers:
+                new_group = dict(group)
+                new_group["hooks"] = kept_handlers
+                kept_groups.append(new_group)
+        if kept_groups:
+            hooks[event_name] = kept_groups
+        else:
+            hooks.pop(event_name, None)
+    data["hooks"] = hooks
+    return data
+
+
+def write_hooks_config() -> Path | None:
+    data = strip_managed_hooks(load_json_object(HOOKS_PATH, "hooks.json"))
+    hooks = data.setdefault("hooks", {})
+    hooks.setdefault("SessionStart", []).append(
+        managed_hook_group("SessionStart", 5, "Loading Cardinal session context")
+    )
+    hooks.setdefault("UserPromptSubmit", []).append(
+        managed_hook_group("UserPromptSubmit", 5, "Reporting Cardinal git context")
+    )
+    hooks.setdefault("Stop", []).append(
+        managed_hook_group("Stop", 10, "Reporting Cardinal session telemetry")
+    )
+    hooks.setdefault("SubagentStop", []).append(
+        managed_hook_group("SubagentStop", 5, "Reporting Cardinal subagent telemetry")
+    )
+    HOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = backup(HOOKS_PATH)
+    atomic_write(HOOKS_PATH, json.dumps(data, indent=2) + "\n")
+    return backup_path
+
+
+def write_secrets(bundle: dict) -> None:
+    ingest = bundle.get("ingest") or {}
+    mcp = bundle.get("mcp") or {}
+    payload = {
+        "schema_version": 1,
+        "ingest_api_key": ingest.get("api_key"),
+        "ingest_api_header": ingest.get("api_header") or "x-cardinalhq-api-key",
+        "mcp_api_key": mcp.get("api_key"),
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }
+    atomic_write_secret(SECRETS_PATH, json.dumps(payload, indent=2) + "\n")
+
+
+def write_state(bundle: dict, host: str, deployment_env: str, telemetry_only: bool) -> None:
+    org = bundle.get("org", {})
+    user = bundle.get("user", {})
+    mcp = bundle.get("mcp") or {}
+    ingest = bundle.get("ingest") or {}
+    mode = (
+        "telemetry-only" if telemetry_only or not mcp
+        else "mcp-only" if not ingest
+        else "telemetry-and-mcp"
+    )
+    state = {
+        "schema_version": 2,
+        "host": host,
+        "mode": mode,
+        "org_id": org.get("id"),
+        "org_slug": org.get("slug"),
+        "user_email": user.get("email"),
+        "deployment_environment": deployment_env,
+        "plugin_version": PLUGIN_VERSION,
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "config_path": str(CONFIG_PATH),
+        "hooks_path": str(HOOKS_PATH),
+        "secrets_path": str(SECRETS_PATH),
+        "telemetry": {
+            "enabled": bool(ingest),
+        },
+    }
+    if ingest:
+        state["ingest_endpoint"] = ingest.get("endpoint")
+        state["ingest_key_id"] = ingest.get("key_id")
+        state["ingest_key_prefix"] = (ingest.get("api_key") or "")[:8]
+    if mcp:
+        state["mcp_url"] = mcp.get("url")
+        state["mcp_key_id"] = mcp.get("key_id")
+        state["mcp_key_prefix"] = mcp.get("key_prefix") or (mcp.get("api_key") or "")[:8]
+        state["mcp_created_at"] = mcp.get("created_at")
+    limits = bundle.get("limits")
+    if isinstance(limits, dict) and limits.get("status_url"):
+        state["limits"] = {
+            "status_url": limits["status_url"],
+            "enabled": bool(limits.get("enabled", True)),
+        }
+    atomic_write(STATE_PATH, json.dumps(state, indent=2) + "\n")
+
+
+def continue_after_grant(args: argparse.Namespace, grant: dict) -> int:
+    expires_in = int(grant.get("expires_in") or deviceflow.DEFAULT_POLL_TIMEOUT_SECS)
+    interval = int(grant.get("interval") or deviceflow.DEFAULT_POLL_INTERVAL_SECS)
+    verification_uri = grant.get("verification_uri") or ""
+
+    print()
+    print("Open this URL in your browser to approve Cardinal for Codex:")
+    print(f"  {verification_uri}")
+    print()
+    print(f"Waiting up to {expires_in // 60} minute(s) for browser approval...")
+
+    bundle = deviceflow.poll_device_token(
+        args.host, grant["device_code"], CLIENT_ID, interval, expires_in
+    )
+    org = bundle.get("org", {})
+    user = bundle.get("user", {})
+    ingest = bundle.get("ingest")
+    mcp = bundle.get("mcp")
+
+    if not ingest:
+        sys.exit("Cardinal did not return an ingest credential. Check the requested scopes.")
+    if not args.telemetry_only and not mcp:
+        sys.exit("Cardinal did not return an MCP credential. Check the requested scopes.")
+
+    deployment_env = args.deployment_env or deviceflow.derive_deployment_env(args.host)
+
+    if args.dry_run:
+        print(json.dumps(
+            {
+                "org": org,
+                "user": user,
+                "deployment_env": deployment_env,
+                "would_write": {
+                    "codex_config": str(CONFIG_PATH) if mcp else None,
+                    "codex_hooks": str(HOOKS_PATH),
+                    "state": str(STATE_PATH),
+                    "secrets": str(SECRETS_PATH),
+                    "ingest_endpoint": ingest.get("endpoint"),
+                    "mcp_url": (mcp or {}).get("url"),
+                },
+            },
+            indent=2,
+        ))
+        return 0
+
+    ok, msg = deviceflow.verify_ingest_reachable(ingest)
+    if not ok:
+        sys.exit(f"Ingest reachability failed: {msg}")
+    print(f"Ingest endpoint reachable ({msg})")
+
+    if mcp:
+        ok, msg = deviceflow.verify_mcp_reachable(mcp.get("url"), mcp.get("api_key"))
+        if not ok:
+            sys.exit(f"MCP reachability failed: {msg}")
+        print(f"MCP endpoint reachable ({msg})")
+
+    if not HOOK_SCRIPT.exists():
+        sys.exit(f"Telemetry hook script is missing: {HOOK_SCRIPT}")
+
+    if mcp:
+        backup_path = write_codex_config(mcp["url"], mcp["api_key"])
+        print(f"Wrote Cardinal MCP config to {CONFIG_PATH}")
+        if backup_path:
+            print(f"Config backup: {backup_path}")
+
+    write_secrets(bundle)
+    print(f"Wrote Cardinal local secrets to {SECRETS_PATH}")
+
+    hooks_backup = write_hooks_config()
+    print(f"Wrote Cardinal hooks to {HOOKS_PATH}")
+    if hooks_backup:
+        print(f"Hooks backup: {hooks_backup}")
+
+    write_state(bundle, args.host, deployment_env, args.telemetry_only)
+    print(f"Wrote Cardinal state to {STATE_PATH}")
+
+    print()
+    print(f"Connected as {user.get('email') or 'unknown'} ({org.get('slug') or org.get('id')})")
+    print(f"Telemetry endpoint: {ingest['endpoint']}")
+    if mcp:
+        print(f"MCP endpoint: {mcp['url']}")
+    print()
+    print("Restart Codex so it reloads MCP and hook config, then run cardinal-status.")
+    return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="cardinal-connect",
+        description="Connect Codex to Cardinal's unified MCP endpoint.",
+    )
+    parser.add_argument(
+        "--host",
+        default="https://app.cardinalhq.io",
+        help="Cardinal app host (default: https://app.cardinalhq.io)",
+    )
+    parser.add_argument(
+        "--rotate",
+        action="store_true",
+        help="Proceed even if Cardinal state already exists and mint a fresh key.",
+    )
+    parser.add_argument(
+        "--telemetry-only",
+        action="store_true",
+        help="Only configure Cardinal telemetry hooks; skip the MCP credential.",
+    )
+    parser.add_argument(
+        "--deployment-env",
+        default=None,
+        help="Override deployment.environment (default derived from --host).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the device-code flow and print what would be written.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    if STATE_PATH.exists() and not args.rotate:
+        try:
+            prior = json.loads(STATE_PATH.read_text())
+        except Exception:
+            prior = {}
+        user = prior.get("user_email") or "this account"
+        sys.stderr.write(
+            f"Cardinal is already connected as {user}. "
+            "Re-run with --rotate to overwrite.\n"
+        )
+        return 2
+
+    scopes = ["ingest:write"]
+    if not args.telemetry_only:
+        scopes.append("mcp:invoke")
+    print(f"Requesting Cardinal consent for scopes: {', '.join(scopes)}")
+    try:
+        grant = deviceflow.start_device_code(args.host, scopes, CLIENT_ID)
+        write_pending(grant)
+        try:
+            return continue_after_grant(args, grant)
+        finally:
+            clear_pending()
+    except deviceflow.DeviceFlowError as exc:
+        sys.exit(str(exc))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
