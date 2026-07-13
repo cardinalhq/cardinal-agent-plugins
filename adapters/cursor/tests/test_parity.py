@@ -322,7 +322,7 @@ class LimitsGateTests(unittest.TestCase):
 
         out = self.hook.limits_gate_output(self.conv)
         self.assertIsNone(out)  # No block emitted; staged for postToolUse.
-        staged = json.loads(self.hook.notify_path(self.conv).read_text())
+        staged = json.loads(self.hook.PATHS.notify_path(self.conv).read_text())
         self.assertIn("Budget context here.", staged["message"])
         self.assertIn("You've hit the cap.", staged["message"])
 
@@ -331,7 +331,7 @@ class LimitsGateTests(unittest.TestCase):
                              "agent_context": "You are at 60% of session budget."})
         out = self.hook.limits_gate_output(self.conv)
         self.assertIsNone(out)
-        staged = json.loads(self.hook.notify_path(self.conv).read_text())
+        staged = json.loads(self.hook.PATHS.notify_path(self.conv).read_text())
         self.assertEqual(staged["message"], "You are at 60% of session budget.")
 
     def test_strict_warn_escalates_to_block(self) -> None:
@@ -347,19 +347,19 @@ class LimitsGateTests(unittest.TestCase):
         self._write_verdict({"decision": "warn", "band": 2,
                              "user_message": "Slow down.", "agent_context": "ctx"})
         self.assertIsNone(self.hook.limits_gate_output(self.conv))
-        self.assertTrue(self.hook.notify_path(self.conv).exists())
+        self.assertTrue(self.hook.PATHS.notify_path(self.conv).exists())
         # Simulate the notify being consumed by postToolUse.
-        self.hook.notify_path(self.conv).unlink()
+        self.hook.PATHS.notify_path(self.conv).unlink()
         # Same band, second turn: ack already recorded → no re-stage.
         self.assertIsNone(self.hook.limits_gate_output(self.conv))
-        self.assertFalse(self.hook.notify_path(self.conv).exists())
+        self.assertFalse(self.hook.PATHS.notify_path(self.conv).exists())
 
     def test_stale_warn_verdict_fails_open(self) -> None:
         self._write_verdict({"decision": "warn", "band": 2,
                              "user_message": "old", "agent_context": "old",
                              "fetched_at": time.time() - 11 * 60})
         self.assertIsNone(self.hook.limits_gate_output(self.conv))
-        self.assertFalse(self.hook.notify_path(self.conv).exists())
+        self.assertFalse(self.hook.PATHS.notify_path(self.conv).exists())
 
 
 class NotifyConsumeTests(unittest.TestCase):
@@ -374,15 +374,15 @@ class NotifyConsumeTests(unittest.TestCase):
 
     def test_consume_notify_reads_once(self) -> None:
         conv = "conv-2"
-        path = self.hook.notify_path(conv)
+        path = self.hook.PATHS.notify_path(conv)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"message": "hello"}))
-        self.assertEqual(self.hook.consume_notify(conv), "hello")
+        self.assertEqual(self.hook.limits.consume_notify(self.hook.PATHS, conv), "hello")
         # File is gone; second consume returns None.
-        self.assertIsNone(self.hook.consume_notify(conv))
+        self.assertIsNone(self.hook.limits.consume_notify(self.hook.PATHS, conv))
 
     def test_consume_notify_missing_is_none(self) -> None:
-        self.assertIsNone(self.hook.consume_notify("nonexistent"))
+        self.assertIsNone(self.hook.limits.consume_notify(self.hook.PATHS, "nonexistent"))
 
 
 class JsonManagedBlockTests(unittest.TestCase):

@@ -18,10 +18,10 @@ consuming `core/cardinal_core` (vendored into `hooks/cardinal_core/` by
    goldens by `tests/test_parity.py::GoldenParityTests` using the same
    fixtures (`tests/fixtures.py`).
 
-Normalization = core harness `_normalize` (timestamps, `ts`) plus an
-adapter-local scrub (`fixtures._scrub`): drop `cardinal.core_version`
-(new in core, absent from pre-migration output — see CORE_GAPS.md §3),
-pin `cardinal.plugin_version` and the OTel scope version, replace the
+Normalization = core harness `_normalize` (timestamps, `ts`; since core
+0.2.0 also drops `cardinal.core_version` and pins
+`cardinal.plugin_version` + the OTel scope version — see CORE_GAPS.md
+§3) plus an adapter-local scrub (`fixtures._scrub`) that replaces the
 sandbox path. Everything else — event names, attribute keys, values,
 attribute order, record order, resource/scope shape — is compared
 byte-for-byte.
@@ -68,12 +68,13 @@ ingest/MCP reachability probes in `cardinal-connect`.
 - camelCase payload mapping (`conversationId`, `toolName`/`toolInput`/
   `toolOutput`, `durationMs`, `modelId`/`modelParams`/`cursorVersion`,
   `workspaceRoots`) with snake_case fallbacks; `workspace_roots` → cwd.
-- Divergence E gate: Cursor `{continue:false, user_message}` output
-  schema, notify staging (`<conv>.notify.json`), `postToolUse`
+- Divergence E gate *rendering only* (since core 0.2.0): Cursor
+  `{continue:false, user_message}` output schema, `postToolUse`
   `additional_context` surfacing, `CARDINAL_CURSOR_STRICT_WARN=1`
-  escalation, and the band/age/override/hysteresis walk (core's
-  `gate_output` couples that policy to the hookSpecificOutput rendering
-  — CORE_GAPS.md §1/§2).
+  escalation. The band/age/override/hysteresis policy walk and the
+  notify staging channel moved into core
+  (`limits.gate_decision`/`ack_band`/`stage_notify`/`consume_notify`,
+  `AgentPaths.notify_path` — CORE_GAPS.md §1/§2, both resolved).
 - Cursor tool normalization (`run_terminal_cmd` → Bash, `mcp__` split),
   TARGET_KEYS, `output_success` exit-code scraping.
 - `generation_id`-based turn ticking (Cursor has no user-message
@@ -106,13 +107,36 @@ Test LOC grew because the adapter suite adds the golden-parity harness
 (fixtures.py 338 + capture_goldens.py 71) on top of the ported
 behavioral tests; the shipped repo had no golden layer.
 
+## core 0.2.0 rewire (gap reconciliation)
+
+Core 0.2.0 shipped the APIs CORE_GAPS.md asked for; the adapter-side
+shims were deleted and the gaps marked resolved:
+
+| Shim deleted | Replaced by (core 0.2.0) | LOC |
+|---|---|---|
+| `limits_gate_output()` policy walk (band/age/override/hysteresis + ack/notify writes) | `limits.gate_decision()` + `limits.ack_band()` + `limits.stage_notify()`; the adapter function survives as a pure Cursor-channel renderer (block body, strict-warn escalation, staging) | hook 707 → 649 (−58, incl. `notify_path`/`consume_notify` below) |
+| `notify_path()` / `consume_notify()` | `AgentPaths.notify_path()` / `limits.consume_notify()` — identical file shape (`{"message","band","staged_at"}`) and one-shot semantics | (counted above) |
+| `fixtures._scrub` drop/pin rules (`cardinal.core_version` drop, `cardinal.plugin_version` + scope-version pin) | harness `_normalize` owns them; `_scrub` keeps only sandbox-path replacement | fixtures 338 → 319 (−19) |
+
+Net: −77 adapter LOC (137 deleted, 60 added back as the thinner
+renderer + docs). Goldens byte-identical (no `tests/goldens/*.json`
+change); 43 tests still green. Behavioral tests were touched only where
+they called the deleted wrapper functions (`notify_path` →
+`PATHS.notify_path`, `consume_notify` → `limits.consume_notify`); every
+assertion is unchanged. Still adapter-side on purpose: strict-warn
+escalation (CORE_GAPS.md §4, a rendering concern) — including a
+one-line `read_verdict()` re-read to preserve the escalation's
+`block_reason` fallback copy exactly, since `GateDecision.reason` is
+block-tier-only.
+
 ## Test results
 
 - `python3 -m unittest discover -s adapters/cursor/tests -t adapters/cursor/tests`
   → **43 tests, 0 failures** (11 golden-parity, 32 behavioral — all
   meaningful tests from the source suite ported, plus a stale-verdict
   fail-open case; the source repo's two `_limits_common`-specific tests
-  are re-pointed at the adapter's `notify_path`/`consume_notify`).
+  are re-pointed at core's staged-notify channel via
+  `PATHS.notify_path` / `limits.consume_notify`).
 - Golden parity: all 10 steps byte-equal after normalization, including
   both stdout contracts (sessionStart convention context; postToolUse
   notify surfacing).
@@ -132,5 +156,6 @@ behavioral tests; the shipped repo had no golden layer.
   that checkout (`capture_goldens.py --source …` /
   `CARDINAL_CURSOR_SOURCE`); it should only ever be re-run if the
   *contract* deliberately changes.
-- See CORE_GAPS.md for the core API changes that would let the gate
-  policy walk (currently duplicated adapter-side) collapse into core.
+- The core API changes CORE_GAPS.md asked for landed in core 0.2.0 and
+  the adapter is rewired onto them (see §core 0.2.0 rewire above); the
+  gate policy walk is no longer duplicated adapter-side.
