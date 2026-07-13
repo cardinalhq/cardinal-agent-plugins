@@ -1,0 +1,193 @@
+{
+  "stdout": {
+    "additional_context": "You are at 60% of session budget."
+  },
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "cursor"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "cursor"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "golden@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "cardinal-golden"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              },
+              {
+                "key": "cursor.model",
+                "value": {
+                  "stringValue": "claude-4.5-sonnet"
+                }
+              },
+              {
+                "key": "cursor.model_id",
+                "value": {
+                  "stringValue": "anthropic/claude-4.5-sonnet"
+                }
+              },
+              {
+                "key": "cursor.model_params",
+                "value": {
+                  "stringValue": "{\"temperature\":0.2,\"max_tokens\":4096}"
+                }
+              },
+              {
+                "key": "cursor.version",
+                "value": {
+                  "stringValue": "1.7.29"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-cursor-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "conv-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "src/main.py"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "tool_result"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "tool_result"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "conv-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "cursor"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "success",
+                      "value": {
+                        "stringValue": "true"
+                      }
+                    },
+                    {
+                      "key": "tool_input",
+                      "value": {
+                        "stringValue": "{\"path\":\"src/main.py\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
