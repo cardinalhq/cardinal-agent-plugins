@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+dist/
+.DS_Store
+# vendored copies are build outputs, not source
+adapters/*/hooks/cardinal_core/
