@@ -1,10 +1,12 @@
-"""Synthetic PolicyEvents matching the shapes verified against omnigent
-commit 6e71197 (docs/specs/omnigent-adapter.md §Verified integration
-facts): PolicyEvent{phase, target, data, context} with
-EvaluationContext{session_id, usage, actor, labels, harness,
-session_state}. Dataclasses (attribute access) exercise the accessors'
-primary path; the adapter's dict path is covered separately in the
-never-raises tests.
+"""Synthetic PolicyEvents matching the wire shape verified against the
+pinned omnigent commit (docs/specs/omnigent-adapter.md §Verified
+integration facts): the plain dict `FunctionPolicy._build_event`
+produces — {type, target, data, context{actor, usage, user_daily_cost,
+model, harness, labels, subtree_usage}, session_state, llm_client,
+request_data}. There is NO session id in the contract; tests pass
+`session_id=` to pre-seed `session_state["cardinal.session_id"]`
+(simulating a persisted mint) so emissions are deterministic. Pass
+`session_id=None` to exercise the minting path.
 
 Also bootstraps sys.path for core + the adapter package and loads the
 StubIngest golden harness from core/tests/harness.py by file path (no
@@ -16,7 +18,6 @@ from __future__ import annotations
 import importlib.util
 import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,70 +49,69 @@ def load_contract_module():
 
 
 # ---------------------------------------------------------------------------
-# PolicyEvent fixtures
+# PolicyEvent fixtures (verified dict wire shape)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class Actor:
-    run_as: str = "dev@example.com"
-    client_id: str = "omnigent-runner"
+SESSION_ID_KEY = "cardinal.session_id"
 
 
-@dataclass
-class EvaluationContext:
-    session_id: str = "omni-sess-1"
-    usage: dict[str, Any] = field(default_factory=dict)
-    actor: Actor | None = field(default_factory=Actor)
-    labels: dict[str, Any] = field(default_factory=dict)
-    harness: str | None = "claude"
-    session_state: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class PolicyEvent:
-    phase: str
-    context: EvaluationContext = field(default_factory=EvaluationContext)
-    data: dict[str, Any] = field(default_factory=dict)
-    target: str | None = None
-
-
-def _context(
-    session_id: str = "omni-sess-1",
+def make_event(
+    type: str,  # noqa: A002 — mirrors the wire key
+    data: Any,
     *,
+    target: str | None = None,
+    session_id: str | None = "omni-sess-1",
     labels: dict[str, Any] | None = None,
-    run_as: str = "dev@example.com",
+    run_as: str | None = "dev@example.com",
     harness: str | None = "claude",
+    model: str | None = None,
     total_cost_usd: float | None = None,
     session_state: dict[str, Any] | None = None,
-) -> EvaluationContext:
+    llm_client: Any = None,
+    request_data: Any = None,
+) -> dict[str, Any]:
     usage: dict[str, Any] = {
         "input_tokens": 5000, "output_tokens": 900, "total_tokens": 5900,
     }
     if total_cost_usd is not None:
         usage["total_cost_usd"] = total_cost_usd
-    return EvaluationContext(
-        session_id=session_id,
-        usage=usage,
-        actor=Actor(run_as=run_as),
-        labels=dict(labels or {}),
-        harness=harness,
-        session_state=dict(session_state or {}),
-    )
+    state = dict(session_state or {})
+    if session_id is not None:
+        state.setdefault(SESSION_ID_KEY, session_id)
+    event: dict[str, Any] = {
+        "type": type,
+        "target": target,
+        "data": data,
+        "context": {
+            "actor": {"run_as": run_as, "client_id": "omnigent-runner"}
+            if run_as else {},
+            "usage": usage,
+            "user_daily_cost": {},
+            "model": model,
+            "harness": harness,
+            "labels": dict(labels or {}),
+            "subtree_usage": {},
+        },
+        "session_state": state,
+        "llm_client": llm_client,
+    }
+    if request_data is not None:
+        event["request_data"] = request_data
+    return event
 
 
 def request_event(
-    session_id: str = "omni-sess-1",
+    session_id: str | None = "omni-sess-1",
     *,
     labels: dict[str, Any] | None = None,
     prompt: str = "please fix the login crash",
-    **ctx_kwargs: Any,
-) -> PolicyEvent:
-    """`request` phase — labels carry the Cardinal attribution convention."""
-    return PolicyEvent(
-        phase="request",
-        context=_context(session_id, labels=labels, **ctx_kwargs),
-        data={"prompt": prompt},
-    )
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """`request` phase — data is the user message STRING (verified:
+    the evaluate route passes the prompt text as content); labels carry
+    the Cardinal attribution convention."""
+    return make_event("request", prompt, session_id=session_id,
+                      labels=labels, **kwargs)
 
 
 DEFAULT_TURN_USAGE = {
@@ -126,77 +126,82 @@ DEFAULT_TURN_USAGE = {
 
 
 def llm_response_event(
-    session_id: str = "omni-sess-1",
+    session_id: str | None = "omni-sess-1",
     *,
     usage: dict[str, Any] | None = None,
     model: str | None = None,
-    total_cost_usd: float | None = None,
-    session_state: dict[str, Any] | None = None,
-    **ctx_kwargs: Any,
-) -> PolicyEvent:
-    """`llm_response` phase — data.usage is per-TURN totals (cumulative
-    across the turn's API calls); context.usage is session-cumulative."""
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """`llm_response` phase — data carries model / text_preview /
+    tool_calls_count and optionally usage (per-TURN totals on the
+    claude_sdk executor); context.usage is session-cumulative."""
     u = dict(DEFAULT_TURN_USAGE if usage is None else usage)
     if model is not None:
         u["model"] = model
-    return PolicyEvent(
-        phase="llm_response",
-        context=_context(
-            session_id, total_cost_usd=total_cost_usd,
-            session_state=session_state, **ctx_kwargs,
-        ),
-        data={"usage": u},
-    )
+    data = {
+        "model": u.get("model"),
+        "text_preview": "done.",
+        "tool_calls_count": 0,
+        "usage": u,
+    }
+    return make_event("llm_response", data, session_id=session_id, **kwargs)
 
 
 def tool_call_shell_event(
-    session_id: str = "omni-sess-1",
+    session_id: str | None = "omni-sess-1",
     *,
     command: str = "git status && ls -la",
     target: str = "bash",
-    **ctx_kwargs: Any,
-) -> PolicyEvent:
-    return PolicyEvent(
-        phase="tool_call",
-        context=_context(session_id, **ctx_kwargs),
-        data={"arguments": {"command": command}},
-        target=target,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return make_event(
+        "tool_call",
+        {"name": target, "arguments": {"command": command}},
+        target=target, session_id=session_id, **kwargs,
     )
 
 
 def tool_call_mcp_event(
-    session_id: str = "omni-sess-1",
+    session_id: str | None = "omni-sess-1",
     *,
     target: str = "mcp__lakerunner__execute_logs_query",
-    **ctx_kwargs: Any,
-) -> PolicyEvent:
-    return PolicyEvent(
-        phase="tool_call",
-        context=_context(session_id, **ctx_kwargs),
-        data={"arguments": {"query": "fingerprint=abc"}},
-        target=target,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return make_event(
+        "tool_call",
+        {"name": target, "arguments": {"query": "fingerprint=abc"}},
+        target=target, session_id=session_id, **kwargs,
     )
 
 
 def tool_result_event(
-    session_id: str = "omni-sess-1",
+    session_id: str | None = "omni-sess-1",
     *,
     target: str = "bash",
     success: Any = True,
     exit_code: int | None = None,
-    **ctx_kwargs: Any,
-) -> PolicyEvent:
-    data: dict[str, Any] = {}
+    **kwargs: Any,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {"result": "ok"}
     if exit_code is not None:
         data["exit_code"] = exit_code
     elif success is not None:
         data["success"] = success
-    return PolicyEvent(
-        phase="tool_result",
-        context=_context(session_id, **ctx_kwargs),
-        data=data,
-        target=target,
-    )
+    return make_event("tool_result", data, target=target,
+                      session_id=session_id, **kwargs)
+
+
+def response_event(
+    session_id: str | None = "omni-sess-1",
+    *,
+    text: str = "All done.",
+    labels: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """`response` phase — data is the assistant message STRING; sub-agent
+    child conversations are recognized by their labels."""
+    return make_event("response", text, session_id=session_id,
+                      labels=labels, **kwargs)
 
 
 def verdict(

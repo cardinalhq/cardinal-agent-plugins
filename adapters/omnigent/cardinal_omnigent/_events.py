@@ -1,27 +1,36 @@
 """Defensive PolicyEvent field accessors.
 
-omnigent is alpha (contract verified at commit 6e71197 — see
-OMNIGENT_VERIFIED_COMMIT); PolicyEvent may arrive as a pydantic model,
-a dataclass, or a plain dict depending on engine version and transport.
-Every field read in this package goes through these accessors: attribute
-access first, mapping access second, a caller-supplied default on any
-miss. Nothing here raises.
+omnigent is alpha (contract verified at OMNIGENT_VERIFIED_COMMIT);
+the event may arrive as a plain dict (the real
+`FunctionPolicy._build_event` output) or an object (test doubles,
+future pydantic-ification). Every field read in this package goes
+through these accessors: attribute access first, mapping access
+second, a caller-supplied default on any miss. Nothing here raises.
 
-Verified shape (schema.py at the pinned commit):
+Verified wire shape (`omnigent/policies/function.py::_build_event` +
+`schema.py` at the pinned commit):
 
-    event.phase        "request" | "response" | "tool_call" | "tool_result"
-                       | "llm_request" | "llm_response"
-    event.target       resolved tool name on tool phases
-    event.data         phase-specific payload (llm_response carries
-                       data.usage per-TURN totals + data.model)
-    event.context      EvaluationContext:
-        .session_id
-        .usage         cumulative session {input_tokens, output_tokens,
-                       total_tokens, total_cost_usd} (server-maintained)
-        .actor         {run_as: email, client_id}
-        .labels        session labels (the Cardinal attribution channel)
-        .harness       underlying agent harness ("claude", "codex", ...)
-        .session_state engine session state (scoping is engine-dependent)
+    event["type"]          "request" | "tool_call" | "tool_result" |
+                           "response" | "llm_request" | "llm_response"
+    event["target"]        resolved tool name on tool phases
+    event["data"]          phase-specific payload (llm_response carries
+                           data.model / data.text_preview /
+                           data.tool_calls_count and optionally
+                           data.usage — per-TURN totals on the
+                           claude_sdk executor)
+    event["context"]       {actor: {run_as, client_id},
+                            usage: cumulative session {input_tokens,
+                              output_tokens, total_tokens,
+                              total_cost_usd, cache buckets},
+                            user_daily_cost, model, harness,
+                            labels, subtree_usage}
+    event["session_state"] engine per-conversation key/value store
+                           (top-level, NOT under context)
+    event["llm_client"]    engine-shared PolicyLLMClient or None
+    event["request_data"]  original tool call, tool_result phase only
+
+There is NO session/conversation id anywhere in the contract — see
+`_identity.py` for how Cardinal mints one.
 """
 
 from __future__ import annotations
@@ -50,8 +59,11 @@ def get(obj: Any, name: str, default: Any = None) -> Any:
 
 
 def phase(event: Any) -> str:
-    value = get(event, "phase")
-    return str(value) if value else ""
+    """The enforcement phase. The wire key is `type` (verified —
+    `_build_event` maps Phase.value onto it); `phase` is probed second
+    for forward-compat with a contract rename."""
+    value = get(event, "type") or get(event, "phase")
+    return str(value) if isinstance(value, str) and value else ""
 
 
 def data(event: Any) -> dict[str, Any]:
@@ -66,12 +78,6 @@ def context(event: Any) -> Any:
 def target(event: Any) -> str | None:
     value = get(event, "target")
     return str(value) if isinstance(value, str) and value else None
-
-
-def session_id(event: Any) -> str | None:
-    ctx = context(event)
-    value = get(ctx, "session_id") or get(event, "session_id")
-    return str(value) if value else None
 
 
 def actor_email(event: Any) -> str | None:
@@ -90,10 +96,20 @@ def harness(event: Any) -> str | None:
     return str(value) if isinstance(value, str) and value else None
 
 
-def session_usage(event: Any) -> dict[str, Any]:
-    """Cumulative session usage from the EvaluationContext (may itself be
-    an object or a dict)."""
-    value = get(context(event), "usage")
+def model(event: Any) -> str | None:
+    """The session's active model, engine-injected on every dispatch
+    (conversation model_override, else the agent spec's llm.model)."""
+    value = get(context(event), "model")
+    return str(value) if isinstance(value, str) and value else None
+
+
+def llm_client(event: Any) -> Any:
+    """The engine-shared PolicyLLMClient (identity anchor for
+    `_identity`); None when the server has no `llm:` config."""
+    return get(event, "llm_client")
+
+
+def _usage_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     if value is None:
@@ -106,9 +122,25 @@ def session_usage(event: Any) -> dict[str, Any]:
     return out
 
 
+def session_usage(event: Any) -> dict[str, Any]:
+    """Cumulative session usage from the context (server-maintained;
+    includes total_cost_usd)."""
+    return _usage_dict(get(context(event), "usage"))
+
+
+def subtree_usage(event: Any) -> dict[str, Any]:
+    """Subtree-scoped cumulative usage (this conversation + its
+    descendants). Engine injects it only when a subagent_cost_budget
+    policy is configured; empty otherwise."""
+    return _usage_dict(get(context(event), "subtree_usage"))
+
+
 def session_state(event: Any) -> dict[str, Any]:
-    for key in ("session_state", "state"):
-        value = get(context(event), key)
+    """The engine's per-conversation state. Top-level on the event
+    (verified); context is probed second for forward-compat."""
+    for source, key in ((event, "session_state"), (event, "state"),
+                        (context(event), "session_state")):
+        value = get(source, key)
         if isinstance(value, dict):
             return value
     return {}

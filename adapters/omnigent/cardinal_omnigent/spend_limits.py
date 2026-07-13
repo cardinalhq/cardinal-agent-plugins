@@ -38,7 +38,7 @@ from typing import Any
 from cardinal_core import limits
 from cardinal_core.paths import AgentPaths
 
-from . import _events
+from . import _events, _identity
 
 DEFAULT_STATE_DIR = "~/.omnigent"
 
@@ -124,7 +124,11 @@ def spend_limits_policy(event: Any, config: Any = None) -> dict[str, Any] | None
         if _events.phase(event) != "request":
             return None
         cfg = config if isinstance(config, dict) else {}
-        session_id = _events.session_id(event)
+        # Minted session identity (no session id in omnigent's contract —
+        # see _identity.py). Shared with the telemetry policy via the
+        # engine's session_state; pending updates ride any non-abstain
+        # return (state_updates are applied on ALLOW and DENY).
+        session_id, updates = _identity.resolve(event)
         if not session_id:
             return None
 
@@ -139,6 +143,10 @@ def spend_limits_policy(event: Any, config: Any = None) -> dict[str, Any] | None
             _refresh_verdict(event, cfg, paths, session_id)
         except Exception:
             pass
+        if updates:
+            if result is None:
+                result = {"result": "ALLOW"}
+            result["state_updates"] = [*updates, *result.get("state_updates", [])]
         return result
     except Exception:
         return None

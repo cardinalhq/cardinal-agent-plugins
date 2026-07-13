@@ -30,7 +30,7 @@ from cardinal_core import limits, pricing
 from cardinal_core.paths import AgentPaths, atomic_write_json_compact
 
 import cardinal_omnigent
-from cardinal_omnigent import spend_limits, telemetry
+from cardinal_omnigent import _identity, spend_limits, telemetry
 from cardinal_omnigent import connect as omniconnect
 
 StubIngest = fixtures.load_stub_ingest()
@@ -90,6 +90,8 @@ class StubBackedTestCase(unittest.TestCase):
         }
         telemetry._SESSIONS.clear()
         self.addCleanup(telemetry._SESSIONS.clear)
+        _identity._MEMO.clear()
+        self.addCleanup(_identity._MEMO.clear)
 
 
 class TelemetryGitStateTests(StubBackedTestCase):
@@ -199,8 +201,31 @@ class TelemetryUsageTests(StubBackedTestCase):
         turn = attrs_of(by_name(self.stub)["cardinal.turn_usage"][0])
         self.assertAlmostEqual(turn["cost_usd"], expected)
 
+    def test_anthropic_model_priced_from_core_table(self) -> None:
+        # core 0.3.0: Anthropic SKUs price from ANTHROPIC_PRICING_USD_PER_M
+        # (disjoint cache buckets) when the server gives no cost total.
+        telemetry.telemetry_policy(fixtures.llm_response_event("omni-anth"), self.config)
+        expected = pricing.compute_cost_usd(
+            "claude-sonnet-4-5",
+            {"input_tokens": 1200, "cached_input_tokens": 900,
+             "cache_creation_tokens": 100, "output_tokens": 300},
+            pricing.ANTHROPIC_PRICING_USD_PER_M,
+        )
+        turn = attrs_of(by_name(self.stub)["cardinal.turn_usage"][0])
+        self.assertAlmostEqual(turn["cost_usd"], expected)
+
+    def test_platform_prefixed_claude_sku_priced(self) -> None:
+        usage = {**fixtures.DEFAULT_TURN_USAGE, "model": "databricks-claude-opus-4-8"}
+        telemetry.telemetry_policy(
+            fixtures.llm_response_event("omni-dbx", usage=usage), self.config)
+        turn = attrs_of(by_name(self.stub)["cardinal.turn_usage"][0])
+        self.assertIn("cost_usd", turn)
+        self.assertEqual(turn["model"], "databricks-claude-opus-4-8")
+
     def test_unpriced_model_omits_cost(self) -> None:
-        telemetry.telemetry_policy(fixtures.llm_response_event("omni-nocost"), self.config)
+        usage = {**fixtures.DEFAULT_TURN_USAGE, "model": "mystery-llm-9000"}
+        telemetry.telemetry_policy(
+            fixtures.llm_response_event("omni-nocost", usage=usage), self.config)
         turn = attrs_of(by_name(self.stub)["cardinal.turn_usage"][0])
         self.assertNotIn("cost_usd", turn)
 
@@ -261,6 +286,156 @@ class TelemetryIdentityTests(StubBackedTestCase):
         self.assertEqual(res["cardinal.plugin_version"], cardinal_omnigent.PLUGIN_VERSION)
 
 
+class SessionIdentityMintTests(StubBackedTestCase):
+    """omnigent's contract has no session id — the adapter mints one
+    into engine session_state (see _identity.py)."""
+
+    def test_mint_rides_allow_state_updates_and_keys_emission(self) -> None:
+        result = telemetry.telemetry_policy(
+            fixtures.request_event(session_id=None), self.config)
+        self.assertEqual(result["result"], "ALLOW")
+        update = result["state_updates"][0]
+        self.assertEqual(update["action"], "set")
+        self.assertEqual(update["key"], _identity.SESSION_ID_KEY)
+        minted = update["value"]
+        self.assertTrue(minted.startswith("omni-"))
+        attrs = attrs_of(by_name(self.stub)["cardinal.git_state"][0])
+        self.assertEqual(attrs["session_id"], minted)
+
+    def test_persisted_id_wins_and_stops_updates(self) -> None:
+        self.assertIsNone(telemetry.telemetry_policy(
+            fixtures.request_event("omni-persisted"), self.config))
+        attrs = attrs_of(by_name(self.stub)["cardinal.git_state"][0])
+        self.assertEqual(attrs["session_id"], "omni-persisted")
+
+    def test_llm_client_memo_keeps_policies_on_one_id(self) -> None:
+        # Same engine (same llm_client object) → telemetry and
+        # spend_limits mint the SAME id even before state persists.
+        client = object()
+        tel = telemetry.telemetry_policy(
+            fixtures.request_event(session_id=None, llm_client=client),
+            self.config)
+        with TemporaryDirectory() as tmp:
+            gate = spend_limits.spend_limits_policy(
+                fixtures.request_event(session_id=None, llm_client=client),
+                {"state_dir": tmp})
+        tel_id = tel["state_updates"][0]["value"]
+        self.assertEqual(gate["result"], "ALLOW")
+        self.assertEqual(gate["state_updates"][0]["value"], tel_id)
+
+    def test_distinct_engines_mint_distinct_ids(self) -> None:
+        # Hold both client refs — a freed object's id() is reused, which
+        # is exactly why the memo carries a TTL in production.
+        client_a, client_b = object(), object()
+        a = telemetry.telemetry_policy(
+            fixtures.request_event(session_id=None, llm_client=client_a),
+            self.config)
+        b = telemetry.telemetry_policy(
+            fixtures.request_event(session_id=None, llm_client=client_b),
+            self.config)
+        self.assertNotEqual(a["state_updates"][0]["value"],
+                            b["state_updates"][0]["value"])
+
+    def test_anchor_and_mint_ride_the_same_allow(self) -> None:
+        result = telemetry.telemetry_policy(
+            fixtures.llm_response_event(None, total_cost_usd=0.05), self.config)
+        keys = [u["key"] for u in result["state_updates"]]
+        self.assertEqual(keys, [_identity.SESSION_ID_KEY, telemetry.COST_ANCHOR_KEY])
+
+
+class SubagentUsageTests(StubBackedTestCase):
+    def test_codex_native_child_emits_subagent_usage(self) -> None:
+        event = fixtures.response_event(
+            "omni-child-1",
+            labels={
+                telemetry.WRAPPER_LABEL: "codex-native-ui-subagent",
+                telemetry.CODEX_THREAD_ID_LABEL: "thread-42",
+                telemetry.CODEX_PARENT_THREAD_ID_LABEL: "thread-root",
+                telemetry.CODEX_NICKNAME_LABEL: "researcher",
+            },
+            model="gpt-5-codex",
+            total_cost_usd=0.42,
+        )
+        self.assertIsNone(telemetry.telemetry_policy(event, self.config))
+        recs = by_name(self.stub)["cardinal.subagent_usage"]
+        attrs = attrs_of(recs[0])
+        self.assertFalse(REQUIRED_KEYS["cardinal.subagent_usage"] - set(attrs))
+        self.assertEqual(attrs["session_id"], "omni-child-1")
+        self.assertEqual(attrs["subagent_description"], "researcher")
+        self.assertEqual(attrs["subagent_id"], "thread-42")
+        self.assertEqual(attrs["parent_thread_id"], "thread-root")
+        self.assertEqual(attrs["model"], "gpt-5-codex")
+        self.assertEqual(attrs["input_tokens"], 5000)
+        self.assertAlmostEqual(attrs["cost_usd"], 0.42)
+        self.assertEqual(attrs["usage_scope"], "session_cumulative")
+
+    def test_cardinal_spec_stamp_marks_native_workflow_child(self) -> None:
+        event = fixtures.response_event(
+            "omni-child-2",
+            labels={telemetry.CARDINAL_SUBAGENT_LABEL: "code-reviewer"},
+        )
+        telemetry.telemetry_policy(event, self.config)
+        attrs = attrs_of(by_name(self.stub)["cardinal.subagent_usage"][0])
+        self.assertEqual(attrs["subagent_description"], "code-reviewer")
+
+    def test_top_level_response_emits_nothing(self) -> None:
+        self.assertIsNone(telemetry.telemetry_policy(
+            fixtures.response_event("omni-top"), self.config))
+        self.assertEqual(self.stub.log_batches, [])
+
+
+class BranchSniffTests(StubBackedTestCase):
+    def test_branch_create_emits_git_state_and_sticks(self) -> None:
+        sid = "omni-sniff"
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            sid, command="git checkout -b feat/omnigent-parity"), self.config)
+        telemetry.telemetry_policy(fixtures.request_event(sid), self.config)
+        states = [attrs_of(r) for r in by_name(self.stub)["cardinal.git_state"]]
+        self.assertEqual(len(states), 2)  # boundary emission + next request
+        for attrs in states:
+            self.assertEqual(attrs["cardinal_branch"], "feat/omnigent-parity")
+            self.assertEqual(attrs["cardinal_initiative_name"], "omnigent-parity")
+            self.assertEqual(attrs["cardinal_initiative_type"], "feature")
+            self.assertEqual(attrs["cardinal_branch_source"], "tool_sniff")
+
+    def test_git_switch_c_detected(self) -> None:
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            "omni-sw", command="git switch -c fix/login-crash"), self.config)
+        attrs = attrs_of(by_name(self.stub)["cardinal.git_state"][0])
+        self.assertEqual(attrs["cardinal_initiative_type"], "bugfix")
+
+    def test_labels_branch_outranks_sniffed(self) -> None:
+        sid = "omni-lab"
+        labels = {"cardinal.branch": "feat/labeled"}
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            sid, command="git checkout -b feat/sniffed", labels=labels),
+            self.config)
+        telemetry.telemetry_policy(
+            fixtures.request_event(sid, labels=labels), self.config)
+        states = [attrs_of(r) for r in by_name(self.stub)["cardinal.git_state"]]
+        self.assertEqual(len(states), 1)  # no boundary emission under labels
+        self.assertEqual(states[0]["cardinal_branch"], "feat/labeled")
+        self.assertNotIn("cardinal_branch_source", states[0])
+
+    def test_plain_checkout_not_sniffed(self) -> None:
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            "omni-amb", command="git checkout main -- file.txt"), self.config)
+        self.assertNotIn("cardinal.git_state", by_name(self.stub))
+
+
+class ContextModelFallbackTests(StubBackedTestCase):
+    def test_context_model_used_when_data_has_none(self) -> None:
+        usage = {k: v for k, v in fixtures.DEFAULT_TURN_USAGE.items()
+                 if k != "model"}
+        event = fixtures.llm_response_event(
+            "omni-mdl", usage=usage, model=None)
+        event["data"]["model"] = None
+        event["context"]["model"] = "databricks-claude-opus-4-8"
+        telemetry.telemetry_policy(event, self.config)
+        turn = attrs_of(by_name(self.stub)["cardinal.turn_usage"][0])
+        self.assertEqual(turn["model"], "databricks-claude-opus-4-8")
+
+
 class TelemetryNeverRaisesTests(unittest.TestCase):
     """Fail-open: telemetry must not break the agent loop, whatever the
     engine hands us."""
@@ -269,37 +444,57 @@ class TelemetryNeverRaisesTests(unittest.TestCase):
         for event in (
             None,
             {},
-            {"phase": "llm_response"},                       # dict event, no context
-            {"phase": "tool_call", "context": {"session_id": "s"}},  # no target
-            fixtures.PolicyEvent(phase="request", context=None),
-            fixtures.PolicyEvent(phase="llm_response",
-                                 data={"usage": "not-a-dict"}),
+            {"type": "llm_response"},                     # no context → no identity
+            {"type": "unknown-phase", "context": {}},
             object(),
         ):
             with self.subTest(event=event):
                 self.assertIsNone(telemetry.telemetry_policy(event, None))
                 self.assertIsNone(telemetry.telemetry_policy(event, {"bad": "config"}))
 
-    def test_dict_shaped_event_works(self) -> None:
-        # Alpha contract: events may arrive as plain dicts — the defensive
-        # accessors must treat them like model objects.
+    def test_degenerate_payloads_still_mint_but_emit_nothing(self) -> None:
+        # Handled phase + context present but payload unusable: the only
+        # output is the identity mint (ALLOW + state_updates), no records.
         stub = StubIngest().start()
         self.addCleanup(stub.stop)
         telemetry._SESSIONS.clear()
-        event = {
-            "phase": "request",
-            "context": {
-                "session_id": "dict-sess",
-                "actor": {"run_as": "carol@example.com"},
-                "labels": {"cardinal.branch": "fix/login-crash"},
-                "usage": {},
-                "harness": "cursor",
-            },
-            "data": {"prompt": "hi"},
-        }
+        _identity._MEMO.clear()
         config = {"ingest_endpoint": stub.endpoint, "ingest_api_key": "k"}
-        self.assertIsNone(telemetry.telemetry_policy(event, config))
+        for event in (
+            fixtures.llm_response_event(None, usage={}),          # empty usage
+            fixtures.make_event("tool_call", {}, session_id=None),  # no target
+        ):
+            with self.subTest(event=event):
+                result = telemetry.telemetry_policy(event, config)
+                self.assertEqual(result["result"], "ALLOW")
+                self.assertEqual(
+                    result["state_updates"][0]["key"], _identity.SESSION_ID_KEY)
+        self.assertEqual(stub.log_batches, [])
+
+    def test_object_shaped_event_works(self) -> None:
+        # Alpha contract: the accessors must handle attribute-shaped
+        # events (future pydantic-ification) like the dict wire shape.
+        stub = StubIngest().start()
+        self.addCleanup(stub.stop)
+        telemetry._SESSIONS.clear()
+
+        class Ctx:
+            actor = {"run_as": "carol@example.com"}
+            labels = {"cardinal.branch": "fix/login-crash"}
+            usage: dict = {}
+            harness = "cursor"
+            model = None
+
+        class Event:
+            type = "request"
+            context = Ctx()
+            data = "hi"
+            session_state = {fixtures.SESSION_ID_KEY: "obj-sess"}
+
+        config = {"ingest_endpoint": stub.endpoint, "ingest_api_key": "k"}
+        self.assertIsNone(telemetry.telemetry_policy(Event(), config))
         attrs = attrs_of(by_name(stub)["cardinal.git_state"][0])
+        self.assertEqual(attrs["session_id"], "obj-sess")
         self.assertEqual(attrs["cardinal_initiative_name"], "login-crash")
         self.assertEqual(attrs["cardinal_initiative_type"], "bugfix")
 
@@ -439,7 +634,7 @@ class RegistryTests(unittest.TestCase):
     def test_policy_registry_and_pin(self) -> None:
         self.assertEqual(cardinal_omnigent.POLICY_REGISTRY,
                          [telemetry.telemetry_policy, spend_limits.spend_limits_policy])
-        self.assertEqual(cardinal_omnigent.OMNIGENT_VERIFIED_COMMIT, "6e71197")
+        self.assertEqual(cardinal_omnigent.OMNIGENT_VERIFIED_COMMIT, "2b3b54a4")
 
     def test_registry_policies_accept_config_by_arity(self) -> None:
         import inspect
