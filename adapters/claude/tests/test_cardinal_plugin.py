@@ -429,10 +429,10 @@ class ConnectTests(unittest.TestCase):
         # Permanent 401 — even after the v0.3.3 retry backoff exhausts, the
         # bin must abort before any writes and surface a clear message.
         self.stub.ingest_reachable_status = 401
-        # Match the bin's full retry sleep budget (core deviceflow ladder:
-        # 1+2+4+8+16+32 = 63s) so we don't hang the suite forever if the
-        # retries somehow misbehave.
-        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home, timeout=120)
+        # Match the bin's full retry sleep budget (the shipped ladder,
+        # injected via core 0.2.0 sleeps=: 1+2+4+8 = 15s) so we don't
+        # hang the suite forever if the retries somehow misbehave.
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home, timeout=60)
         self.assertNotEqual(res.returncode, 0)
         out = (res.stderr + res.stdout).lower()
         self.assertIn("ingest reachability failed", out)

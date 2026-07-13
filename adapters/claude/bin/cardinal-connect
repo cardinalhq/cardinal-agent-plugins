@@ -486,9 +486,14 @@ def _continue_after_grant(
 
     # Reachability sanity check (best-effort, before any writes).
     if ingest:
+        # The shipped v0.3.3 ladder (~15s total): long enough for a
+        # freshly minted ingest key to propagate through Lakerunner,
+        # short enough that a genuinely bad key aborts promptly. Core's
+        # default ladder is ~63s; the sleeps became injectable in 0.2.0.
         ok, msg = verify_ingest_reachable(
             ingest,
             log=lambda line: print(f"  … {line}"),
+            sleeps=(1.0, 2.0, 4.0, 8.0),
         )
         if not ok:
             sys.exit(f"ingest reachability failed: {msg}")
