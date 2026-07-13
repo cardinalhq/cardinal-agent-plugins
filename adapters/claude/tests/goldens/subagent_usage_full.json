@@ -126,6 +126,12 @@
                       }
                     },
                     {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "claude-opus-4-7"
+                      }
+                    },
+                    {
                       "key": "subagent_model",
                       "value": {
                         "stringValue": "claude-opus-4-7"

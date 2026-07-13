@@ -205,6 +205,7 @@ def fixture_steps(repo: Path) -> list[dict[str, Any]]:
                 "conversationId": CONV_ID,
                 "workspaceRoots": [repo_s],
                 "subagentType": "explore",
+                "model": "claude-sonnet-4-5",
                 "status": "completed",
                 "task": "Find OTLP emit callsites",
                 "description": "Search the repo for OTLP emit callsites",

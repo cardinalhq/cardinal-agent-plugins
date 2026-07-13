@@ -83,6 +83,12 @@
                   }
                 },
                 {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "gpt-5-codex"
+                  }
+                },
+                {
                   "key": "total_tokens",
                   "value": {
                     "intValue": "4321"

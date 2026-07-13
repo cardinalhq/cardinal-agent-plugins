@@ -115,6 +115,12 @@
                       }
                     },
                     {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "claude-4.5-sonnet"
+                      }
+                    },
+                    {
                       "key": "subagent_status",
                       "value": {
                         "stringValue": "completed"
