@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cardinal-omnigent-policy"
+version = "0.1.0"
+description = "Cardinal policy modules for omnigent's policy engine: agent-session telemetry + enforced spend limits."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "CardinalHQ", email = "support@cardinalhq.io" }]
+dependencies = ["cardinal-agent-core>=0.2"]
+
+[project.urls]
+Homepage = "https://github.com/cardinalhq/cardinal-agent-plugins"
+
+[tool.setuptools.packages.find]
+include = ["cardinal_omnigent*"]
