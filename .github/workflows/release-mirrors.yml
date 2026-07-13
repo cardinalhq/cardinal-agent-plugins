@@ -34,11 +34,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Set up mirror deploy key
+        # Each mirror repo has a write deploy key; the private halves are
+        # repo secrets. gh clones over SSH (git_protocol below) using this
+        # key, and release.py's pushes ride the same remote — no PAT.
+        env:
+          KEY_CLAUDE: ${{ secrets.MIRROR_DEPLOY_KEY_CLAUDE }}
+          KEY_CODEX: ${{ secrets.MIRROR_DEPLOY_KEY_CODEX }}
+          KEY_CURSOR: ${{ secrets.MIRROR_DEPLOY_KEY_CURSOR }}
+          KEY_GEMINI: ${{ secrets.MIRROR_DEPLOY_KEY_GEMINI }}
+        run: |
+          case "${{ inputs.adapter }}" in
+            claude) KEY="$KEY_CLAUDE" ;;
+            codex)  KEY="$KEY_CODEX" ;;
+            cursor) KEY="$KEY_CURSOR" ;;
+            gemini) KEY="$KEY_GEMINI" ;;
+          esac
+          if [ -z "$KEY" ]; then
+            echo "missing MIRROR_DEPLOY_KEY secret for ${{ inputs.adapter }}" >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/mirror_deploy_key
+          chmod 600 ~/.ssh/mirror_deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          {
+            echo "Host github.com"
+            echo "  IdentityFile ~/.ssh/mirror_deploy_key"
+            echo "  IdentitiesOnly yes"
+          } >> ~/.ssh/config
       - name: Release to mirror
         env:
-          # Fine-grained PAT with contents:write on the four mirror repos.
-          GH_TOKEN: ${{ secrets.MIRROR_PUSH_TOKEN }}
+          # Read-only default token — gh needs it to resolve the clone;
+          # the push authenticates via the deploy key over SSH.
+          GH_TOKEN: ${{ github.token }}
         run: |
+          gh config set git_protocol ssh
           git config --global user.name "cardinal-release-bot"
           git config --global user.email "release@cardinalhq.io"
           python3 build/release.py ${{ inputs.adapter }}
