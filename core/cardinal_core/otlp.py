@@ -27,6 +27,10 @@ class IngestConnection:
     endpoint: str  # base URL; /v1/logs is appended
     api_key: str
     api_header: str = DEFAULT_API_HEADER
+    # Additional headers forwarded verbatim on every POST (core 0.2.0
+    # gap #3 — Claude forwards every pair parsed from
+    # OTEL_EXPORTER_OTLP_HEADERS, which may carry more than the auth key).
+    extra_headers: tuple[tuple[str, str], ...] = ()
 
 
 def connection_from_paths(paths: AgentPaths) -> IngestConnection | None:
@@ -75,18 +79,44 @@ def resource_attrs(
     user_email: str | None,
     org: str | None,
     plugin_version: str,
+    include_core_version: bool = True,
 ) -> dict[str, str]:
     """Standard Cardinal resource attributes. Identity is an argument —
     CLI adapters read it from state, omnigent supplies actor.run_as."""
-    return {
+    attrs = {
         "service.name": service_name,
         "agent.runtime": agent_runtime,
         "deployment.environment": str(deployment_environment or "unknown"),
         "user.email": str(user_email or "unknown"),
         "cardinal.org": str(org or "unknown"),
         "cardinal.plugin_version": plugin_version,
-        "cardinal.core_version": CORE_VERSION,
     }
+    if include_core_version:
+        attrs["cardinal.core_version"] = CORE_VERSION
+    return attrs
+
+
+def passthrough_resource_attrs(
+    pairs: dict[str, str],
+    *,
+    service_name: str,
+    agent_runtime: str,
+    plugin_version: str,
+    include_core_version: bool = True,
+) -> dict[str, str]:
+    """Resource attributes from an externally-owned pair set, order
+    preserved (core 0.2.0 gap #4 — Claude passes through whatever CSV
+    cardinal-connect baked into OTEL_RESOURCE_ATTRIBUTES).
+    service.name / agent.runtime are setdefaults; cardinal.plugin_version
+    is an emit-time overwrite (the stamp must reflect the installed
+    plugin, not what connect wrote at install time)."""
+    attrs = dict(pairs)
+    attrs.setdefault("service.name", service_name)
+    attrs.setdefault("agent.runtime", agent_runtime)
+    attrs["cardinal.plugin_version"] = plugin_version
+    if include_core_version:
+        attrs["cardinal.core_version"] = CORE_VERSION
+    return attrs
 
 
 def emit_records(
@@ -118,14 +148,16 @@ def emit_records(
             }
         ]
     }
+    headers = {
+        "content-type": "application/json",
+        **dict(connection.extra_headers),
+        connection.api_header: connection.api_key,
+    }
     req = urllib.request.Request(
         connection.endpoint + "/v1/logs",
         data=json.dumps(body).encode("utf-8"),
         method="POST",
-        headers={
-            "content-type": "application/json",
-            connection.api_header: connection.api_key,
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout):

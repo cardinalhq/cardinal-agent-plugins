@@ -157,9 +157,12 @@ def _ingest_probe_once(endpoint: str, api_key: str, api_header: str) -> tuple[bo
 def verify_ingest_reachable(
     ingest: dict | None,
     log: Callable[[str], None] = print,
+    sleeps: tuple[float, ...] = INGEST_PROBE_RETRY_SLEEPS,
 ) -> tuple[bool, str]:
-    """Probe the ingest endpoint. Retries the 401 case on the documented
-    ladder because a freshly minted key can take seconds to propagate."""
+    """Probe the ingest endpoint. Retries the 401 case on the retry
+    ladder because a freshly minted key can take seconds to propagate;
+    `sleeps` is injectable so callers (and tests) can shorten it
+    (core 0.2.0 gap #7)."""
     if not ingest:
         return False, "server returned no ingest credential"
     endpoint = ingest.get("endpoint")
@@ -171,19 +174,19 @@ def verify_ingest_reachable(
         return False, "server returned no ingest API key"
 
     last_msg = ""
-    for attempt in range(len(INGEST_PROBE_RETRY_SLEEPS) + 1):
+    for attempt in range(len(sleeps) + 1):
         ok, msg = _ingest_probe_once(str(endpoint), str(api_key), str(api_header))
         if ok:
             return True, msg
         last_msg = msg
         if "HTTP 401" not in msg:
             return False, msg
-        if attempt < len(INGEST_PROBE_RETRY_SLEEPS):
-            sleep_s = INGEST_PROBE_RETRY_SLEEPS[attempt]
+        if attempt < len(sleeps):
+            sleep_s = sleeps[attempt]
             log(
                 f"ingest key returned 401; retrying in {sleep_s:.0f}s "
-                f"(attempt {attempt + 2}/{len(INGEST_PROBE_RETRY_SLEEPS) + 1})..."
+                f"(attempt {attempt + 2}/{len(sleeps) + 1})..."
             )
             time.sleep(sleep_s)
-    total = sum(INGEST_PROBE_RETRY_SLEEPS)
+    total = sum(sleeps)
     return False, f"{last_msg} after ~{total:.0f}s; ingest key did not propagate"

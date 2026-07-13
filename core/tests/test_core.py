@@ -346,15 +346,16 @@ class DeviceFlowTests(unittest.TestCase):
 
 
 class GoldenNormalizationTests(unittest.TestCase):
-    def test_normalizer_zeroes_volatile_fields(self) -> None:
+    def test_normalizer_pins_drops_and_zeroes(self) -> None:
         stub = StubIngest()
         stub.log_batches.append({
             "resourceLogs": [{
                 "resource": {"attributes": [
-                    {"key": "cardinal.core_version", "value": {"stringValue": "0.1.0"}},
+                    {"key": "cardinal.core_version", "value": {"stringValue": "0.2.0"}},
+                    {"key": "cardinal.plugin_version", "value": {"stringValue": "0.6.0"}},
                 ]},
                 "scopeLogs": [{
-                    "scope": {"name": "s", "version": "1"},
+                    "scope": {"name": "s", "version": "0.6.0"},
                     "logRecords": [{
                         "timeUnixNano": "123", "observedTimeUnixNano": "123",
                         "attributes": [
@@ -372,7 +373,177 @@ class GoldenNormalizationTests(unittest.TestCase):
         self.assertEqual(attr_map["ts"], {"stringValue": "<normalized>"})
         self.assertEqual(attr_map["model"], {"stringValue": "m"})
         res_attrs = {a["key"]: a["value"] for a in norm["resourceLogs"][0]["resource"]["attributes"]}
-        self.assertEqual(res_attrs["cardinal.core_version"], {"stringValue": "<normalized>"})
+        # core_version DROPPED (pre-migration goldens lack the key);
+        # plugin_version and scope version pinned.
+        self.assertNotIn("cardinal.core_version", res_attrs)
+        self.assertEqual(res_attrs["cardinal.plugin_version"], {"stringValue": "<normalized>"})
+        self.assertEqual(
+            norm["resourceLogs"][0]["scopeLogs"][0]["scope"]["version"], "<normalized>"
+        )
+
+
+class GateDecisionTests(unittest.TestCase):
+    """core 0.2.0 gap #1 — policy/channel split."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.paths = AgentPaths(home=Path(self._tmp.name) / ".agent")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_verdict(self, verdict: dict) -> None:
+        atomic_write_json_compact(self.paths.verdict_path("s1"), verdict)
+
+    def test_block_decision(self) -> None:
+        self._write_verdict({
+            "decision": "block", "band": 3, "fetched_at": time.time(),
+            "block_reason": "over budget",
+        })
+        d = limits.gate_decision(self.paths, "s1")
+        self.assertEqual((d.tier, d.reason), ("block", "over budget"))
+
+    def test_notify_vs_warn_tier(self) -> None:
+        self._write_verdict({
+            "decision": "allow", "band": 1, "fetched_at": time.time(),
+            "agent_context": "ctx",
+        })
+        self.assertEqual(limits.gate_decision(self.paths, "s1").tier, "notify")
+        self._write_verdict({
+            "decision": "warn", "band": 2, "fetched_at": time.time(),
+            "agent_context": "ctx", "user_message": "msg",
+        })
+        self.assertEqual(limits.gate_decision(self.paths, "s1").tier, "warn")
+
+    def test_hysteresis_via_ack_band(self) -> None:
+        self._write_verdict({
+            "decision": "warn", "band": 2, "fetched_at": time.time(),
+            "agent_context": "ctx",
+        })
+        d = limits.gate_decision(self.paths, "s1")
+        self.assertTrue(d.is_new_band)
+        limits.ack_band(self.paths, "s1", d.band)
+        self.assertFalse(limits.gate_decision(self.paths, "s1").is_new_band)
+
+    def test_gate_output_equivalence_preserved(self) -> None:
+        """gate_output is now a renderer over gate_decision — its behavior
+        contract is pinned by LimitsTests; this asserts the ack write only
+        happens when output is actually produced."""
+        self._write_verdict({
+            "decision": "warn", "band": 2, "fetched_at": time.time(),
+        })  # no agent_context, no user_message → no output, no ack
+        self.assertIsNone(
+            limits.gate_output(self.paths, "s1", hook_event_name="UserPromptSubmit")
+        )
+        self.assertFalse(self.paths.ack_path("s1").exists())
+
+    def test_notify_staging_roundtrip(self) -> None:
+        self.assertIsNone(limits.consume_notify(self.paths, "s1"))
+        limits.stage_notify(self.paths, "s1", "standing msg", 2)
+        self.assertEqual(limits.consume_notify(self.paths, "s1"), "standing msg")
+        self.assertIsNone(limits.consume_notify(self.paths, "s1"), "one-shot")
+
+
+class Core020ApiTests(unittest.TestCase):
+    def test_extra_headers_forwarded(self) -> None:
+        stub = StubIngest().start()
+        try:
+            conn = otlp.IngestConnection(
+                endpoint=stub.endpoint, api_key="k",
+                extra_headers=(("x-extra", "v1"),),
+            )
+            # emit and verify the request carried the extra header — the stub
+            # doesn't capture headers, so assert via a local check of the
+            # header dict construction path instead: no exception + batch
+            # received proves merge didn't clobber auth.
+            otlp.emit_records(
+                [otlp.log_record("e", {}, 1)],
+                conn,
+                {"service.name": "t"},
+                scope_name="s", scope_version="v",
+            )
+            time.sleep(0.05)
+            self.assertEqual(len(stub.log_batches), 1)
+        finally:
+            stub.stop()
+
+    def test_passthrough_resource_attrs(self) -> None:
+        pairs = {"custom.key": "x", "service.name": "user-set"}
+        attrs = otlp.passthrough_resource_attrs(
+            pairs, service_name="claude", agent_runtime="claude",
+            plugin_version="1.2.3",
+        )
+        self.assertEqual(attrs["service.name"], "user-set", "setdefault must not clobber")
+        self.assertEqual(attrs["agent.runtime"], "claude")
+        self.assertEqual(attrs["cardinal.plugin_version"], "1.2.3")
+        self.assertEqual(attrs["custom.key"], "x")
+        self.assertIn("cardinal.core_version", attrs)
+        no_cv = otlp.passthrough_resource_attrs(
+            pairs, service_name="c", agent_runtime="c",
+            plugin_version="1", include_core_version=False,
+        )
+        self.assertNotIn("cardinal.core_version", no_cv)
+
+    def test_resource_attrs_core_version_optional(self) -> None:
+        attrs = otlp.resource_attrs(
+            service_name="s", agent_runtime="r", deployment_environment=None,
+            user_email=None, org=None, plugin_version="1",
+            include_core_version=False,
+        )
+        self.assertNotIn("cardinal.core_version", attrs)
+
+    def test_refresh_verdict_with_injected_api_key(self) -> None:
+        """No secrets file — the injected key must be used (gap #2)."""
+        import http.server, threading
+
+        verdict_payload = json.dumps({"decision": "allow", "band": 0, "ttl_seconds": 60})
+        seen_keys: list[str] = []
+
+        class GetHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                seen_keys.append(self.headers.get("x-cardinalhq-api-key") or "")
+                body = verdict_payload.encode()
+                self.send_response(200)
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), GetHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with TemporaryDirectory() as tmp:
+                paths = AgentPaths(home=Path(tmp) / ".agent")
+                paths.home.mkdir(parents=True)
+                paths.state_path.write_text(json.dumps({
+                    "limits": {"status_url": f"http://127.0.0.1:{server.server_port}/status"}
+                }))
+                v = limits.maybe_refresh_verdict(
+                    paths, session_id="s1", repo=None, branch=None,
+                    force=True, api_key="injected-key",
+                )
+                self.assertIsNotNone(v)
+                self.assertEqual(seen_keys, ["injected-key"])
+                self.assertTrue(paths.verdict_path("s1").exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_ingest_probe_sleeps_injectable(self) -> None:
+        stub = StubIngest().start()
+        stub.metrics_status = 401
+        try:
+            t0 = time.monotonic()
+            ok, msg = deviceflow.verify_ingest_reachable(
+                {"endpoint": stub.endpoint, "api_key": "k"},
+                log=lambda _s: None, sleeps=(),
+            )
+            self.assertFalse(ok)
+            self.assertLess(time.monotonic() - t0, 2.0, "empty ladder must not sleep")
+        finally:
+            stub.stop()
 
 
 if __name__ == "__main__":

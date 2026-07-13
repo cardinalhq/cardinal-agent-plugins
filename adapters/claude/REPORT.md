@@ -119,4 +119,39 @@ python3 -m unittest discover -s . -p 'test_*.py'`
 
 See CORE_GAPS.md (5 items: limits key-sourcing injection, single-header
 IngestConnection, resource-attr passthrough, retry-ladder injection,
-plan-stamp path divergence).
+plan-stamp path divergence). **Resolved by core 0.2.0 — see below.**
+
+## Core 0.2.0 rewire (gaps 1–4 adopted)
+
+Core 0.2.0 added the argument-injection APIs the migration filed as
+CORE_GAPS; the adapter-side shims are gone. This section supersedes the
+`_limits.py` / `_budget_standing` rows above and the retry-ladder
+behavioral delta.
+
+- **Gap 1** — `hooks/_limits.py` DELETED (90 LOC). git-state.py calls
+  core `limits.maybe_refresh_verdict(..., api_key=...)`;
+  initiative-convention.py's `_budget_standing` collapsed to core
+  `session.budget_standing(paths, session_id, cwd, api_key=...)`; the
+  key still comes from `_otel_settings.ingest_api_key` (Claude fact).
+- **Gap 2** — `ingest_connection()` forwards all OTLP header pairs via
+  `IngestConnection.extra_headers` (key pair stays the auth header).
+- **Gap 3** — `resource_attrs()` delegates to core
+  `otlp.passthrough_resource_attrs` (resources now also carry
+  `cardinal.core_version`; the parity normalizer drops it — goldens
+  unchanged).
+- **Gap 4** — cardinal-connect passes `sleeps=(1, 2, 4, 8)` to
+  `verify_ingest_reachable`, restoring the shipped ~15s
+  persistent-401 abort (was ~63s on core's hardwired ladder); the
+  ported abort test's sleep budget adjusted back.
+- **Gap 5** — still moot (plan cache is adapter-only by decision).
+
+LOC: −96 net adapter code (155 deleted, 59 added; hooks 1,959 → 1,858,
+bin 913 → 918 — the +5 is the injected ladder + comment). Test count
+unchanged at 136, all green; goldens byte-identical. The only test-file
+change is LimitsCommonTests, rewired from the deleted shim onto the
+surface the hooks now call (core `limits` + `_otel_settings`).
+
+What still can't move to core (by design, not gaps): the OTel-settings
+acquisition itself (`_otel_settings.py` — settings.json env block, CSV
+parsing, key extraction), Claude payload/env session-id sourcing, and
+`_plan_cache.py` (verbatim, standing decision).

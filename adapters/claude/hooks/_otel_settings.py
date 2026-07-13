@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cardinal_core.otlp import IngestConnection  # noqa: E402
+from cardinal_core.otlp import IngestConnection, passthrough_resource_attrs  # noqa: E402
 import _plugin_version  # noqa: E402
 
 API_KEY_HEADER = "x-cardinalhq-api-key"
@@ -68,9 +68,9 @@ def otlp_headers(settings_env: dict[str, str]) -> dict[str, str]:
 def ingest_connection(settings_env: dict[str, str]) -> IngestConnection | None:
     """core IngestConnection from the Claude OTel settings. None when the
     endpoint is missing (emit becomes a no-op — same silent-exit contract
-    as before). When OTEL_EXPORTER_OTLP_HEADERS carries several pairs the
-    Cardinal key header wins, else the first pair rides along (core's
-    IngestConnection speaks exactly one auth header — see CORE_GAPS.md)."""
+    as before). EVERY pair parsed from OTEL_EXPORTER_OTLP_HEADERS rides
+    on the POST: the Cardinal key pair (else the first pair) becomes the
+    auth header, the rest go through extra_headers (core 0.2.0)."""
     endpoint = _setting(settings_env, "OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
         return None
@@ -83,8 +83,10 @@ def ingest_connection(settings_env: dict[str, str]) -> IngestConnection | None:
     else:
         if headers:
             header, key = next(iter(headers.items()))
+    extra = tuple((k, v) for k, v in headers.items() if k != header)
     return IngestConnection(
         endpoint=endpoint.rstrip("/"), api_key=key, api_header=header,
+        extra_headers=extra,
     )
 
 
@@ -99,17 +101,14 @@ def ingest_api_key(settings_env: dict[str, str] | None = None) -> str | None:
 
 
 def resource_attrs(settings_env: dict[str, str]) -> dict[str, str]:
-    """Resource attributes: OTEL_RESOURCE_ATTRIBUTES verbatim, with
-    service.name/agent.runtime defaults and the plugin version stamped at
-    emit time from the on-disk plugin.json (self-heals on upgrade — the
-    value baked into settings.json at install time goes stale).
-
-    NOT core's otlp.resource_attrs(): that fixed shape adds
-    cardinal.core_version and unknown-defaults for identity keys, which
-    would change the wire bytes; here the connect-time CSV is already the
-    complete identity."""
-    attrs = parse_kv_csv(_setting(settings_env, "OTEL_RESOURCE_ATTRIBUTES"))
-    attrs.setdefault("service.name", "claude-code")
-    attrs.setdefault("agent.runtime", "claude-code")
-    attrs["cardinal.plugin_version"] = _plugin_version.plugin_version()
-    return attrs
+    """Resource attributes: OTEL_RESOURCE_ATTRIBUTES verbatim (order
+    preserved), with service.name/agent.runtime defaults and the plugin
+    version stamped at emit time from the on-disk plugin.json (self-heals
+    on upgrade — the value baked into settings.json at install time goes
+    stale). Construction is core's passthrough builder (core 0.2.0)."""
+    return passthrough_resource_attrs(
+        parse_kv_csv(_setting(settings_env, "OTEL_RESOURCE_ATTRIBUTES")),
+        service_name="claude-code",
+        agent_runtime="claude-code",
+        plugin_version=_plugin_version.plugin_version(),
+    )

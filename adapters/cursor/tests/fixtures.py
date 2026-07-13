@@ -275,35 +275,16 @@ def run_hook(script: Path, event: str, payload: dict[str, Any],
 
 
 def _scrub(node: Any, sandbox_root: str) -> Any:
-    """Adapter-local normalization on TOP of core harness._normalize
-    (which is read-only for us):
+    """Adapter-local normalization on TOP of core harness._normalize.
 
-      * drop `cardinal.core_version` resource attributes entirely — the
-        pre-migration plugin never emitted them, so pinning the value
-        (what harness does) still leaves a key-presence diff;
-      * pin `cardinal.plugin_version` values and OTel scope versions —
-        the adapter's manifest version may drift from the shipped
-        plugin's;
-      * replace the sandbox path in every stringValue — the sandbox is a
-        fresh tempdir on each run.
+    Core 0.2.0's _normalize now owns the golden-reconciliation rules
+    (drops `cardinal.core_version`, pins `cardinal.plugin_version` and
+    the OTel scope version); the only adapter-specific rule left is
+    replacing the sandbox path in every string — the sandbox is a fresh
+    tempdir on each run.
     """
     if isinstance(node, dict):
-        out = {}
-        for k, v in node.items():
-            if k == "attributes" and isinstance(v, list):
-                kept = []
-                for a in v:
-                    if isinstance(a, dict) and a.get("key") == "cardinal.core_version":
-                        continue
-                    if isinstance(a, dict) and a.get("key") == "cardinal.plugin_version":
-                        a = {**a, "value": {"stringValue": "<normalized>"}}
-                    kept.append(_scrub(a, sandbox_root))
-                out[k] = kept
-            elif k == "scope" and isinstance(v, dict) and "version" in v:
-                out[k] = {**_scrub(v, sandbox_root), "version": "<normalized>"}
-            else:
-                out[k] = _scrub(v, sandbox_root)
-        return out
+        return {k: _scrub(v, sandbox_root) for k, v in node.items()}
     if isinstance(node, list):
         return [_scrub(x, sandbox_root) for x in node]
     if isinstance(node, str):

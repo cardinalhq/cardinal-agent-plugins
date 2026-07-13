@@ -7,7 +7,26 @@ could not be consumed as-is. Per the migration rules, everything below
 was worked around adapter-side; each entry states what was needed, why,
 and a suggested core API.
 
+> **Status (core 0.2.0):** gaps 1–3 are RESOLVED — core shipped the
+> suggested APIs and the adapter-side shims were deleted (see the
+> per-gap status lines below and REPORT.md §core 0.2.0). Gap 4 stays
+> adapter-side by design; gap 5 was informational only.
+
 ## 1. `limits.gate_output()` fuses policy with the hookSpecificOutput rendering
+
+**RESOLVED by core 0.2.0.** `limits.gate_decision(paths, session_id) ->
+GateDecision | None` and `limits.ack_band(paths, session_id, band)`
+landed exactly as suggested; `gate_output()` is now a thin renderer over
+them. The adapter's local ~60-line policy walk was deleted —
+`limits_gate_output()` in the hook script is now purely the Cursor
+channel mapping (`{continue:false, user_message}` for block /
+strict-warn escalation, staged notify for warn/notify, ack only when a
+message is actually staged). One residual wrinkle: `GateDecision.reason`
+is populated for the block tier only, so the strict-warn escalation's
+fallback copy (warn verdict with no `user_message`) re-reads the verdict
+via `limits.read_verdict()` to preserve the pre-0.2.0 `block_reason`
+fallback byte-for-byte. If core ever carries `reason` (or `block_reason`)
+on warn-tier decisions too, that re-read can go.
 
 **What I needed.** Cursor's `beforeSubmitPrompt` output schema is
 `{continue: false, user_message}` only — no `additionalContext`, no
@@ -51,6 +70,16 @@ user_message}` / stages a notify file from the same decision.
 
 ## 2. No staged-notify channel in `AgentPaths` / `limits`
 
+**RESOLVED by core 0.2.0.** `AgentPaths.notify_path(session_id)`,
+`limits.stage_notify(paths, session_id, message, band)` and
+`limits.consume_notify(paths, session_id)` landed; the adapter's local
+`notify_path()` / `consume_notify()` were deleted. Core's staged-file
+shape (`{"message", "band", "staged_at"}`) and one-shot read-and-delete
+semantics (invalid/empty file → None without unlink) are identical to
+what the adapter wrote, so no behavioral difference is observable —
+goldens (step 05, notify surfacing) and the behavioral suite pass
+unchanged.
+
 **What I needed.** The Divergence-E staging file
 `<conv>.notify.json` under `<agent-home>/cardinal/limits/`, written by
 the gate and consumed (read-and-delete, one-shot) by `postToolUse`.
@@ -67,6 +96,16 @@ adapter whose prompt-time hook lacks a non-blocking message slot (or
 omnigent delivering deferred standing) needs the same channel.
 
 ## 3. `otlp.resource_attrs()` unconditionally appends `cardinal.core_version`
+
+**RESOLVED by core 0.2.0** (harness side). `core/tests/harness.py::
+_normalize` now DROPS `cardinal.core_version` (reconciling key presence
+against pre-migration goldens) and pins `cardinal.plugin_version` and
+the OTel scope version. The adapter's `tests/fixtures.py::_scrub`
+shrank to the one Cursor-specific rule left: sandbox tempdir path
+replacement. Goldens still compare byte-equal. (The `extra:` parameter
+idea for `resource_attrs()` did not ship; the adapter still stamps
+`cursor.*` by dict mutation, which remains workable — insertion order
+is stable and golden-locked.)
 
 **What I needed.** Byte-equal output against goldens captured from the
 shipped v0.2.0 plugin, which never emitted `cardinal.core_version`.
@@ -88,6 +127,12 @@ useful: an `extra: dict[str, str] | None` parameter on
 is load-bearing for byte-parity and worth making explicit).
 
 ## 4. No per-adapter strict-warn escalation knob
+
+**REMAINS adapter-side — by design, not a core gap.** With gap #1's
+`gate_decision()` landed in 0.2.0, escalation is now exactly the pure
+rendering concern predicted below: `strict_warn_enabled()` plus a
+block-body render over a warn-tier `GateDecision` (~10 lines). Nothing
+further should move to core.
 
 **What I needed.** `CARDINAL_CURSOR_STRICT_WARN=1` (documented in the
 Cursor README and parity spec) escalating a warn verdict to a block.

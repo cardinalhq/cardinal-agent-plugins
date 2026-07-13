@@ -22,10 +22,10 @@ different repo. SessionStart additionalContext is the surface Claude
 Code provides for "tell the model this on every session" — short,
 authoritative, in-context.
 
-The convention text and standing-lines rendering come from
-cardinal_core (session.convention_prompt / limits.standing_lines); the
-budget fetch goes through the adapter's _limits shim because the ingest
-key lives in Claude's OTel settings, not cardinal-secrets.json.
+The convention text and the session-start budget standing both come
+from cardinal_core (session.convention_prompt / session.budget_standing);
+the ingest key lives in Claude's OTel settings, not cardinal-secrets.json,
+and core 0.2.0 takes it as an argument.
 """
 
 from __future__ import annotations
@@ -33,57 +33,34 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _limits  # noqa: E402
-from cardinal_core.initiative import git_facts, is_git_repo  # noqa: E402
-from cardinal_core.limits import standing_lines  # noqa: E402
-from cardinal_core.session import convention_prompt  # noqa: E402
+import _otel_settings  # noqa: E402
+from cardinal_core.initiative import is_git_repo  # noqa: E402
+from cardinal_core.paths import AgentPaths  # noqa: E402
+from cardinal_core.session import budget_standing, convention_prompt  # noqa: E402
 
 PROMPT = convention_prompt("Claude Code")
 
+# Bound at import time (hooks are one process per invocation).
+PATHS = AgentPaths(home=Path.home() / ".claude")
+
 
 def _budget_standing(payload: dict, cwd: str) -> str | None:
-    """One synchronous limits fetch at session start (short timeout, fail
-    open) so the budget is part of the session's standing context from
-    turn one — the agent starts economical instead of being corrected
-    mid-flight. Also warm-writes the verdict file the per-turn sync gate
-    reads. No-op when the backend doesn't advertise the limits protocol.
-
-    Spec: conductor docs/specs/agent-spend-limits.md §Delivery.
-    """
+    """core session.budget_standing (one synchronous fetch at session
+    start, fail open, warm-writes the verdict file the per-turn gate
+    reads) with Claude's payload/env session-id sourcing and OTel-settings
+    key sourcing. Spec: conductor docs/specs/agent-spend-limits.md
+    §Delivery."""
     session_id = (
         payload.get("session_id")
         or os.environ.get("CLAUDE_CODE_SESSION_ID")
         or os.environ.get("CLAUDE_SESSION_ID")
     )
-    if not session_id:
-        return None
-
-    if not _limits.limits_config():
-        return None
-    repo, branch = git_facts(cwd)
-    verdict = _limits.maybe_refresh_verdict(
-        session_id=session_id, repo=repo, branch=branch, force=True, timeout=1.5
+    return budget_standing(
+        PATHS, session_id, cwd, api_key=_otel_settings.ingest_api_key()
     )
-    if not verdict:
-        return None
-
-    lines = standing_lines(verdict)
-    if not lines:
-        return None
-    parts = ["Cardinal spend budgets apply to this session:"]
-    parts.extend(lines)
-    # Server-authored copy rides through verbatim — when a threshold is
-    # already crossed at session start, lead with the server's message.
-    user_message = verdict.get("user_message")
-    if isinstance(user_message, str) and user_message:
-        parts.append(user_message)
-    parts.append(
-        "Work economically as budgets tighten; budget standing updates "
-        "arrive automatically as the session proceeds."
-    )
-    return "\n".join(parts)
 
 
 def main() -> None:
