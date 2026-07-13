@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""cardinal-status — verify the Cardinal plugin's wiring.
+
+Reads the (non-secret) state at ~/.claude/cardinal.json and reports both
+sides depending on the recorded mode. Probes both endpoints for
+reachability.
+
+In v0.3, the MCP side is wired via plugins/cardinal/.mcp.json + the
+CARDINAL_MCP_URL / CARDINAL_MCP_API_KEY env vars that this plugin
+writes into ~/.claude/settings.json's env block. This script checks
+those env vars rather than any mcpServers entry in ~/.claude.json —
+that file is no longer touched by the plugin.
+
+Spend-limits standing rendering and git facts come from the vendored
+cardinal_core; the ingest key is sourced Claude-style from the OTel
+headers in settings.json (see hooks/_otel_settings.py).
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+import _otel_settings  # noqa: E402
+from cardinal_core.initiative import git_facts  # noqa: E402
+from cardinal_core.limits import fetch_status, standing_lines  # noqa: E402
+
+CLAUDE_DIR = Path.home() / ".claude"
+SETTINGS_PATH = CLAUDE_DIR / "settings.json"
+STATE_PATH = CLAUDE_DIR / "cardinal.json"
+
+
+def load_or_die(path: Path, label: str) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception as e:
+        print(f"✗ {label} ({path}) is unreadable: {e}")
+        sys.exit(1)
+
+
+def probe_ingest(endpoint: str, key: str) -> str:
+    url = endpoint.rstrip("/") + "/v1/metrics"
+    req = urllib.request.Request(
+        url,
+        data=b"",
+        method="POST",
+        headers={"content-type": "application/x-protobuf",
+                 "x-cardinalhq-api-key": key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return f"✓ Ingest reachable (HTTP {resp.status})"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return f"✗ Ingest returned HTTP {e.code} — key invalid or revoked. Run /cardinal:connect --rotate."
+        return f"✓ Ingest reachable (HTTP {e.code} on empty body — expected)"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return f"✗ Ingest network error: {e}"
+
+
+def probe_mcp(mcp_url: str, key: str) -> str:
+    req = urllib.request.Request(
+        mcp_url,
+        method="GET",
+        headers={"x-cardinalhq-api-key": key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return f"✓ MCP reachable (HTTP {resp.status})"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return f"✗ MCP returned HTTP {e.code} — key invalid or revoked. Run /cardinal:connect --rotate."
+        return f"✓ MCP reachable (HTTP {e.code} — auth OK)"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return f"✗ MCP network error: {e}"
+
+
+def main() -> int:
+    if not STATE_PATH.exists():
+        print("✗ Not connected. Run /cardinal:connect to wire up.")
+        return 1
+
+    state = load_or_die(STATE_PATH, "cardinal.json")
+    mode = state.get("mode", "unknown")
+    print(f"  Mode:        {mode}")
+    print(f"  User:        {state.get('user_email')}")
+    print(f"  Org:         {state.get('org_slug') or state.get('org_id')}")
+    print(f"  Host:        {state.get('host')}")
+    print(f"  Plugin ver:  {state.get('plugin_version')}")
+    written_at = state.get("written_at")
+    if written_at:
+        try:
+            t = datetime.fromisoformat(written_at.replace("Z", "+00:00"))
+            age_days = (datetime.now(timezone.utc) - t).days
+            print(f"  Connected:   {age_days} day(s) ago")
+            if age_days >= 90:
+                print("  ⚠  Connection is older than 90 days — consider /cardinal:connect --rotate")
+        except Exception:
+            pass
+
+    settings = load_or_die(SETTINGS_PATH, "settings.json")
+    env = settings.get("env", {}) if isinstance(settings.get("env"), dict) else {}
+
+    # ---- Telemetry side --------------------------------------------------
+    telemetry_enabled = state.get("telemetry", {}).get("enabled", True)
+    if telemetry_enabled:
+        print()
+        print(f"  Telemetry endpoint:   {state.get('ingest_endpoint')}")
+        print(f"  Ingest key prefix:    {state.get('ingest_key_prefix')}")
+        tool_details = state.get("telemetry", {}).get("tool_details", False)
+        if tool_details:
+            print("  Tool details:         enabled")
+        else:
+            print("  Tool details:         disabled (Outcomes Dashboard will show repo=unknown, service=unknown)")
+
+        if env.get("CLAUDE_CODE_ENABLE_TELEMETRY") != "1":
+            print("  ✗ CLAUDE_CODE_ENABLE_TELEMETRY missing from settings.json env. Run /cardinal:connect --rotate to repair.")
+            return 1
+
+        endpoint = state.get("ingest_endpoint")
+        if endpoint:
+            header_raw = env.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+            key = header_raw.split("=", 1)[-1] if "=" in header_raw else ""
+            print(f"  {probe_ingest(endpoint, key)}")
+
+    # ---- MCP side --------------------------------------------------------
+    mcp_url_state = state.get("mcp_url")
+    if mcp_url_state:
+        print()
+        print(f"  MCP endpoint:         {mcp_url_state}")
+        print(f"  MCP key prefix:       {state.get('mcp_key_prefix')}")
+
+        mcp_url_env = env.get("CARDINAL_MCP_URL")
+        mcp_key_env = env.get("CARDINAL_MCP_API_KEY")
+        if not mcp_url_env or not mcp_key_env:
+            print("  ✗ CARDINAL_MCP_URL or CARDINAL_MCP_API_KEY missing from settings.json env.")
+            print("    The plugin's .mcp.json declares the server but the env vars it substitutes")
+            print("    aren't set. Run /cardinal:connect --rotate to repair.")
+            return 1
+        if mcp_url_env != mcp_url_state:
+            print(f"  ⚠ settings.json CARDINAL_MCP_URL differs from state ({mcp_url_env} vs {mcp_url_state}).")
+
+        if isinstance(mcp_key_env, str) and mcp_key_env:
+            print(f"  {probe_mcp(mcp_url_state, mcp_key_env)}")
+
+    # ---- Spend limits ----------------------------------------------------
+    limits_state = state.get("limits")
+    if isinstance(limits_state, dict) and limits_state.get("status_url"):
+        print()
+        print(f"  Limits endpoint:      {limits_state['status_url']}")
+        try:
+            api_key = _otel_settings.ingest_api_key(env)
+            if not api_key:
+                print("  ✗ No ingest key in settings.json env — run /cardinal:connect --rotate.")
+            else:
+                repo, branch = git_facts(os.getcwd())
+                verdict = fetch_status(
+                    limits_state["status_url"],
+                    api_key,
+                    session_id="cardinal-status-probe",
+                    repo=repo,
+                    branch=branch,
+                    timeout=5.0,
+                )
+                if verdict is None:
+                    print("  ✗ Limits endpoint unreachable.")
+                else:
+                    lines = standing_lines(verdict)
+                    if lines:
+                        print("  Budget standing:")
+                        for line in lines:
+                            print(f"    {line}")
+                    else:
+                        print("  ✓ Limits endpoint reachable — no spend limits configured for this org.")
+        except Exception as e:  # standing is informational; never fail status over it
+            print(f"  ✗ Limits check failed: {e}")
+
+    print()
+    print("If you haven't restarted Claude Code since connecting, do it now —")
+    print("settings.json env is read once at process start, and Claude Code")
+    print("substitutes ${CARDINAL_MCP_URL} / ${CARDINAL_MCP_API_KEY} from it")
+    print("when it loads the plugin's .mcp.json.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,127 @@
+{
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "claude-code"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "claude-code"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "dogfood"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "golden@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "cardinalhq"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-claude-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.plan_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.plan_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "five_hour_utilization",
+                      "value": {
+                        "doubleValue": 12.5
+                      }
+                    },
+                    {
+                      "key": "five_hour_resets_at",
+                      "value": {
+                        "stringValue": "2026-01-02T05:00:00Z"
+                      }
+                    },
+                    {
+                      "key": "seven_day_utilization",
+                      "value": {
+                        "doubleValue": 40.0
+                      }
+                    },
+                    {
+                      "key": "seven_day_resets_at",
+                      "value": {
+                        "stringValue": "2026-01-08T00:00:00Z"
+                      }
+                    },
+                    {
+                      "key": "seven_day_opus_utilization",
+                      "value": {
+                        "doubleValue": 3.0
+                      }
+                    },
+                    {
+                      "key": "seven_day_opus_resets_at",
+                      "value": {
+                        "stringValue": "2026-01-08T00:00:00Z"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "stdout": null,
+  "returncode": 0
+}
