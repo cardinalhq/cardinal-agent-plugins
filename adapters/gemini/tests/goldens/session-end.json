@@ -1,0 +1,10 @@
+{
+  "steps": [
+    {
+      "event": "SessionEnd",
+      "returncode": 0,
+      "stdout": ""
+    }
+  ],
+  "batches": []
+}

@@ -1,0 +1,1240 @@
+{
+  "steps": [
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterModel",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterModel",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterModel",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterModel",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterModel",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterModel",
+      "returncode": 0,
+      "stdout": ""
+    }
+  ],
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "api_request"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "api_request"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-2.0-flash"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "1200"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "340"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "64"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "200"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "200"
+                      }
+                    },
+                    {
+                      "key": "cost_usd",
+                      "value": {
+                        "doubleValue": 0.000267
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-2.0-flash"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "1200"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "340"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "64"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "200"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "200"
+                      }
+                    },
+                    {
+                      "key": "cost_usd",
+                      "value": {
+                        "doubleValue": 0.000267
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "api_request"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "api_request"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-2.0-pro-2026-03-01"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "5000"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "800"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "1200"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "2500"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "2500"
+                      }
+                    },
+                    {
+                      "key": "cost_usd",
+                      "value": {
+                        "doubleValue": 0.023906
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-2.0-pro-2026-03-01"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "5000"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "800"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "1200"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "2500"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "2500"
+                      }
+                    },
+                    {
+                      "key": "cost_usd",
+                      "value": {
+                        "doubleValue": 0.023906
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "api_request"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "api_request"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "imagen-4-ultra"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "10"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "5"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "imagen-4-ultra"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "10"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "5"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "api_request"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "api_request"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-1.5-flash"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "700"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "90"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cost_usd",
+                      "value": {
+                        "doubleValue": 7.9e-05
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-1.5-flash"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "700"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "90"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cost_usd",
+                      "value": {
+                        "doubleValue": 7.9e-05
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "3"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.plan_state"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.plan_state"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "api_request"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "api_request"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-1.5-flash"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "800"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "100"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cost_usd",
+                      "value": {
+                        "doubleValue": 9e-05
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-model"
+                      }
+                    },
+                    {
+                      "key": "user_email",
+                      "value": {
+                        "stringValue": "fixture@cardinalhq.io"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "model",
+                      "value": {
+                        "stringValue": "gemini-1.5-flash"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "intValue": "800"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "intValue": "100"
+                      }
+                    },
+                    {
+                      "key": "thought_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cache_read_input_tokens",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "cost_usd",
+                      "value": {
+                        "doubleValue": 9e-05
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "4"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
