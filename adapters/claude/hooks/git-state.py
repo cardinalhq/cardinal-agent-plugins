@@ -44,9 +44,24 @@ from cardinal_core.initiative import (  # noqa: E402
     git,
     resolve_initiative,
 )
-from cardinal_core.otlp import emit_records, log_record  # noqa: E402
+from cardinal_core.initiative import PREFIX_TO_TYPE, strip_worktree_noise  # noqa: E402
+from cardinal_core.otlp import emit_records, kv, log_record  # noqa: E402
 
 HOOK_TIMEOUT_SEC = 2.0
+
+# Back-compat module surface: the pre-migration script exported these as
+# underscore-prefixed locals; the algorithms now live in cardinal_core.
+# Kept as aliases so importers (including the ported test suite) see the
+# same API.
+_resolve_initiative = resolve_initiative
+_strip_worktree_noise = strip_worktree_noise
+_detect_command = detect_command
+_canonical_repo = canonical_repo
+_kv = kv
+# Closed vocabulary downstream (lakerunner, conductor dashboard) treats
+# as canonical — derived from core's prefix map, whose values ARE the
+# closed enum ("feature" included via the feat alias).
+_INITIATIVE_TYPES = frozenset(PREFIX_TO_TYPE.values())
 
 
 def _silent_exit() -> None:

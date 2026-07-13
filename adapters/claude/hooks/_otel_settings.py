@@ -25,14 +25,18 @@ import _plugin_version  # noqa: E402
 
 API_KEY_HEADER = "x-cardinalhq-api-key"
 
+# Bound at import time (hooks are one process per invocation) — the same
+# semantics the pre-migration _limits_common module had, which the
+# importlib-based tests rely on.
+SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+
 
 def load_otel_settings() -> dict[str, str]:
     """The OTel env block from ~/.claude/settings.json (string values only).
     settings.json wins over the process env, because Claude Code strips
     OTEL_* and CLAUDE_PROJECT_DIR from hook subprocess envs in practice."""
     try:
-        settings_path = Path.home() / ".claude" / "settings.json"
-        with open(settings_path, encoding="utf-8") as f:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
             data = json.load(f)
         env = data.get("env") or {}
         return {k: v for k, v in env.items() if isinstance(v, str)}

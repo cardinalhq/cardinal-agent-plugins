@@ -33,12 +33,25 @@ from cardinal_core.paths import AgentPaths, atomic_write_json_compact  # noqa: E
 import _otel_settings  # noqa: E402
 
 
+# Bound at import time (hooks are one process per invocation) — the same
+# semantics the pre-migration _limits_common module had, which the
+# importlib-based tests rely on.
+PATHS = AgentPaths(home=Path.home() / ".claude")
+
+
 def paths() -> AgentPaths:
-    return AgentPaths(home=Path.home() / ".claude")
+    return PATHS
 
 
 def limits_config() -> dict | None:
     return _core_limits_config(paths())
+
+
+def ingest_api_key(settings_env: dict[str, str] | None = None) -> str | None:
+    """The plugin's ingest key, from OTEL_EXPORTER_OTLP_HEADERS — the same
+    credential the status endpoint authenticates (and derives engineer
+    identity from, server-side)."""
+    return _otel_settings.ingest_api_key(settings_env)
 
 
 def maybe_refresh_verdict(
