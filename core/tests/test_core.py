@@ -173,6 +173,24 @@ class PricingTests(unittest.TestCase):
 
 
 class OtlpTests(unittest.TestCase):
+    def test_resource_attrs_extra_merges_and_skips_empty(self) -> None:
+        from cardinal_core import otlp
+        attrs = otlp.resource_attrs(
+            service_name="omnigent", agent_runtime="omnigent",
+            deployment_environment=None, user_email=None, org=None,
+            plugin_version="0.0.0",
+            extra={"cardinal.omnigent_harness": "codex", "skip.me": ""},
+        )
+        self.assertEqual(attrs["cardinal.omnigent_harness"], "codex")
+        self.assertNotIn("skip.me", attrs)
+        # No extra: identical key set as before (byte-compat guard).
+        base = otlp.resource_attrs(
+            service_name="omnigent", agent_runtime="omnigent",
+            deployment_environment=None, user_email=None, org=None,
+            plugin_version="0.0.0",
+        )
+        self.assertNotIn("cardinal.omnigent_harness", base)
+
     def test_kv_types(self) -> None:
         self.assertEqual(otlp.kv("b", True), {"key": "b", "value": {"boolValue": True}})
         self.assertEqual(otlp.kv("i", 3), {"key": "i", "value": {"intValue": "3"}})
@@ -478,6 +496,31 @@ class GateDecisionTests(unittest.TestCase):
         limits.stage_notify(self.paths, "s1", "standing msg", 2)
         self.assertEqual(limits.consume_notify(self.paths, "s1"), "standing msg")
         self.assertIsNone(limits.consume_notify(self.paths, "s1"), "one-shot")
+
+    def test_warn_reason_carries_standing_copy(self) -> None:
+        # core 0.3.0: warn/notify tiers populate reason for renderers
+        # whose channel has only a reason slot.
+        self._write_verdict({
+            "decision": "warn", "band": 2, "fetched_at": time.time(),
+            "agent_context": "ctx", "user_message": "msg",
+        })
+        self.assertEqual(limits.gate_decision(self.paths, "s1").reason, "msg")
+        self._write_verdict({
+            "decision": "allow", "band": 1, "fetched_at": time.time(),
+            "agent_context": "ctx only",
+        })
+        self.assertEqual(limits.gate_decision(self.paths, "s1").reason, "ctx only")
+
+    def test_override_downgrade_retains_block_reason(self) -> None:
+        self._write_verdict({
+            "decision": "block", "band": 3, "fetched_at": time.time(),
+            "block_reason": "initiative budget exhausted",
+            "user_message": "standing msg",
+        })
+        atomic_write_json_compact(self.paths.override_path("s1"), {"by": "admin"})
+        d = limits.gate_decision(self.paths, "s1")
+        self.assertEqual(d.tier, "warn")
+        self.assertEqual(d.reason, "initiative budget exhausted")
 
 
 class Core020ApiTests(unittest.TestCase):

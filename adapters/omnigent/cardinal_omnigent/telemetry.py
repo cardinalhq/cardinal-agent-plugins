@@ -164,18 +164,15 @@ def connection_from_config(config: dict[str, Any] | None) -> otlp.IngestConnecti
 
 
 def _resource(event: Any, config: dict[str, Any]) -> dict[str, str]:
-    attrs = otlp.resource_attrs(
+    return otlp.resource_attrs(
         service_name=str(config.get("service_name") or "omnigent"),
         agent_runtime="omnigent",
         deployment_environment=config.get("deployment_environment"),
         user_email=_events.actor_email(event),
         org=config.get("org"),
         plugin_version=_plugin_version(),
+        extra={"cardinal.omnigent_harness": _events.harness(event) or ""},
     )
-    harness = _events.harness(event)
-    if harness:
-        attrs["cardinal.omnigent_harness"] = harness
-    return attrs
 
 
 def _emit(event: Any, config: dict[str, Any], records: list[dict[str, Any]]) -> None:

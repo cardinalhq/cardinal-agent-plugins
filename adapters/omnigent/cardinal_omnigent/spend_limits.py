@@ -81,7 +81,9 @@ def _render_gate(
         }
     if not decision.is_new_band:
         return None  # hysteresis: this band was already surfaced
-    message = decision.user_message or decision.agent_context
+    # core 0.3.0: reason carries the tier's "why" (block_reason survives
+    # an override downgrade; ordinary warns get the standing copy).
+    message = decision.reason or decision.user_message or decision.agent_context
     if not message:
         return None
     out: dict[str, Any] = {
