@@ -489,6 +489,124 @@ class StatusAndDisconnectTests(unittest.TestCase):
         self.assertNotIn("cardinal-codex-plugin", self.hooks.read_text())
 
 
+class LauncherTests(unittest.TestCase):
+    """Regression: plugin version bumps must not dangle the hooks.json command.
+
+    Codex caches plugins under a versioned dir; on upgrade the old dir is
+    removed. Fixed by writing a stable launcher at ~/.codex/cardinal/ and
+    pointing hooks.json there. The launcher resolves the newest installed
+    hook at invocation time.
+    """
+
+    def setUp(self):
+        self.stub = StubCardinal()
+        self.stub.start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        connected = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(connected.returncode, 0, connected.stderr + connected.stdout)
+        self.launcher = self.home / ".codex" / "cardinal" / "cardinal-codex-telemetry.py"
+        self.hooks = self.home / ".codex" / "hooks.json"
+
+    def tearDown(self):
+        self.stub.stop()
+        self.tmp.cleanup()
+
+    def test_hooks_json_points_at_stable_launcher_not_versioned_path(self):
+        hooks_text = self.hooks.read_text()
+        self.assertIn(str(self.launcher), hooks_text)
+        # The launcher path must NOT contain a plugin-cache version segment;
+        # that's the whole thing we're avoiding.
+        self.assertNotIn("plugins/cache/", str(self.launcher))
+        self.assertNotIn("plugins/cache/", hooks_text.split("cardinal-codex-telemetry.py")[0])
+
+    def test_launcher_is_written_and_executable(self):
+        self.assertTrue(self.launcher.is_file())
+        self.assertTrue(os.access(str(self.launcher), os.X_OK))
+        body = self.launcher.read_text()
+        self.assertIn("cardinal-codex-plugin", body)
+        self.assertIn("_discover_newest_cached", body)
+
+    def _install_fake_cached_version(self, version: str, marker: str) -> Path:
+        """Simulate a Codex plugin-cache entry with a hook that prints `marker`."""
+        cache = (
+            self.home / ".codex" / "plugins" / "cache"
+            / "cardinalhq-codex-plugin" / "cardinal-codex-plugin"
+            / version / "hooks"
+        )
+        cache.mkdir(parents=True)
+        hook = cache / "cardinal-codex-telemetry.py"
+        hook.write_text(
+            "#!/usr/bin/env python3\n"
+            f"import sys\n"
+            f"print({marker!r})\n"
+            f"print('argv=' + ' '.join(sys.argv[1:]))\n"
+        )
+        hook.chmod(0o755)
+        return hook
+
+    def test_launcher_picks_newest_semver_from_cache(self):
+        self._install_fake_cached_version("0.5.2", "old")
+        self._install_fake_cached_version("0.10.0", "newest")
+        self._install_fake_cached_version("0.6.0", "middle")
+
+        result = subprocess.run(
+            [sys.executable, str(self.launcher), "--event", "SessionStart"],
+            env={**os.environ, "HOME": str(self.home)},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("newest", result.stdout)
+        self.assertIn("argv=--event SessionStart", result.stdout)
+
+    def test_launcher_falls_back_when_cache_empty(self):
+        # No cached versions installed — launcher should exec the fallback
+        # path baked in at connect time (the dev-checkout hooks/ path).
+        result = subprocess.run(
+            [sys.executable, str(self.launcher), "--event", "SessionStart"],
+            env={**os.environ, "HOME": str(self.home)},
+            capture_output=True, text=True, timeout=10,
+            input="{}",
+        )
+        # Fallback exec runs the real hook; it exits 0 (best-effort telemetry)
+        # even with no ingest configured for this bare invocation.
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_launcher_survives_plugin_version_bump(self):
+        """The specific dangling-path scenario from the bug report."""
+        old_hook = self._install_fake_cached_version("0.5.2", "old-hook-body")
+
+        # Confirm launcher resolves to it initially.
+        result = subprocess.run(
+            [sys.executable, str(self.launcher), "--event", "SessionStart"],
+            env={**os.environ, "HOME": str(self.home)},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("old-hook-body", result.stdout)
+
+        # Simulate Codex upgrading the plugin: nuke the old cache dir, install
+        # a new versioned one. hooks.json (pointing at the launcher) MUST
+        # still work — that's the whole fix.
+        import shutil
+        shutil.rmtree(old_hook.parent.parent)  # rm .../0.5.2/
+        self._install_fake_cached_version("0.7.0", "new-hook-body")
+
+        result = subprocess.run(
+            [sys.executable, str(self.launcher), "--event", "SessionStart"],
+            env={**os.environ, "HOME": str(self.home)},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("new-hook-body", result.stdout)
+
+    def test_disconnect_removes_launcher(self):
+        self.assertTrue(self.launcher.is_file())
+        result = run_script(DISCONNECT, [], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(self.launcher.exists())
+
+
 class TelemetryHookTests(unittest.TestCase):
     def setUp(self):
         self.stub = StubCardinal()
