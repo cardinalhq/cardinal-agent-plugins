@@ -429,10 +429,10 @@ class ConnectTests(unittest.TestCase):
         # Permanent 401 — even after the v0.3.3 retry backoff exhausts, the
         # bin must abort before any writes and surface a clear message.
         self.stub.ingest_reachable_status = 401
-        # Match the bin's full retry sleep budget (core deviceflow ladder:
-        # 1+2+4+8+16+32 = 63s) so we don't hang the suite forever if the
-        # retries somehow misbehave.
-        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home, timeout=120)
+        # Match the bin's full retry sleep budget (the shipped ladder,
+        # injected via core 0.2.0 sleeps=: 1+2+4+8 = 15s) so we don't
+        # hang the suite forever if the retries somehow misbehave.
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home, timeout=60)
         self.assertNotEqual(res.returncode, 0)
         out = (res.stderr + res.stdout).lower()
         self.assertIn("ingest reachability failed", out)
@@ -1100,32 +1100,41 @@ class InitiativeConventionHookTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Spend-limits delivery — _limits_common.py + limits-gate.py
+# Spend-limits delivery — cardinal_core.limits + limits-gate.py
 # ---------------------------------------------------------------------------
 # Two-hook split (conductor docs/specs/agent-spend-limits.md §Delivery):
 # git-state.py's async fetch writes <session>.verdict.json; the sync
 # limits-gate.py reads it and emits hook JSON. These tests pin the gate's
 # channel mapping (notify/warn/block), the anti-nag hysteresis, the
-# staleness fail-open windows, and the TTL-honoring refresh.
+# staleness fail-open windows, and the TTL-honoring refresh. Since core
+# 0.2.0 the hooks call cardinal_core.limits directly (api_key as an
+# argument, sourced from _otel_settings) — the _limits.py shim is gone.
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
-LIMITS_COMMON_PATH = HOOKS_DIR / "_limits.py"
 LIMITS_GATE_PATH = HOOKS_DIR / "limits-gate.py"
 
 
-def _load_limits_common(home: Path):
-    """Import the adapter's _limits shim with HOME pointed at a temp dir.
-    The module (and the _otel_settings module it imports) binds its paths
-    from Path.home() at import time, so each test gets a fresh module
-    object. _otel_settings is evicted from sys.modules first so its
-    import-time SETTINGS_PATH rebinds to this test's home."""
+def _core_limits(home: Path):
+    """The rewired spend-limits surface: vendored cardinal_core.limits
+    plus AgentPaths bound to <home>/.claude — exactly what the hooks
+    construct at import time."""
+    sys.path.insert(0, str(HOOKS_DIR))
+    import cardinal_core.limits as limits
+    from cardinal_core.paths import AgentPaths
+
+    return limits, AgentPaths(home=home / ".claude")
+
+
+def _load_otel_settings(home: Path):
+    """Import the adapter's _otel_settings with HOME pointed at a temp
+    dir. The module binds SETTINGS_PATH from Path.home() at import time,
+    so each test gets a fresh module object."""
     prior = os.environ.get("HOME")
     os.environ["HOME"] = str(home)
-    sys.modules.pop("_otel_settings", None)
     sys.path.insert(0, str(HOOKS_DIR))
     try:
         spec = importlib.util.spec_from_file_location(
-            f"limits_common_{id(home)}", LIMITS_COMMON_PATH
+            f"otel_settings_{id(home)}", HOOKS_DIR / "_otel_settings.py"
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -1301,60 +1310,88 @@ class LimitsCommonTests(unittest.TestCase):
             "env": {"OTEL_EXPORTER_OTLP_HEADERS": "x-cardinalhq-api-key=sekrit"},
         }))
 
+    def _patch_fetch(self, limits, fake):
+        """Swap cardinal_core.limits.fetch_status for the test, restoring
+        the real one afterwards (the module is shared process state)."""
+        orig = limits.fetch_status
+        limits.fetch_status = fake
+        self.addCleanup(setattr, limits, "fetch_status", orig)
+
     def test_ingest_api_key_parses_otlp_headers(self):
+        # Claude's key sourcing (OTel settings, not cardinal-secrets.json)
+        # — the value the hooks pass to core as the api_key argument.
         self._write_connected_state()
-        lc = _load_limits_common(self.home)
-        self.assertEqual(lc.ingest_api_key(), "sekrit")
-        self.assertIsNone(lc.ingest_api_key({"OTEL_EXPORTER_OTLP_HEADERS": "other=x"}))
+        otel = _load_otel_settings(self.home)
+        self.assertEqual(otel.ingest_api_key(), "sekrit")
+        self.assertIsNone(otel.ingest_api_key({"OTEL_EXPORTER_OTLP_HEADERS": "other=x"}))
 
     def test_limits_config_absent_or_disabled_is_none(self):
-        lc = _load_limits_common(self.home)
-        self.assertIsNone(lc.limits_config())
+        limits, paths = _core_limits(self.home)
+        self.assertIsNone(limits.limits_config(paths))
         claude = self.home / ".claude"
         claude.mkdir(parents=True, exist_ok=True)
         (claude / "cardinal.json").write_text(json.dumps({
             "limits": {"status_url": "https://x", "enabled": False},
         }))
-        self.assertIsNone(lc.limits_config())
+        self.assertIsNone(limits.limits_config(paths))
 
     def test_maybe_refresh_honors_server_ttl(self):
         self._write_connected_state()
-        lc = _load_limits_common(self.home)
+        limits, paths = _core_limits(self.home)
         calls = []
 
         def fake_fetch(*args, **kwargs):
             calls.append(args)
             return {"decision": "allow", "band": 0, "ttl_seconds": 9999}
 
-        lc.fetch_status = fake_fetch
-        first = lc.maybe_refresh_verdict("sess-1", repo="o/r", branch="feat/x")
+        self._patch_fetch(limits, fake_fetch)
+        first = limits.maybe_refresh_verdict(
+            paths, "sess-1", repo="o/r", branch="feat/x", api_key="sekrit"
+        )
         self.assertEqual(len(calls), 1)
         self.assertIn("fetched_at", first)
         # Within TTL: served from the file, no second fetch.
-        lc.maybe_refresh_verdict("sess-1", repo="o/r", branch="feat/x")
+        limits.maybe_refresh_verdict(
+            paths, "sess-1", repo="o/r", branch="feat/x", api_key="sekrit"
+        )
         self.assertEqual(len(calls), 1)
         # force=True bypasses the TTL (SessionStart warm fetch).
-        lc.maybe_refresh_verdict("sess-1", repo="o/r", branch="feat/x", force=True)
+        limits.maybe_refresh_verdict(
+            paths, "sess-1", repo="o/r", branch="feat/x", force=True, api_key="sekrit"
+        )
         self.assertEqual(len(calls), 2)
 
     def test_maybe_refresh_noop_without_limits_config(self):
-        lc = _load_limits_common(self.home)
-        lc.fetch_status = lambda *a, **k: self.fail("must not fetch when unconfigured")
-        self.assertIsNone(lc.maybe_refresh_verdict("sess-1", repo=None, branch=None))
+        limits, paths = _core_limits(self.home)
+        self._patch_fetch(
+            limits, lambda *a, **k: self.fail("must not fetch when unconfigured")
+        )
+        self.assertIsNone(
+            limits.maybe_refresh_verdict(
+                paths, "sess-1", repo=None, branch=None, api_key="sekrit"
+            )
+        )
 
     def test_fetch_failure_keeps_prior_verdict(self):
         self._write_connected_state()
-        lc = _load_limits_common(self.home)
-        lc.fetch_status = lambda *a, **k: {"decision": "warn", "band": 90, "ttl_seconds": 0}
-        first = lc.maybe_refresh_verdict("sess-1", repo=None, branch=None)
+        limits, paths = _core_limits(self.home)
+        self._patch_fetch(
+            limits, lambda *a, **k: {"decision": "warn", "band": 90, "ttl_seconds": 0}
+        )
+        first = limits.maybe_refresh_verdict(
+            paths, "sess-1", repo=None, branch=None, api_key="sekrit"
+        )
         self.assertEqual(first["band"], 90)
-        lc.fetch_status = lambda *a, **k: None  # network down; ttl 0 forces refetch
-        kept = lc.maybe_refresh_verdict("sess-1", repo=None, branch=None)
+        # network down; ttl 0 forces refetch
+        self._patch_fetch(limits, lambda *a, **k: None)
+        kept = limits.maybe_refresh_verdict(
+            paths, "sess-1", repo=None, branch=None, api_key="sekrit"
+        )
         self.assertEqual(kept["band"], 90, "failed refresh must keep the prior verdict")
 
     def test_standing_lines_formats_evaluations(self):
-        lc = _load_limits_common(self.home)
-        lines = lc.standing_lines({
+        limits, _ = _core_limits(self.home)
+        lines = limits.standing_lines({
             "evaluations": [
                 {"scope": "engineer", "window": "week", "spent_usd": 142, "limit_usd": 200,
                  "fraction": 0.71,
