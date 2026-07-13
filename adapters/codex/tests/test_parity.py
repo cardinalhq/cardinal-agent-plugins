@@ -282,5 +282,172 @@ class GoldenParityTests(unittest.TestCase):
         self.assert_matches(fixtures.scenario_gate(HOOK))
 
 
+class ManifestTests(unittest.TestCase):
+    def test_mcp_json_has_disabled_template(self):
+        data = json.loads((ROOT / ".mcp.json").read_text())
+        entry = data["mcpServers"]["cardinal"]
+        self.assertEqual(entry["type"], "http")
+        self.assertEqual(entry["url"], "${CARDINAL_MCP_URL}")
+        self.assertEqual(entry["headers"]["X-CardinalHQ-API-Key"], "${CARDINAL_MCP_API_KEY}")
+        self.assertFalse(entry["enabled"])
+
+    def test_plugin_version_is_loaded_at_runtime(self):
+        # Both cardinal-connect and the telemetry hook resolve
+        # PLUGIN_VERSION from plugin.json at import time — no hardcoded
+        # constants.
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text())
+
+        def _load(name, path):
+            loader = SourceFileLoader(name, str(path))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+
+        connect = _load("cardinal_connect_module", CONNECT)
+        self.assertEqual(connect.PLUGIN_VERSION, manifest["version"])
+        self.assertNotEqual(connect.PLUGIN_VERSION, "unknown")
+
+        version_helper = _load(
+            "cardinal_codex_plugin_version",
+            ROOT / "hooks" / "_plugin_version.py",
+        )
+        self.assertEqual(version_helper.plugin_version(), manifest["version"])
+
+
+class ConnectTests(unittest.TestCase):
+    def setUp(self):
+        self.stub = StubCardinal()
+        self.stub.start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.config = self.home / ".codex" / "config.toml"
+        self.hooks = self.home / ".codex" / "hooks.json"
+        self.state = self.home / ".codex" / "cardinal.json"
+        self.secrets = self.home / ".codex" / "cardinal-secrets.json"
+
+    def tearDown(self):
+        self.stub.stop()
+        self.tmp.cleanup()
+
+    def test_happy_path_writes_managed_config_and_state(self):
+        result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.stub.last_scopes, ["ingest:write", "mcp:invoke"])
+
+        config = read_toml(self.config)
+        entry = config["mcp_servers"]["cardinal"]
+        self.assertTrue(entry["url"].endswith("/api/orgs/org-uuid-1/mcp"))
+        self.assertTrue(entry["http_headers"]["X-CardinalHQ-API-Key"].startswith("MCPPLAINTEXT"))
+        raw_config = self.config.read_text()
+        self.assertIn("# BEGIN cardinal-codex-plugin managed MCP server", raw_config)
+
+        state = read_json(self.state)
+        self.assertEqual(state["mode"], "telemetry-and-mcp")
+        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["org_slug"], "test-org")
+        self.assertEqual(state["ingest_key_id"], "ingest-key-uuid-1")
+        self.assertEqual(state["mcp_key_id"], "mcp-key-uuid-1")
+        self.assertNotIn("MCPPLAINTEXT", self.state.read_text())
+        self.assertNotIn("INGESTPLAINTEXT", self.state.read_text())
+
+        secrets = read_json(self.secrets)
+        self.assertTrue(secrets["ingest_api_key"].startswith("INGESTPLAINTEXT"))
+        self.assertTrue(secrets["mcp_api_key"].startswith("MCPPLAINTEXT"))
+
+        hooks = read_json(self.hooks)
+        self.assertIn("SessionStart", hooks["hooks"])
+        self.assertIn("UserPromptSubmit", hooks["hooks"])
+        self.assertIn("Stop", hooks["hooks"])
+        self.assertIn("SubagentStop", hooks["hooks"])
+        self.assertIn("cardinal-codex-plugin", json.dumps(hooks))
+
+    def test_already_connected_guard_without_rotate(self):
+        first = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(first.returncode, 0)
+        second = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(second.returncode, 2)
+        self.assertIn("already connected", second.stderr.lower())
+
+    def test_rotate_replaces_existing_managed_block(self):
+        first = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(first.returncode, 0)
+        self.stub.token_calls = 0
+        second = run_script(CONNECT, ["--host", self.stub.url(), "--rotate"], self.home)
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+        self.assertEqual(self.config.read_text().count("[mcp_servers.cardinal]"), 1)
+
+    def test_dry_run_writes_nothing(self):
+        result = run_script(CONNECT, ["--host", self.stub.url(), "--dry-run"], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would_write", result.stdout)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.state.exists())
+
+    def test_unmanaged_cardinal_table_is_not_overwritten(self):
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text('[mcp_servers.cardinal]\nurl = "https://example.invalid/mcp"\n')
+        result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unmanaged", (result.stderr + result.stdout).lower())
+        self.assertFalse(self.state.exists())
+
+    def inject_drift_into_managed_block(self):
+        """Simulate the issue-#10 drift observed on a live install: Codex
+        rewrites config.toml and lands its own sections INSIDE the plugin's
+        BEGIN/END marker span."""
+        foreign = (
+            "[desktop]\n"
+            'followUpQueueMode = "queue"\n'
+            "\n"
+            "[hooks.state]\n"
+            'trusted_hash = "sha256:abc"\n'
+        )
+        end_marker = "# END cardinal-codex-plugin managed MCP server"
+        text = self.config.read_text()
+        self.assertIn(end_marker, text)
+        self.config.write_text(text.replace(end_marker, foreign + end_marker))
+
+    def test_rotate_preserves_foreign_sections_inside_managed_block(self):
+        first = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        self.inject_drift_into_managed_block()
+
+        self.stub.token_calls = 0
+        result = run_script(CONNECT, ["--host", self.stub.url(), "--rotate"], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+        text = self.config.read_text()
+        self.assertEqual(text.count("[mcp_servers.cardinal]"), 1)
+        config = read_toml(self.config)
+        self.assertIn("cardinal", config["mcp_servers"])
+        self.assertEqual(config["desktop"]["followUpQueueMode"], "queue")
+        self.assertEqual(config["hooks"]["state"]["trusted_hash"], "sha256:abc")
+
+    def test_disconnect_preserves_foreign_sections_inside_managed_block(self):
+        first = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        self.inject_drift_into_managed_block()
+
+        result = run_script(DISCONNECT, [], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+        text = self.config.read_text()
+        self.assertNotIn("[mcp_servers.cardinal]", text)
+        self.assertNotIn("cardinal-codex-plugin managed MCP server", text)
+        config = read_toml(self.config)
+        self.assertEqual(config["desktop"]["followUpQueueMode"], "queue")
+        self.assertEqual(config["hooks"]["state"]["trusted_hash"], "sha256:abc")
+
+    def test_mcp_reachability_failure_aborts(self):
+        self.stub.mcp_status = 401
+        result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mcp reachability failed", (result.stderr + result.stdout).lower())
+        self.assertFalse(self.state.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
