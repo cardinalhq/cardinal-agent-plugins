@@ -33,8 +33,9 @@ import os
 import sys
 import time
 
+from pathlib import Path
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _limits  # noqa: E402
 import _otel_settings  # noqa: E402
 import _plan_cache  # noqa: E402
 import _plugin_version  # noqa: E402
@@ -45,9 +46,14 @@ from cardinal_core.initiative import (  # noqa: E402
     resolve_initiative,
 )
 from cardinal_core.initiative import PREFIX_TO_TYPE, strip_worktree_noise  # noqa: E402
+from cardinal_core.limits import maybe_refresh_verdict  # noqa: E402
 from cardinal_core.otlp import emit_records, kv, log_record  # noqa: E402
+from cardinal_core.paths import AgentPaths  # noqa: E402
 
 HOOK_TIMEOUT_SEC = 2.0
+
+# Bound at import time (hooks are one process per invocation).
+PATHS = AgentPaths(home=Path.home() / ".claude")
 
 # Back-compat module surface: the pre-migration script exported these as
 # underscore-prefixed locals; the algorithms now live in cardinal_core.
@@ -154,12 +160,15 @@ def main() -> None:
     # maestro when the server-assigned TTL has lapsed and rewrites the local
     # verdict file that the sync limits-gate.py hook reads. Runs AFTER the
     # OTLP post and stays best-effort — limits must never cost telemetry.
+    # api_key: Claude's credential lives in the OTel settings, not a
+    # cardinal-secrets.json — core 0.2.0 takes it as an argument.
     try:
-        _limits.maybe_refresh_verdict(
+        maybe_refresh_verdict(
+            PATHS,
             session_id=session_id,
             repo=repo,
             branch=branch,
-            settings_env=settings_env,
+            api_key=_otel_settings.ingest_api_key(settings_env),
         )
     except Exception:
         pass

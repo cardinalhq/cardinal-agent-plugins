@@ -20,10 +20,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _limits  # noqa: E402
 from cardinal_core.limits import gate_output  # noqa: E402
+from cardinal_core.paths import AgentPaths  # noqa: E402
+
+# Bound at import time (hooks are one process per invocation).
+PATHS = AgentPaths(home=Path.home() / ".claude")
 
 
 def main() -> None:
@@ -41,7 +45,7 @@ def main() -> None:
         sys.exit(0)
 
     out = gate_output(
-        _limits.paths(), session_id, hook_event_name="UserPromptSubmit"
+        PATHS, session_id, hook_event_name="UserPromptSubmit"
     )
     if out:
         sys.stdout.write(json.dumps(out))
