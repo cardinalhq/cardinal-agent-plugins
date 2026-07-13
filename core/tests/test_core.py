@@ -135,6 +135,42 @@ class PricingTests(unittest.TestCase):
             pricing.compute_cost_usd("mystery-model", {"input_tokens": 5}, pricing.OPENAI_PRICING_USD_PER_M)
         )
 
+    def test_anthropic_disjoint_buckets_and_cache_write_premium(self) -> None:
+        # Anthropic semantics: input / cache-read / cache-creation are
+        # disjoint; nothing is subtracted from input_tokens.
+        cost = pricing.compute_cost_usd(
+            "claude-opus-4-8",
+            {"input_tokens": 1_000_000, "cached_input_tokens": 400_000,
+             "cache_creation_tokens": 200_000, "output_tokens": 100_000},
+            pricing.ANTHROPIC_PRICING_USD_PER_M,
+        )
+        expected = (
+            1_000_000 * 5.00 + 400_000 * 0.50 + 200_000 * 6.25 + 100_000 * 25.00
+        ) / 1_000_000
+        self.assertAlmostEqual(cost, round(expected, 6), places=6)
+
+    def test_anthropic_dated_sku_prefix_and_tiers(self) -> None:
+        self.assertEqual(
+            pricing.price_for_model(
+                "claude-opus-4-5-20251101", pricing.ANTHROPIC_PRICING_USD_PER_M
+            )["input"],
+            5.00,
+        )
+        # Opus 4.0/4.1 predate the 4.5 price drop.
+        self.assertEqual(
+            pricing.price_for_model(
+                "claude-opus-4-1", pricing.ANTHROPIC_PRICING_USD_PER_M
+            )["output"],
+            75.00,
+        )
+        self.assertEqual(
+            pricing.price_for_model(
+                "claude-fable-5", pricing.ANTHROPIC_PRICING_USD_PER_M
+            )["output"],
+            50.00,
+        )
+        self.assertIn("anthropic", pricing.PROVIDER_TABLES)
+
 
 class OtlpTests(unittest.TestCase):
     def test_kv_types(self) -> None:

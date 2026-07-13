@@ -7,16 +7,18 @@ agents) — unlike the four CLI adapters in this repo, `cardinal-agent-core`
 is a real dependency here, not vendored, and the policies run inside the
 omnigent **server** process.
 
-Verified against omnigent commit `6e71197`
-(`cardinal_omnigent.OMNIGENT_VERIFIED_COMMIT`). omnigent is alpha: every
-event-field read goes through defensive accessors (`_events.py`), and the
-contract must be re-verified on omnigent upgrades.
+Verified against omnigent commit `2b3b54a4`
+(`cardinal_omnigent.OMNIGENT_VERIFIED_COMMIT`); CI re-diffs the upstream
+contract surface against that pin (`build/omnigent_drift.py`, the
+"Omnigent contract drift" workflow). omnigent is alpha: every event-field
+read goes through defensive accessors (`_events.py`), and the contract
+must be re-verified on omnigent upgrades.
 
 ## What it ships
 
 | Module | Kind | Phases | Emits / enforces |
 | --- | --- | --- | --- |
-| `cardinal_omnigent.telemetry` | observe-only (always abstains) | request, llm_response, tool_call, tool_result | `cardinal.git_state`, `api_request` + `cardinal.turn_usage` (per-TURN granularity, `usage_granularity="turn"`), `cardinal.turn_tool` (core bashclass on shell tools), `tool_result` |
+| `cardinal_omnigent.telemetry` | observe-only (never blocks; ALLOWs only to carry `state_updates`) | request, llm_response, tool_call, tool_result, response | `cardinal.git_state` (labels convention + branch sniffing), `api_request` + `cardinal.turn_usage` (per-turn on the claude_sdk executor, `usage_granularity="turn"`), `cardinal.turn_tool` (core bashclass on shell tools), `tool_result`, `cardinal.subagent_usage` (sub-agent child conversations — see below) |
 | `cardinal_omnigent.spend_limits` | enforcing | request | Cardinal server verdicts → `DENY` (block) / `ALLOW` + standing message with `ack_band` hysteresis (warn/notify); plus an omnigent-native per-session cap (`session_cost_limit_usd`) checked against `context.usage.total_cost_usd` |
 
 Because `request` is in omnigent's FAIL_CLOSED_PHASES, spend limits here
@@ -25,15 +27,42 @@ does not proceed. Our own internal errors deliberately abstain
 (return `None`), never self-DENY: only a genuine server verdict or the
 configured session cap denies (see the `spend_limits` module docstring).
 
-`cardinal.subagent_usage` is not emitted yet — the child-agent boundary
-event is engine-dependent (spec open question 1).
+## Session identity (minted)
+
+omnigent's policy contract carries **no session or conversation id** —
+the event a callable receives is `{type, target, data, context{actor,
+usage, user_daily_cost, model, harness, labels, subtree_usage},
+session_state, llm_client, request_data}`. Cardinal telemetry is
+session-keyed, so the policies mint a `cardinal.session_id` into the
+engine's per-conversation `session_state` via `state_updates` (durable
+server-side; an in-process memo keyed by the engine-shared `llm_client`
+keeps both policies on one id until it persists). See `_identity.py`.
+
+## Subagent mapping
+
+`cardinal.subagent_usage` is emitted on the `response` phase of
+conversations whose **labels** mark them as sub-agent children:
+
+- claude-native / codex-native UI children carry `omnigent.wrapper`
+  (`*-native-ui-subagent`) plus id labels
+  (`omnigent.claude_native.subagent_id`,
+  `omnigent.codex_native.subagent_thread_id` / `parent_thread_id` /
+  `agent_nickname` / `agent_role`) — stamped by the omnigent server.
+- native workflow / custom-YAML sub-agents get no upstream label:
+  stamp `cardinal.subagent: <name>` in the sub-agent spec's guardrails
+  labels (the Cardinal convention).
+
+Emitted usage is the child conversation's cumulative `context.usage`
+(`usage_scope="session_cumulative"` — downstream takes last-per-session,
+not a sum) with `model` from the engine-injected `context.model`.
 
 Cost attribution: `cost_usd` on usage events is the delta of the
 server-maintained cumulative `context.usage.total_cost_usd` (anchored via
 omnigent `state_updates` with an in-process mirror), falling back to
-core pricing tables keyed on `data.usage.model` for models the server
-does not price. Anthropic SKUs without a session total emit no `cost_usd`
-rather than a misleading $0.
+core pricing tables (`anthropic` / `openai` / `gemini`, core 0.3.0) keyed
+on the model — platform-prefixed SKUs like `databricks-claude-opus-4-8`
+re-resolve from the embedded `claude-` name. Unpriced models emit no
+`cost_usd` rather than a misleading $0.
 
 ## Registering with an omnigent server
 
@@ -88,6 +117,13 @@ attribute to `initiative=None, type=research` — same as protected-branch
 sessions on the CLI adapters, so rollups stay honest. Consequently
 `cardinal.git_state` here carries repo/branch/initiative facts but not
 `head_sha`/`cwd`/`remote_url` (structurally unavailable server-side).
+
+**Branch sniffing (enrichment):** creation-time labels can't see a
+mid-session `git checkout -b`. Shell `tool_call` events are watched for
+branch creation/switch commands (`checkout -b/-B`, `switch`/`switch -c`);
+a detected branch emits a fresh `cardinal.git_state` at the boundary
+(marked `cardinal_branch_source="tool_sniff"`) and is used at request
+time when labels carry no branch. Labels always win when present.
 
 Identity is per-event: `user.email` comes from
 `event.context.actor.run_as`; `cardinal.omnigent_harness` (resource
