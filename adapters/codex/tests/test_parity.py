@@ -49,5 +49,25 @@ class GoldenSmokeTests(unittest.TestCase):
         self.assertEqual(len(names), 10, names)
 
 
+class GoldenParityTests(unittest.TestCase):
+    """The migrated hook must emit byte-equal normalized output to the
+    goldens captured from the pre-migration shipped hook."""
+
+    def assert_matches(self, results: dict) -> None:
+        for name, data in sorted(results.items()):
+            with self.subTest(golden=name):
+                self.assertEqual(data, golden(name))
+
+    def test_telemetry_scenarios(self) -> None:
+        # stop_first, stop_second, user_prompt_submit, subagent_stop
+        self.assert_matches(fixtures.scenario_telemetry(HOOK))
+
+    def test_session_start_scenarios(self) -> None:
+        self.assert_matches(fixtures.scenario_session_start(HOOK))
+
+    def test_gate_scenarios(self) -> None:
+        self.assert_matches(fixtures.scenario_gate(HOOK))
+
+
 if __name__ == "__main__":
     unittest.main()
