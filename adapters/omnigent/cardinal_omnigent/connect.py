@@ -93,14 +93,11 @@ def merge_config_text(existing: str, cardinal_cfg: dict[str, Any]) -> tuple[str,
     """(new config.yaml text, policy_modules_included). Re-running is
     idempotent: the previous managed block is replaced in place-ish
     (stripped, block appended)."""
-    base = strip_managed_block(existing)
+    base = strip_managed_block(existing).rstrip("\n")
     has_foreign_policy_modules = bool(_POLICY_MODULES_RE.search(base))
     include = not has_foreign_policy_modules
-    if base and not base.endswith("\n"):
-        base += "\n"
-    if base.strip():
-        base += "\n"
-    return base + render_block(cardinal_cfg, include), include
+    prefix = base + "\n\n" if base.strip() else ""
+    return prefix + render_block(cardinal_cfg, include), include
 
 
 def write_server_config(config_path: Path, cardinal_cfg: dict[str, Any]) -> bool:
