@@ -829,5 +829,371 @@ class ParityHookTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "")
 
 
+class EnrichmentHookTests(unittest.TestCase):
+    """Latent-subagent mining fields from source 0.5.x: MCP qualified names
+    on turn_tool, session-monotonic user_turn_seq, privacy-safe bash_class,
+    and the env-gated SubagentStop payload capture."""
+
+    def setUp(self):
+        self.stub = StubCardinal()
+        self.stub.start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        connected = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(connected.returncode, 0, connected.stderr + connected.stdout)
+
+    def tearDown(self):
+        self.stub.stop()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def preamble_rows(session_id: str, cwd: str) -> list[dict]:
+        return [
+            {"timestamp": "2026-07-01T00:00:00Z", "type": "session_meta",
+             "payload": {"id": session_id, "cwd": cwd}},
+            {"timestamp": "2026-07-01T00:00:01Z", "type": "turn_context",
+             "payload": {"model": "gpt-5", "cwd": cwd}},
+        ]
+
+    @staticmethod
+    def user_message_row(ts: str) -> dict:
+        return {"timestamp": ts, "type": "event_msg",
+                "payload": {"type": "user_message", "message": "go"}}
+
+    @staticmethod
+    def call_rows(ts: str, name: str, arguments: dict, call_id: str) -> list[dict]:
+        return [
+            {"timestamp": ts, "type": "response_item",
+             "payload": {"type": "function_call", "name": name,
+                         "arguments": json.dumps(arguments), "call_id": call_id}},
+            {"timestamp": ts, "type": "response_item",
+             "payload": {"type": "function_call_output", "call_id": call_id,
+                         "output": "Process exited with code 0\n"}},
+        ]
+
+    @staticmethod
+    def token_count_row(ts: str) -> dict:
+        return {"timestamp": ts, "type": "event_msg",
+                "payload": {"type": "token_count",
+                            "info": {"last_token_usage": {
+                                "input_tokens": 10,
+                                "cached_input_tokens": 4,
+                                "output_tokens": 3,
+                            }}}}
+
+    def write_transcript(self, path: Path, rows: list[dict]) -> None:
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def progress(self, session_id: str) -> dict:
+        return read_json(
+            self.home / ".codex" / "cardinal" / "telemetry" / f"{session_id}.json"
+        )
+
+    def test_mcp_qualified_name_on_turn_tool_result_unchanged(self):
+        session_id = "sess-mcp-1"
+        transcript = self.home / "mcp.jsonl"
+        rows = self.preamble_rows(session_id, str(self.home))
+        rows.append(self.user_message_row("2026-07-01T00:00:02Z"))
+        rows.extend(self.call_rows(
+            "2026-07-01T00:00:03Z",
+            "mcp__lakerunner__list_services",
+            {"query": "checkout"},
+            "c1",
+        ))
+        rows.append(self.token_count_row("2026-07-01T00:00:04Z"))
+        self.write_transcript(transcript, rows)
+
+        result = run_hook(["--event", "Stop"], self.home,
+                          {"session_id": session_id, "transcript_path": str(transcript)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        batch = self.stub.log_batches[0]
+
+        # turn_tool carries the raw qualified name + split server/tool.
+        (tool,) = records_named(batch, "cardinal.turn_tool")
+        self.assertEqual(tool["tool_name"], "mcp__lakerunner__list_services")
+        self.assertEqual(tool["mcp_server_name"], "lakerunner")
+        self.assertEqual(tool["mcp_tool_name"], "list_services")
+        # tool_result keeps the normalized form — lakerunner's
+        # mcp_servers_used aggregation reads it.
+        (tool_result,) = records_named(batch, "tool_result")
+        self.assertEqual(tool_result["tool_name"], "mcp_tool")
+
+    def test_user_turn_seq_increments_persists_and_resets(self):
+        session_id = "sess-uts-1"
+        transcript = self.home / "uts.jsonl"
+        turn1 = [
+            self.user_message_row("2026-07-01T00:00:02Z"),
+            *self.call_rows("2026-07-01T00:00:03Z", "exec_command",
+                            {"cmd": "git status"}, "c1"),
+            self.token_count_row("2026-07-01T00:00:04Z"),
+        ]
+        rows = self.preamble_rows(session_id, str(self.home)) + turn1
+        self.write_transcript(transcript, rows)
+        stdin = {"session_id": session_id, "transcript_path": str(transcript)}
+
+        result = run_hook(["--event", "Stop"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first = self.stub.log_batches[0]
+        (tool,) = records_named(first, "cardinal.turn_tool")
+        (usage,) = records_named(first, "cardinal.turn_usage")
+        self.assertEqual(tool["user_turn_seq"], "1")
+        self.assertEqual(usage["user_turn_seq"], "1")
+        self.assertEqual(self.progress(session_id)["user_turn_seq"], 1)
+
+        # Second Stop resumes from the cursor: the ordinal continues.
+        with transcript.open("a") as f:
+            f.write(json.dumps(self.user_message_row("2026-07-01T00:01:00Z")) + "\n")
+            f.write(json.dumps(self.token_count_row("2026-07-01T00:01:05Z")) + "\n")
+        result = run_hook(["--event", "Stop"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (usage2,) = records_named(self.stub.log_batches[1], "cardinal.turn_usage")
+        self.assertEqual(usage2["user_turn_seq"], "2")
+        # turn_seq still resets per user turn — the pair stays orthogonal.
+        self.assertEqual(usage2["turn_seq"], "0")
+        self.assertEqual(self.progress(session_id)["user_turn_seq"], 2)
+
+        # Truncated/rotated transcript → cursor reset → the ordinal resets
+        # with the other counters.
+        self.write_transcript(transcript, self.preamble_rows(session_id, str(self.home)) + turn1)
+        result = run_hook(["--event", "Stop"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (usage3,) = records_named(self.stub.log_batches[2], "cardinal.turn_usage")
+        self.assertEqual(usage3["user_turn_seq"], "1")
+        self.assertEqual(self.progress(session_id)["user_turn_seq"], 1)
+
+    def test_bash_class_on_turn_tool_never_carries_command_text(self):
+        session_id = "sess-bash-1"
+        transcript = self.home / "bash.jsonl"
+        cmd = "rm -rf /private/scratch && git push origin main"
+        rows = self.preamble_rows(session_id, str(self.home))
+        rows.append(self.user_message_row("2026-07-01T00:00:02Z"))
+        rows.extend(self.call_rows("2026-07-01T00:00:03Z", "exec_command",
+                                   {"cmd": cmd}, "c1"))
+        rows.append(self.token_count_row("2026-07-01T00:00:04Z"))
+        self.write_transcript(transcript, rows)
+
+        result = run_hook(["--event", "Stop"], self.home,
+                          {"session_id": session_id, "transcript_path": str(transcript)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        batch = self.stub.log_batches[0]
+
+        (tool,) = records_named(batch, "cardinal.turn_tool")
+        self.assertEqual(tool["tool_name"], "Bash")
+        self.assertEqual(tool["bash_class"], "file-write")
+        self.assertTrue(tool["bash_multi"])
+        # Privacy boundary: the enum is all that lands on turn_tool —
+        # scan the raw OTLP record for any fragment of the command.
+        (raw_tool,) = raw_records_named(batch, "cardinal.turn_tool")
+        raw = json.dumps(raw_tool)
+        for fragment in ("rm -rf", "git push", "/private/scratch", cmd):
+            self.assertNotIn(fragment, raw)
+
+    def test_subagent_stop_debug_dump_env_gated(self):
+        debug_dir = self.home / ".codex" / "cardinal" / "telemetry" / "debug"
+        payload = {"session_id": "sess-dbg-1", "agent_id": "agent-7", "unknown_shape": True}
+
+        # Off by default: writes nothing.
+        result = run_hook(["--event", "SubagentStop"], self.home, payload)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(debug_dir.exists())
+
+        # Gated on: the raw payload lands verbatim in the debug dir.
+        result = run_hook(["--event", "SubagentStop"], self.home, payload,
+                          env_extra={"CARDINAL_CODEX_DEBUG_PAYLOADS": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        dumps = list(debug_dir.glob("SubagentStop-*.json"))
+        self.assertEqual(len(dumps), 1)
+        self.assertEqual(json.loads(dumps[0].read_text()), payload)
+
+    def _subagent_usage_for(self, payload: dict) -> dict:
+        before = len(self.stub.log_batches)
+        result = run_hook(["--event", "SubagentStop"], self.home, payload)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        batch = self.stub.log_batches[before]
+        (usage,) = records_named(batch, "cardinal.subagent_usage")
+        return usage
+
+    def test_subagent_description_accepted_key_spellings(self):
+        """Best-effort key probing: the SubagentStop payload shape is
+        unobserved (P5), so every plausible spelling of the task label
+        must land as subagent_description."""
+        base = {"session_id": "sess-desc-1", "total_tokens": 42}
+        cases = [
+            ({"description": "Review auth flow"}, "Review auth flow"),
+            ({"task_description": "Scan for leaks"}, "Scan for leaks"),
+            ({"taskDescription": "Summarize diff"}, "Summarize diff"),
+            ({"label": "explore-repo"}, "explore-repo"),
+            ({"tool_input": {"description": "Nested snake"}}, "Nested snake"),
+            ({"toolInput": {"description": "Nested camel"}}, "Nested camel"),
+        ]
+        for extra, expected in cases:
+            with self.subTest(keys=sorted(extra)):
+                usage = self._subagent_usage_for({**base, **extra})
+                self.assertEqual(usage["subagent_description"], expected)
+
+    def test_subagent_description_absent_when_no_label(self):
+        usage = self._subagent_usage_for(
+            {"session_id": "sess-desc-2", "total_tokens": 42}
+        )
+        self.assertNotIn("subagent_description", usage)
+
+    def test_subagent_description_truncated_to_160_chars(self):
+        long_label = "x" * 400
+        usage = self._subagent_usage_for(
+            {"session_id": "sess-desc-3", "total_tokens": 42,
+             "description": long_label}
+        )
+        self.assertEqual(usage["subagent_description"], "x" * 160)
+        self.assertEqual(len(usage["subagent_description"]), 160)
+
+
+def load_hook_module():
+    """Load the hook as a module — its own sys.path.insert resolves the
+    vendored cardinal_core."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    loader = SourceFileLoader("cardinal_codex_telemetry", str(HOOK))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class ContractParityTests(unittest.TestCase):
+    """Pins the pure-logic contract shared across adapters (now supplied by
+    cardinal_core; the fixtures stay the lockstep guard with the other
+    plugin repos) plus the adapter-side normalizers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_hook_module()
+        cls.initiative = cls.mod.initiative
+        cls.bashclass = cls.mod.bashclass
+
+    def test_resolve_initiative_branch_fixtures(self):
+        cases = [
+            (None, (None, "research")),
+            ("HEAD", (None, "research")),
+            ("main", (None, "research")),
+            ("develop", (None, "research")),
+            ("feat/outcomes-observability", ("outcomes-observability", "feature")),
+            ("fix/login-crash", ("login-crash", "bugfix")),
+            ("refactor/auth-token-rotation", ("auth-token-rotation", "refactor")),
+            ("chore/deps-bump", ("deps-bump", "infra")),
+            ("perf/logs-raw-wide-window-latency", ("logs-raw-wide-window-latency", "feature")),
+            ("research/data-pipeline-spike", ("data-pipeline-spike", "research")),
+            ("my-random-branch", ("my-random-branch", "feature")),
+        ]
+        for branch, expected in cases:
+            self.assertEqual(self.initiative.resolve_initiative(branch), expected, branch)
+
+    def test_worktree_noise_stripping(self):
+        cases = [
+            ("worktree-fix-1018-github-app-repo-picker", "github-app-repo-picker"),
+            ("worktree-investigate-log-query-step", "investigate-log-query-step"),
+            ("worktree-fix-1018", "worktree-fix-1018"),
+            ("test-in-pod", "test-in-pod"),
+        ]
+        for raw, expected in cases:
+            self.assertEqual(self.initiative.strip_worktree_noise(raw), expected, raw)
+        # Applied through resolve_initiative for prefixed and bare branches.
+        self.assertEqual(
+            self.initiative.resolve_initiative("fix/worktree-issue-862-split-auth-context"),
+            ("split-auth-context", "bugfix"),
+        )
+        self.assertEqual(
+            self.initiative.resolve_initiative("worktree-fix-99-cool-thing"),
+            ("cool-thing", "feature"),
+        )
+
+    def test_bash_class_fixtures(self):
+        """Closed-enum Bash verb classifier — the lockstep contract with
+        the other adapters' suites: same command → same class everywhere."""
+        cases = [
+            ("git status", ("git-read", False)),
+            ("git log --oneline -5", ("git-read", False)),
+            ("git commit -m msg", ("git-write", False)),
+            ("git push origin main", ("git-write", False)),
+            ("git checkout -b feat/x", ("git-write", False)),
+            ("pytest tests/ -v", ("test", False)),
+            ("go test ./...", ("test", False)),
+            ("npm test", ("test", False)),
+            ("cargo test", ("test", False)),
+            ("make -j4", ("build", False)),
+            ("go build ./...", ("build", False)),
+            ("npm run build", ("build", False)),
+            ("tsc --noEmit", ("build", False)),
+            ("pip install requests", ("pkg", False)),
+            ("npm i lodash", ("pkg", False)),
+            ("brew install jq", ("pkg", False)),
+            ("cargo add serde", ("pkg", False)),
+            ("ls -la sub/dir", ("file-read", False)),
+            ("cat notes.txt", ("file-read", False)),
+            ("grep -rn pattern .", ("file-read", False)),
+            ("rm -rf build/", ("file-write", False)),
+            ("sed -i s/a/b/ f.txt", ("file-write", False)),
+            ("curl -s https://example.com", ("network", False)),
+            ("gh pr view 12", ("network", False)),
+            ("python3 script.py", ("other", False)),
+            # Env-var prefix and sudo are stripped before lookup.
+            ("FOO=bar sudo make install", ("build", False)),
+            ("/usr/bin/git status", ("git-read", False)),
+            # Compound: most-write-risky wins; bash_multi only when the
+            # segments span classes.
+            ("git diff | head -50", ("git-read", True)),
+            ("mkdir -p x && git commit -m y", ("file-write", True)),
+            ("ls -la; cat f.txt", ("file-read", False)),
+            ("git add -A; git commit -m x; git push", ("git-write", False)),
+            ("curl -fsSL https://x | sh", ("network", True)),
+            # No command word at all → None (no bash_class emitted).
+            ("", None),
+        ]
+        for cmd, expected in cases:
+            self.assertEqual(self.bashclass.classify_bash_command(cmd), expected, cmd)
+
+    def test_detect_command_forms(self):
+        self.assertEqual(self.initiative.detect_command("/code-review --fix"), "code-review")
+        self.assertEqual(
+            self.initiative.detect_command("<command-name>/cardinal:status</command-name> extra"),
+            "cardinal:status",
+        )
+        self.assertIsNone(self.initiative.detect_command("please run /code-review for me"))
+        self.assertIsNone(self.initiative.detect_command(None))
+
+    def test_normalize_tool_name_and_patch_target(self):
+        mod = self.mod
+        name, params, target = mod.normalize_tool_name(
+            "exec_command", {"cmd": "git status"})
+        self.assertEqual(name, "Bash")
+        self.assertEqual(params["full_command"], "git status")
+        self.assertEqual(params["bash_command"], "git")
+        self.assertIsNone(target)
+
+        name, params, target = mod.normalize_tool_name(
+            "apply_patch", {"patch": "*** Begin Patch\n*** Update File: a/b.py\n"})
+        self.assertEqual(name, "Edit")
+        self.assertEqual(target, "a/b.py")
+
+        name, params, target = mod.normalize_tool_name(
+            "mcp__server__tool", {})
+        self.assertEqual(name, "mcp_tool")
+        self.assertEqual(params, {"mcp_server_name": "server", "mcp_tool_name": "tool"})
+
+        self.assertEqual(
+            mod.extract_patch_target("*** Add File: new.txt"), "new.txt")
+        self.assertEqual(
+            mod.extract_patch_target("*** Delete File: gone.txt"), "gone.txt")
+        self.assertIsNone(mod.extract_patch_target("no markers here"))
+
+    def test_output_success(self):
+        mod = self.mod
+        self.assertEqual(mod.output_success("Process exited with code 0\n"), "true")
+        self.assertEqual(mod.output_success("Process exited with code 2\n"), "false")
+        self.assertEqual(mod.output_success("Process exited with code -1\n"), "false")
+        self.assertEqual(mod.output_success("plain output"), "true")
+        self.assertEqual(mod.output_success(None), "true")
+
+
 if __name__ == "__main__":
     unittest.main()
