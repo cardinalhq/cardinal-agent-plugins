@@ -1,0 +1,44 @@
+name: Release adapter to mirror
+
+on:
+  workflow_dispatch:
+    inputs:
+      adapter:
+        description: Adapter to release (version read from its plugin.json)
+        required: true
+        type: choice
+        options: [claude, codex, cursor, gemini]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Core suite
+        run: cd core && python3 -m unittest discover tests
+      - name: Vendor + adapter suite
+        run: |
+          python3 build/vendor.py ${{ inputs.adapter }}
+          cd adapters/${{ inputs.adapter }} && python3 -m unittest discover tests
+      - name: Contract suite
+        run: python3 -m unittest discover tests
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Release to mirror
+        env:
+          # Fine-grained PAT with contents:write on the four mirror repos.
+          GH_TOKEN: ${{ secrets.MIRROR_PUSH_TOKEN }}
+        run: |
+          git config --global user.name "cardinal-release-bot"
+          git config --global user.email "release@cardinalhq.io"
+          python3 build/release.py ${{ inputs.adapter }}
