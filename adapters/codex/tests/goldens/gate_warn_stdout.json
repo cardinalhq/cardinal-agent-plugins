@@ -1,0 +1,7 @@
+{
+  "hookSpecificOutput": {
+    "additionalContext": "Economize: budget at 90%.",
+    "hookEventName": "UserPromptSubmit"
+  },
+  "systemMessage": "Cardinal: session budget at 90%."
+}

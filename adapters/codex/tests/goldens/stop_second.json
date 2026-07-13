@@ -1,0 +1,316 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "codex"
+            }
+          },
+          {
+            "key": "agent.runtime",
+            "value": {
+              "stringValue": "codex"
+            }
+          },
+          {
+            "key": "deployment.environment",
+            "value": {
+              "stringValue": "dogfood"
+            }
+          },
+          {
+            "key": "user.email",
+            "value": {
+              "stringValue": "golden@example.com"
+            }
+          },
+          {
+            "key": "cardinal.org",
+            "value": {
+              "stringValue": "golden-org"
+            }
+          },
+          {
+            "key": "cardinal.plugin_version",
+            "value": {
+              "stringValue": "<normalized>"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "event_name",
+                  "value": {
+                    "stringValue": "cardinal.turn_tool"
+                  }
+                },
+                {
+                  "key": "session_id",
+                  "value": {
+                    "stringValue": "sess-golden-1"
+                  }
+                },
+                {
+                  "key": "ts",
+                  "value": {
+                    "stringValue": "<normalized>"
+                  }
+                },
+                {
+                  "key": "user_turn_seq",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "turn_seq",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "tool_seq",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "tool_name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                },
+                {
+                  "key": "plan_type",
+                  "value": {
+                    "stringValue": "team"
+                  }
+                },
+                {
+                  "key": "rate_limit_tier",
+                  "value": {
+                    "stringValue": "codex"
+                  }
+                },
+                {
+                  "key": "bash_class",
+                  "value": {
+                    "stringValue": "test"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "cardinal.turn_tool"
+              },
+              "observedTimeUnixNano": "0",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "timeUnixNano": "0"
+            },
+            {
+              "attributes": [
+                {
+                  "key": "event_name",
+                  "value": {
+                    "stringValue": "tool_result"
+                  }
+                },
+                {
+                  "key": "session_id",
+                  "value": {
+                    "stringValue": "sess-golden-1"
+                  }
+                },
+                {
+                  "key": "agent_runtime",
+                  "value": {
+                    "stringValue": "codex"
+                  }
+                },
+                {
+                  "key": "tool_name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                },
+                {
+                  "key": "success",
+                  "value": {
+                    "stringValue": "true"
+                  }
+                },
+                {
+                  "key": "tool_parameters",
+                  "value": {
+                    "stringValue": "{\"full_command\":\"pytest -q\",\"bash_command\":\"pytest\"}"
+                  }
+                },
+                {
+                  "key": "tool_input",
+                  "value": {
+                    "stringValue": "{\"cmd\":\"pytest -q\"}"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "tool_result"
+              },
+              "observedTimeUnixNano": "0",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "timeUnixNano": "0"
+            },
+            {
+              "attributes": [
+                {
+                  "key": "event_name",
+                  "value": {
+                    "stringValue": "api_request"
+                  }
+                },
+                {
+                  "key": "session_id",
+                  "value": {
+                    "stringValue": "sess-golden-1"
+                  }
+                },
+                {
+                  "key": "agent_runtime",
+                  "value": {
+                    "stringValue": "codex"
+                  }
+                },
+                {
+                  "key": "input_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "output_tokens",
+                  "value": {
+                    "intValue": "40"
+                  }
+                },
+                {
+                  "key": "cache_read_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "cache_read_input_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "api_request"
+              },
+              "observedTimeUnixNano": "0",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "timeUnixNano": "0"
+            },
+            {
+              "attributes": [
+                {
+                  "key": "event_name",
+                  "value": {
+                    "stringValue": "cardinal.turn_usage"
+                  }
+                },
+                {
+                  "key": "session_id",
+                  "value": {
+                    "stringValue": "sess-golden-1"
+                  }
+                },
+                {
+                  "key": "agent_runtime",
+                  "value": {
+                    "stringValue": "codex"
+                  }
+                },
+                {
+                  "key": "input_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "output_tokens",
+                  "value": {
+                    "intValue": "40"
+                  }
+                },
+                {
+                  "key": "cache_read_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "cache_read_input_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "ts",
+                  "value": {
+                    "stringValue": "<normalized>"
+                  }
+                },
+                {
+                  "key": "user_turn_seq",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "turn_seq",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "plan_type",
+                  "value": {
+                    "stringValue": "team"
+                  }
+                },
+                {
+                  "key": "rate_limit_tier",
+                  "value": {
+                    "stringValue": "codex"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "cardinal.turn_usage"
+              },
+              "observedTimeUnixNano": "0",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "timeUnixNano": "0"
+            }
+          ],
+          "scope": {
+            "name": "cardinal-codex-plugin",
+            "version": "<normalized>"
+          }
+        }
+      ]
+    }
+  ]
+}

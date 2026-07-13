@@ -1,0 +1,139 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "codex"
+            }
+          },
+          {
+            "key": "agent.runtime",
+            "value": {
+              "stringValue": "codex"
+            }
+          },
+          {
+            "key": "deployment.environment",
+            "value": {
+              "stringValue": "dogfood"
+            }
+          },
+          {
+            "key": "user.email",
+            "value": {
+              "stringValue": "golden@example.com"
+            }
+          },
+          {
+            "key": "cardinal.org",
+            "value": {
+              "stringValue": "golden-org"
+            }
+          },
+          {
+            "key": "cardinal.plugin_version",
+            "value": {
+              "stringValue": "<normalized>"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "event_name",
+                  "value": {
+                    "stringValue": "cardinal.git_state"
+                  }
+                },
+                {
+                  "key": "session_id",
+                  "value": {
+                    "stringValue": "sess-golden-1"
+                  }
+                },
+                {
+                  "key": "cardinal_cwd",
+                  "value": {
+                    "stringValue": "<HOME>/repo"
+                  }
+                },
+                {
+                  "key": "cardinal_head_sha",
+                  "value": {
+                    "stringValue": "6ec85f6826a0d86750df036209f9c1a6235fe820"
+                  }
+                },
+                {
+                  "key": "cardinal_branch",
+                  "value": {
+                    "stringValue": "feat/worktree-fix-99-cool-thing"
+                  }
+                },
+                {
+                  "key": "cardinal_repo",
+                  "value": {
+                    "stringValue": "cardinalhq/golden-fixture"
+                  }
+                },
+                {
+                  "key": "cardinal_remote_url",
+                  "value": {
+                    "stringValue": "git@github.com:cardinalhq/golden-fixture.git"
+                  }
+                },
+                {
+                  "key": "cardinal_initiative_name",
+                  "value": {
+                    "stringValue": "cool-thing"
+                  }
+                },
+                {
+                  "key": "cardinal_initiative_type",
+                  "value": {
+                    "stringValue": "feature"
+                  }
+                },
+                {
+                  "key": "cardinal_command",
+                  "value": {
+                    "stringValue": "cardinal:status"
+                  }
+                },
+                {
+                  "key": "plan_type",
+                  "value": {
+                    "stringValue": "team"
+                  }
+                },
+                {
+                  "key": "rate_limit_tier",
+                  "value": {
+                    "stringValue": "codex"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "cardinal.git_state"
+              },
+              "observedTimeUnixNano": "0",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "timeUnixNano": "0"
+            }
+          ],
+          "scope": {
+            "name": "cardinal-codex-plugin",
+            "version": "<normalized>"
+          }
+        }
+      ]
+    }
+  ]
+}

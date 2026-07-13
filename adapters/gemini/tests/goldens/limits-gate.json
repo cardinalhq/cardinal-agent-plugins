@@ -1,0 +1,25 @@
+{
+  "steps": [
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": "{\"hookSpecificOutput\": {\"hookEventName\": \"BeforeAgent\", \"additionalContext\": \"Cardinal budget standing: 80% of the weekly engineer budget is spent. Work economically.\"}, \"systemMessage\": \"You are at 80% of your weekly Cardinal budget.\"}"
+    },
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": "{\"decision\": \"block\", \"reason\": \"The weekly spend limit for this initiative is exhausted.\"}"
+    },
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": "{\"decision\": \"block\", \"reason\": \"The weekly spend limit for this initiative is exhausted.\"}"
+    }
+  ],
+  "batches": []
+}

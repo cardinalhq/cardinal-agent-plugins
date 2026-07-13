@@ -1,0 +1,677 @@
+{
+  "steps": [
+    {
+      "event": "AfterAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterAgent",
+      "returncode": 0,
+      "stdout": ""
+    }
+  ],
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.subagent_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.subagent_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-sub"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "subagent_type",
+                      "value": {
+                        "stringValue": "code-reviewer"
+                      }
+                    },
+                    {
+                      "key": "total_tokens",
+                      "value": {
+                        "intValue": "4200"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.subagent_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.subagent_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-sub"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "subagent_description",
+                      "value": {
+                        "stringValue": "review the diff for bugs"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.subagent_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.subagent_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-sub"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "agent_id",
+                      "value": {
+                        "stringValue": "a-123"
+                      }
+                    },
+                    {
+                      "key": "duration_ms",
+                      "value": {
+                        "intValue": "5400"
+                      }
+                    },
+                    {
+                      "key": "status",
+                      "value": {
+                        "stringValue": "completed"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.subagent_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.subagent_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-sub"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "total_tokens",
+                      "value": {
+                        "intValue": "991"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.subagent_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.subagent_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-sub"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "subagent_description",
+                      "value": {
+                        "stringValue": "scan dependencies"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.subagent_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.subagent_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-sub"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "subagent_description",
+                      "value": {
+                        "stringValue": "Investigate every flaky integration test in the payments suite, bisect the responsible commits, propose fixes with minimal diffs, and write a summary of root ca"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "gemini-code-assist-standard"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "tier-2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

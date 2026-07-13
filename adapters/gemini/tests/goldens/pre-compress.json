@@ -1,0 +1,252 @@
+{
+  "steps": [
+    {
+      "event": "PreCompress",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "PreCompress",
+      "returncode": 0,
+      "stdout": ""
+    }
+  ],
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.plan_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.plan_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-comp"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "context_tokens",
+                      "value": {
+                        "intValue": "150000"
+                      }
+                    },
+                    {
+                      "key": "context_window_size",
+                      "value": {
+                        "intValue": "200000"
+                      }
+                    },
+                    {
+                      "key": "context_usage_percent",
+                      "value": {
+                        "doubleValue": 75.0
+                      }
+                    },
+                    {
+                      "key": "trigger",
+                      "value": {
+                        "stringValue": "auto"
+                      }
+                    },
+                    {
+                      "key": "messages_to_compact",
+                      "value": {
+                        "intValue": "42"
+                      }
+                    },
+                    {
+                      "key": "is_first_compaction",
+                      "value": {
+                        "boolValue": true
+                      }
+                    },
+                    {
+                      "key": "plan.compact_trigger",
+                      "value": {
+                        "stringValue": "auto"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.plan_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.plan_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-comp"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "context_tokens",
+                      "value": {
+                        "intValue": "10"
+                      }
+                    },
+                    {
+                      "key": "context_window_size",
+                      "value": {
+                        "intValue": "100"
+                      }
+                    },
+                    {
+                      "key": "context_usage_percent",
+                      "value": {
+                        "doubleValue": 10.5
+                      }
+                    },
+                    {
+                      "key": "is_first_compaction",
+                      "value": {
+                        "boolValue": false
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

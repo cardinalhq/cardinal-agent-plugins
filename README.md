@@ -17,9 +17,14 @@ docs/specs/             the extraction spec and migration plan
 
 ## Status
 
-P0 complete: core extracted (37 unit tests), fixture harness in place.
-Adapters migrate in phases P1–P4 (`docs/specs/agent-core.md`); until each
-phase lands, the corresponding plugin repo remains the shipping source:
+P0–P4 code-complete: core extracted (37 unit tests) and all four adapters
+migrated with byte-equal golden parity against their shipped plugins
+(~226 adapter tests + a cross-adapter contract test in `tests/`). See
+`docs/specs/agent-core.md` for the plan and
+`docs/specs/core-gaps-followup.md` for the core 0.2.0 reconciliation.
+
+Until the release-mirror CI lands, the plugin repos remain the shipping
+sources:
 
 - [cardinal-claude-plugin](https://github.com/cardinalhq/cardinal-claude-plugin)
 - [cardinal-codex-plugin](https://github.com/cardinalhq/cardinal-codex-plugin)

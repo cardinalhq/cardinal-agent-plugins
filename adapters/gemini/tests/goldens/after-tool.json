@@ -1,0 +1,1043 @@
+{
+  "steps": [
+    {
+      "event": "BeforeAgent",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterTool",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterTool",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterTool",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterTool",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterTool",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterTool",
+      "returncode": 0,
+      "stdout": ""
+    }
+  ],
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Bash"
+                      }
+                    },
+                    {
+                      "key": "bash_class",
+                      "value": {
+                        "stringValue": "file-write"
+                      }
+                    },
+                    {
+                      "key": "bash_multi",
+                      "value": {
+                        "boolValue": true
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "tool_result"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "tool_result"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Bash"
+                      }
+                    },
+                    {
+                      "key": "success",
+                      "value": {
+                        "stringValue": "true"
+                      }
+                    },
+                    {
+                      "key": "tool_parameters",
+                      "value": {
+                        "stringValue": "{\"full_command\":\"ls -la && rm -rf build\",\"bash_command\":\"ls\"}"
+                      }
+                    },
+                    {
+                      "key": "tool_input",
+                      "value": {
+                        "stringValue": "{\"command\":\"ls -la && rm -rf build\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Bash"
+                      }
+                    },
+                    {
+                      "key": "bash_class",
+                      "value": {
+                        "stringValue": "git-read"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "tool_result"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "tool_result"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Bash"
+                      }
+                    },
+                    {
+                      "key": "success",
+                      "value": {
+                        "stringValue": "true"
+                      }
+                    },
+                    {
+                      "key": "tool_parameters",
+                      "value": {
+                        "stringValue": "{\"full_command\":\"git status\",\"bash_command\":\"git\"}"
+                      }
+                    },
+                    {
+                      "key": "tool_input",
+                      "value": {
+                        "stringValue": "{\"command\":\"git status\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "mcp__lakerunner__list_services"
+                      }
+                    },
+                    {
+                      "key": "mcp_server_name",
+                      "value": {
+                        "stringValue": "lakerunner"
+                      }
+                    },
+                    {
+                      "key": "mcp_tool_name",
+                      "value": {
+                        "stringValue": "list_services"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "tool_result"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "tool_result"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "mcp_tool"
+                      }
+                    },
+                    {
+                      "key": "success",
+                      "value": {
+                        "stringValue": "true"
+                      }
+                    },
+                    {
+                      "key": "tool_parameters",
+                      "value": {
+                        "stringValue": "{\"mcp_server_name\":\"lakerunner\",\"mcp_tool_name\":\"list_services\"}"
+                      }
+                    },
+                    {
+                      "key": "tool_input",
+                      "value": {
+                        "stringValue": "{\"instance\":\"prod\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "3"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "src/main.py"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "tool_result"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "tool_result"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "success",
+                      "value": {
+                        "stringValue": "false"
+                      }
+                    },
+                    {
+                      "key": "tool_input",
+                      "value": {
+                        "stringValue": "{\"path\":\"src/main.py\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "4"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Read"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "/etc/hosts"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "tool_result"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "tool_result"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "Read"
+                      }
+                    },
+                    {
+                      "key": "success",
+                      "value": {
+                        "stringValue": "true"
+                      }
+                    },
+                    {
+                      "key": "tool_input",
+                      "value": {
+                        "stringValue": "{\"file_path\":\"/etc/hosts\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "gemini-cli"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "gemini"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "fixture@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "fixture-org"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-gemini-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.turn_tool"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.turn_tool"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "ts",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "user_turn_seq",
+                      "value": {
+                        "intValue": "1"
+                      }
+                    },
+                    {
+                      "key": "turn_seq",
+                      "value": {
+                        "intValue": "0"
+                      }
+                    },
+                    {
+                      "key": "tool_seq",
+                      "value": {
+                        "intValue": "5"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "write_file"
+                      }
+                    },
+                    {
+                      "key": "target",
+                      "value": {
+                        "stringValue": "out.txt"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "tool_result"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "tool_result"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "s-tool"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "gemini"
+                      }
+                    },
+                    {
+                      "key": "tool_name",
+                      "value": {
+                        "stringValue": "write_file"
+                      }
+                    },
+                    {
+                      "key": "success",
+                      "value": {
+                        "stringValue": "false"
+                      }
+                    },
+                    {
+                      "key": "tool_input",
+                      "value": {
+                        "stringValue": "{\"file_path\":\"out.txt\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

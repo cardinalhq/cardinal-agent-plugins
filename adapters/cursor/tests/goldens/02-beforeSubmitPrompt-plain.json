@@ -1,0 +1,150 @@
+{
+  "stdout": null,
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "cursor"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "cursor"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "golden@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "cardinal-golden"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              },
+              {
+                "key": "cursor.model",
+                "value": {
+                  "stringValue": "claude-4.5-sonnet"
+                }
+              },
+              {
+                "key": "cursor.model_id",
+                "value": {
+                  "stringValue": "anthropic/claude-4.5-sonnet"
+                }
+              },
+              {
+                "key": "cursor.model_params",
+                "value": {
+                  "stringValue": "{\"temperature\":0.2,\"max_tokens\":4096}"
+                }
+              },
+              {
+                "key": "cursor.version",
+                "value": {
+                  "stringValue": "1.7.29"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-cursor-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.git_state"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.git_state"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "conv-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "cardinal_cwd",
+                      "value": {
+                        "stringValue": "<SANDBOX>/repo"
+                      }
+                    },
+                    {
+                      "key": "cardinal_head_sha",
+                      "value": {
+                        "stringValue": "a00d6492c4d05ed6519843b57117671749151cef"
+                      }
+                    },
+                    {
+                      "key": "cardinal_branch",
+                      "value": {
+                        "stringValue": "feat/golden-fixture"
+                      }
+                    },
+                    {
+                      "key": "cardinal_repo",
+                      "value": {
+                        "stringValue": "cardinalhq/golden-fixture"
+                      }
+                    },
+                    {
+                      "key": "cardinal_remote_url",
+                      "value": {
+                        "stringValue": "git@github.com:cardinalhq/golden-fixture.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_name",
+                      "value": {
+                        "stringValue": "golden-fixture"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_type",
+                      "value": {
+                        "stringValue": "feature"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

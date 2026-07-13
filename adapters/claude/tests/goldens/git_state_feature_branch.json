@@ -1,0 +1,145 @@
+{
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "claude-code"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "claude-code"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "dogfood"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "golden@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "cardinalhq"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-claude-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.git_state"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.git_state"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "sess-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "cardinal.cwd",
+                      "value": {
+                        "stringValue": "<normalized>"
+                      }
+                    },
+                    {
+                      "key": "cardinal.head_sha",
+                      "value": {
+                        "stringValue": "9f9e3a327d7fac7b8fd3024551180a88b900c85f"
+                      }
+                    },
+                    {
+                      "key": "cardinal.branch",
+                      "value": {
+                        "stringValue": "feat/golden-fixture"
+                      }
+                    },
+                    {
+                      "key": "cardinal.repo",
+                      "value": {
+                        "stringValue": "cardinalhq/golden-repo"
+                      }
+                    },
+                    {
+                      "key": "cardinal.remote_url",
+                      "value": {
+                        "stringValue": "git@github.com:cardinalhq/golden-repo.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal.initiative.name",
+                      "value": {
+                        "stringValue": "golden-fixture"
+                      }
+                    },
+                    {
+                      "key": "cardinal.initiative.type",
+                      "value": {
+                        "stringValue": "feature"
+                      }
+                    },
+                    {
+                      "key": "cardinal.command",
+                      "value": {
+                        "stringValue": "code-review"
+                      }
+                    },
+                    {
+                      "key": "plan_type",
+                      "value": {
+                        "stringValue": "max"
+                      }
+                    },
+                    {
+                      "key": "rate_limit_tier",
+                      "value": {
+                        "stringValue": "default_claude_max_20x"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "stdout": null,
+  "returncode": 0
+}

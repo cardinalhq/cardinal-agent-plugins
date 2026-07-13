@@ -1,0 +1,533 @@
+#!/usr/bin/env python3
+"""cardinal-connect — wire Claude Code up to Cardinal.
+
+Runs the maestro device-code flow (cardinal-mcp-aggregator.md R5b) to
+mint an ingest key (OTel telemetry to the Outcomes Dashboard) AND an
+MCP key (unified `cardinal` MCP in this Claude Code session) in one
+browser-approved consent. `--telemetry-only` opts out of the MCP side.
+
+The device-code flow and reachability probes come from the vendored
+cardinal_core.deviceflow; what stays here is the Claude-specific write
+surface:
+
+How the MCP side actually wires up (v0.3 design):
+  - The plugin ships `.mcp.json` declaring a `cardinal` HTTP MCP server
+    whose `url` and `X-CardinalHQ-API-Key` header reference env vars
+    via Claude Code's ${VAR} substitution syntax.
+  - This script just sets those env vars in ~/.claude/settings.json
+    (the same file the telemetry side writes to). Claude Code reads
+    settings.json `env` at process start; on the next launch the
+    plugin's `.mcp.json` substitution resolves the live URL + key.
+  - Net: no ~/.claude.json side effects. One file owns both surfaces.
+
+v0.3 also cleans up the v0.2 footprint on connect: any
+`mcpServers.cardinal` entry, or legacy per-driver `cardinal-*` entries,
+in ~/.claude.json are removed so the plugin-declared server doesn't
+collide with stale user-config copies.
+
+Writes:
+  ~/.claude/settings.json        OTel env overlay + CARDINAL_MCP_URL/KEY
+  ~/.claude/cardinal.json        non-secret state + key ids
+  ~/.claude.json (best-effort)   prunes legacy cardinal/cardinal-* entries
+"""
+
+import argparse
+import json
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+from cardinal_core.deviceflow import (  # noqa: E402
+    DEFAULT_POLL_INTERVAL_SECS,
+    DEFAULT_POLL_TIMEOUT_SECS,
+    DeviceFlowError,
+    derive_deployment_env,
+    poll_device_token,
+    start_device_code,
+    verify_ingest_reachable,
+    verify_mcp_reachable,
+)
+from cardinal_core.paths import atomic_write  # noqa: E402
+
+
+def _load_plugin_version() -> str:
+    """Read the canonical version from the sibling plugin.json.
+
+    Same pattern as hooks/_plugin_version.py — one source of truth, no
+    hardcoded constants that drift out of sync with releases.
+    """
+    manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+    try:
+        return json.loads(manifest.read_text(encoding="utf-8")).get("version") or "unknown"
+    except (OSError, ValueError):
+        return "unknown"
+
+
+PLUGIN_VERSION = _load_plugin_version()
+
+CLAUDE_DIR = Path.home() / ".claude"
+SETTINGS_PATH = CLAUDE_DIR / "settings.json"
+STATE_PATH = CLAUDE_DIR / "cardinal.json"
+# Side-channel file that surfaces the verification URL while the
+# polling loop blocks. Claude Code's Bash tool buffers stdout until the
+# command returns, so the URL printed to stdout never reaches the user
+# in time. The SKILL.md tells Claude to run this bin in background and
+# read the pending file within a few seconds — that's how the URL gets
+# in front of the human. Cleared on every exit path via try/finally.
+PENDING_PATH = CLAUDE_DIR / "cardinal-pending.json"
+# ~/.claude.json is the per-user Claude Code config that historically
+# held the MCP entry. As of v0.3 the plugin doesn't write to it — we
+# only read it for the one-shot v0.2 cleanup.
+CLAUDE_JSON_PATH = Path.home() / ".claude.json"
+
+CLIENT_ID = "cardinal-claude-plugin"
+
+# Env keys this plugin claims ownership over in ~/.claude/settings.json
+# `env`. The merge logic strips any owned key absent from the freshly
+# computed env block, so e.g. running --telemetry-only after a full
+# connect cleanly removes the MCP env vars.
+OWNED_ENV_KEYS = {
+    # Telemetry side
+    "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+    "OTEL_METRICS_EXPORTER",
+    "OTEL_LOGS_EXPORTER",
+    "OTEL_TRACES_EXPORTER",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "OTEL_LOG_TOOL_DETAILS",
+    # MCP side (substituted into plugins/cardinal/.mcp.json by Claude Code
+    # at MCP server connect time)
+    "CARDINAL_MCP_URL",
+    "CARDINAL_MCP_API_KEY",
+}
+
+
+# ---------------------------------------------------------------------------
+# Misc helpers
+# ---------------------------------------------------------------------------
+
+def write_pending(grant: dict) -> None:
+    """Write the verification URL to a side-channel file so Claude Code can
+    surface it to the user while the polling loop blocks. See PENDING_PATH
+    docstring for the design rationale."""
+    payload = {
+        "verification_uri": grant.get("verification_uri", ""),
+        "user_code": grant.get("user_code", ""),
+        "expires_in": grant.get("expires_in", DEFAULT_POLL_TIMEOUT_SECS),
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "plugin_version": PLUGIN_VERSION,
+    }
+    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(PENDING_PATH, json.dumps(payload, indent=2) + "\n")
+
+
+def clear_pending() -> None:
+    """Remove the pending file. Idempotent — safe to call from finally even
+    when write_pending was never reached (e.g. /code failed)."""
+    try:
+        PENDING_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def load_json_object(path: Path, label: str) -> dict:
+    if not path.exists():
+        return {}
+    raw = path.read_text()
+    if not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        sys.exit(
+            f"refusing to write: {label} ({path}) is not valid JSON ({e}). "
+            f"Back up the file, fix the syntax, then re-run."
+        )
+    if not isinstance(data, dict):
+        sys.exit(f"refusing to write: {label} ({path}) is not a JSON object.")
+    return data
+
+
+# ---------------------------------------------------------------------------
+# settings.json — telemetry + MCP env vars
+# ---------------------------------------------------------------------------
+
+def build_env_block(
+    bundle: dict, deployment_env: str, capture_tool_details: bool,
+) -> dict:
+    """Compose the env keys this plugin owns. Includes the MCP vars when the
+    bundle carries an MCP block — Claude Code substitutes them into
+    plugins/cardinal/.mcp.json at MCP server connect time."""
+    org = bundle.get("org", {})
+    user = bundle.get("user", {})
+    ingest = bundle.get("ingest")
+    mcp = bundle.get("mcp")
+
+    env: dict[str, str] = {}
+
+    if ingest:
+        # cardinal.plugin_version deliberately omitted: the hooks stamp it
+        # at emit time from the sibling plugin.json so it self-heals on
+        # upgrade. Baking it here would freeze it at connect time and
+        # never update again.
+        resource_attrs = ",".join([
+            "service.name=claude-code",
+            "agent.runtime=claude-code",
+            f"deployment.environment={deployment_env}",
+            f"user.email={user.get('email') or 'unknown'}",
+            f"cardinal.org={org.get('slug') or org.get('id') or 'unknown'}",
+        ])
+        env.update({
+            "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+            "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+            "OTEL_METRICS_EXPORTER": "otlp",
+            "OTEL_LOGS_EXPORTER": "otlp",
+            "OTEL_TRACES_EXPORTER": "otlp",
+            "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": ingest["endpoint"],
+            "OTEL_EXPORTER_OTLP_HEADERS": f"{ingest['api_header']}={ingest['api_key']}",
+            "OTEL_RESOURCE_ATTRIBUTES": resource_attrs,
+        })
+        if capture_tool_details:
+            env["OTEL_LOG_TOOL_DETAILS"] = "1"
+
+    if mcp:
+        env["CARDINAL_MCP_URL"] = mcp["url"]
+        env["CARDINAL_MCP_API_KEY"] = mcp["api_key"]
+
+    return env
+
+
+def merge_owned_env(existing: dict, new_env: dict) -> dict:
+    """Key-level overlay. Owned keys absent from the new env get removed
+    (so --telemetry-only after a full connect strips the MCP vars, and
+    --no-tool-details strips OTEL_LOG_TOOL_DETAILS). Unowned keys stay."""
+    merged = dict(existing)
+    for key in OWNED_ENV_KEYS:
+        if key not in new_env and key in merged:
+            del merged[key]
+    for k, v in new_env.items():
+        merged[k] = v
+    return merged
+
+
+def write_settings_env(new_env: dict) -> None:
+    settings = load_json_object(SETTINGS_PATH, "settings.json")
+    settings["env"] = merge_owned_env(settings.get("env", {}), new_env)
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(SETTINGS_PATH, json.dumps(settings, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# One-shot v0.2 → v0.3 cleanup of ~/.claude.json
+# ---------------------------------------------------------------------------
+
+def cleanup_legacy_claude_json(mcp_host_url: str | None) -> list[str]:
+    """Remove `mcpServers.cardinal` (v0.2 self-write) and any legacy
+    `cardinal-*` per-driver entries from ~/.claude.json. The plugin's
+    .mcp.json now declares `cardinal` natively; leaving the v0.2 entry
+    around would either shadow the plugin entry or produce duplicate
+    tool listings depending on Claude Code's resolution order.
+
+    Best-effort: refuses on malformed JSON but reports rather than
+    failing the whole connect. Returns the list of removed entry names.
+    Backs up the file before mutating if anything changed.
+    """
+    if not CLAUDE_JSON_PATH.exists():
+        return []
+    try:
+        data = json.loads(CLAUDE_JSON_PATH.read_text())
+    except json.JSONDecodeError:
+        print(f"  ⚠ {CLAUDE_JSON_PATH} is not valid JSON — skipping v0.2 cleanup. "
+              f"Old `mcpServers.cardinal` may shadow the plugin entry until removed by hand.")
+        return []
+    if not isinstance(data, dict):
+        return []
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        return []
+
+    target_host = urlparse(mcp_host_url).hostname if mcp_host_url else None
+    removed: list[str] = []
+    for name in list(servers.keys()):
+        if name == "cardinal" or name.startswith("cardinal-"):
+            removed.append(name)
+            del servers[name]
+            continue
+        # Also catch pre-aggregator per-driver paths against the connect host.
+        if target_host:
+            entry = servers[name]
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("url")
+            if not isinstance(url, str):
+                continue
+            try:
+                parsed = urlparse(url)
+            except Exception:
+                continue
+            if (
+                parsed.hostname == target_host
+                and parsed.path
+                and "/integrations/" in parsed.path
+                and parsed.path.rstrip("/").endswith("/mcp")
+            ):
+                removed.append(name)
+                del servers[name]
+
+    if not removed:
+        return []
+
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    backup = CLAUDE_JSON_PATH.with_suffix(f".json.bak.{ts}")
+    backup.write_text(CLAUDE_JSON_PATH.read_text())
+
+    if not servers:
+        data.pop("mcpServers", None)
+    else:
+        data["mcpServers"] = servers
+    atomic_write(CLAUDE_JSON_PATH, json.dumps(data, indent=2) + "\n")
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# State file
+# ---------------------------------------------------------------------------
+
+def write_state(
+    bundle: dict,
+    host: str,
+    deployment_env: str,
+    capture_tool_details: bool,
+    telemetry_only: bool,
+) -> None:
+    org = bundle.get("org", {})
+    user = bundle.get("user", {})
+    mcp = bundle.get("mcp")
+    ingest = bundle.get("ingest")
+    mode = (
+        "telemetry-only" if telemetry_only or mcp is None
+        else "mcp-only" if ingest is None
+        else "telemetry-and-mcp"
+    )
+    state = {
+        "schema_version": 3,
+        "host": host,
+        "mode": mode,
+        "org_id": org.get("id"),
+        "org_slug": org.get("slug"),
+        "user_email": user.get("email"),
+        "deployment_environment": deployment_env,
+        "plugin_version": PLUGIN_VERSION,
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "telemetry": {
+            "enabled": ingest is not None,
+            "tool_details": capture_tool_details,
+        },
+    }
+    if ingest:
+        state["ingest_endpoint"] = ingest["endpoint"]
+        state["ingest_key_id"] = ingest.get("key_id")
+        state["ingest_key_prefix"] = (ingest.get("api_key") or "")[:8]
+    if mcp:
+        state["mcp_url"] = mcp["url"]
+        state["mcp_key_id"] = mcp.get("key_id")
+        state["mcp_key_prefix"] = mcp.get("key_prefix")
+        state["mcp_created_at"] = mcp.get("created_at")
+    # Spend-limits discovery (conductor docs/specs/agent-spend-limits.md).
+    # When the bundle carries a limits block, the hooks poll status_url
+    # with the ingest key on their turn cadence; absent (older maestro),
+    # they do nothing limits-related.
+    limits = bundle.get("limits")
+    if isinstance(limits, dict) and limits.get("status_url"):
+        state["limits"] = {
+            "status_url": limits["status_url"],
+            "enabled": bool(limits.get("enabled", True)),
+        }
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(STATE_PATH, json.dumps(state, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        prog="cardinal-connect",
+        description=(
+            "Connect Claude Code to Cardinal — runs the device-code flow to "
+            "enable telemetry (Outcomes Dashboard) AND the unified Cardinal MCP "
+            "server in one consent. Use --telemetry-only to opt out of MCP."
+        ),
+    )
+    p.add_argument(
+        "--host", default="https://app.cardinalhq.io",
+        help="Cardinal app host (default: https://app.cardinalhq.io)",
+    )
+    p.add_argument(
+        "--telemetry-only", action="store_true",
+        help="Skip the MCP side. The plugin's .mcp.json is still loaded by "
+             "Claude Code, but with CARDINAL_MCP_URL unset the server entry "
+             "resolves to an empty URL and silently doesn't connect.",
+    )
+    p.add_argument(
+        "--no-tool-details", action="store_true",
+        help="Opt out of capturing bash commands and file paths. NOTE: the "
+             "Outcomes Dashboard will show repo=unknown and service=unknown "
+             "without this — see the SKILL.md.",
+    )
+    p.add_argument(
+        "--skip-legacy-cleanup", action="store_true",
+        help="Don't prune `mcpServers.cardinal` or `cardinal-*` entries from "
+             "~/.claude.json. v0.2 users upgrading will see duplicate tool "
+             "listings until the entries are removed.",
+    )
+    p.add_argument(
+        "--rotate", action="store_true",
+        help="Proceed even if state shows we're already connected. Overwrites "
+             "with freshly-minted keys. (Previous keys stay alive until their "
+             "TTL or until /cardinal:disconnect.)",
+    )
+    p.add_argument(
+        "--deployment-env", default=None,
+        help="Override the derived deployment.environment label (prod / "
+             "dogfood / cardinal / customer / unknown).",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="Run the device-code flow and print what would be written; touch "
+             "no files.",
+    )
+    args = p.parse_args()
+
+    if STATE_PATH.exists() and not args.rotate:
+        try:
+            prior = json.loads(STATE_PATH.read_text())
+        except Exception:
+            prior = {}
+        prior_user = prior.get("user_email") or "this account"
+        sys.stderr.write(
+            f"Cardinal is already connected as {prior_user}. "
+            f"Re-run with --rotate to overwrite.\n"
+        )
+        return 2
+
+    scopes = ["ingest:write"]
+    if not args.telemetry_only:
+        scopes.append("mcp:invoke")
+
+    print(f"  Requesting consent for scopes: {', '.join(scopes)}")
+    try:
+        grant = start_device_code(args.host, scopes, CLIENT_ID)
+    except DeviceFlowError as e:
+        sys.exit(f"✗ {e}")
+    expires_in = int(grant.get("expires_in") or DEFAULT_POLL_TIMEOUT_SECS)
+    interval = int(grant.get("interval") or DEFAULT_POLL_INTERVAL_SECS)
+    verification_uri = grant.get("verification_uri") or ""
+
+    # Side-channel write so Claude can surface the URL while we block on the
+    # poll loop below. Cleared in the finally regardless of success path.
+    write_pending(grant)
+    try:
+        return _continue_after_grant(
+            args, grant, expires_in, interval, verification_uri,
+        )
+    finally:
+        clear_pending()
+
+
+def _continue_after_grant(
+    args, grant: dict, expires_in: int, interval: int, verification_uri: str,
+) -> int:
+    print()
+    print("  Open this URL in your browser to approve:")
+    print(f"    {verification_uri}")
+    print()
+    print(f"  (waiting up to {expires_in // 60} minute(s) for browser approval…)")
+
+    try:
+        bundle = poll_device_token(
+            args.host, grant["device_code"], CLIENT_ID, interval, expires_in
+        )
+    except DeviceFlowError as e:
+        sys.exit(f"✗ {e}")
+
+    org = bundle.get("org", {})
+    user = bundle.get("user", {})
+    ingest = bundle.get("ingest")
+    mcp = bundle.get("mcp")
+
+    deployment_env = args.deployment_env or derive_deployment_env(args.host)
+    capture_tool_details = not args.no_tool_details
+
+    if args.dry_run:
+        print(json.dumps(
+            {
+                "org": org,
+                "user": user,
+                "deployment_env": deployment_env,
+                "would_write": {
+                    "settings_env_keys": sorted(
+                        build_env_block(bundle, deployment_env, capture_tool_details).keys()
+                    ),
+                    "mcp_wired_via": "plugins/cardinal/.mcp.json + CARDINAL_MCP_URL / CARDINAL_MCP_API_KEY env",
+                },
+            },
+            indent=2,
+        ))
+        return 0
+
+    # Reachability sanity check (best-effort, before any writes).
+    if ingest:
+        ok, msg = verify_ingest_reachable(
+            ingest,
+            log=lambda line: print(f"  … {line}"),
+        )
+        if not ok:
+            sys.exit(f"ingest reachability failed: {msg}")
+        print(f"  ✓ Ingest endpoint reachable ({msg})")
+    if mcp:
+        ok, msg = verify_mcp_reachable(mcp.get("url"), mcp.get("api_key"))
+        if not ok:
+            sys.exit(f"MCP reachability failed: {msg}")
+        print(f"  ✓ MCP endpoint reachable ({msg})")
+
+    # Single file write covers both sides now.
+    env = build_env_block(bundle, deployment_env, capture_tool_details)
+    write_settings_env(env)
+    print(f"  ✓ Wrote env to {SETTINGS_PATH}")
+
+    # v0.2 → v0.3 migration: prune leftover ~/.claude.json entries that
+    # would otherwise collide with the plugin-declared `cardinal` server.
+    if not args.skip_legacy_cleanup and mcp:
+        removed = cleanup_legacy_claude_json(mcp["url"] if mcp else None)
+        if removed:
+            print(f"  ✓ Pruned legacy entries from {CLAUDE_JSON_PATH}: {', '.join(removed)}")
+
+    write_state(bundle, args.host, deployment_env, capture_tool_details, args.telemetry_only)
+    print(f"  ✓ Wrote state to {STATE_PATH}")
+
+    print()
+    print(f"  Connected as {user.get('email') or 'unknown'} ({org.get('slug') or org.get('id')})")
+    if ingest:
+        print(f"  Telemetry → {ingest['endpoint']}")
+        tool_msg = "enabled" if capture_tool_details else "disabled — repo/service will read as 'unknown'"
+        print(f"  Tool details: {tool_msg}")
+    if mcp:
+        print(f"  MCP       → {mcp['url']}")
+        print(f"               (wired via plugins/cardinal/.mcp.json; env-var substitution)")
+    print()
+    print("Fully quit Claude Code (Cmd-Q on macOS) and start a new session.")
+    print("Then run /cardinal:status to verify.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,156 @@
+{
+  "stdout": null,
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "cursor"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "cursor"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "golden@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "cardinal-golden"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              },
+              {
+                "key": "cursor.model",
+                "value": {
+                  "stringValue": "claude-4.5-sonnet"
+                }
+              },
+              {
+                "key": "cursor.model_id",
+                "value": {
+                  "stringValue": "anthropic/claude-4.5-sonnet"
+                }
+              },
+              {
+                "key": "cursor.model_params",
+                "value": {
+                  "stringValue": "{\"temperature\":0.2,\"max_tokens\":4096}"
+                }
+              },
+              {
+                "key": "cursor.version",
+                "value": {
+                  "stringValue": "1.7.29"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-cursor-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.subagent_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.subagent_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "conv-golden-0001"
+                      }
+                    },
+                    {
+                      "key": "agent_runtime",
+                      "value": {
+                        "stringValue": "cursor"
+                      }
+                    },
+                    {
+                      "key": "subagent_type",
+                      "value": {
+                        "stringValue": "explore"
+                      }
+                    },
+                    {
+                      "key": "subagent_description",
+                      "value": {
+                        "stringValue": "Search the repo for OTLP emit callsites"
+                      }
+                    },
+                    {
+                      "key": "subagent_status",
+                      "value": {
+                        "stringValue": "completed"
+                      }
+                    },
+                    {
+                      "key": "duration_ms",
+                      "value": {
+                        "intValue": "15321"
+                      }
+                    },
+                    {
+                      "key": "message_count",
+                      "value": {
+                        "intValue": "12"
+                      }
+                    },
+                    {
+                      "key": "tool_call_count",
+                      "value": {
+                        "intValue": "7"
+                      }
+                    },
+                    {
+                      "key": "loop_count",
+                      "value": {
+                        "intValue": "2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
