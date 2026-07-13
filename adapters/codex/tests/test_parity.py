@@ -604,5 +604,230 @@ class TelemetryHookTests(unittest.TestCase):
         self.assertEqual(resource_attrs["agent.runtime"], "codex")
 
 
+class ParityHookTests(unittest.TestCase):
+    """Behavioural parity from source 0.4.0: plan throttling, turn_seq
+    reset, plan stamping, cursor resume, spend-limits gate, SessionStart."""
+
+    def setUp(self):
+        self.stub = StubCardinal()
+        self.stub.start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        connected = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(connected.returncode, 0, connected.stderr + connected.stdout)
+        self.limits_dir = self.home / ".codex" / "cardinal" / "limits"
+
+    def tearDown(self):
+        self.stub.stop()
+        self.tmp.cleanup()
+
+    def make_git_repo(self, branch: str) -> Path:
+        repo = self.home / "repo"
+        repo.mkdir(exist_ok=True)
+        for cmd in (
+            ["git", "init", "-q", "-b", branch],
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "--allow-empty", "-q", "-m", "init"],
+        ):
+            subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+        return repo
+
+    @staticmethod
+    def token_count_row(ts: str, with_limits: bool = True) -> dict:
+        payload = {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 10,
+                    "cached_input_tokens": 4,
+                    "output_tokens": 3,
+                }
+            },
+        }
+        if with_limits:
+            payload["rate_limits"] = {
+                "limit_id": "codex",
+                "plan_type": "team",
+                "primary": {"used_percent": 3, "resets_at": 1780000000},
+                "secondary": {"used_percent": 8, "resets_at": 1780001000},
+            }
+        return {"timestamp": ts, "type": "event_msg", "payload": payload}
+
+    def test_plan_throttle_turn_seq_reset_and_stamp(self):
+        session_id = "sess-parity-1"
+        transcript = self.home / "session.jsonl"
+        rows = [
+            {"timestamp": "2026-07-01T00:00:00Z", "type": "session_meta",
+             "payload": {"id": session_id, "cwd": str(self.home)}},
+            {"timestamp": "2026-07-01T00:00:01Z", "type": "turn_context",
+             "payload": {"model": "gpt-5", "cwd": str(self.home)}},
+            {"timestamp": "2026-07-01T00:00:02Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "hi"}},
+            {"timestamp": "2026-07-01T00:00:03Z", "type": "response_item",
+             "payload": {"type": "function_call", "name": "Read",
+                         "arguments": json.dumps({"file_path": "/tmp/x.py"}),
+                         "call_id": "c1"}},
+            {"timestamp": "2026-07-01T00:00:04Z", "type": "response_item",
+             "payload": {"type": "function_call_output", "call_id": "c1",
+                         "output": "ok"}},
+            self.token_count_row("2026-07-01T00:00:05Z"),
+        ]
+        transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        stdin = {"session_id": session_id, "transcript_path": str(transcript)}
+
+        result = run_hook(["--event", "Stop"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.stub.log_batches), 1)
+        first = self.stub.log_batches[0]
+        self.assertEqual(event_names(first).count("cardinal.plan_state"), 1)
+        self.assertEqual(event_names(first).count("cardinal.plan_usage"), 1)
+        # TARGET_KEYS wiring: the Read call's file_path becomes target.
+        (tool,) = records_named(first, "cardinal.turn_tool")
+        self.assertEqual(tool["target"], "/tmp/x.py")
+        self.assertIn("ts", tool)
+        # First model call of the turn.
+        (usage,) = records_named(first, "cardinal.turn_usage")
+        self.assertEqual(usage["turn_seq"], "0")
+        self.assertEqual(usage["plan_type"], "team")
+        self.assertEqual(usage["rate_limit_tier"], "codex")
+
+        # Second turn: same rate_limits → plan events throttled out;
+        # turn_seq resets at the user_message boundary.
+        with transcript.open("a") as f:
+            f.write(json.dumps({"timestamp": "2026-07-01T00:01:00Z", "type": "event_msg",
+                                "payload": {"type": "user_message", "message": "again"}}) + "\n")
+            f.write(json.dumps(self.token_count_row("2026-07-01T00:01:05Z")) + "\n")
+        result = run_hook(["--event", "Stop"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.stub.log_batches), 2)
+        second = self.stub.log_batches[1]
+        self.assertNotIn("cardinal.plan_state", event_names(second))
+        self.assertNotIn("cardinal.plan_usage", event_names(second))
+        (usage2,) = records_named(second, "cardinal.turn_usage")
+        self.assertEqual(usage2["turn_seq"], "0")
+
+        # Plan stamp persisted globally → git_state on the next prompt
+        # carries plan_type/rate_limit_tier (and the stripped initiative).
+        repo = self.make_git_repo("feat/worktree-fix-99-cool-thing")
+        result = run_hook(
+            ["--event", "UserPromptSubmit"], self.home,
+            {"session_id": session_id, "cwd": str(repo), "prompt": "/status now"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        git_state = records_named(self.stub.log_batches[-1], "cardinal.git_state")[0]
+        self.assertEqual(git_state["plan_type"], "team")
+        self.assertEqual(git_state["rate_limit_tier"], "codex")
+        self.assertEqual(git_state["cardinal_initiative_name"], "cool-thing")
+        self.assertEqual(git_state["cardinal_initiative_type"], "feature")
+        self.assertEqual(git_state["cardinal_command"], "status")
+
+    def test_stop_cap_resumes_from_cursor(self):
+        session_id = "sess-cap-1"
+        transcript = self.home / "cap.jsonl"
+        rows = [self.token_count_row(f"2026-07-01T00:00:{i % 60:02d}Z", with_limits=False)
+                for i in range(300)]
+        transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        stdin = {"session_id": session_id, "transcript_path": str(transcript)}
+
+        result = run_hook(["--event", "Stop"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        progress = read_json(
+            self.home / ".codex" / "cardinal" / "telemetry" / f"{session_id}.json"
+        )
+        # The cap tripped: the cursor must point at the first unprocessed
+        # line, not the end of the file.
+        self.assertLess(progress["last_line"], 300)
+
+        result = run_hook(["--event", "Stop"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        progress = read_json(
+            self.home / ".codex" / "cardinal" / "telemetry" / f"{session_id}.json"
+        )
+        self.assertEqual(progress["last_line"], 300)
+        total_api_requests = sum(
+            event_names(b).count("api_request") for b in self.stub.log_batches
+        )
+        self.assertEqual(total_api_requests, 300)
+
+    def write_verdict(self, session_id: str, verdict: dict) -> None:
+        import time as _time
+
+        verdict = {"fetched_at": _time.time(), **verdict}
+        self.limits_dir.mkdir(parents=True, exist_ok=True)
+        (self.limits_dir / f"{session_id}.verdict.json").write_text(json.dumps(verdict))
+
+    def test_gate_blocks_on_block_verdict(self):
+        session_id = "sess-block-1"
+        self.write_verdict(session_id, {
+            "decision": "block", "band": 3,
+            "block_reason": "Session budget of $100 reached.",
+        })
+        result = run_hook(
+            ["--event", "UserPromptSubmit"], self.home,
+            {"session_id": session_id, "cwd": str(self.home), "prompt": "hi"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        self.assertEqual(out["decision"], "block")
+        self.assertEqual(out["reason"], "Session budget of $100 reached.")
+
+        # An override file downgrades the block to warn-tier surfacing.
+        (self.limits_dir / f"{session_id}.override.json").write_text("{}")
+        result = run_hook(
+            ["--event", "UserPromptSubmit"], self.home,
+            {"session_id": session_id, "cwd": str(self.home), "prompt": "hi"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('"decision"', result.stdout or "")
+
+    def test_gate_warn_surfaces_once_per_band(self):
+        session_id = "sess-warn-1"
+        self.write_verdict(session_id, {
+            "decision": "warn", "band": 2,
+            "agent_context": "Economize: budget at 90%.",
+            "user_message": "Cardinal: session budget at 90%.",
+        })
+        stdin = {"session_id": session_id, "cwd": str(self.home), "prompt": "hi"}
+        result = run_hook(["--event", "UserPromptSubmit"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        self.assertEqual(
+            out["hookSpecificOutput"]["additionalContext"], "Economize: budget at 90%."
+        )
+        self.assertEqual(out["systemMessage"], "Cardinal: session budget at 90%.")
+
+        # Hysteresis: same band again → silent.
+        result = run_hook(["--event", "UserPromptSubmit"], self.home, stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_session_start_emits_convention_and_budget_standing(self):
+        repo = self.make_git_repo("main")
+        session_id = "sess-start-1"
+        result = run_hook(
+            ["--event", "SessionStart"], self.home,
+            {"session_id": session_id, "cwd": str(repo)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertIn("one branch = one initiative", context)
+        self.assertIn("Cardinal spend budgets apply to this session:", context)
+        self.assertIn("$1.25 of $100.00 (1%)", context)
+        # The forced fetch warm-writes the verdict file the gate reads.
+        self.assertTrue((self.limits_dir / f"{session_id}.verdict.json").exists())
+
+    def test_session_start_outside_git_repo_is_silent(self):
+        outside = self.home / "not-a-repo"
+        outside.mkdir()
+        result = run_hook(
+            ["--event", "SessionStart"], self.home,
+            {"session_id": "sess-start-2", "cwd": str(outside)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
