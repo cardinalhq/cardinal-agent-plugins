@@ -449,5 +449,160 @@ class ConnectTests(unittest.TestCase):
         self.assertFalse(self.state.exists())
 
 
+class StatusAndDisconnectTests(unittest.TestCase):
+    def setUp(self):
+        self.stub = StubCardinal()
+        self.stub.start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        connected = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(connected.returncode, 0, connected.stderr + connected.stdout)
+        self.config = self.home / ".codex" / "config.toml"
+        self.hooks = self.home / ".codex" / "hooks.json"
+        self.state = self.home / ".codex" / "cardinal.json"
+        self.secrets = self.home / ".codex" / "cardinal-secrets.json"
+
+    def tearDown(self):
+        self.stub.stop()
+        self.tmp.cleanup()
+
+    def test_status_reports_reachable(self):
+        result = run_script(STATUS, [], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Telemetry:", result.stdout)
+        self.assertIn("OK ingest reachable", result.stdout)
+        self.assertIn("MCP endpoint:", result.stdout)
+        self.assertIn("OK MCP reachable", result.stdout)
+
+    def test_disconnect_revokes_key_and_removes_managed_block(self):
+        result = run_script(DISCONNECT, [], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.stub.revoke_calls, [
+            ("ingest-key-uuid-1", "INGESTPLAINTEXT" + "y" * 48),
+            ("mcp-key-uuid-1", "MCPPLAINTEXT" + "x" * 52),
+        ])
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.secrets.exists())
+        self.assertNotIn("cardinal-codex-plugin managed", self.config.read_text())
+        config = read_toml(self.config)
+        self.assertNotIn("cardinal", config.get("mcp_servers", {}))
+        self.assertNotIn("cardinal-codex-plugin", self.hooks.read_text())
+
+
+class TelemetryHookTests(unittest.TestCase):
+    def setUp(self):
+        self.stub = StubCardinal()
+        self.stub.start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        connected = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(connected.returncode, 0, connected.stderr + connected.stdout)
+
+    def tearDown(self):
+        self.stub.stop()
+        self.tmp.cleanup()
+
+    def test_stop_hook_posts_codex_events_from_transcript(self):
+        session_id = "sess-test-1"
+        transcript = self.home / "session.jsonl"
+        rows = [
+            {
+                "timestamp": "2026-07-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(self.home)},
+            },
+            {
+                "timestamp": "2026-07-01T00:00:01.000Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.5", "cwd": str(self.home)},
+            },
+            {
+                "timestamp": "2026-07-01T00:00:02.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "run tests"},
+            },
+            {
+                "timestamp": "2026-07-01T00:00:03.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "go test ./..."}),
+                    "call_id": "call-1",
+                },
+            },
+            {
+                "timestamp": "2026-07-01T00:00:04.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "Process exited with code 0\n",
+                },
+            },
+            {
+                "timestamp": "2026-07-01T00:00:05.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 12,
+                            "cached_input_tokens": 7,
+                            "output_tokens": 5,
+                            "total_tokens": 17,
+                        }
+                    },
+                    "rate_limits": {
+                        "limit_id": "codex",
+                        "plan_type": "team",
+                        "primary": {"used_percent": 3, "resets_at": 1780000000},
+                        "secondary": {"used_percent": 8, "resets_at": 1780001000},
+                    },
+                },
+            },
+        ]
+        transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        result = run_hook(
+            ["--event", "Stop"],
+            self.home,
+            {"session_id": session_id, "transcript_path": str(transcript)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(len(self.stub.log_batches), 1)
+
+        records = self.stub.log_batches[0]["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        names = [
+            next(a["value"]["stringValue"] for a in r["attributes"] if a["key"] == "event_name")
+            for r in records
+        ]
+        self.assertIn("cardinal.turn_tool", names)
+        self.assertIn("tool_result", names)
+        self.assertIn("api_request", names)
+        self.assertIn("cardinal.turn_usage", names)
+        self.assertIn("cardinal.plan_usage", names)
+
+        # api_request must carry cost_usd — codex has no native cost
+        # emitter, so the plugin computes it from usage + a model price
+        # table.
+        api_req = next(
+            r for r in records
+            if next(a["value"]["stringValue"] for a in r["attributes"] if a["key"] == "event_name") == "api_request"
+        )
+        cost_kv = next(a for a in api_req["attributes"] if a["key"] == "cost_usd")
+        # gpt-5.5 falls back to gpt-5 pricing via longest-prefix match:
+        #   (12-7) input * $1.25/M + 7 cached * $0.125/M + 5 output * $10/M
+        #   → 0.000057 rounded to 6 places.
+        self.assertAlmostEqual(cost_kv["value"]["doubleValue"], 0.000057, places=6)
+
+        resource_attrs = {
+            a["key"]: next(iter(a["value"].values()))
+            for a in self.stub.log_batches[0]["resourceLogs"][0]["resource"]["attributes"]
+        }
+        self.assertEqual(resource_attrs["service.name"], "codex")
+        self.assertEqual(resource_attrs["agent.runtime"], "codex")
+
+
 if __name__ == "__main__":
     unittest.main()
