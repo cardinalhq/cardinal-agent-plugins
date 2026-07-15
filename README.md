@@ -37,19 +37,18 @@ marketplace slugs keep working; development happens here.
 ## Omnigent
 
 Unlike the CLI adapters, the omnigent integration ships as a pip
-package that loads inside the omnigent server. Until we publish to
-PyPI, install both packages directly from this repo (into the same
-Python interpreter that runs your omnigent server):
+package (`cardinal-omnigent-policy`) that loads inside the omnigent
+server. Install into the same Python interpreter that runs your
+omnigent server:
 
 ```sh
-pip install \
-  "cardinal-agent-core @ git+https://github.com/cardinalhq/cardinal-agent-plugins.git#subdirectory=core" \
-  "cardinal-omnigent-policy @ git+https://github.com/cardinalhq/cardinal-agent-plugins.git#subdirectory=adapters/omnigent"
+pip install cardinal-omnigent-policy
 python3 -m cardinal_omnigent.connect --config /etc/omnigent/config.yaml
 ```
 
-`connect` runs device-flow auth, mints an ingest credential, and merges
-a `cardinalManaged` block into your server config. See
+`cardinal-agent-core` is pulled in as a dependency. `connect` runs
+device-flow auth, mints an ingest credential, and merges a
+`cardinalManaged` block into your server config. See
 [`adapters/omnigent/README.md`](./adapters/omnigent/README.md) for the
 manual-config form and what the policies emit.
 
