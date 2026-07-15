@@ -34,6 +34,21 @@ sources:
 After migration those repos become release mirrors: install URLs and
 marketplace slugs keep working; development happens here.
 
+## Omnigent
+
+Unlike the CLI adapters, the omnigent integration ships as a pip
+package that loads inside the omnigent server:
+
+```sh
+pip install cardinal-omnigent-policy
+python3 -m cardinal_omnigent.connect --config /etc/omnigent/config.yaml
+```
+
+`connect` runs device-flow auth, mints an ingest credential, and merges
+a `cardinalManaged` block into your server config. See
+[`adapters/omnigent/README.md`](./adapters/omnigent/README.md) for the
+manual-config form and what the policies emit.
+
 ## Development
 
 ```bash
