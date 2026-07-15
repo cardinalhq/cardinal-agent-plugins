@@ -180,15 +180,83 @@ def tool_result_event(
     target: str = "bash",
     success: Any = True,
     exit_code: int | None = None,
+    data: dict[str, Any] | None = None,
+    request_data: Any = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    data: dict[str, Any] = {"result": "ok"}
+    payload: dict[str, Any] = dict(data) if data is not None else {"result": "ok"}
     if exit_code is not None:
-        data["exit_code"] = exit_code
-    elif success is not None:
-        data["success"] = success
-    return make_event("tool_result", data, target=target,
-                      session_id=session_id, **kwargs)
+        payload["exit_code"] = exit_code
+    elif success is not None and "success" not in payload:
+        payload["success"] = success
+    return make_event("tool_result", payload, target=target,
+                      session_id=session_id, request_data=request_data, **kwargs)
+
+
+def sys_session_send_call_event(
+    session_id: str = "omni-parent",
+    *,
+    agent: str = "claude_code",
+    title: str = "task-1",
+    input_text: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Parent-side ``sys_session_send`` tool_call — polly's dispatch. The
+    child conversation id only appears on the paired tool_result; the call
+    itself just names agent/title/args."""
+    args: dict[str, Any] = {
+        "agent": agent,
+        "title": title,
+        "args": {"purpose": "implement", "input": input_text},
+    }
+    return make_event(
+        "tool_call",
+        {"name": "sys_session_send", "arguments": args},
+        target="sys_session_send", session_id=session_id, **kwargs,
+    )
+
+
+def sys_session_send_result_event(
+    session_id: str = "omni-parent",
+    *,
+    child_conversation_id: str,
+    input_text: str,
+    agent: str = "claude_code",
+    title: str = "task-1",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Parent-side ``sys_session_send`` tool_result — the JSON handle
+    ``{task_id, kind, agent, title, conversation_id, status, message}``
+    per omnigent's SysSessionSendTool. ``request_data`` echoes the call so
+    the adapter can substring-match dispatch input against worktree paths
+    registered on this session."""
+    handle = {
+        "task_id": "task-abc",
+        "kind": "sub_agent",
+        "agent": agent,
+        "title": title,
+        "conversation_id": child_conversation_id,
+        "status": "running",
+        "message": "dispatched",
+    }
+    request_data = {
+        "arguments": {
+            "agent": agent,
+            "title": title,
+            "args": {"purpose": "implement", "input": input_text},
+        },
+    }
+    return tool_result_event(
+        session_id, target="sys_session_send",
+        data={"output": _dump_handle(handle)},
+        request_data=request_data,
+        **kwargs,
+    )
+
+
+def _dump_handle(handle: dict[str, Any]) -> str:
+    import json as _json
+    return _json.dumps(handle)
 
 
 def response_event(

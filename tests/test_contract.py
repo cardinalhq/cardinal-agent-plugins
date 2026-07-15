@@ -37,6 +37,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 ADAPTERS = ("claude", "codex", "cursor", "gemini")
 
+# omnigent is deliberately NOT in ADAPTERS (toolkit-hive-mind.md PLG.1):
+# it has no committed adapters/omnigent/tests/goldens/*.json for
+# load_adapter_events' glob to find, its cardinal.git_state structurally
+# lacks 3 REQUIRED_KEYS (no workspace in the policy contract), and its
+# cardinal.subagent_usage has no subagent_type equivalent (see
+# SUBAGENT_TYPE_ADAPTERS below). None of the three is closeable by adding
+# an emit. It keeps its own suite (adapters/omnigent/tests/test_omnigent.py,
+# which imports REQUIRED_KEYS from this module directly) and is covered by
+# the capability-identity fields that DO apply to it there. Full writeup:
+# docs/specs/subagent-telemetry-enrichment.md §8.
+
 # Which Cardinal events each adapter's goldens must contain.
 EXPECTED_EVENTS: dict[str, set[str]] = {
     "claude": {
@@ -94,6 +105,38 @@ REQUIRED_KEYS: dict[str, set[str]] = {
         "session_id",
     },
 }
+
+# Capability-identity fields the lakerunner identity extractor (T1.2, see
+# docs/specs/toolkit-hive-mind.md) keys on. These are NOT folded into
+# REQUIRED_KEYS above because that dict is shared verbatim with
+# adapters/omnigent/tests/test_omnigent.py, and each field below is
+# adapter-scoped rather than universal (see docs/specs/
+# subagent-telemetry-enrichment.md §7 for the per-adapter emission
+# evidence and why each asymmetry is deliberate, not a gap).
+
+# claude keeps the raw qualified MCP name on tool_name only — no split.
+# Its extractor instead reads mcp_server_name off Claude Code's own native
+# tool_result/tool_parameters event, which this repo does not emit
+# (turn-usage.py has no mcp__ branch). codex/cursor/gemini split into
+# mcp_server_name + mcp_tool_name alongside the raw name.
+MCP_SPLIT_ADAPTERS = {"codex", "cursor", "gemini"}
+MCP_SPLIT_KEYS = {"mcp_server_name", "mcp_tool_name"}
+
+# subagent_type: emitted by all 4 CLI adapters on cardinal.subagent_usage
+# (probed on codex/cursor/gemini — their SubagentStop-equivalent payload
+# shape is unconfirmed in the wild; see the CARDINAL_*_DEBUG_PAYLOADS
+# capture affordances). Omnigent has no type-taxonomy field to probe for
+# (structural, not a probing gap) and is excluded from this set.
+SUBAGENT_TYPE_ADAPTERS = {"claude", "codex", "cursor", "gemini"}
+
+# cardinal_command on cardinal.git_state, sourced from the shared
+# cardinal_core.initiative.detect_command. Present only on the subset of
+# records where a slash command actually fired (detect_command returns
+# None otherwise, and otlp.log_record drops None attrs) — so this is
+# checked as present-somewhere-in-the-goldens, matching how
+# test_shared_events_agree_on_initiative_keys already treats it as
+# allowed-optional rather than required-on-every-record.
+COMMAND_IDENTITY_ADAPTERS = set(ADAPTERS)
 
 
 def _walk_records(node):
@@ -174,6 +217,39 @@ class ContractTests(unittest.TestCase):
                         f"{adapter}/{event} goldens missing required keys: "
                         f"{sorted(missing)}",
                     )
+
+    def test_capability_identity_fields(self) -> None:
+        """The lakerunner identity extractor (T1.2) parity gate: assert
+        the capability-identity fields it depends on are present in each
+        adapter's goldens, scoped to the adapters that actually emit them
+        (docs/specs/subagent-telemetry-enrichment.md §7-§8)."""
+        for adapter in MCP_SPLIT_ADAPTERS:
+            keys = self.by_adapter[adapter].get("cardinal.turn_tool", set())
+            with self.subTest(adapter=adapter, event="cardinal.turn_tool"):
+                missing = MCP_SPLIT_KEYS - keys
+                self.assertFalse(
+                    missing,
+                    f"{adapter}/cardinal.turn_tool goldens missing MCP split "
+                    f"keys: {sorted(missing)}",
+                )
+
+        for adapter in SUBAGENT_TYPE_ADAPTERS:
+            keys = self.by_adapter[adapter].get("cardinal.subagent_usage", set())
+            with self.subTest(adapter=adapter, event="cardinal.subagent_usage"):
+                self.assertIn(
+                    "subagent_type", keys,
+                    f"{adapter}/cardinal.subagent_usage goldens missing "
+                    "subagent_type",
+                )
+
+        for adapter in COMMAND_IDENTITY_ADAPTERS:
+            keys = self.by_adapter[adapter].get("cardinal.git_state", set())
+            with self.subTest(adapter=adapter, event="cardinal.git_state"):
+                self.assertIn(
+                    "cardinal_command", keys,
+                    f"{adapter}/cardinal.git_state goldens missing "
+                    "cardinal_command (no fixture with a slash command?)",
+                )
 
     def test_shared_events_agree_on_initiative_keys(self) -> None:
         """The initiative attribution keys are the product's backbone —

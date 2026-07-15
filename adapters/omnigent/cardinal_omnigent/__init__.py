@@ -20,8 +20,8 @@ and the contract must be re-verified on omnigent upgrades.
 
 from __future__ import annotations
 
-OMNIGENT_VERIFIED_COMMIT = "2b3b54a4"
-PLUGIN_VERSION = "0.2.0"
+OMNIGENT_VERIFIED_COMMIT = "6cbd72b1"
+PLUGIN_VERSION = "0.3.0"
 
 from .spend_limits import make_spend_limits_policy, spend_limits_policy  # noqa: E402
 from .telemetry import make_telemetry_policy, telemetry_policy  # noqa: E402
