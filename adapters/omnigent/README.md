@@ -68,18 +68,14 @@ re-resolve from the embedded `claude-` name. Unpriced models emit no
 
 The easy way — device-flow connect (mints the ingest credential, writes
 the state dir, merges a `cardinalManaged`-tagged block into your server
-config). Until we publish to PyPI, install both packages from git into
-the interpreter that runs your omnigent server:
+config). Install into the interpreter that runs your omnigent server:
 
 ```sh
-pip install \
-  "cardinal-agent-core @ git+https://github.com/cardinalhq/cardinal-agent-plugins.git#subdirectory=core" \
-  "cardinal-omnigent-policy @ git+https://github.com/cardinalhq/cardinal-agent-plugins.git#subdirectory=adapters/omnigent"
+pip install cardinal-omnigent-policy
 python3 -m cardinal_omnigent.connect --config /etc/omnigent/config.yaml
 ```
 
-Once PyPI releases land, this collapses to `pip install
-cardinal-omnigent-policy` (core is pulled in as a dependency).
+`cardinal-agent-core` is resolved as a dependency.
 
 Or by hand: `policy_modules:` names the module; omnigent scans it for
 `POLICY_REGISTRY` (both policies take `config` by arity). The
