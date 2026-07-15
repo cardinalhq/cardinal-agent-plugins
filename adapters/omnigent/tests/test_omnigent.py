@@ -884,7 +884,7 @@ class RegistryTests(unittest.TestCase):
     def test_policy_registry_and_pin(self) -> None:
         self.assertEqual(cardinal_omnigent.POLICY_REGISTRY,
                          [telemetry.telemetry_policy, spend_limits.spend_limits_policy])
-        self.assertEqual(cardinal_omnigent.OMNIGENT_VERIFIED_COMMIT, "2b3b54a4")
+        self.assertEqual(cardinal_omnigent.OMNIGENT_VERIFIED_COMMIT, "6cbd72b1")
 
     def test_registry_policies_accept_config_by_arity(self) -> None:
         import inspect
