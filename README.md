@@ -42,12 +42,18 @@ server. Install into the same Python interpreter that runs your
 omnigent server:
 
 ```sh
+# venv
 pip install cardinal-omnigent-policy
-python3 -m cardinal_omnigent.connect --config /etc/omnigent/config.yaml
+
+# pipx-installed omnigent (put the CLI on PATH via --include-apps)
+pipx inject omnigent cardinal-omnigent-policy --include-apps
+
+# then, from anywhere:
+cardinal-omnigent-connect --config /path/to/omnigent-config.yaml
 ```
 
-`cardinal-agent-core` is pulled in as a dependency. `connect` runs
-device-flow auth, mints an ingest credential, and merges a
+`cardinal-agent-core` is pulled in as a dependency. `cardinal-omnigent-connect`
+runs device-flow auth, mints an ingest credential, and merges a
 `cardinalManaged` block into your server config. See
 [`adapters/omnigent/README.md`](./adapters/omnigent/README.md) for the
 manual-config form and what the policies emit.
