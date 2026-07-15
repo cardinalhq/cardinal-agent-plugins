@@ -71,11 +71,19 @@ the state dir, merges a `cardinalManaged`-tagged block into your server
 config). Install into the interpreter that runs your omnigent server:
 
 ```sh
+# venv
 pip install cardinal-omnigent-policy
-python3 -m cardinal_omnigent.connect --config /etc/omnigent/config.yaml
+
+# pipx-installed omnigent (use --include-apps so the CLI lands on PATH)
+pipx inject omnigent cardinal-omnigent-policy --include-apps
+
+# then, from anywhere:
+cardinal-omnigent-connect --config /etc/omnigent/config.yaml
 ```
 
-`cardinal-agent-core` is resolved as a dependency.
+`cardinal-agent-core` is resolved as a dependency. `python3 -m
+cardinal_omnigent.connect` still works as an alternative to the
+`cardinal-omnigent-connect` console script.
 
 Or by hand: `policy_modules:` names the module; omnigent scans it for
 `POLICY_REGISTRY` (both policies take `config` by arity). The

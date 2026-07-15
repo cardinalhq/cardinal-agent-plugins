@@ -169,7 +169,6 @@ def cardinal_config_from_bundle(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python3 -m cardinal_omnigent.connect",
         description="Connect an omnigent server to Cardinal telemetry + spend limits.",
     )
     parser.add_argument("--host", default=DEFAULT_HOST)
