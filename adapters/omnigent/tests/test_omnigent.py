@@ -11,6 +11,19 @@ cardinal_cwd, or cardinal_remote_url; repo/branch ride the labels
 convention instead. WORKSPACE_KEYS below subtracts exactly those from the
 contract's git_state requirement.
 
+omnigent is deliberately NOT in tests/test_contract.py's ADAPTERS (see
+docs/specs/subagent-telemetry-enrichment.md §7-§8, toolkit-hive-mind.md
+PLG.1): beyond the workspace-key gap above, omnigent's cardinal.subagent_usage
+has no subagent_type equivalent (only subagent_description — a structural
+difference, the engine has no type taxonomy to probe), and there is no
+committed adapters/omnigent/tests/goldens/*.json for the shared test's
+glob to find. The capability-identity fields the lakerunner extractor DOES
+key on for omnigent — the MCP split on cardinal.turn_tool, subagent_description
++ model on cardinal.subagent_usage, cardinal_command on cardinal.git_state —
+are asserted below (see TelemetryToolTests.test_mcp_tool_call_keeps_qualified_name,
+SubagentUsageTests.test_codex_native_child_emits_subagent_usage,
+TelemetryGitStateTests.test_slash_command_detected_from_prompt).
+
 Run from adapters/omnigent:
     PYTHONPATH=../../core:. python3 -m unittest discover tests
 (fixtures.py also bootstraps sys.path, so a bare discover works too.)
