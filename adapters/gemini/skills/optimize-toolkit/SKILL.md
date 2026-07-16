@@ -5,8 +5,8 @@ description: Mine this engineer's own session telemetry for capability-fit recom
 
 # Cardinal Optimize Toolkit
 
-Use this skill when the user explicitly asks Codex to optimize their
-toolkit, mine their own session history for capability-fit
+Use this skill when the user explicitly asks Gemini CLI to optimize
+their toolkit, mine their own session history for capability-fit
 recommendations, or review whether a recurring inline pattern should
 become a reusable sub-agent. It is **not** a skill to reach for
 opportunistically just because the conversation is adjacent to agents
@@ -18,11 +18,15 @@ session-local one. It looks at your own last 30 days of sessions
 candidate ever reaches this skill), pitches the top few candidates with
 their evidence, and — only on your explicit confirmation — writes the
 accepted artifact to this working tree. **Anything written takes effect
-next session**, not this one: Codex loads custom agent definitions
-(`.codex/agents/*.toml`) at startup, the same as `~/.codex/config.toml`
-and `~/.codex/hooks.json` — there is no live-registration channel, so
-accepting a candidate here will not change what happens for the rest of
-this conversation.
+next session**, not this one: Gemini CLI loads custom subagent
+definitions (`.gemini/agents/*.md`) at startup, the same as
+`~/.gemini/settings.json` and the extension directory — there is no
+live-registration channel, so accepting a candidate here will not
+change what happens for the rest of this conversation. (`/agents
+reload` reloads the agent registry without a full restart if the user's
+Gemini CLI version supports it — mention it as an option, but the
+"takes effect next session" framing below is still the safe default to
+tell the user.)
 
 This burns your own session tokens to run. It is built to be cheap by
 construction: the server (conductor's maestro, via the `cardinal` MCP
@@ -68,7 +72,7 @@ grepping local logs, no falling back to "let me look at your repo
 instead"). This mirrors the spec's silent-failure rule: MCP unreachable
 or empty candidates → one line, stop, no retries.
 
-## How you (Codex) should run this
+## How you (Gemini CLI) should run this
 
 Budget: usually 5–7 tool calls total, ≤10 in the worst case. Stay inside
 it — this is a "thin skill" by design; the intelligence is server-side.
@@ -84,9 +88,8 @@ both with `window: "30d"`. From the two responses, compose a short
 - Name the caller's top 1–2 model-mix rows by cost from
   `my_turn_pattern.models`.
 - Name the toolkit-adoption headline the first candidate will target,
-  e.g. "42 exec/apply-patch spawns / 480k tokens on a reasoning-tier
-  model in the last 30 days" (from `my_toolkit_adoption.agents` or
-  `.skills`).
+  e.g. "42 tool-call spawns / 480k tokens on a reasoning-tier model in
+  the last 30 days" (from `my_toolkit_adoption.agents` or `.skills`).
 - **No usable evidence, stop before any ratio math.** If
   `my_toolkit_adoption.coverage.sessions_scanned == 0`, or
   `my_turn_pattern.turns_total` is 0, there is nothing to compute a
@@ -116,7 +119,7 @@ both with `window: "30d"`. From the two responses, compose a short
   will climb as you keep working on a current plugin version." Also
   check `my_turn_pattern.coverage.plugin_versions_seen` — if it shows a
   stale version for recent turns, mention the plugin-version-drift
-  possibility and suggest a Codex restart.
+  possibility and suggest a Gemini CLI restart.
 
 If `my_turn_pattern.turns_total` or `my_toolkit_adoption` shows nothing
 usable (near-zero coverage), say so and stop — do not manufacture a
@@ -209,8 +212,11 @@ One candidate at a time, top-K by headline savings, each with:
 Call `outcomes__generate_agent_spec` with the cluster's id, the chosen
 `target_tier`, and the chosen `kind` (one of `extract`, `pin`,
 `downgrade`, `adopt`, `swap`, `consolidate` — never `gap`, which has no
-artifact). This is a **server-authored** artifact, but note the
-render-format gap below before you present it.
+artifact). This is a **server-authored** artifact — you do not compose
+the markdown; you present it and, on confirmation, write it verbatim
+(cosmetic adaptation only: renaming to fit repo conventions, trimming an
+obviously-irrelevant tool from the allowlist), subject to the
+render-target note below.
 
 **D5 outcome gate — read directly.** The response carries
 `outcome_backed: boolean` and `kind_supported: boolean`
@@ -227,96 +233,57 @@ render-format gap below before you present it.
   specialization (FU-1), not D5 outcome validity. Both can appear on
   the same response.
 
-**Format gap — be honest about it.** `outcomes__generate_agent_spec` was
-designed against Claude Code's shape: a markdown file with YAML
+**Render-target note — be honest about it.** `outcomes__generate_agent_spec`
+was designed against Claude Code's shape: a markdown file with YAML
 frontmatter (`name`, `description`, `model`, a prose instruction body).
-Codex's native custom-agent format is a **TOML file**
-(`.codex/agents/<name>.toml`) with fields `name`, `description`,
-`developer_instructions`, and optionally `model`,
-`model_reasoning_effort`, `sandbox_mode`, `mcp_servers`. There is no
-codex-aware rendering on the server side yet, so this skill maps the
-markdown response into TOML itself, mechanically and losslessly, not by
-re-summarizing:
+Gemini CLI's native custom-subagent format is **also** a markdown file
+with YAML frontmatter, at `.gemini/agents/<name>.md`, with fields
+`name`, `description`, `kind` (`local` or `remote`), `tools` (array,
+supports wildcards like `*` / `mcp_*`), `mcpServers`, `model`,
+`temperature`, `max_turns`, and `timeout_mins`. This is the closest of
+the three ports to a lossless map — unlike codex (TOML, no tool
+allowlist field) and cursor (no tool allowlist field), Gemini's format
+does carry a `tools` field the server's `tools:`/`tool_allowlist:`
+frontmatter can map into:
 
-- spec's `name` frontmatter → TOML `name`
-- spec's `description` frontmatter → TOML `description`
-- the markdown body's prose (everything after frontmatter) → TOML
-  `developer_instructions`, as a verbatim triple-quoted string — do not
-  paraphrase or trim it. TOML has two triple-quote flavors and they are
-  not interchangeable, so pick deliberately rather than defaulting:
-  - Default to `'''…'''` — a **literal** string, no escape processing —
-    for `developer_instructions`. This preserves the markdown body
-    exactly as the server wrote it: backslashes, `\n`/`\t` sequences,
-    and backticks all pass through unchanged.
-  - **Delimiter collision:** if the body itself contains a `'''`
-    sequence, fall back to `"""…"""` (a **basic** string) instead, and
-    properly escape the body as you go — every `\` becomes `\\`, every
-    `"` becomes `\"`; backticks need no escaping.
-  - If the body contains **both** `'''` and `"""`, that's rare enough
-    that guessing is worse than stopping: reject the mapping and
-    surface to the user verbatim — "agent body contains both `'''` and
-    `"""` triple-quote delimiters — cannot represent in TOML without
-    lossy re-encoding; surface to user for a manual edit" — rather than
-    silently mangling it into either flavor.
-  - Never mix basic and literal quoting within the same field. Pick one
-    flavor for the whole `developer_instructions` value.
-- **drop `tools:` / `tool_allowlist:` from the server frontmatter —
-  there is no field to map it to.** Codex's `mcp_servers` is a
-  different concept (server-level MCP connections this codex install
-  has, not a per-tool allowlist), so there's no lossless translation
-  between the two. Say so out loud when you present the artifact:
-  "codex's custom-agent format doesn't have a per-tool allowlist — the
-  server's tool list is dropped; the agent will have access to whatever
-  MCP servers this codex install has connected. If specific tool
-  restrictions matter, note them in the developer_instructions body
-  instead." If the user asks about the dropped list after that, offer
-  to fold it into `developer_instructions` as an inline note rather
-  than resurrecting the missing frontmatter field.
-- **model precedence:** the server-authored spec's frontmatter
-  sometimes carries its own `model:` (from the recommendation's chosen
-  tier); the `target_model_id` resolved from `org_offered_tiers` in
-  step 3 (Score) also exists, and the two can differ (e.g. the server
-  picked a model no longer in this org's offered tiers).
-  **`org_offered_tiers`'s resolved `target_model_id` always wins over
-  the server-frontmatter `model:`** for the TOML `model` field — the
-  org's currently-offered tiers are the source of truth for what will
-  actually work in this org today, and a server-frontmatter model can
-  be stale or reflect a cohort that isn't this org. If the two differ,
-  don't error — log the disagreement in the dry-run explanation
+- spec's `name` / `description` / prose body → map straight across, no
+  reformatting.
+- spec's `tools:` / `tool_allowlist:` list → Gemini's `tools` array,
+  one entry per tool name, copied across as literal names (not
+  wildcards) unless the user asks you to broaden a group into a
+  wildcard pattern. If a listed tool name doesn't obviously correspond
+  to a Gemini-visible tool (naming conventions can differ slightly
+  across MCP surfaces), say so in the dry-run rather than silently
+  dropping or renaming it — surface the mismatch, let the user decide.
+- **model precedence:** same rule as the codex and cursor adapters —
+  `org_offered_tiers`'s resolved `target_model_id` always wins over the
+  server-frontmatter `model:` for the `.gemini/agents/<name>.md`
+  `model` field, since the org's currently-offered tiers are the source
+  of truth for what actually works in this org today. If the two
+  differ, don't error — log the disagreement in the dry-run explanation
   ("server suggested `<server-model>`, using org's `<tier>` tier
-  `<target_model_id>` instead"). This is a precedence rule, not a new
-  gate: if `org_offered_tiers` has no matching tier for the kind you're
-  recommending (e.g. `pin` to `cheap` but this org has no `cheap`
-  tier), that's still the existing step-3 stop — "that door is closed
-  for this org" — don't fall back to the server's suggested model to
-  route around it.
-- leave `model_reasoning_effort`, `sandbox_mode`, `mcp_servers`, and
-  `nickname_candidates` **unset** — none of the 8 tools supply source
-  data for them, and guessing a value would be inventing content the
-  server didn't author. If the user wants one set, ask them for the
-  value explicitly rather than defaulting it yourself.
+  `<target_model_id>` instead").
+- leave `kind` (defaults to `local`), `mcpServers`, `temperature`,
+  `max_turns`, and `timeout_mins` **unset**, letting Gemini CLI's own
+  defaults apply — none of the 8 tools supply source data for them, and
+  guessing a value would be inventing content the server didn't author.
+  If the user wants one set, ask them for the value explicitly rather
+  than defaulting it yourself.
 
-Present the resulting TOML in full before any confirmation question,
-same as the claude adapter does for its markdown — the "full artifact
-before confirmation" contract doesn't change, only the target format
-does. `TODO(reviewer)`: once conductor ships a codex-shaped
-`generate_agent_spec` response (or a `render_target` parameter), delete
-this mapping step and use the server output directly. The
-review-flagged TOML-mapping gaps are otherwise closed as of this
-commit: string-flavor escaping (triple-quote delimiter choice and the
-`'''`/`"""` collision case), the dropped `tools:`/`tool_allowlist:`
-field, and `model:`-vs-`target_model_id` precedence are all specified
-above. Whether Codex CLI actually loads `.codex/agents/<name>.toml` at
-startup rests on a version-pinned external doc citation, not a live
-smoke test against an installed CLI (see §6 Write below) — closed as
-cardinalhq/cardinal-agent-plugins#20 on that basis; a live smoke test
-remains a good idea if a Codex CLI install ever becomes available in
-this repo's test environment.
+`TODO(reviewer)`: the `.gemini/agents/<name>.md` render-target path and
+field shape above are sourced from Gemini CLI's published docs
+(geminicli.com/docs/core/subagents) captured during this port, not a
+live smoke test against an installed Gemini CLI — no Gemini CLI install
+is available in this repo's test environment. Same caveat as the codex
+adapter's `.codex/agents/<name>.toml` target (tracked there as
+cardinalhq/cardinal-agent-plugins#20); if this skill's dry-run ever
+produces a file Gemini CLI doesn't actually load, that's the
+render-target assumption to revisit first.
 
-**Known gap — be honest about it, independent of the format gap above.**
-`outcomes__generate_agent_spec` today emits the same shape of body
-regardless of `kind` (flagged in the harvester review as FU-1, not yet
-closed as of this writing). That means a `pin` or `adopt`
+**Known gap — be honest about it, independent of the render-target note
+above.** `outcomes__generate_agent_spec` today emits the same shape of
+markdown body regardless of `kind` (flagged in the harvester review as
+FU-1, not yet closed as of this writing). That means a `pin` or `adopt`
 recommendation may come back reading like a freshly-minted agent even
 though nothing about the role is actually new. **Say what kind you're
 rendering and where the target file would go even when the body itself
@@ -326,8 +293,8 @@ real; only the prose body is currently kind-blind). Per kind:
 
 | kind | what it means | target file | what to do given the generic-body gap |
 |---|---|---|---|
-| `extract` | mint a genuinely new capability from a recurring inline cluster | new file: `.codex/agents/<suggested_name>.toml` | Body is expected to be generic-shaped here — this is the one kind `generate_agent_spec` was designed for. Map to TOML per the rules above and write as-is. |
-| `pin` | keep the existing capability, change only its model tier | existing `.codex/agents/<name>.toml` if you can identify it from the conversation/repo; otherwise `.codex/agents/<suggested_name>.toml` as a fallback | Tell the user plainly: "this is a `pin` — the meaningful change is the `model` field (`model = \"<target_model_id>\"`), not a new role description. I'd normally just edit that one field on your existing agent file rather than replace it with this generic body; let me know which existing file this should target." Prefer a minimal edit over a full-file overwrite when you can locate the existing file. |
+| `extract` | mint a genuinely new capability from a recurring inline cluster | new file: `.gemini/agents/<suggested_name>.md` | Body is expected to be generic-shaped here — this is the one kind `generate_agent_spec` was designed for. Write as-is (after the render-target mapping above). |
+| `pin` | keep the existing capability, change only its model tier | existing `.gemini/agents/<name>.md` if you can identify it from the conversation/repo; otherwise `.gemini/agents/<suggested_name>.md` as a fallback | Tell the user plainly: "this is a `pin` — the meaningful change is the `model` line, not a new role description. I'd normally just edit that one field on your existing agent file rather than replace it with this generic body; let me know which existing file this should target." Prefer a minimal edit over a full-body overwrite when you can locate the existing file. |
 | `downgrade` | same as `pin` but framed as re-tiering an over-qualified capability down | same as `pin` | Same honesty note as `pin`. |
 | `adopt` | stop minting this pattern inline; an existing capability already covers it | usually **no new file** | Say so directly: "this is an `adopt` — no new file is needed, `<existing capability>` already covers this. I'll skip writing anything; the actionable part is reaching for it next time." Only write something (e.g., a short note) if the user asks for a durable reminder. |
 | `swap` | replace a capability with a better-fit existing one | the **existing** capability's file, if identifiable | Same posture as `adopt` — this is a pointer to something that already exists, not new content. Don't write a new agent file under this kind without the user explicitly asking for one. |
@@ -335,22 +302,12 @@ real; only the prose body is currently kind-blind). Per kind:
 | `gap` | no fitting capability exists | none — no artifact | Never call `generate_agent_spec` for this kind. Present as a signal only. |
 
 `TODO(reviewer)`: this table is this skill's interpretation of how to
-stay honest around the FU-1 generic-body gap and the codex TOML-mapping
-gap above — confirm both against product intent once
-`generate_agent_spec` becomes kind-aware and codex-shape-aware, and
-simplify accordingly.
+stay honest around the FU-1 generic-body gap and the render-target note
+above — confirm both against product intent once `generate_agent_spec`
+becomes kind-aware and, once the Gemini render target above is smoke-
+tested, simplify accordingly.
 
 ### 6. Write (only on explicit confirmation)
-
-**Render-target doc citation.** The `.codex/agents/<name>.toml` render
-target used below follows the Codex CLI custom-agents contract
-documented at https://developers.openai.com/codex/subagents (pinned as
-of 2026-07-16, per cardinalhq/cardinal-agent-plugins#20). This is a
-version-pinned doc citation, not a live smoke test — no Codex CLI
-install is available in this repo to verify end-to-end. If Codex CLI
-changes this contract (path, file extension, discovery mechanism, or
-field shape), this skill's render target needs updating in lock-step;
-re-pin the citation date when that happens.
 
 **Validate the target-file basename before anything else.** The
 `suggested_name` field is server-authored so this is defence in depth,
@@ -366,22 +323,23 @@ attempt a rewrite or a slugification pass.
 - Whether it's a new file or an edit to an existing one, and if an
   edit, which fields change (ideally just the `model` line for
   `pin`/`downgrade`).
-- The full TOML artifact body that would land (post-mapping, per step
-  5).
-- A plain confirmation question ("write this to
-  `.codex/agents/<name>.toml`? yes/no").
+- The full artifact body that would land (post-mapping, per step 5).
+- A plain confirmation question ("write this to `.gemini/agents/
+  <name>.md`? yes/no").
 
 Only write after an explicit "yes"-shaped answer in the conversation.
 No write on silence, hedging, or topic change. After writing, tell the
-user this **takes effect next session** (Codex loads
-`.codex/agents/*.toml` at startup; there is no live-registration
-channel — same restart requirement as the `cardinal-connect`/
+user this **takes effect next session** (Gemini CLI loads
+`.gemini/agents/*.md` at startup; there is no live-registration channel
+by default — same restart requirement the `cardinal-connect`/
 `cardinal-disconnect` skills already ask for when they touch
-`~/.codex/config.toml` or `~/.codex/hooks.json`) — never imply the
-current conversation just changed. Consent, revert, and distribution
-are git: the artifact lands in the working tree like any other change,
-reviewed in the diff, reverted with `git checkout --`, shared via the
-repo. There is no separate revoke/sync mechanism to explain.
+`~/.gemini/settings.json` — though `/agents reload` may pick it up
+without a restart if the user's Gemini CLI version supports it,
+mention that as a secondary option) — never imply the current
+conversation just changed. Consent, revert, and distribution are git:
+the artifact lands in the working tree like any other change, reviewed
+in the diff, reverted with `git checkout --`, shared via the repo.
+There is no separate revoke/sync mechanism to explain.
 
 ### 7. Mark (1 call per candidate you presented)
 
@@ -452,8 +410,8 @@ confidently you say the number, not whether you say it.
 - Don't invent a cohort comparison when a tool response says there
   isn't one.
 - Don't write anything without an explicit "yes" in this conversation.
-- Don't auto-invoke yourself opportunistically. Codex has no
-  `disable-model-invocation` frontmatter gate the way the claude
+- Don't auto-invoke yourself opportunistically. Gemini CLI has no
+  `disable-model-invocation`-style frontmatter gate the way the claude
   adapter does — there is no hard mechanism here, only this prose rule
   and a narrowly-scoped `description` field. Treat it as load-bearing
   anyway: only run this flow when the user explicitly asks to optimize

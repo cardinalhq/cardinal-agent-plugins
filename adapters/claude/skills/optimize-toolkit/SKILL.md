@@ -162,19 +162,13 @@ you:
   replacing).
 - Two or more clusters look like near-duplicates of each other →
   `consolidate`.
-- **D5 outcome gate**: `adopt`/`swap`/`pin`/`downgrade` are only valid
-  when the merged/lost-PR outcome signal is available for the cohort;
-  absent it the server may only support `extract`/`gap`/`consolidate`.
-  These 8 tools don't expose an explicit "cohort outcome available"
-  boolean, so treat this as a **soft prior, not a hard gate you can
-  compute** — pick your best-guess `kind`, and if
-  `outcomes__generate_agent_spec` (next step) errors or clearly can't
-  back the kind you asked for, fall back to `extract` or say plainly
-  that this recommendation isn't outcome-backed yet rather than
-  guessing further. Tracked upstream: cardinalhq/conductor#1320 —
-  once `outcomes__generate_agent_spec` surfaces `outcome_backed` /
-  `kind_supported`, delete this inference logic and read the fields
-  directly.
+- **D5 outcome gate**: `adopt`/`swap`/`pin`/`downgrade` require the
+  cohort outcome signal to be present for this candidate. Pick your
+  best-guess `kind` here from the signals above — the gate itself is
+  validated authoritatively after `outcomes__generate_agent_spec` in
+  step 5 (Compose), which returns `outcome_backed` / `kind_supported`
+  directly (cardinalhq/conductor#1322). No inference from errors or
+  body shape needed.
 - If nothing in the cluster fits any artifact-bearing kind, it's a
   `gap` — a signal worth naming in conversation ("you keep doing X by
   hand; there's no fitting capability for it yet") with **no artifact
@@ -209,6 +203,21 @@ artifact). This is a **server-authored** artifact — you do not compose
 the markdown; you present it and, on confirmation, write it verbatim
 (cosmetic adaptation only: renaming to fit repo conventions, trimming an
 obviously-irrelevant tool from the allowlist).
+
+**D5 outcome gate — read directly.** The response carries
+`outcome_backed: boolean` and `kind_supported: boolean`
+(cardinalhq/conductor#1322). Read both before presenting the candidate:
+
+- If `kind_supported === false`, fall back to kind `extract` and tell
+  the user plainly why: "this recommendation kind needs cohort outcome
+  data your sessions don't have populated yet — falling back to
+  `extract`."
+- Never present or write a `pin`/`downgrade`/`adopt`/`swap` artifact
+  when `outcome_backed === false` — this is a hard gate.
+- This is independent of the `warning: "artifact_kind_not_yet_specialized"`
+  field described below in **Known gap** — that flags body
+  specialization (FU-1), not D5 outcome validity. Both can appear on
+  the same response.
 
 **Known gap — be honest about it.** `outcomes__generate_agent_spec`
 today emits the same shape of markdown body regardless of `kind`
