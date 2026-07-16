@@ -233,8 +233,54 @@ re-summarizing:
 - spec's `description` frontmatter → TOML `description`
 - the markdown body's prose (everything after frontmatter) → TOML
   `developer_instructions`, as a verbatim triple-quoted string — do not
-  paraphrase or trim it
-- the resolved `target_model_id` from `org_offered_tiers` → TOML `model`
+  paraphrase or trim it. TOML has two triple-quote flavors and they are
+  not interchangeable, so pick deliberately rather than defaulting:
+  - Default to `'''…'''` — a **literal** string, no escape processing —
+    for `developer_instructions`. This preserves the markdown body
+    exactly as the server wrote it: backslashes, `\n`/`\t` sequences,
+    and backticks all pass through unchanged.
+  - **Delimiter collision:** if the body itself contains a `'''`
+    sequence, fall back to `"""…"""` (a **basic** string) instead, and
+    properly escape the body as you go — every `\` becomes `\\`, every
+    `"` becomes `\"`; backticks need no escaping.
+  - If the body contains **both** `'''` and `"""`, that's rare enough
+    that guessing is worse than stopping: reject the mapping and
+    surface to the user verbatim — "agent body contains both `'''` and
+    `"""` triple-quote delimiters — cannot represent in TOML without
+    lossy re-encoding; surface to user for a manual edit" — rather than
+    silently mangling it into either flavor.
+  - Never mix basic and literal quoting within the same field. Pick one
+    flavor for the whole `developer_instructions` value.
+- **drop `tools:` / `tool_allowlist:` from the server frontmatter —
+  there is no field to map it to.** Codex's `mcp_servers` is a
+  different concept (server-level MCP connections this codex install
+  has, not a per-tool allowlist), so there's no lossless translation
+  between the two. Say so out loud when you present the artifact:
+  "codex's custom-agent format doesn't have a per-tool allowlist — the
+  server's tool list is dropped; the agent will have access to whatever
+  MCP servers this codex install has connected. If specific tool
+  restrictions matter, note them in the developer_instructions body
+  instead." If the user asks about the dropped list after that, offer
+  to fold it into `developer_instructions` as an inline note rather
+  than resurrecting the missing frontmatter field.
+- **model precedence:** the server-authored spec's frontmatter
+  sometimes carries its own `model:` (from the recommendation's chosen
+  tier); the `target_model_id` resolved from `org_offered_tiers` in
+  step 3 (Score) also exists, and the two can differ (e.g. the server
+  picked a model no longer in this org's offered tiers).
+  **`org_offered_tiers`'s resolved `target_model_id` always wins over
+  the server-frontmatter `model:`** for the TOML `model` field — the
+  org's currently-offered tiers are the source of truth for what will
+  actually work in this org today, and a server-frontmatter model can
+  be stale or reflect a cohort that isn't this org. If the two differ,
+  don't error — log the disagreement in the dry-run explanation
+  ("server suggested `<server-model>`, using org's `<tier>` tier
+  `<target_model_id>` instead"). This is a precedence rule, not a new
+  gate: if `org_offered_tiers` has no matching tier for the kind you're
+  recommending (e.g. `pin` to `cheap` but this org has no `cheap`
+  tier), that's still the existing step-3 stop — "that door is closed
+  for this org" — don't fall back to the server's suggested model to
+  route around it.
 - leave `model_reasoning_effort`, `sandbox_mode`, `mcp_servers`, and
   `nickname_candidates` **unset** — none of the 8 tools supply source
   data for them, and guessing a value would be inventing content the
@@ -246,7 +292,16 @@ same as the claude adapter does for its markdown — the "full artifact
 before confirmation" contract doesn't change, only the target format
 does. `TODO(reviewer)`: once conductor ships a codex-shaped
 `generate_agent_spec` response (or a `render_target` parameter), delete
-this mapping step and use the server output directly.
+this mapping step and use the server output directly. The
+review-flagged TOML-mapping gaps are otherwise closed as of this
+commit: string-flavor escaping (triple-quote delimiter choice and the
+`'''`/`"""` collision case), the dropped `tools:`/`tool_allowlist:`
+field, and `model:`-vs-`target_model_id` precedence are all specified
+above. The one still-open item is whether Codex CLI actually loads
+`.codex/agents/<name>.toml` at startup at all — that render-target
+assumption rests on external docs, not a live smoke test against an
+installed CLI, and is tracked as
+cardinalhq/cardinal-agent-plugins#20.
 
 **Known gap — be honest about it, independent of the format gap above.**
 `outcomes__generate_agent_spec` today emits the same shape of body
