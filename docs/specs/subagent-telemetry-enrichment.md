@@ -227,7 +227,7 @@ Whether the qualified MCP tool name is additionally **split** into
 | codex | Yes | `adapters/codex/hooks/cardinal-codex-telemetry.py:204-208` (`normalize_tool_name`), `:373-380` (emission: `tool_name` keeps the raw qualified name, `mcp_server_name`/`mcp_tool_name` added alongside) |
 | cursor | Yes | `adapters/cursor/hooks/cardinal-cursor-telemetry.py:207-216` (`_mcp_split`), `:432-437` |
 | gemini | Yes | `adapters/gemini/hooks/cardinal-gemini-telemetry.py:298-308` (`normalize_tool`), `:342-347` |
-| omnigent | Yes | `adapters/omnigent/cardinal_omnigent/telemetry.py:399-406` (`_split_mcp`), `:450-452` |
+| omnigent | Yes | `adapters/omnigent/cardinal_omnigent/telemetry.py:427-434` (`_split_mcp`), `:491-493` |
 
 Claude's non-split is a **deliberate, existing asymmetry, not a gap**: the
 lakerunner extractor's claude branch (`toolkitKey`, `processor.go:341-376`)
@@ -255,7 +255,7 @@ make this "keep both" tradeoff explicit in comments).
 | codex | Yes (probed) — `cardinal-codex-telemetry.py:588` | Yes (probed) — `:589` | Yes — `:590`, `subagent_description_from_payload` `:546-568` | Yes (probed) — `:593` | No — `total_tokens` only, `:594` |
 | cursor | Yes (probed, no `agent_id`) — `cardinal-cursor-telemetry.py:569` | **No** — grep-empty for `agent_id` in this file | Yes — `:570`, `subagent_description_from_payload` `:545-555` | Yes (probed) — `:574` | No — and **no `total_tokens` either** (Cursor's documented `subagentStop` payload has no token field at all — "gap D"; only `duration_ms`/`message_count`/`tool_call_count`/`loop_count` are emitted, `:559-561,575-579`) |
 | gemini | Yes (probed) — `cardinal-gemini-telemetry.py:444-450` | Yes (probed) — `:451` | Yes — `:452`, `subagent_description_from_payload` `:395-414` | Yes (probed) — `:455-460` | No — `total_tokens` only, `:431-439,461` |
-| omnigent | **No** — no type-taxonomy field exists in the contract | Not by that name — carries `subagent_id`, a thread/conversation id (`telemetry.py:543-544`), semantically closer to Claude's `agent_id` than to `subagent_type` | Yes — `telemetry.py:505-514,532` (`_subagent_description`; preference order: `cardinal.subagent` label → codex nickname/role/prompt → wrapper marker) | Yes (engine-injected `context.model`) — `:535` | No — `input_tokens`/`output_tokens`/`total_tokens` are cumulative-to-date (`usage_scope="session_cumulative"`, `:536-538,542`), not per-component; no tool_counts |
+| omnigent | **No** — no type-taxonomy field exists in the contract | Not by that name — carries `subagent_id`, a thread/conversation id (`telemetry.py:596-597`), semantically closer to Claude's `agent_id` than to `subagent_type` | Yes — `telemetry.py:558-567,585` (`_subagent_description`; preference order: `cardinal.subagent` label → codex nickname/role/prompt → wrapper marker) | Yes (engine-injected `context.model`) — `:588` | No — `input_tokens`/`output_tokens`/`total_tokens` are cumulative-to-date (`usage_scope="session_cumulative"`, `:589-591,595`), not per-component; no tool_counts |
 
 `subagent_type`/`agent_id`/`model` are **probed** (multiple candidate
 payload keys tried in sequence) on codex/cursor/gemini because none of the
@@ -281,7 +281,7 @@ Omnigent's absence of `subagent_type` is a **structural** difference, not a
 missing probe: omnigent's engine has no native "subagent type" taxonomy to
 read — a spawned child is identified by labels (`cardinal.subagent`, codex
 nickname/role, or a wrapper marker), which is exactly what
-`subagent_description` already carries (`telemetry.py:505-514`). Synthesizing
+`subagent_description` already carries (`telemetry.py:558-567`). Synthesizing
 a `subagent_type` value by copying `subagent_description` into a
 differently-named field would not add information and would misrepresent
 the two fields' distinct semantics (a free-text label vs. a closed-ish
@@ -303,7 +303,7 @@ otlp.py:70`) when neither matches.
 | codex | `adapters/codex/hooks/cardinal-codex-telemetry.py:167-169` |
 | cursor | `adapters/cursor/hooks/cardinal-cursor-telemetry.py:371` |
 | gemini | `adapters/gemini/hooks/cardinal-gemini-telemetry.py:156` |
-| omnigent | `adapters/omnigent/cardinal_omnigent/telemetry.py:212`, tested at `adapters/omnigent/tests/test_omnigent.py:123-127` |
+| omnigent | `adapters/omnigent/cardinal_omnigent/telemetry.py:212`, tested at `adapters/omnigent/tests/test_omnigent.py:138-142` |
 
 Because `detect_command` returns `None` for prompts with no leading slash
 command, `cardinal_command` is present only on the subset of `cardinal.git_state`
@@ -328,9 +328,9 @@ skill events for runtimes that have no skills."
 Omnigent emits six OTLP event types from `telemetry.py`, reusing the exact
 `cardinal.*` / bare-name convention and underscore-spelled attribute keys
 the other four adapters converge on post-normalization: `cardinal.git_state`
-(`:216`), `api_request` (`:360`), `cardinal.turn_usage` (`:361`),
-`cardinal.turn_tool` (`:463`), `tool_result` (`:498`),
-`cardinal.subagent_usage` (`:547-548`). No `cardinal.plan_state`,
+(`:231`), `api_request` (`:388`), `cardinal.turn_usage` (`:389`),
+`cardinal.turn_tool` (`:504`), `tool_result` (`:551`),
+`cardinal.subagent_usage` (`:600-601`). No `cardinal.plan_state`,
 `cardinal.plan_usage`, `cardinal.turn_thought`, or `cardinal.turn_response` —
 omnigent has no plan/rate-limit surface and no separate thought/response
 capture. See §8 for why this adapter is not (yet) added to the shared
@@ -348,7 +348,7 @@ the adapters that actually emit each field (`MCP_SPLIT_ADAPTERS`,
 `tests/test_contract.py`) rather than widening the universal `REQUIRED_KEYS`
 set — `REQUIRED_KEYS` is imported verbatim by
 `adapters/omnigent/tests/test_omnigent.py` (`CONTRACT.REQUIRED_KEYS`,
-`test_omnigent.py:36-38`), so growing it with a field omnigent (or claude,
+`test_omnigent.py:49-51`), so growing it with a field omnigent (or claude,
 for the MCP split) doesn't emit would turn an intentional per-adapter
 asymmetry into a false failure in a suite that already passes.
 
@@ -363,12 +363,12 @@ yet — this is an infrastructure gap, not a shape mismatch:**
    `REQUIRED_KEYS` for `cardinal.turn_tool`, `cardinal.turn_usage`,
    `api_request`, `tool_result`, and `cardinal.subagent_usage` — each is
    satisfied today (verified against `tests/test_omnigent.py`'s live
-   assertions, e.g. `:238,145,137,256,362`).
+   assertions, e.g. `:253,160,152,271,377`).
 2. **`cardinal.git_state` legitimately fails 3 of the 6 required keys** —
    `cardinal_head_sha`, `cardinal_cwd`, `cardinal_remote_url`. Omnigent
    policies never see the workspace (`telemetry.py` module docstring,
    `docs/specs/omnigent-adapter.md` §Verified integration facts: no cwd,
-   repo, or branch anywhere in the policy contract); `test_omnigent.py:40-42`
+   repo, or branch anywhere in the policy contract); `test_omnigent.py:53-55`
    names this `WORKSPACE_KEYS` and subtracts it explicitly. This is a
    structural, permanent divergence — not something PLG.1 can close with an
    emit, since the data doesn't exist on omnigent's wire.
@@ -386,15 +386,21 @@ yet — this is an infrastructure gap, not a shape mismatch:**
    adapter 'omnigent'") before any key-level assertion even runs — this is
    the actual blocker, ahead of items 2–3.
 
+Back-reference: because omnigent stays out of `ADAPTERS`, `toolkit-hive-mind.md`
+§6 DoD item 5 ("the contract test covers all five adapters") is only
+partially met by this change — closing it needs a committed
+`adapters/omnigent/tests/goldens/*.json` fixture set for `test_contract.py`'s
+`load_adapter_events` glob (`test_contract.py:159-163`) to find.
+
 Per PLG.1's rule against forcing a broken/red test, omnigent is **not**
 added to `ADAPTERS`. It keeps its own, already-thorough suite
 (`adapters/omnigent/tests/test_omnigent.py`), which already asserts the
 capability-identity fields that do apply to it: MCP split on
 `cardinal.turn_tool` (`test_mcp_tool_call_keeps_qualified_name`,
-`:243-249`), `subagent_description` + `model` on `cardinal.subagent_usage`
-(`test_codex_native_child_emits_subagent_usage`, `:347-370`), and
+`:258-264`), `subagent_description` + `model` on `cardinal.subagent_usage`
+(`test_codex_native_child_emits_subagent_usage`, `:362-385`), and
 `cardinal_command` on `cardinal.git_state`
-(`test_slash_command_detected_from_prompt`, `:123-127`). Closing items 2–4
+(`test_slash_command_detected_from_prompt`, `:138-142`). Closing items 2–4
 above (a `goldens/` fixture set, a `subagent_type`-equivalent taxonomy, or a
 server-side-workspace substitute) is future work if omnigent needs to join
 the shared gate — none of the three is a PLG.1-sized change.
