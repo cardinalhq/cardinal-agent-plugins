@@ -105,7 +105,6 @@ OWNED_ENV_KEYS = {
     # at MCP server connect time)
     "CARDINAL_MCP_URL",
     "CARDINAL_MCP_API_KEY",
-    "CARDINAL_USER_EMAIL",
 }
 
 
@@ -201,12 +200,6 @@ def build_env_block(
     if mcp:
         env["CARDINAL_MCP_URL"] = mcp["url"]
         env["CARDINAL_MCP_API_KEY"] = mcp["api_key"]
-        # Forwarded as X-CardinalHQ-User-Email on every MCP call so the
-        # aggregator can resolve per-user context (see mcp-gateway
-        # aggregator/server.go makeToolHandler → outcomes CallContext).
-        user_email = (bundle.get("user") or {}).get("email") or ""
-        if user_email:
-            env["CARDINAL_USER_EMAIL"] = user_email
 
     return env
 
