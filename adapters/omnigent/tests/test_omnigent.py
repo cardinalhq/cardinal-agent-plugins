@@ -43,7 +43,7 @@ from cardinal_core import limits, pricing
 from cardinal_core.paths import AgentPaths, atomic_write_json_compact
 
 import cardinal_omnigent
-from cardinal_omnigent import _identity, spend_limits, telemetry
+from cardinal_omnigent import _identity, _subagent, spend_limits, telemetry
 from cardinal_omnigent import connect as omniconnect
 
 StubIngest = fixtures.load_stub_ingest()
@@ -105,6 +105,8 @@ class StubBackedTestCase(unittest.TestCase):
         self.addCleanup(telemetry._SESSIONS.clear)
         _identity._MEMO.clear()
         self.addCleanup(_identity._MEMO.clear)
+        _subagent._clear_for_tests()
+        self.addCleanup(_subagent._clear_for_tests)
 
 
 class TelemetryGitStateTests(StubBackedTestCase):
@@ -436,6 +438,241 @@ class BranchSniffTests(StubBackedTestCase):
         self.assertNotIn("cardinal.git_state", by_name(self.stub))
 
 
+class WorktreeParseTests(unittest.TestCase):
+    """The regex family that recognises polly's `git worktree add`
+    invocations. Pure-function coverage; no adapter state involved."""
+
+    def test_path_then_dash_b(self) -> None:
+        # Polly's fanout skill uses this exact form.
+        self.assertEqual(
+            _subagent.parse_worktree_add(
+                "git worktree add .worktrees/task-1 -b polly/task-1"),
+            (".worktrees/task-1", "polly/task-1"),
+        )
+
+    def test_dash_b_then_path(self) -> None:
+        self.assertEqual(
+            _subagent.parse_worktree_add(
+                "git worktree add -b feat/x .worktrees/x"),
+            (".worktrees/x", "feat/x"),
+        )
+
+    def test_dash_capital_b_force_recreate(self) -> None:
+        self.assertEqual(
+            _subagent.parse_worktree_add(
+                "git worktree add .worktrees/x -B feat/x"),
+            (".worktrees/x", "feat/x"),
+        )
+
+    def test_flags_before_path(self) -> None:
+        self.assertEqual(
+            _subagent.parse_worktree_add(
+                "git worktree add --force --no-track -b feat/y .worktrees/y"),
+            (".worktrees/y", "feat/y"),
+        )
+
+    def test_attach_existing_returns_none(self) -> None:
+        # `git worktree add <path> <commit-ish>` — branch not on the
+        # command line; the correlation falls back rather than shell out.
+        self.assertIsNone(_subagent.parse_worktree_add(
+            "git worktree add .worktrees/x feat/existing"))
+
+    def test_non_worktree_command_returns_none(self) -> None:
+        self.assertIsNone(_subagent.parse_worktree_add(
+            "git checkout -b feat/x"))
+        self.assertIsNone(_subagent.parse_worktree_add(
+            "git worktree list"))
+
+
+class SubagentCorrelationTests(StubBackedTestCase):
+    """End-to-end: parent-side worktree add + sys_session_send correlate to
+    override the child's polluted `cardinal.branch` label."""
+
+    def _dispatch_with_worktree(
+        self, parent_sid: str, worktree_path: str, branch: str,
+        child_conv_id: str, input_text: str,
+    ) -> None:
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            parent_sid,
+            command=f"git worktree add {worktree_path} -b {branch}"),
+            self.config)
+        telemetry.telemetry_policy(fixtures.sys_session_send_call_event(
+            parent_sid, input_text=input_text), self.config)
+        telemetry.telemetry_policy(fixtures.sys_session_send_result_event(
+            parent_sid,
+            child_conversation_id=child_conv_id, input_text=input_text),
+            self.config)
+
+    def test_single_fanout_registers_child_branch(self) -> None:
+        self._dispatch_with_worktree(
+            "omni-polly",
+            worktree_path=".worktrees/task-1",
+            branch="polly/task-1",
+            child_conv_id="conv_child_1",
+            input_text="Implement the login refactor in .worktrees/task-1.",
+        )
+        self.assertEqual(
+            _subagent.child_correlated_branch("conv_child_1"),
+            "polly/task-1",
+        )
+
+    def test_cross_initiative_fanout_registers_distinct_branches(self) -> None:
+        # Polly fans out two children to two different worktrees. Each
+        # child must resolve to its OWN branch, not the parent's.
+        parent = "omni-polly-x"
+        # First worktree + dispatch pair.
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            parent,
+            command="git worktree add .worktrees/alpha -b feat/alpha"),
+            self.config)
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            parent,
+            command="git worktree add .worktrees/beta -b fix/beta"),
+            self.config)
+        # Two dispatches, each input mentions only its own worktree.
+        telemetry.telemetry_policy(fixtures.sys_session_send_call_event(
+            parent, title="alpha",
+            input_text="Do work in .worktrees/alpha per the contract."),
+            self.config)
+        telemetry.telemetry_policy(fixtures.sys_session_send_result_event(
+            parent, child_conversation_id="conv_alpha",
+            input_text="Do work in .worktrees/alpha per the contract."),
+            self.config)
+        telemetry.telemetry_policy(fixtures.sys_session_send_call_event(
+            parent, title="beta",
+            input_text="Do work in .worktrees/beta per the contract."),
+            self.config)
+        telemetry.telemetry_policy(fixtures.sys_session_send_result_event(
+            parent, child_conversation_id="conv_beta",
+            input_text="Do work in .worktrees/beta per the contract."),
+            self.config)
+        self.assertEqual(
+            _subagent.child_correlated_branch("conv_alpha"), "feat/alpha")
+        self.assertEqual(
+            _subagent.child_correlated_branch("conv_beta"), "fix/beta")
+
+    def test_input_without_worktree_path_falls_back(self) -> None:
+        # Worktree was created but polly's dispatch input didn't name the
+        # path — correlation misses; downstream falls through to label.
+        parent = "omni-polly-miss"
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            parent,
+            command="git worktree add .worktrees/task-1 -b polly/task-1"),
+            self.config)
+        telemetry.telemetry_policy(fixtures.sys_session_send_call_event(
+            parent, input_text="Please implement the auth refactor."),
+            self.config)
+        telemetry.telemetry_policy(fixtures.sys_session_send_result_event(
+            parent, child_conversation_id="conv_orphan",
+            input_text="Please implement the auth refactor."), self.config)
+        self.assertIsNone(_subagent.child_correlated_branch("conv_orphan"))
+
+    def test_no_prior_worktree_add_no_registration(self) -> None:
+        # Sub-agent dispatched without polly having run `git worktree add`
+        # (e.g. non-fanout flow) — nothing to correlate against.
+        parent = "omni-polly-none"
+        telemetry.telemetry_policy(fixtures.sys_session_send_call_event(
+            parent, input_text="Do the thing in .worktrees/task-1."),
+            self.config)
+        telemetry.telemetry_policy(fixtures.sys_session_send_result_event(
+            parent, child_conversation_id="conv_none",
+            input_text="Do the thing in .worktrees/task-1."), self.config)
+        self.assertIsNone(_subagent.child_correlated_branch("conv_none"))
+
+    def test_worktree_add_does_not_emit_boundary_git_state(self) -> None:
+        # `git worktree add` is a fan-out setup step, not a branch move for
+        # the parent — no cardinal.git_state boundary emission (that would
+        # falsely re-label polly's session with the child's target branch).
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            "omni-parent",
+            command="git worktree add .worktrees/task-1 -b polly/task-1"),
+            self.config)
+        self.assertNotIn("cardinal.git_state", by_name(self.stub))
+
+
+class BranchResolutionOverrideTests(StubBackedTestCase):
+    """`_resolve_branch` prefers a correlated child branch over the child's
+    (potentially polluted) `cardinal.branch` label. Monkey-patches
+    `current_conv_id` / `lookup_subagent_identity` to simulate the omnigent
+    ContextVar + store without needing runtime initialization."""
+
+    def _patch_identity(
+        self, conv_id: str | None,
+        identity: _subagent.SubagentIdentity | None = None,
+    ) -> None:
+        self._saved_current = _subagent.current_conv_id
+        self._saved_lookup = _subagent.lookup_subagent_identity
+        _subagent.current_conv_id = lambda: conv_id  # type: ignore[assignment]
+        _subagent.lookup_subagent_identity = (  # type: ignore[assignment]
+            lambda _cid: identity
+        )
+        self.addCleanup(self._restore_identity)
+
+    def _restore_identity(self) -> None:
+        _subagent.current_conv_id = self._saved_current  # type: ignore[assignment]
+        _subagent.lookup_subagent_identity = self._saved_lookup  # type: ignore[assignment]
+
+    def test_correlated_branch_wins_over_polluted_label(self) -> None:
+        # Simulate polly's cwd-inherited pollution: the child's label says
+        # `infra/polly-branch`, but correlation says the real worktree
+        # branch was `feat/real-child`.
+        _subagent._register_child_branch("conv_child_1", "feat/real-child")
+        identity = _subagent.SubagentIdentity(
+            conversation_id="conv_child_1",
+            parent_conversation_id="conv_parent",
+            sub_agent_name="claude_code",
+        )
+        self._patch_identity("conv_child_1", identity)
+        telemetry.telemetry_policy(fixtures.request_event(
+            "omni-child",
+            labels={"cardinal.branch": "infra/polly-branch"}),
+            self.config)
+        attrs = attrs_of(by_name(self.stub)["cardinal.git_state"][0])
+        self.assertEqual(attrs["cardinal_branch"], "feat/real-child")
+        self.assertEqual(attrs["cardinal_branch_source"],
+                         "correlated_from_parent_dispatch")
+        self.assertEqual(attrs["cardinal_initiative_name"], "real-child")
+        self.assertEqual(attrs["cardinal_initiative_type"], "feature")
+        # Sub-agent marker still stamped so downstream can group.
+        self.assertTrue(attrs["cardinal_sub_agent"])
+        self.assertEqual(attrs["cardinal_parent_conversation_id"], "conv_parent")
+        self.assertEqual(attrs["cardinal_sub_agent_name"], "claude_code")
+
+    def test_uncorrelated_subagent_marks_inherited_source(self) -> None:
+        # No correlation entry; identity lookup still says sub-agent. Label
+        # value flows through but source signals it's inherited (suspect).
+        identity = _subagent.SubagentIdentity(
+            conversation_id="conv_child_2",
+            parent_conversation_id="conv_parent",
+            sub_agent_name="codex",
+        )
+        self._patch_identity("conv_child_2", identity)
+        telemetry.telemetry_policy(fixtures.request_event(
+            "omni-child-2",
+            labels={"cardinal.branch": "infra/polly-branch"}),
+            self.config)
+        attrs = attrs_of(by_name(self.stub)["cardinal.git_state"][0])
+        self.assertEqual(attrs["cardinal_branch"], "infra/polly-branch")
+        self.assertEqual(attrs["cardinal_branch_source"],
+                         "inherited_from_parent_cwd")
+        self.assertTrue(attrs["cardinal_sub_agent"])
+        self.assertEqual(attrs["cardinal_sub_agent_name"], "codex")
+
+    def test_top_level_session_no_marker_no_source(self) -> None:
+        # No conv id available (runtime not init / non-FastAPI path) → no
+        # correlation, no identity, no marker. Behaviour is unchanged.
+        self._patch_identity(None, None)
+        telemetry.telemetry_policy(fixtures.request_event(
+            "omni-top",
+            labels={"cardinal.branch": "feat/normal"}),
+            self.config)
+        attrs = attrs_of(by_name(self.stub)["cardinal.git_state"][0])
+        self.assertEqual(attrs["cardinal_branch"], "feat/normal")
+        self.assertNotIn("cardinal_branch_source", attrs)
+        self.assertNotIn("cardinal_sub_agent", attrs)
+        self.assertNotIn("cardinal_parent_conversation_id", attrs)
+
+
 class ContextModelFallbackTests(StubBackedTestCase):
     def test_context_model_used_when_data_has_none(self) -> None:
         usage = {k: v for k, v in fixtures.DEFAULT_TURN_USAGE.items()
@@ -647,7 +884,7 @@ class RegistryTests(unittest.TestCase):
     def test_policy_registry_and_pin(self) -> None:
         self.assertEqual(cardinal_omnigent.POLICY_REGISTRY,
                          [telemetry.telemetry_policy, spend_limits.spend_limits_policy])
-        self.assertEqual(cardinal_omnigent.OMNIGENT_VERIFIED_COMMIT, "2b3b54a4")
+        self.assertEqual(cardinal_omnigent.OMNIGENT_VERIFIED_COMMIT, "6cbd72b1")
 
     def test_registry_policies_accept_config_by_arity(self) -> None:
         import inspect

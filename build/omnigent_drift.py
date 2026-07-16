@@ -15,6 +15,25 @@ Contract surface (the files the adapter's behavior was derived from):
   - omnigent/policies/function.py  FunctionPolicy._build_event (the dict
                                    our accessors actually read)
   - omnigent/policies/registry.py  POLICY_REGISTRY resolution
+  - omnigent/runtime/telemetry.py  current_session_id ContextVar +
+                                   _fastapi_session_id_hook — the pre-#2494
+                                   channel _subagent uses to reach the
+                                   omnigent conversation id from a policy
+                                   evaluation (adapter-side sub-agent branch
+                                   correlation workaround)
+  - omnigent/entities/conversation.py  Conversation.kind /
+                                       parent_conversation_id /
+                                       sub_agent_name — the columns the
+                                       subagent-identity lookup reads via
+                                       get_conversation_store(). Rename or
+                                       type-change here silently breaks
+                                       cross-initiative attribution for
+                                       polly-orchestrated fan-outs.
+  - omnigent/tools/builtins/spawn.py  SysSessionSendTool result JSON handle
+                                      shape (`{task_id, kind, agent, title,
+                                      conversation_id, status, message}`)
+                                      that correlate_dispatch parses to
+                                      extract the child conv id.
 
 On failure: re-verify the adapter against upstream HEAD (see
 docs/specs/omnigent-adapter.md §Verified integration facts), update the
@@ -41,6 +60,9 @@ CONTRACT_FILES = (
     "omnigent/policies/types.py",
     "omnigent/policies/function.py",
     "omnigent/policies/registry.py",
+    "omnigent/runtime/telemetry.py",
+    "omnigent/entities/conversation.py",
+    "omnigent/tools/builtins/spawn.py",
 )
 
 

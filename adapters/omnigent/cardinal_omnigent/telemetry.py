@@ -85,12 +85,12 @@ from typing import Any
 
 from cardinal_core import bashclass, initiative, otlp, pricing
 
-from . import _events, _identity
+from . import _events, _identity, _subagent
 
 SCOPE_NAME = "cardinal-omnigent-policy"
 # Single source of truth is the package __init__; imported lazily in
 # _plugin_version() to dodge the circular import during package init.
-_PLUGIN_VERSION_FALLBACK = "0.2.0"
+_PLUGIN_VERSION_FALLBACK = "0.3.0"
 
 # Session-state key anchoring the cost delta between llm_response events.
 COST_ANCHOR_KEY = "cardinal.last_total_cost_usd"
@@ -211,16 +211,44 @@ def _git_state_record(
         "cardinal_initiative_type": initiative_type,
         "cardinal_command": initiative.detect_command(prompt),
     }
+    # Sub-agent marker attributes. When this session is a polly-dispatched
+    # child (Conversation.kind == "sub_agent" per the omnigent store), stamp
+    # the identity so downstream can distinguish parent-cwd-inherited
+    # attribution from top-level session attribution. Correlation, when it
+    # succeeded, already set branch_source to "correlated_from_parent_dispatch"
+    # (trustworthy); a fallback here means the branch value is polly's own
+    # branch that leaked through the child's cwd-derived label.
+    identity = _subagent.lookup_subagent_identity(_subagent.current_conv_id())
+    if identity is not None:
+        attrs["cardinal_sub_agent"] = True
+        attrs["cardinal_parent_conversation_id"] = identity.parent_conversation_id
+        if identity.sub_agent_name:
+            attrs["cardinal_sub_agent_name"] = identity.sub_agent_name
+        if branch_source is None and branch:
+            branch_source = "inherited_from_parent_cwd"
     if branch_source:
         attrs["cardinal_branch_source"] = branch_source
     return otlp.log_record("cardinal.git_state", attrs, ts_ns)
 
 
 def _resolve_branch(event: Any, state: dict[str, Any]) -> tuple[str | None, str | None]:
-    """(branch, source). Labels are the primary channel; a branch
-    sniffed from a shell tool_call in this session is the fallback —
-    it exists exactly for sessions whose static creation-time labels
-    predate a mid-session `git checkout -b`."""
+    """(branch, source). Resolution order:
+
+    1. Parent-side dispatch correlation — polly-orchestrated children have
+       their real worktree branch registered when the parent's
+       ``sys_session_send`` tool_result fired. This overrides labels because
+       upstream (`sys_session_send` has no `workspace` field) means the
+       child's `cardinal.branch` label was stamped by git-state.py running
+       in polly's cwd — i.e. it's polly's branch, not the child's.
+    2. Labels convention (``cardinal.branch`` on the child's session labels)
+       — the primary channel for top-level sessions.
+    3. In-session sniff — a `git checkout -b` / `git switch -c` in a shell
+       tool_call, for sessions whose creation-time labels predate a
+       mid-session branch move.
+    """
+    correlated = _subagent.child_correlated_branch(_subagent.current_conv_id())
+    if correlated:
+        return correlated, "correlated_from_parent_dispatch"
     branch = _label_str(_events.labels(event), "cardinal.branch")
     if branch:
         return branch, None
@@ -410,11 +438,24 @@ def _sniff_branch(
     event: Any, config: dict[str, Any], session_id: str,
     state: dict[str, Any], command: str,
 ) -> None:
-    """Branch-change enrichment: a `git checkout -b` / `git switch -c`
-    in a shell tool call marks an initiative boundary the static
-    creation-time labels can't see. Remember it and emit a fresh
-    git_state at the boundary (labels, when present, still win at
-    request time — see _resolve_branch)."""
+    """Branch-change enrichment. Handles two kinds of shell command:
+
+    - ``git checkout -b`` / ``git switch -c/-C`` — marks an initiative
+      boundary the creation-time labels can't see. Emits a fresh
+      ``cardinal.git_state`` at the boundary and caches the branch for
+      the labels-absent fallback path in :func:`_resolve_branch`.
+    - ``git worktree add <path> -b <branch>`` — polly's fanout skill
+      creates a per-task worktree BEFORE dispatching each sub-agent.
+      Recorded in the parent's ``worktree_registry``; consumed by
+      ``_subagent.correlate_dispatch`` on the paired
+      ``sys_session_send`` tool_result to override the child's polluted
+      ``cardinal.branch`` label. No boundary emission for the parent —
+      polly hasn't moved off its own branch.
+    """
+    worktree = _subagent.parse_worktree_add(command)
+    if worktree is not None:
+        _subagent.register_worktree(state, worktree[0], worktree[1])
+        return
     match = _BRANCH_RE.search(command)
     if match is None:
         return
@@ -469,6 +510,18 @@ def _handle_tool_result(event: Any, config: dict[str, Any], session_id: str) -> 
     if not tool_name:
         return
     data = _events.data(event)
+
+    if tool_name == "sys_session_send":
+        # Parent-side dispatch correlation: extract the child's conversation_id
+        # from the tool result and match the dispatch input text against
+        # worktree adds this parent session made earlier. On a match, the
+        # child's real branch is registered so its own events attribute
+        # correctly instead of inheriting polly's cwd-derived label. See
+        # _subagent module docstring for the full mechanism and why this
+        # cannot be a purely observational lookup.
+        state = _session_counters(session_id)
+        request_data = _events.get(event, "request_data")
+        _subagent.correlate_dispatch(state, request_data, data)
 
     success = data.get("success")
     if success is None:
