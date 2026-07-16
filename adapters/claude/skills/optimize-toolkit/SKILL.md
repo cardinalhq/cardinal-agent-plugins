@@ -30,14 +30,17 @@ This skill orchestrates eight `outcomes__*` tools served by the
 consent). They are documented in conductor's
 `docs/specs/optimize-toolkit-mcp-tools.md`:
 
-1. `outcomes__my_recent_spawns`
-2. `outcomes__my_turn_pattern`
-3. `outcomes__my_toolkit_adoption`
-4. `outcomes__cluster_spawns`
-5. `outcomes__org_offered_tiers`
-6. `outcomes__estimate_savings`
-7. `outcomes__generate_agent_spec`
-8. `outcomes__mark`
+1. `outcomes__my_turn_pattern`
+2. `outcomes__my_toolkit_adoption`
+3. `outcomes__cluster_spawns`
+4. `outcomes__org_offered_tiers`
+5. `outcomes__estimate_savings`
+6. `outcomes__generate_agent_spec`
+7. `outcomes__mark`
+
+`outcomes__my_recent_spawns` also exists on the same server — it's a
+raw spawn history for ad-hoc debugging, not part of this flow. Reach
+for it only if the user explicitly asks "what did I spawn recently?".
 
 **Check your available tools before doing anything else.** As of this
 writing, the maestro routes behind these tools are live, but the
@@ -74,15 +77,33 @@ both with `window: "30d"`. From the two responses, compose a short
 - Name the toolkit-adoption headline the first candidate will target,
   e.g. "42 Explore spawns / 480k tokens on opus in the last 30 days"
   (from `my_toolkit_adoption.agents` or `.skills`).
+- **No usable evidence, stop before any ratio math.** If
+  `my_toolkit_adoption.coverage.sessions_scanned == 0`, or
+  `my_turn_pattern.turns_total` is 0, there is nothing to compute a
+  coverage ratio from — say "no optimization candidates right now, not
+  enough session history yet" and stop. Never divide by
+  `sessions_scanned` before this check passes.
 - **Coverage caveat.** The 8-tool contract doesn't ship one unified
   `enriched_share` field (an earlier draft of the skill spec assumed a
   single bundle response with that shape; the shipped tool contract
   splits it per-tool instead — treat the per-tool `coverage` objects as
-  authoritative). Use `my_toolkit_adoption.coverage.sessions_with_toolkit_data
-  / coverage.sessions_scanned` as the enrichment-coverage proxy. When
-  that ratio is under 0.5, prepend a one-line caveat: "evidence from
-  N/M of your sessions in the last 30 days — coverage will climb as you
-  keep working on a current plugin version." Also check
+  authoritative). Use `my_toolkit_adoption.coverage.sessions_with_tier_attribution
+  / coverage.sessions_scanned` as the enrichment-coverage proxy —
+  `sessions_with_tier_attribution` is the subset where `tok_by_model`
+  is actually populated (v0.12.x fields present), which is what this
+  skill's savings math depends on; it's the closest available stand-in
+  for the `enriched_share` the original spec draft described (see
+  `optimize-toolkit-mcp-tools.md:214-218`). Treat
+  `sessions_with_toolkit_data / sessions_scanned` as a **separate,
+  secondary** check — "does the plugin see this user at all" — worth
+  mentioning if it diverges sharply from the tier-attribution ratio
+  (e.g. a very-online-but-pre-v0.12 user), but don't gate the caveat on
+  it: a user can score 1.0 on toolkit-data presence while still being
+  at 0 on tier attribution, and it's the latter that governs whether a
+  savings number is grounded. When the tier-attribution ratio is under
+  0.5, prepend a one-line caveat: "evidence from N/M of your sessions
+  in the last 30 days — coverage will climb as you keep working on a
+  current plugin version." Also check
   `my_turn_pattern.coverage.plugin_versions_seen` — if it shows a stale
   version for recent turns, mention the plugin-version-drift possibility
   and suggest a Claude Code restart.
@@ -124,11 +145,16 @@ you:
   there's no tiering headroom; this cluster is a candidate for
   `extract` (mint a reusable capability) or `consolidate`
   (near-duplicate of something that already exists), not `pin`/
-  `downgrade`. Skip the savings call or call it with `target_tier:
-  "cheap"` only to confirm there's truly no delta.
+  `downgrade`. **Still call `estimate_savings` with `target_tier:
+  "cheap"`** — the savings will be ~0 honestly, but the call keeps
+  `target_tier` grounded for the compose step that follows, and
+  confirms there's truly no delta rather than assuming it. Never skip
+  the call.
 - Cluster runs on a `reasoning`-tier or unresolved model and the work
-  looks mechanical (tight tool_signature, low variance) → `target_tier:
-  "cheap"`, kind candidate `pin` or `downgrade`.
+  looks mechanical (tight `tool_signature` — use `jaccard_within` as
+  the proxy, `≥ 0.6` is a defensible starting threshold;
+  `TODO(reviewer)` on the exact value) → `target_tier: "cheap"`, kind
+  candidate `pin` or `downgrade`.
 - Cluster's `tool_signature` looks like it's duplicating an existing
   named capability you can see in `my_toolkit_adoption` → kind
   candidate `adopt` (stop minting the inline pattern, use the existing
@@ -145,9 +171,10 @@ you:
   `outcomes__generate_agent_spec` (next step) errors or clearly can't
   back the kind you asked for, fall back to `extract` or say plainly
   that this recommendation isn't outcome-backed yet rather than
-  guessing further. `TODO(reviewer)`: confirm whether a future tool
-  revision should surface this gate explicitly so the skill doesn't
-  have to infer it.
+  guessing further. Tracked upstream: cardinalhq/conductor#1320 —
+  once `outcomes__generate_agent_spec` surfaces `outcome_backed` /
+  `kind_supported`, delete this inference logic and read the fields
+  directly.
 - If nothing in the cluster fits any artifact-bearing kind, it's a
   `gap` — a signal worth naming in conversation ("you keep doing X by
   hand; there's no fitting capability for it yet") with **no artifact
@@ -211,6 +238,14 @@ simplify accordingly.
 
 ### 6. Write (only on explicit confirmation)
 
+**Validate the target-file basename before anything else.** The
+`suggested_name` field is server-authored so this is defence in depth,
+but names are used as path segments — reject if `suggested_name` (a)
+contains `/` or `\`, (b) contains `..`, or (c) doesn't match
+kebab-case `^[a-z][a-z0-9-]*$`. On rejection, surface the value
+verbatim to the user with the specific reason and stop — do not
+attempt a rewrite or a slugification pass.
+
 **Dry-run first, always.** Before writing anything, show:
 
 - The exact target file path (from the table above).
@@ -233,8 +268,10 @@ explain.
 
 ### 7. Mark (1 call per candidate you presented)
 
-Call `outcomes__mark` for every candidate you showed, not just accepted
-ones:
+**Exactly one `mark` call per candidate you showed, carrying its
+terminal status.** Not one call per state transition, not a stream of
+"presented → accepted" updates — the ledger reads the status as the
+single terminal outcome. Don't double-mark. Pick from:
 
 - `status: "accepted"` — confirmed and written.
 - `status: "dismissed"` — **explicit refusal only** ("no," "don't want
@@ -252,6 +289,18 @@ live cluster-derived decisions, not legacy ledger rows. Mark is
 best-effort: if the call fails, don't error the conversation over it —
 the artifact write (or its absence) is the real outcome; the ledger is
 measurement, not the source of truth.
+
+## Failure handling for non-`mark` tools
+
+`mark` is the one tool that follows the silent-log rule above — every
+other tool is on the hard-stop rule. If any of `my_turn_pattern`,
+`my_toolkit_adoption`, `cluster_spawns`, `org_offered_tiers`,
+`estimate_savings`, or `generate_agent_spec` returns `503`
+(lakerunner-not-configured), `400` (invalid body), or an empty result
+set where the flow depends on at least one row, **surface the error
+verbatim to the user, stop the flow, do not retry**. An empty
+`cluster_spawns` result means "no clusters cleared the recurrence
+floor — nothing to pitch," not "try again with looser thresholds."
 
 ## Placeholder savings, honestly
 
