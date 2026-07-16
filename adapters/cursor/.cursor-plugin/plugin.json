@@ -7,5 +7,6 @@
     "url": "https://cardinalhq.io"
   },
   "homepage": "https://github.com/cardinalhq/cardinal-cursor-plugin",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "skills": "./skills/"
 }
