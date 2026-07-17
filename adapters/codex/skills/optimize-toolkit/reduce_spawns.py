@@ -8,20 +8,23 @@ Output: reduced JSON with dedup + verb-bucket + tool-sig groupings, small
 
 Stages:
   1. Flatten: unnest cluster.members into a flat spawn list.
-  2. Normalize label: strip / lowercase for grouping keys; keep original for display.
-  3. Dedupe by exact normalized label (label collapses N-of-a-kind to one row).
-  4. Verb bucket: group by the first content word of the label ("Migrate", "Verify",
-     "Trace", "Find", "Research", "Fix", "Build", "Plan", "Organize", "Review",
-     "Code", "Silent", "Test", "Type", "Comment", "General", "Apply", "Explore",
-     "Implement", "Extract", "Map", "Inventory", "Assess", "Reconcile", "Investigate",
-     "Search:", "Validate", "Sonnet-5", "Independent", "Fresh-eyes", "MCP", "PLG.1",
-     "W3.T3.2", "W4.T4.1"). No taxonomy — the verb IS the key.
-  5. Tool-sig shape: within a verb bucket, sub-group by dominant-tool signature
-     ("Bash+Read", "Read+Write", "Bash-only", "Empty", etc.).
-  6. Session-burst collapse: consecutive spawns from the same session within 5min
-     count as one "burst" (retain per-burst member count for display).
-  7. Emit: per-verb-bucket row with {verb, count, unique_labels[:8], token_sum,
-     sessions, dominant_tool_shape, sample_bursts}.
+  2. Filter zero-signal spawns (tracker entries + pre-enrichment spawns
+     with no model / no tokens / no tool_signature — these carry no
+     evidence useful for kind selection and inflate spawn counts as noise).
+     Filter count reported in output so caller sees the drop.
+  3. Sub-cluster key = (verb, tool_shape). Verb = first content word of
+     the label ("Migrate", "Verify", "Trace", "Find", "Research", ...).
+     tool_shape = dominant + secondary tool from the spawn's tool_counts
+     ("Bash+Read", "Read+Write", "WebSearch+WebFetch", etc.). A verb
+     bucket like `research` gets split into `(research, Bash+Read)` for
+     code-reading vs `(research, WebSearch+WebFetch)` for web lookups —
+     structurally different work, previously merged.
+  4. Dedupe by exact normalized label within each sub-cluster.
+  5. Session-burst collapse: spawns from the same session within a 5min
+     window count as one "burst" (retain per-burst member count).
+  6. Emit: per-sub-cluster row with {verb, tool_shape, spawn_count,
+     unique_labels, top_labels[:8], tokens_total, session_count,
+     burst_count, sample_top_by_tokens}.
 """
 import json
 import re
@@ -44,18 +47,41 @@ def first_verb(label: str) -> str:
     return w
 
 def tool_shape(tool_signature: dict) -> str:
+    """Grouping key over the spawn's tool_counts. Picks the top 2 tools by
+    frequency, then sorts THEM alphabetically for a stable key — so
+    {Bash:11, Read:10} and {Bash:10, Read:11} both bucket to "Bash+Read"
+    (same underlying pattern, different noise-level ordering). Without
+    the alphabetical sort, minor count fluctuations split otherwise-
+    identical patterns across sub-clusters."""
     if not tool_signature:
         return "<empty>"
     ranked = sorted(tool_signature.items(), key=lambda kv: -kv[1])
-    if len(ranked) == 1:
-        return f"{ranked[0][0]}-only"
-    return "+".join(t for t, _ in ranked[:2])
+    top_two_names = sorted([t for t, _ in ranked[:2]])
+    if len(top_two_names) == 1:
+        return f"{top_two_names[0]}-only"
+    return "+".join(top_two_names)
 
 def burst_key(session_id: str, at_iso: str, bucket_minutes: int = 5) -> str:
     t = datetime.fromisoformat(at_iso.replace('Z', '+00:00'))
     slot = t.replace(minute=(t.minute // bucket_minutes) * bucket_minutes,
                      second=0, microsecond=0)
     return f"{session_id}@{slot.isoformat()}"
+
+def is_zero_signal(spawn: dict) -> bool:
+    """A spawn with no model + no tokens + empty tool_signature carries no
+    evidence useful for kind selection (adopt needs tool_signature, downgrade
+    needs model, extract needs tool_signature). These come in two shapes:
+      1. TaskCreate/TaskUpdate tracker entries (test-session self-pollution).
+      2. Pre-enrichment sessions (v0.11 and earlier plugin versions that
+         didn't emit subagent_model / tokens_total / tool_counts).
+    Both are indistinguishable structurally and both produce noise in the
+    reduction. Filter and report the count so the caller can decide whether
+    the surviving evidence is representative."""
+    tokens = spawn.get('tokens') or 0
+    model = spawn.get('model')
+    tool_sig = spawn.get('tool_signature') or {}
+    return tokens == 0 and model is None and not tool_sig
+
 
 def main():
     raw = json.load(sys.stdin)
@@ -75,49 +101,73 @@ def main():
         print(json.dumps({'error': 'no spawns with descriptions'}))
         return
 
-    # Stage 4-5: verb bucket, sub-group by tool shape
+    # Fix (2) — filter zero-signal spawns (tracker entries + pre-enrichment).
+    # Count before/after so the reduction output surfaces the drop honestly.
+    raw_spawn_count = len(spawns)
+    spawns = [s for s in spawns if not is_zero_signal(s)]
+    filtered_zero_signal = raw_spawn_count - len(spawns)
+
+    if not spawns:
+        print(json.dumps({
+            'error': 'all spawns were zero-signal (no model / no tokens / no tool_signature)',
+            'input_spawns': raw_spawn_count,
+            'filtered_zero_signal_spawns': filtered_zero_signal,
+        }))
+        return
+
+    # Fix (1) — sub-group by (verb, tool_shape) instead of verb alone.
+    # A `research` bucket previously merged Bash+Read (opus code-reading)
+    # and WebSearch+WebFetch (opus web-lookup) under one row — different
+    # patterns, same stem. Sub-grouping surfaces them as separate
+    # recommendations without exploding the total row count (empirically
+    # ~1.3x row count; still well under the LLM budget).
     buckets = defaultdict(lambda: {
+        'verb': None,
+        'tool_shape': None,
         'labels': Counter(),
         'tokens': 0,
         'sessions': set(),
-        'tool_shapes': Counter(),
         'bursts': set(),
         'sample_examples': [],  # (label, tokens, model, shape)
     })
     for s in spawns:
         v = first_verb(s['label'])
-        b = buckets[v]
+        sh = tool_shape(s['tool_signature'])
+        key = (v, sh)
+        b = buckets[key]
+        b['verb'] = v
+        b['tool_shape'] = sh
         b['labels'][s['label']] += 1
         b['tokens'] += s['tokens']
         b['sessions'].add(s['session_id'])
-        b['tool_shapes'][tool_shape(s['tool_signature'])] += 1
         b['bursts'].add(burst_key(s['session_id'], s['at']))
-        # Keep top-token exemplars per bucket
         b['sample_examples'].append(
-            (s['label'], s['tokens'], s['model'], tool_shape(s['tool_signature']))
+            (s['label'], s['tokens'], s['model'], sh)
         )
 
     # Emit
     reduced = []
-    for verb, b in sorted(buckets.items(), key=lambda kv: -kv[1]['tokens']):
+    for (verb, shape), b in sorted(buckets.items(), key=lambda kv: -kv[1]['tokens']):
         exs = sorted(b['sample_examples'], key=lambda x: -x[1])[:5]
         reduced.append({
             'verb': verb,
+            'tool_shape': shape,
             'spawn_count': sum(b['labels'].values()),
             'unique_labels': len(b['labels']),
             'top_labels': [l for l, _ in b['labels'].most_common(8)],
             'tokens_total': b['tokens'],
             'session_count': len(b['sessions']),
             'burst_count': len(b['bursts']),
-            'dominant_tool_shapes': b['tool_shapes'].most_common(3),
             'sample_top_by_tokens': [
                 {'label': l, 'tokens': t, 'model': m, 'shape': sh}
                 for l, t, m, sh in exs
             ],
         })
     print(json.dumps({
-        'input_spawns': len(spawns),
-        'input_verb_buckets': len(buckets),
+        'input_spawns_raw': raw_spawn_count,
+        'input_spawns_after_filter': len(spawns),
+        'filtered_zero_signal_spawns': filtered_zero_signal,
+        'sub_cluster_count': len(buckets),
         'reduced_rows': reduced,
     }, indent=2, default=str))
 
