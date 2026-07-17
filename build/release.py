@@ -164,14 +164,72 @@ def main() -> int:
     try:
         run(["git", "push", "-q", "origin", "HEAD:main", tag], cwd=clone)
         print(f"{adapter}: released {tag} to {slug} (direct push)")
+        return 0
     except subprocess.CalledProcessError:
-        branch = f"release/{tag}"
-        run(["git", "push", "-q", "origin", f"HEAD:refs/heads/{branch}", tag], cwd=clone)
+        pass
+
+    # main is protected — push a release branch + tag, then open (and
+    # auto-merge) a PR. Previously this step just printed the gh command,
+    # which meant nobody ran it and stale release/vX.Y.Z branches piled up
+    # while the marketplace's main stayed frozen. See cardinal-agent-plugins
+    # release.py-auto-pr PR for why.
+    branch = f"release/{tag}"
+    run(["git", "push", "-q", "origin", f"HEAD:refs/heads/{branch}", tag], cwd=clone)
+
+    pr_body = (
+        f"Advances main to {tag} (from cardinal-agent-plugins@{mono_sha}).\n\n"
+        f"Auto-created by build/release.py because {slug} main is "
+        f"protected and cannot be pushed to directly.\n\n"
+        f"Safe to squash-merge — the branch is a full snapshot rebuild."
+    )
+    try:
+        pr_url = run([
+            "gh", "pr", "create",
+            "-R", slug,
+            "--head", branch,
+            "--base", "main",
+            "--title", f"release {tag}",
+            "--body", pr_body,
+        ], cwd=clone).strip()
+        print(f"{adapter}: {slug} main is protected; opened {pr_url}")
+    except subprocess.CalledProcessError as exc:
+        # gh will error if a PR already exists for this head → fine, look it up.
+        try:
+            existing = run([
+                "gh", "pr", "list", "-R", slug, "--head", branch,
+                "--state", "open", "--json", "url", "-q", ".[0].url",
+            ], cwd=clone).strip()
+            pr_url = existing or f"(gh pr list failed after auto-create errored: {exc})"
+            print(f"{adapter}: {slug} main is protected; existing PR {pr_url}")
+        except subprocess.CalledProcessError:
+            # Emit as a GitHub Actions warning annotation so it surfaces in
+            # the workflow UI, not just buried in stdout. (::warning:: is a
+            # no-op on non-Actions runs.)
+            print(
+                f"::warning title=Release PR needs manual create::"
+                f"{adapter}/{slug}: pushed {branch} + {tag}, but "
+                f"'gh pr create' failed (likely: GH_TOKEN lacks "
+                f"pull-requests:write on {slug} — set MIRROR_PR_TOKEN "
+                f"secret). Open manually: "
+                f"gh pr create -R {slug} --head {branch} "
+                f"--base main --title 'release {tag}'"
+            )
+            return 1
+
+    # Best-effort enable auto-merge so the PR lands when required checks
+    # pass without a human squash click. Silently fine if the repo doesn't
+    # allow auto-merge — falls back to the human merging the printed PR.
+    try:
+        run(["gh", "pr", "merge", pr_url, "--auto", "--squash"], cwd=clone)
+        print(f"{adapter}: auto-merge enabled on {pr_url}")
+    except subprocess.CalledProcessError:
+        # No annotation — this is expected on repos that don't allow
+        # auto-merge; the PR still exists and is mergeable manually.
         print(
-            f"{adapter}: {slug} main is protected; pushed {branch} + {tag}.\n"
-            f"  open PR: gh pr create -R {slug} --head {branch} "
-            f"--title 'release {tag}' --body 'from cardinal-agent-plugins@{mono_sha}'"
+            f"{adapter}: auto-merge not enabled (repo may not allow it); "
+            f"land the PR manually: {pr_url}"
         )
+
     return 0
 
 

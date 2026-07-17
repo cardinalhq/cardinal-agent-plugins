@@ -65,9 +65,16 @@ jobs:
           } >> ~/.ssh/config
       - name: Release to mirror
         env:
-          # Read-only default token — gh needs it to resolve the clone;
-          # the push authenticates via the deploy key over SSH.
-          GH_TOKEN: ${{ github.token }}
+          # Prefer MIRROR_PR_TOKEN (PAT with pull-requests:write on all 4
+          # mirror repos — cardinal-{claude,codex,cursor,gemini}-plugin) so
+          # release.py can auto-open + auto-merge the release PR when the
+          # mirror's main is protected. Falls back to github.token when the
+          # secret isn't configured — release.py will still push the
+          # release/vX.Y.Z branch + tag, but manual PR merge will be
+          # required (release.py emits a ::warning:: annotation naming the
+          # branch so it doesn't get lost in stdout). Git push over SSH
+          # rides the deploy key, unrelated to this token.
+          GH_TOKEN: ${{ secrets.MIRROR_PR_TOKEN || github.token }}
         run: |
           gh config set git_protocol ssh
           git config --global user.name "cardinal-release-bot"
