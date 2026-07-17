@@ -89,57 +89,147 @@ both with `window: "30d"`. From the two responses, compose a short
   version for recent turns, mention the plugin-version-drift
   possibility and suggest a Claude Code restart.
 
-### 2. Discover (1 call)
+### 2. Discover — pull raw spawns (1 call)
 
-Call `outcomes__cluster_spawns` with `window: "30d"` (defaults:
-`min_jaccard: 0.4`, `min_cluster_size: 3` — leave as-is unless the
-conversation gives you a reason to tune them). Rank clusters by
-`total_tokens` (cost isn't per-cluster available; use tokens as the
-size proxy) and recurrence; drop anything with `recurrence < 3` even
-if it slipped through, and prefer clusters with a higher
-`with_description_share` in `coverage` (clustering is weaker without
-descriptions).
+Call `outcomes__cluster_spawns` with `window: "30d"`, **`min_jaccard: 0.99`**,
+**`min_cluster_size: 1`**. Those thresholds effectively disable the server's
+built-in token-Jaccard clustering — each spawn returns as its own single-
+member "cluster", giving you the raw spawn population (label + session_id +
+tool_signature + tokens + model). You do the actual clustering client-side
+in the next step, because the server's token-Jaccard is too coarse for
+semantically-similar-but-token-diverse labels ("Trace polly cwd flow" and
+"Map maestro sites/org API" are both investigation-shape but share zero
+content tokens).
 
-Take the top **K = 3** clusters forward. If fewer than 3 clear
-clusters exist, present fewer — do not pad with weak candidates to hit
-the number.
+Note the `coverage.with_description_share` — if it's under 0.5, mention it
+in the caveat you already added in step 1 (older sessions from pre-v0.12
+plugin versions don't emit `subagent_description`; it's legacy drift, not
+a per-agent gap).
 
-### 3. Ground yourself in the user's real toolkit (0–2 file reads per candidate)
+### 3. Reduce + semantically cluster (Bash + LLM pass)
 
-Before picking a kind for a cluster, look at what the user actually
+**Stage 3a — mechanical reduction (Bash).** Save the cluster_spawns
+response to a temp file and pipe it through the reducer that ships
+alongside this SKILL.md. The reducer collapses N-identical labels,
+groups by first content-word (verb), sub-groups by dominant-tool
+signature, and collapses same-session bursts. It turns 100+ raw spawn
+records into ~15–30 sub-clusters — a small enough set for the semantic
+pass in 3b to reason over without paging in the whole raw population.
+
+```bash
+# Find the reducer that shipped with this skill. Portable across
+# adapters + install locations.
+REDUCER=$(find ~/.claude/plugins ~/.claude/skills . \
+  -name reduce_spawns.py -path '*optimize-toolkit*' 2>/dev/null | head -1)
+[ -z "$REDUCER" ] && { echo "reduce_spawns.py not found"; exit 1; }
+
+# Feed cluster_spawns response as JSON on stdin; get verb-bucketed JSON out.
+python3 "$REDUCER" < /tmp/spawns_raw.json > /tmp/spawns_reduced.json
+cat /tmp/spawns_reduced.json
+```
+
+Output shape: `{ input_spawns, input_verb_buckets, reduced_rows: [{verb, tool_shape,
+spawn_count, unique_labels, top_labels[:8], tokens_total, session_count,
+burst_count, tool_shape, sample_top_by_tokens}] }`. Rows come
+sorted by `tokens_total` descending.
+
+**Stage 3b — semantic cluster (your reasoning, in-context).** Read the
+reducer's output and group verb buckets into meta-clusters by intent, not
+by surface tokens. Verb buckets like `code`/`silent-failure`/`silent`/
+`test`/`comment`/`type`/`review`/`independent`/`fresh-eyes`/`general` all
+fold into one **Code Review** meta-cluster; `trace`/`research`/`investigate`
+/`find`/`explore`/`map`/`inventory`/`reconcile` fold into one **Research
+& Investigation** meta-cluster. Expected meta-clusters for a typical
+engineer include: **Code Review**, **Research & Investigation**,
+**Migration / Implementation**, **Testing & Validation**, **Planning /
+Organization**. Not every meta-cluster surfaces for every user; only
+name the ones that clear a real token/recurrence floor from the data
+in front of you.
+
+The semantic pass is **your judgment** — no server-side taxonomy. Use
+the reducer's rich per-bucket evidence (top_labels, session_count,
+tool_shape) to justify each grouping. A verb bucket that
+doesn't cleanly fit any meta-cluster stays as its own single-bucket
+meta-cluster; don't force-fit for symmetry.
+
+Take the top **K = 3** meta-clusters by `tokens_total`. If fewer than 3
+clear meta-clusters exist, present fewer — do not pad.
+
+**Known coverage gap.** `cluster_spawns` only covers Task-tool subagent
+spawns. Slash commands (visible in `my_toolkit_adoption.commands`)
+never show up here — a heavy user of `/make-release` won't see a
+"Releases" cluster no matter how the reducer runs. If the user asks
+about command patterns, say so plainly and point at
+`my_toolkit_adoption.commands` for the raw counts; don't fabricate a
+cluster from spawn data alone.
+
+### 4. Ground yourself in the user's real toolkit (0–2 file reads per meta-cluster)
+
+Before picking a kind for a meta-cluster, look at what the user actually
 has. `my_toolkit_adoption` lists capabilities by name and usage, but
 "a name in a usage map" is not the same as "a file on disk that will
-still be there next session." For each of the top-K clusters:
+still be there next session." For each of the top-K meta-clusters:
 
 - If `my_toolkit_adoption` shows an agent/skill whose name looks like
-  it might cover this cluster's `representative_label` +
-  `tool_signature`, `Read` the matching file under `.claude/agents/`
-  or `.claude/skills/` to confirm the fit before recommending `adopt`.
-  Bad `adopt` recommendations happen when the name matches but the
-  actual scope doesn't.
+  it might cover the meta-cluster's dominant verb buckets +
+  `tool_shape`, `Read` the matching file under
+  `.claude/agents/` or `.claude/skills/` (including plugin-installed
+  paths under `~/.claude/plugins/`) to confirm the fit before
+  recommending `adopt`. Bad `adopt` recommendations happen when the
+  name matches but the actual scope doesn't.
 - If you're considering `extract` (mint new), `Grep` under
-  `.claude/agents/` for the cluster's dominant tools in the
-  `tool_signature` — a similar-shape agent may already exist under a
-  name your `my_toolkit_adoption` scan didn't surface.
+  `.claude/agents/` for the meta-cluster's `tool_shape` — a
+  similar-shape agent may already exist under a name your
+  `my_toolkit_adoption` scan didn't surface.
 - If you're considering `pin`/`downgrade`, locate the existing agent
   file so you can propose a **minimal edit** (change one `model:`
   line) rather than overwriting the whole file.
 
 Keep this bounded — one or two focused `Read`/`Grep` calls per
-candidate, not a full-repo sweep. If the file isn't obviously there,
-that's information ("adopt target's name matched but the file isn't
-under `.claude/agents/` — treat as evidence to soften the adopt pitch,
-or reframe as `gap`").
+meta-cluster, not a full-repo sweep. If the file isn't obviously
+there, that's information ("adopt target's name matched but the file
+isn't under `.claude/agents/` — treat as evidence to soften the adopt
+pitch, or reframe as `gap`").
 
-### 4. Pick the kind, from first principles
+### 5. Pick the kind, from first principles
 
 Call `outcomes__org_offered_tiers` once — this tells you the org's
 actual `cheap` and `reasoning` model tiers. **Never suggest a model
 the org isn't offered**; if a tier is `null`, that door is closed for
 this org.
 
-For each of the top-K clusters, reason about kind from the evidence in
-front of you. There is no server-side kind gate — you pick, you
+**Drill into sub-clusters — meta-clusters are framing, not the
+recommendation unit.** The meta-cluster tells you the organizing shape
+of an engineer's work (Research is heavy, Code Review is heavy); the
+actionable play lives one level deeper, at the sub-cluster level: the
+individual verb-bucket from the reducer with its specific
+`top_labels`, `tool_shape`, `sample_top_by_tokens[].model`,
+`session_count`, and `burst_count`. Pitching at the meta-cluster level
+alone produces truisms ("mechanical work should run on Haiku") — the
+non-obvious plays only appear when you compare a sub-cluster's shape
+against `my_toolkit_adoption`.
+
+**Strongest pattern (empirically): toolkit-consistency adopt.** When a
+sub-cluster's verb + `tool_shape` matches an existing agent
+in `my_toolkit_adoption` (e.g. code-review-shaped labels + Bash+Read +
+no Agent/Skill call in the tool_signature → `pr-review-toolkit:code-reviewer`
+covers this), the play is `adopt` — the user has the tool, they're
+inconsistently skipping it. Contrast evidence sharpens the pitch: if
+another spawn in the same window DID show `Agent` or `Skill` in its
+tool_signature for the same verb, cite that ("you already use this
+tool sometimes — 3 of your same-shape spawns bypassed it").
+
+**Tie-break — adopt beats downgrade when both fire.** If a sub-cluster
+is both `adopt`-covered (an existing agent handles this shape) AND
+downgrade-shaped (running on reasoning tier with a mechanical
+tool_signature), pitch `adopt` alone. The existing agent's own model
+config is a separate concern; routing the work to the agent captures
+the primary win. Do not double-recommend.
+
+For each of the top-K meta-clusters, reason about kind from the
+evidence in front of you (the semantic cluster label, its member verb
+buckets, its dominant tool shapes, its token magnitude, and the
+`my_toolkit_adoption` match you just grounded). There is no server-side kind gate — you pick, you
 justify. The five buildable kinds and one signal-only kind:
 
 - **`adopt`** — the cluster's `tool_signature` and label overlap an
@@ -183,7 +273,7 @@ jaccard_within) are rules of thumb, not gates. Adjust when the
 cluster's specifics clearly warrant — the point is to reason from the
 evidence, not clear a fixed bar.
 
-### 5. Estimate savings (1 call per non-`gap` candidate)
+### 6. Estimate savings (1 call per non-`gap` candidate)
 
 For each candidate that isn't `gap`, call `outcomes__estimate_savings`
 with the cluster's `total_tokens`, per-component tokens if you can
@@ -196,7 +286,7 @@ derive them from members' fields, `current_model` (the dominant
 see **Placeholder savings, honestly** below before you say a dollar
 figure out loud.
 
-### 6. Author + Present (no tool call; you write the artifact)
+### 7. Author + Present (no tool call; you write the artifact)
 
 For each candidate, author the artifact yourself from first principles
 before asking for confirmation. The user will see the full artifact,
@@ -266,7 +356,7 @@ recommendation) with:
 - A plain confirmation question ("write this to `.claude/agents/<name>.md`?
   yes/no"). One candidate at a time — don't stack.
 
-### 7. Write (only on explicit confirmation)
+### 8. Write (only on explicit confirmation)
 
 **Validate the target-file basename before anything else.** Names are
 used as path segments — reject if the name (a) contains `/` or `\`,
@@ -283,7 +373,7 @@ distribution are git: the artifact lands in the working tree like any
 other change, reviewed in the diff, reverted with `git checkout --`,
 shared via the repo.
 
-### 8. Mark (1 call per candidate you presented)
+### 9. Mark (1 call per candidate you presented)
 
 **Exactly one `mark` call per candidate you showed, carrying its
 terminal status and — when there is one — the artifact body you
@@ -341,8 +431,14 @@ specifically so you don't overstate a number:
   the cluster didn't carry per-component token data. Say "estimated
   within a wide band" rather than quoting a bare point figure when
   either flag is set.
-- When `current_cost_usd` is `null` (current model unpriced), don't
-  imply a before/after delta — state the projected cost alone.
+- **`current_cost_usd: null` — dominant model not priced in this
+  org's catalog.** If the sub-cluster's dominant model (e.g.,
+  `claude-opus-4-8`) isn't in `org_offered_tiers.all`,
+  `estimate_savings` returns `current_cost_usd: null` and
+  `savings_high/low_usd: 0`. Do not quote a $ figure. Pitch the play
+  on consistency or shape grounds ("mechanical tool-use pattern, better
+  routed through <existing agent>") — the savings surface just isn't
+  usable in this org for this model.
 
 None of this blocks presenting the candidate — it changes how
 confidently you say the number, not whether you say it.
