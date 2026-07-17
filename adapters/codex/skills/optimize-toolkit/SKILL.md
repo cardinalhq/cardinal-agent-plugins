@@ -138,10 +138,21 @@ python3 "$REDUCER" < /tmp/spawns_raw.json > /tmp/spawns_reduced.json
 cat /tmp/spawns_reduced.json
 ```
 
-Output shape: `{{ input_spawns, input_verb_buckets, reduced_rows: [{{verb,
-spawn_count, unique_labels, top_labels[:8], tokens_total, session_count,
-burst_count, tool_shape, sample_top_by_tokens}}] }}`. Rows come
-sorted by `tokens_total` descending.
+Output shape: `{ input_spawns_raw, zero_signal_spawns, sub_cluster_count,
+reduced_rows: [{verb, tool_shape, spawn_count, zero_signal_count,
+unique_labels, top_labels[:8], tokens_total, session_count,
+burst_count, sample_top_by_tokens}] }`. Rows come sorted by
+`tokens_total` descending.
+
+**Zero-signal rows are retained, not dropped.** A row where
+`zero_signal_count == spawn_count` has no tokens/model on any member
+(pre-enrichment sessions or tracker entries) — `tokens_total` reads 0
+and `tool_shape` reads `<empty>` for these, so don't use them for
+cost/tier math (adopt-savings, downgrade share, pin thresholds). But
+their `top_labels` are real, often bespoke, self-narrated Task
+descriptions — exactly the evidence the contrast-pair mechanic below
+needs. Don't filter these rows out of your own reasoning just because
+`tokens_total` is 0.
 
 **Stage 3b — semantic cluster (your reasoning, in-context).** Read the
 reducer's output and group verb buckets into meta-clusters by intent, not
@@ -217,15 +228,58 @@ alone produces truisms ("mechanical work should run on Haiku") — the
 non-obvious plays only appear when you compare a sub-cluster's shape
 against `my_toolkit_adoption`.
 
-**Strongest pattern (empirically): toolkit-consistency adopt.** When a
-sub-cluster's verb + `tool_shape` matches an existing agent
-in `my_toolkit_adoption` (e.g. code-review-shaped labels + Bash+Read +
-no Agent/Skill call in the tool_signature → `pr-review-toolkit:code-reviewer`
-covers this), the play is `adopt` — the user has the tool, they're
-inconsistently skipping it. Contrast evidence sharpens the pitch: if
-another spawn in the same window DID show `Agent` or `Skill` in its
-tool_signature for the same verb, cite that ("you already use this
-tool sometimes — 3 of your same-shape spawns bypassed it").
+**Strongest pattern (empirically): toolkit-consistency adopt, found via
+contrast pairs.** A contrast pair sets a named agent's aggregate usage
+(from `my_toolkit_adoption`, the "routed" side) against a reducer
+sub-cluster whose labels credibly describe the same domain but never
+name that agent (the "bypassed" side). Do **not** look for the
+contrast inside a single spawn's `tool_signature` — an `Agent`/`Skill`
+call there reflects the *parent* turn's routing decision, not the
+child subagent's own trace, and `tool_shape` (top-2 tools by
+frequency) usually buries a lone `Agent`/`Skill` call under `Bash`/
+`Read` noise anyway. Cross-data-source contrast is the mechanic that
+actually surfaces evidence:
+
+1. From `my_toolkit_adoption.agents`, keep entries whose key is
+   namespaced (contains `:`, e.g. `pr-review-toolkit:code-reviewer` —
+   built-ins like `Explore`/`general-purpose`/`Plan` aren't a "domain"
+   to bypass, they're the generic fallback) and that clear **≥10
+   spawns OR ≥1M `subtok`**. This is the routed side.
+2. For each kept agent, build a small domain-vocabulary set from its
+   `description:` frontmatter (`Read` the file you already located in
+   step 4) — the content words in the "use this agent when..."
+   sentence, not just the slug. Reading the real description beats
+   guessing from the hyphenated name; a name like `pr-test-analyzer`
+   undersells that its domain also covers "coverage" and "regression."
+3. Walk the reducer's `reduced_rows` — **including rows where
+   `zero_signal_count == spawn_count`** (v4 of `reduce_spawns.py`
+   retains these; they carry no tokens/model but their `top_labels`
+   are real evidence, and labels like "General code review" / "Silent
+   failure hunt" / "Test coverage review" / "Type design review" are
+   often the *strongest* signal precisely because they're bespoke,
+   self-narrated Task descriptions rather than toolkit boilerplate).
+   Flag a row as a bypass candidate when its `top_labels` share ≥2
+   content words with a kept agent's domain vocabulary.
+4. Require the candidate to clear the same bar a one-off wouldn't:
+   **≥2 spawns**, same session or sessions within the window you're
+   already scanning. Two or more label-only reviews fired back-to-back
+   in one session (check `at` timestamps — a burst under a few minutes
+   is a giveaway) is a much stronger tell than a single spawn.
+   Bonus confidence: if the same verb-phrase recurs across sessions
+   with only the trailing subject varying ("Code review Phase A" /
+   "Code review site-config-v2" / "General code review") — that's a
+   hand-rolled loop the user re-invents each time, not a one-off.
+5. State the caveat honestly when you present this: `cluster_spawns`
+   never exposes `subagent_type` on a member (only
+   `session_id`/`at`/`subagent_description`/`subagent_model`/
+   `tokens_total`), so you cannot prove the bypassed spawns did NOT
+   route through the named agent — only that their labels don't
+   mention it and their shape/cadence reads as ad hoc. Pitch it as
+   "these don't reference `<agent>` and look hand-rolled" rather than
+   "you didn't use `<agent>`."
+
+Once you have a pair, the play is `adopt` — the user has the tool,
+they're inconsistently reaching for it.
 
 **Tie-break — adopt beats downgrade when both fire.** If a sub-cluster
 is both `adopt`-covered (an existing agent handles this shape) AND
