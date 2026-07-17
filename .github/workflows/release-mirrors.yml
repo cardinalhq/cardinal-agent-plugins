@@ -1,5 +1,15 @@
 name: Release adapter to mirror
 
+# Two triggers:
+#   1. workflow_dispatch: manually release one adapter (choose via input).
+#      Matrix contains just that one adapter.
+#   2. push to main touching any adapter's plugin.json: auto-release all
+#      4 adapters (matrix over all). release.py is idempotent — adapters
+#      whose plugin.json version already has a matching tag on the mirror
+#      no-op cleanly, so firing all 4 on any single bump has no side
+#      effect beyond a fast "already at vX.Y.Z" print. Path filter
+#      restricts firing to actual plugin-manifest changes, not every
+#      merge to main.
 on:
   workflow_dispatch:
     inputs:
@@ -8,10 +18,39 @@ on:
         required: true
         type: choice
         options: [claude, codex, cursor, gemini]
+  push:
+    branches: [main]
+    paths:
+      - 'adapters/*/.claude-plugin/plugin.json'
+      - 'adapters/*/.codex-plugin/plugin.json'
+      - 'adapters/*/.cursor-plugin/plugin.json'
+      - 'adapters/*/.gemini-plugin/plugin.json'
 
 jobs:
-  test:
+  # Compute the matrix once, based on trigger:
+  # - dispatch → [inputs.adapter]
+  # - push     → [claude, codex, cursor, gemini]
+  # Emitted as a JSON array on stdout, consumed by downstream matrix.
+  matrix:
     runs-on: ubuntu-latest
+    outputs:
+      adapters: ${{ steps.set.outputs.adapters }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "adapters=[\"${{ inputs.adapter }}\"]" >> "$GITHUB_OUTPUT"
+          else
+            echo 'adapters=["claude","codex","cursor","gemini"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        adapter: ${{ fromJson(needs.matrix.outputs.adapters) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,14 +60,18 @@ jobs:
         run: cd core && python3 -m unittest discover tests
       - name: Vendor + adapter suite
         run: |
-          python3 build/vendor.py ${{ inputs.adapter }}
-          cd adapters/${{ inputs.adapter }} && python3 -m unittest discover tests
+          python3 build/vendor.py ${{ matrix.adapter }}
+          cd adapters/${{ matrix.adapter }} && python3 -m unittest discover tests
       - name: Contract suite
         run: python3 -m unittest discover tests
 
   release:
-    needs: test
+    needs: [matrix, test]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        adapter: ${{ fromJson(needs.matrix.outputs.adapters) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,14 +87,14 @@ jobs:
           KEY_CURSOR: ${{ secrets.MIRROR_DEPLOY_KEY_CURSOR }}
           KEY_GEMINI: ${{ secrets.MIRROR_DEPLOY_KEY_GEMINI }}
         run: |
-          case "${{ inputs.adapter }}" in
+          case "${{ matrix.adapter }}" in
             claude) KEY="$KEY_CLAUDE" ;;
             codex)  KEY="$KEY_CODEX" ;;
             cursor) KEY="$KEY_CURSOR" ;;
             gemini) KEY="$KEY_GEMINI" ;;
           esac
           if [ -z "$KEY" ]; then
-            echo "missing MIRROR_DEPLOY_KEY secret for ${{ inputs.adapter }}" >&2
+            echo "missing MIRROR_DEPLOY_KEY secret for ${{ matrix.adapter }}" >&2
             exit 1
           fi
           mkdir -p ~/.ssh
@@ -74,9 +117,20 @@ jobs:
           # required (release.py emits a ::warning:: annotation naming the
           # branch so it doesn't get lost in stdout). Git push over SSH
           # rides the deploy key, unrelated to this token.
+          #
+          # HOW TO SET MIRROR_PR_TOKEN (one-time):
+          # 1. Create a fine-grained PAT at
+          #    https://github.com/settings/personal-access-tokens with
+          #    Repository access = the 4 mirror repos (cardinal-*-plugin),
+          #    Repository permissions = Pull requests: read/write +
+          #    Contents: read/write (needed for --auto-merge to update the
+          #    branch when checks pass).
+          # 2. Save at
+          #    https://github.com/cardinalhq/cardinal-agent-plugins/settings/secrets/actions
+          #    as MIRROR_PR_TOKEN.
           GH_TOKEN: ${{ secrets.MIRROR_PR_TOKEN || github.token }}
         run: |
           gh config set git_protocol ssh
           git config --global user.name "cardinal-release-bot"
           git config --global user.email "release@cardinalhq.io"
-          python3 build/release.py ${{ inputs.adapter }}
+          python3 build/release.py ${{ matrix.adapter }}
