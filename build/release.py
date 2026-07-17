@@ -211,39 +211,65 @@ def main() -> int:
         f"protected and cannot be pushed to directly.\n\n"
         f"Safe to squash-merge — the branch is a full snapshot rebuild."
     )
-    try:
-        pr_url = run([
-            "gh", "pr", "create",
-            "-R", slug,
-            "--head", branch,
-            "--base", "main",
-            "--title", f"release {tag}",
-            "--body", pr_body,
-        ], cwd=clone).strip()
+    # Try to open the PR. Two independent failure shapes we care about:
+    #   (a) PR already exists for this head — fine, look it up and continue.
+    #   (b) Anything else — annotate with the actual stderr (was previously
+    #       swallowed by run()'s check=True raising a plain CalledProcessError
+    #       that carried the stderr but never printed it).
+    create_cmd = [
+        "gh", "pr", "create",
+        "-R", slug,
+        "--head", branch,
+        "--base", "main",
+        "--title", f"release {tag}",
+        "--body", pr_body,
+    ]
+    create_result = subprocess.run(
+        create_cmd, cwd=clone, capture_output=True, text=True,
+    )
+    if create_result.returncode == 0:
+        pr_url = create_result.stdout.strip()
         print(f"{adapter}: {slug} main is protected; opened {pr_url}")
-    except subprocess.CalledProcessError as exc:
-        # gh will error if a PR already exists for this head → fine, look it up.
+    elif "already exists" in (create_result.stderr or ""):
+        # (a) look up the existing PR and continue with auto-merge
         try:
-            existing = run([
+            pr_url = run([
                 "gh", "pr", "list", "-R", slug, "--head", branch,
                 "--state", "open", "--json", "url", "-q", ".[0].url",
             ], cwd=clone).strip()
-            pr_url = existing or f"(gh pr list failed after auto-create errored: {exc})"
+            if not pr_url:
+                # "already exists" but list returned nothing — likely
+                # already-merged (or closed). Nothing to do; the branch is
+                # pushed, mirror main will pick it up on the next matching
+                # release or manual merge.
+                print(
+                    f"::warning title=Release PR gone but tag exists::"
+                    f"{adapter}/{slug}: 'gh pr create' said PR exists "
+                    f"but 'gh pr list' returned nothing. Likely closed "
+                    f"without merge. Check {slug} PRs for {branch}."
+                )
+                return 1
             print(f"{adapter}: {slug} main is protected; existing PR {pr_url}")
-        except subprocess.CalledProcessError:
-            # Emit as a GitHub Actions warning annotation so it surfaces in
-            # the workflow UI, not just buried in stdout. (::warning:: is a
-            # no-op on non-Actions runs.)
+        except subprocess.CalledProcessError as list_exc:
             print(
-                f"::warning title=Release PR needs manual create::"
-                f"{adapter}/{slug}: pushed {branch} + {tag}, but "
-                f"'gh pr create' failed (likely: GH_TOKEN lacks "
-                f"pull-requests:write on {slug} — set MIRROR_PR_TOKEN "
-                f"secret). Open manually: "
-                f"gh pr create -R {slug} --head {branch} "
-                f"--base main --title 'release {tag}'"
+                f"::warning title=Release PR lookup failed::"
+                f"{adapter}/{slug}: {list_exc.stderr or list_exc}"
             )
             return 1
+    else:
+        # (b) real failure — auth, permissions, network, etc. Surface the
+        # actual gh stderr so we can debug what went wrong instead of the
+        # opaque CalledProcessError print v1 shipped.
+        print(
+            f"::warning title=Release PR create failed::"
+            f"{adapter}/{slug}: pushed {branch} + {tag}, but "
+            f"'gh pr create' returned {create_result.returncode}.\n"
+            f"stderr: {create_result.stderr.strip() or '(empty)'}\n"
+            f"stdout: {create_result.stdout.strip() or '(empty)'}\n"
+            f"Manual: gh pr create -R {slug} --head {branch} "
+            f"--base main --title 'release {tag}'"
+        )
+        return 1
 
     # Best-effort enable auto-merge so the PR lands when required checks
     # pass without a human squash click. Silently fine if the repo doesn't
