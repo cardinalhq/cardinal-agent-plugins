@@ -29,6 +29,7 @@ from cardinal_core.paths import backup  # noqa: E402
 CLAUDE_DIR = Path.home() / ".claude"
 SETTINGS_PATH = CLAUDE_DIR / "settings.json"
 STATE_PATH = CLAUDE_DIR / "cardinal.json"
+SECRETS_PATH = CLAUDE_DIR / "cardinal-secrets.json"
 
 OWNED_ENV_KEYS = {
     # Telemetry side
@@ -110,6 +111,37 @@ def _read_mcp_plaintext_from_settings() -> str | None:
     return val if isinstance(val, str) else None
 
 
+def _read_act_token_from_secrets() -> str | None:
+    """Read the maestro:act plaintext from cardinal-secrets.json (0600)."""
+    if not SECRETS_PATH.exists():
+        return None
+    try:
+        data = json.loads(SECRETS_PATH.read_text())
+    except Exception:
+        return None
+    val = data.get("act_api_key") if isinstance(data, dict) else None
+    return val if isinstance(val, str) else None
+
+
+def _strip_act_from_secrets() -> None:
+    """Remove act_* keys from the secret file; delete the file if nothing else
+    remains. Refuses to touch a malformed file."""
+    if not SECRETS_PATH.exists():
+        return
+    try:
+        data = json.loads(SECRETS_PATH.read_text())
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    for k in ("act_api_key", "act_endpoint"):
+        data.pop(k, None)
+    if data:
+        SECRETS_PATH.write_text(json.dumps(data, indent=2) + "\n")
+    else:
+        SECRETS_PATH.unlink()
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="cardinal-disconnect")
     p.add_argument("--force", action="store_true",
@@ -134,6 +166,7 @@ def main() -> int:
     host = state.get("host") or "https://app.cardinalhq.io"
     mcp_key_id = state.get("mcp_key_id")
     ingest_key_id = state.get("ingest_key_id")
+    act_key_id = state.get("act_key_id")
 
     # ---- Revoke MCP key server-side (best effort) ------------------------
     if mcp_key_id:
@@ -158,6 +191,18 @@ def main() -> int:
                 print(f"  ✓ Removed {removed} plugin-owned env key(s) from {SETTINGS_PATH}")
         if bk and removed:
             print(f"    Backup → {bk}")
+
+    # ---- Revoke the user-scoped act token (full disconnect only) ----------
+    if not args.keep_telemetry and act_key_id:
+        act_plaintext = _read_act_token_from_secrets()
+        ok, msg = revoke_mcp_key(host, act_key_id, act_plaintext)
+        if ok:
+            print(f"  ✓ Revoked control-plane token {state.get('act_key_prefix') or act_key_id} server-side ({msg})")
+        else:
+            print(f"  ⚠ Could not revoke control-plane token server-side ({msg}).")
+            print(f"    Visit {host}/settings/api-keys to revoke it manually.")
+        _strip_act_from_secrets()
+        print(f"  ✓ Removed control-plane token from {SECRETS_PATH}")
 
     # ---- State file -------------------------------------------------------
     if not args.keep_telemetry:

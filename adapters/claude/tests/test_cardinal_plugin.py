@@ -129,7 +129,16 @@ class StubMaestro:
                     },
                     "mcp": None,
                     "ingest": None,
+                    "act": None,
                 }
+                if "maestro:act" in outer.last_scopes:
+                    bundle["act"] = {
+                        "endpoint": outer.url(),
+                        "api_key": "ACTPLAINTEXT" + "z" * 52,
+                        "key_id": "act-key-uuid-1",
+                        "key_prefix": "ACTPLAIN",
+                        "created_at": "2026-07-17T00:00:00Z",
+                    }
                 if "mcp:invoke" in outer.last_scopes:
                     bundle["mcp"] = {
                         "url": f"{outer.url()}/api/orgs/org-uuid-1/mcp",
@@ -323,7 +332,7 @@ class ConnectTests(unittest.TestCase):
         # State file
         state = read_json(self.state)
         self.assertEqual(state["mode"], "telemetry-and-mcp")
-        self.assertEqual(state["schema_version"], 3)
+        self.assertEqual(state["schema_version"], 4)
         self.assertEqual(state["org_id"], "org-uuid-1")
         self.assertEqual(state["mcp_key_id"], "mcp-key-uuid-1")
         # Plaintexts MUST never appear in the state file.
@@ -370,6 +379,58 @@ class ConnectTests(unittest.TestCase):
         self.assertFalse(self.settings.exists())
         self.assertFalse(self.claude_json.exists())
         self.assertFalse(self.state.exists())
+
+    def test_no_act_token_without_enable_actions(self):
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("maestro:act", self.stub.last_scopes)
+        secrets = self.home / ".claude" / "cardinal-secrets.json"
+        self.assertFalse(secrets.exists())
+        state = read_json(self.state)
+        self.assertNotIn("act_key_id", state)
+
+    def test_enable_actions_writes_0600_secret_not_settings(self):
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("maestro:act", self.stub.last_scopes)
+
+        # Secret file exists, mode 0600, holds the plaintext + endpoint.
+        secrets_path = self.home / ".claude" / "cardinal-secrets.json"
+        self.assertTrue(secrets_path.exists())
+        self.assertEqual(secrets_path.stat().st_mode & 0o777, 0o600)
+        secrets = read_json(secrets_path)
+        self.assertTrue(secrets["act_api_key"].startswith("ACTPLAINTEXT"))
+        self.assertEqual(secrets["act_endpoint"], self.stub.url())
+
+        # The token must NEVER land in settings.json (the whole point).
+        if self.settings.exists():
+            self.assertNotIn("ACTPLAINTEXT", self.settings.read_text())
+
+        # State carries non-secret metadata only, at schema v4.
+        state = read_json(self.state)
+        self.assertEqual(state["schema_version"], 4)
+        self.assertEqual(state["act_key_id"], "act-key-uuid-1")
+        self.assertNotIn("ACTPLAINTEXT", self.state.read_text())
+
+    def test_reconnect_without_actions_drops_prior_act_secret(self):
+        # Grant actions, then re-connect without the flag: the token must be
+        # reconciled off disk, mirroring the env-key merge.
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions"], self.home)
+        secrets_path = self.home / ".claude" / "cardinal-secrets.json"
+        self.assertTrue(secrets_path.exists())
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--rotate"], self.home)
+        self.assertFalse(secrets_path.exists(),
+                         "act token should be dropped when re-connecting without --enable-actions")
+
+    def test_enable_actions_preserves_sibling_secret(self):
+        # A pre-existing secret (e.g. an ingest key) must survive the act write.
+        secrets_path = self.home / ".claude" / "cardinal-secrets.json"
+        secrets_path.parent.mkdir(parents=True, exist_ok=True)
+        secrets_path.write_text(json.dumps({"ingest_api_key": "KEEPME"}) + "\n")
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions"], self.home)
+        secrets = read_json(secrets_path)
+        self.assertEqual(secrets["ingest_api_key"], "KEEPME")
+        self.assertTrue(secrets["act_api_key"].startswith("ACTPLAINTEXT"))
 
     def test_v02_legacy_entries_pruned_from_claude_json(self):
         # Pre-seed ~/.claude.json with v0.2's mcpServers.cardinal entry +
@@ -705,6 +766,33 @@ class DisconnectTests(unittest.TestCase):
         state = read_json(self.state)
         self.assertEqual(state["mode"], "telemetry-only")
         self.assertNotIn("mcp_key_id", state)
+
+    def test_disconnect_revokes_and_removes_act_token(self):
+        # Fresh connect WITH actions so the act token is present.
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions", "--rotate"], self.home)
+        self.stub.revoke_calls.clear()
+        secrets_path = self.home / ".claude" / "cardinal-secrets.json"
+        self.assertTrue(secrets_path.exists())
+
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+        # Both the MCP key and the act key are revoked, act with its plaintext.
+        revoked = dict(self.stub.revoke_calls)
+        self.assertIn("act-key-uuid-1", revoked)
+        self.assertTrue(revoked["act-key-uuid-1"].startswith("ACTPLAINTEXT"))
+        # Secret file cleaned up (nothing else in it → removed).
+        self.assertFalse(secrets_path.exists())
+
+    def test_keep_telemetry_leaves_act_token_alone(self):
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions", "--rotate"], self.home)
+        self.stub.revoke_calls.clear()
+        secrets_path = self.home / ".claude" / "cardinal-secrets.json"
+        res = run_plugin(DISCONNECT, ["--keep-telemetry"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        # --keep-telemetry is MCP-only removal; the act token is untouched.
+        self.assertNotIn("act-key-uuid-1", dict(self.stub.revoke_calls))
+        self.assertTrue(secrets_path.exists())
 
     def test_no_state_file_no_op(self):
         self.state.unlink()
