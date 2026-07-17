@@ -120,18 +120,47 @@ def main() -> int:
 
     existing_tags = run(["git", "ls-remote", "--tags", "origin", tag], cwd=clone)
     if existing_tags:
-        sys.exit(f"{slug} already has tag {tag}; bump the adapter version first")
+        # v29-follow-up: was sys.exit(non-zero) — hostile to matrix jobs on
+        # push, where only the adapter with the actual version bump has a
+        # new tag and the other three would fail loudly. No-op with a
+        # message is idempotent, matches release-mirrors.yml's push-trigger
+        # semantics (fire all 4 on any adapter's version bump; only the
+        # bumped one actually releases).
+        print(f"{adapter}: {slug} already at {tag} — no-op")
+        return 0
 
     plugin_dir = clone / subpath
     # Remove the old plugin package (including its stale tests) and lay
     # down the new artifact. Mirror files OUTSIDE the plugin subpath
-    # (README, docs/, LICENSE, marketplace manifests) are preserved.
+    # (README, docs/, LICENSE) are preserved, EXCEPT marketplace.json
+    # which is updated below to sync its declared version.
     if plugin_dir.exists():
         shutil.rmtree(plugin_dir)
     build_artifact(adapter, plugin_dir)
     # Mirror-level stale tests referencing the old layout, if present at
     # the plugin dir level only, were removed with the subpath above.
     ensure_banner(clone / "README.md")
+
+    # Sync .claude-plugin/marketplace.json's declared version with the
+    # plugin.json version we just laid down. Claude Code's `/plugin`
+    # command reads marketplace.json to determine what version to offer;
+    # if it stays stale, users see no update available even after the
+    # plugin folder itself has advanced. Skip cleanly when the file
+    # doesn't exist (codex/cursor/gemini mirrors are for their respective
+    # CLIs — no Claude Code marketplace manifest at the root).
+    marketplace_json = clone / ".claude-plugin" / "marketplace.json"
+    if marketplace_json.exists():
+        mf = json.loads(marketplace_json.read_text())
+        for entry in mf.get("plugins", []):
+            if entry.get("source", "").rstrip("/").endswith(f"/{adapter}") or \
+               entry.get("name") == adapter or entry.get("name") == "cardinal":
+                if entry.get("version") != version:
+                    print(
+                        f"{adapter}: marketplace.json {entry['name']} "
+                        f"{entry.get('version')} → {version}"
+                    )
+                    entry["version"] = version
+        marketplace_json.write_text(json.dumps(mf, indent=2) + "\n")
 
     # Vendored core must be committed in mirrors even though the monorepo
     # gitignores it — guard against an inherited ignore rule.
