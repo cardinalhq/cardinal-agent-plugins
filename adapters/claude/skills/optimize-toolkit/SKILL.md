@@ -6,26 +6,27 @@ disable-model-invocation: true
 # /cardinal:optimize-toolkit
 
 A **per-user, past-informed, future-effective** optimizer — not a
-session-local one. It looks at your own last 30 days of sessions
-(recurrence across ≥5 is the admission bar the server applies before a
-candidate ever reaches this skill), pitches the top few candidates with
-their evidence, and — only on your explicit confirmation — writes the
-accepted artifact to this working tree. **Anything written takes effect
-next session**, not this one: agents load at session start, so accepting
-a candidate here will not change what happens for the rest of this
-conversation.
+session-local one. It looks at your own last 30 days of sessions,
+picks the top few recurring inline-work patterns worth acting on,
+authors the artifact itself grounded in your actual toolkit, and — only
+on your explicit confirmation — writes the accepted artifact to this
+working tree. **Anything written takes effect next session**, not this
+one: agents load at session start, so accepting a candidate here will
+not change what happens for the rest of this conversation.
 
-This burns your own session tokens to run. It is built to be cheap by
-construction: the server (conductor's maestro, via the `cardinal` MCP
-server) authors every number and every artifact body — this skill never
-re-analyzes your repo, never invents a savings figure, and never spawns
-a sub-agent to do its own investigating. If a candidate needs more than
-cosmetic adaptation (renaming, trimming a tool allowlist), that is a
-server-side gap to report, not something to improvise here.
+This burns your own session tokens to run. The server (conductor's
+maestro, via the `cardinal` MCP server) provides evidence — clusters,
+model mix, toolkit adoption, tier pricing, priced-savings math. **You
+(Claude) do the authorship** from first principles: pick the
+recommendation kind by reasoning about the evidence, then write the
+artifact grounded in this user's real capabilities, real tool
+signatures, real cluster labels. There is no server-side artifact
+template — the artifact is composed here, per invocation, and passed
+back to the ledger verbatim on `mark`.
 
 ## Before you start
 
-This skill orchestrates eight `outcomes__*` tools served by the
+This skill orchestrates six `outcomes__*` tools served by the
 `cardinal` MCP server (see `/cardinal:connect` — same server, same
 consent). They are documented in conductor's
 `docs/specs/optimize-toolkit-mcp-tools.md`:
@@ -35,18 +36,14 @@ consent). They are documented in conductor's
 3. `outcomes__cluster_spawns`
 4. `outcomes__org_offered_tiers`
 5. `outcomes__estimate_savings`
-6. `outcomes__generate_agent_spec`
-7. `outcomes__mark`
+6. `outcomes__mark`
 
 `outcomes__my_recent_spawns` also exists on the same server — it's a
 raw spawn history for ad-hoc debugging, not part of this flow. Reach
 for it only if the user explicitly asks "what did I spawn recently?".
 
-**Check your available tools before doing anything else.** As of this
-writing, the maestro routes behind these tools are live, but the
-mcp-gateway `outcomes/` package that exposes them as *callable MCP
-tools* is a separate, not-yet-shipped follow-up. If none of the
-`outcomes__*` tools appear in your tool list (they'd show under the
+**Check your available tools before doing anything else.** If none of
+the `outcomes__*` tools appear in your tool list (they'd show under the
 `cardinal` MCP server, alongside whatever other integrations this org
 has configured), say so plainly and stop:
 
@@ -56,13 +53,14 @@ has configured), say so plainly and stop:
 
 Do not attempt a substitute analysis (no reading transcripts, no
 grepping local logs, no falling back to "let me look at your repo
-instead"). This mirrors the spec's silent-failure rule: MCP unreachable
-or empty candidates → one line, stop, no retries.
+instead"). MCP unreachable or empty candidates → one line, stop, no
+retries.
 
 ## How you (Claude) should run this
 
-Budget: usually 5–7 tool calls total, ≤10 in the worst case. Stay inside
-it — this is a "thin skill" by design; the intelligence is server-side.
+Budget: usually 5–7 tool calls total, ≤10 in the worst case. You'll
+also read a handful of files from the working tree to ground kind
+picking and authorship — that's fine, keep it targeted.
 
 ### 1. Open — situational-awareness bundle (2 calls)
 
@@ -81,254 +79,268 @@ both with `window: "30d"`. From the two responses, compose a short
   `my_toolkit_adoption.coverage.sessions_scanned == 0`, or
   `my_turn_pattern.turns_total` is 0, there is nothing to compute a
   coverage ratio from — say "no optimization candidates right now, not
-  enough session history yet" and stop. Never divide by
-  `sessions_scanned` before this check passes.
-- **Coverage caveat.** The 8-tool contract doesn't ship one unified
-  `enriched_share` field (an earlier draft of the skill spec assumed a
-  single bundle response with that shape; the shipped tool contract
-  splits it per-tool instead — treat the per-tool `coverage` objects as
-  authoritative). Use `my_toolkit_adoption.coverage.sessions_with_tier_attribution
-  / coverage.sessions_scanned` as the enrichment-coverage proxy —
-  `sessions_with_tier_attribution` is the subset where `tok_by_model`
-  is actually populated (v0.12.x fields present), which is what this
-  skill's savings math depends on; it's the closest available stand-in
-  for the `enriched_share` the original spec draft described (see
-  `optimize-toolkit-mcp-tools.md:214-218`). Treat
-  `sessions_with_toolkit_data / sessions_scanned` as a **separate,
-  secondary** check — "does the plugin see this user at all" — worth
-  mentioning if it diverges sharply from the tier-attribution ratio
-  (e.g. a very-online-but-pre-v0.12 user), but don't gate the caveat on
-  it: a user can score 1.0 on toolkit-data presence while still being
-  at 0 on tier attribution, and it's the latter that governs whether a
-  savings number is grounded. When the tier-attribution ratio is under
-  0.5, prepend a one-line caveat: "evidence from N/M of your sessions
-  in the last 30 days — coverage will climb as you keep working on a
-  current plugin version." Also check
+  enough session history yet" and stop.
+- **Coverage caveat.** Use `my_toolkit_adoption.coverage.sessions_with_tier_attribution
+  / coverage.sessions_scanned` as the enrichment-coverage proxy. When
+  that ratio is under 0.5, prepend a one-line caveat: "evidence from
+  N/M of your sessions in the last 30 days — coverage will climb as
+  you keep working on a current plugin version." Also check
   `my_turn_pattern.coverage.plugin_versions_seen` — if it shows a stale
-  version for recent turns, mention the plugin-version-drift possibility
-  and suggest a Claude Code restart.
-
-If `my_turn_pattern.turns_total` or `my_toolkit_adoption` shows nothing
-usable (near-zero coverage), say so and stop — do not manufacture a
-pitch from thin data.
+  version for recent turns, mention the plugin-version-drift
+  possibility and suggest a Claude Code restart.
 
 ### 2. Discover (1 call)
 
 Call `outcomes__cluster_spawns` with `window: "30d"` (defaults:
 `min_jaccard: 0.4`, `min_cluster_size: 3` — leave as-is unless the
-conversation gives you a reason to tune them). This tool does not judge
-which clusters are worth pitching — **that's your job, adaptively, in
-this conversation.** Rank by `total_cost_usd` (fall back to
-`total_tokens` when cost is null) and recurrence; drop anything with
-`recurrence < 3` even if it slipped through, and prefer clusters with a
-higher `with_description_share` in `coverage` (clustering is weaker
-without descriptions).
+conversation gives you a reason to tune them). Rank clusters by
+`total_tokens` (cost isn't per-cluster available; use tokens as the
+size proxy) and recurrence; drop anything with `recurrence < 3` even
+if it slipped through, and prefer clusters with a higher
+`with_description_share` in `coverage` (clustering is weaker without
+descriptions).
 
-Take the top **K = 3** clusters forward. If fewer than 3 clear clusters
-exist, present fewer — do not pad with weak candidates to hit the
-number.
+Take the top **K = 3** clusters forward. If fewer than 3 clear
+clusters exist, present fewer — do not pad with weak candidates to hit
+the number.
 
-### 3. Score (1 + up to K calls)
+### 3. Ground yourself in the user's real toolkit (0–2 file reads per candidate)
+
+Before picking a kind for a cluster, look at what the user actually
+has. `my_toolkit_adoption` lists capabilities by name and usage, but
+"a name in a usage map" is not the same as "a file on disk that will
+still be there next session." For each of the top-K clusters:
+
+- If `my_toolkit_adoption` shows an agent/skill whose name looks like
+  it might cover this cluster's `representative_label` +
+  `tool_signature`, `Read` the matching file under `.claude/agents/`
+  or `.claude/skills/` to confirm the fit before recommending `adopt`.
+  Bad `adopt` recommendations happen when the name matches but the
+  actual scope doesn't.
+- If you're considering `extract` (mint new), `Grep` under
+  `.claude/agents/` for the cluster's dominant tools in the
+  `tool_signature` — a similar-shape agent may already exist under a
+  name your `my_toolkit_adoption` scan didn't surface.
+- If you're considering `pin`/`downgrade`, locate the existing agent
+  file so you can propose a **minimal edit** (change one `model:`
+  line) rather than overwriting the whole file.
+
+Keep this bounded — one or two focused `Read`/`Grep` calls per
+candidate, not a full-repo sweep. If the file isn't obviously there,
+that's information ("adopt target's name matched but the file isn't
+under `.claude/agents/` — treat as evidence to soften the adopt pitch,
+or reframe as `gap`").
+
+### 4. Pick the kind, from first principles
 
 Call `outcomes__org_offered_tiers` once — this tells you the org's
-actual `cheap` and `reasoning` model tiers. **Never suggest a model the
-org isn't offered**; if a tier is `null`, that door is closed for this
-org.
+actual `cheap` and `reasoning` model tiers. **Never suggest a model
+the org isn't offered**; if a tier is `null`, that door is closed for
+this org.
 
-For each of the top-K clusters, call `outcomes__estimate_savings` with
-the cluster's token/model data and a `target_tier`. Choosing
-`target_tier` and the eventual `kind` (next step) is this skill's
-judgment call — the tools score a proposal, they don't propose one for
-you:
+For each of the top-K clusters, reason about kind from the evidence in
+front of you. There is no server-side kind gate — you pick, you
+justify. The five buildable kinds and one signal-only kind:
 
-- Cluster's `current_model` already matches the org's `cheap` tier →
-  there's no tiering headroom; this cluster is a candidate for
-  `extract` (mint a reusable capability) or `consolidate`
-  (near-duplicate of something that already exists), not `pin`/
-  `downgrade`. **Still call `estimate_savings` with `target_tier:
-  "cheap"`** — the savings will be ~0 honestly, but the call keeps
-  `target_tier` grounded for the compose step that follows, and
-  confirms there's truly no delta rather than assuming it. Never skip
-  the call.
-- Cluster runs on a `reasoning`-tier or unresolved model and the work
-  looks mechanical (tight `tool_signature` — use `jaccard_within` as
-  the proxy, `≥ 0.6` is a defensible starting threshold;
-  `TODO(reviewer)` on the exact value) → `target_tier: "cheap"`, kind
-  candidate `pin` or `downgrade`.
-- Cluster's `tool_signature` looks like it's duplicating an existing
-  named capability you can see in `my_toolkit_adoption` → kind
-  candidate `adopt` (stop minting the inline pattern, use the existing
-  one) or `swap` (existing capability is the wrong shape/model, needs
-  replacing).
-- Two or more clusters look like near-duplicates of each other →
-  `consolidate`.
-- **D5 outcome gate**: `adopt`/`swap`/`pin`/`downgrade` require the
-  cohort outcome signal to be present for this candidate. Pick your
-  best-guess `kind` here from the signals above — the gate itself is
-  validated authoritatively after `outcomes__generate_agent_spec` in
-  step 5 (Compose), which returns `outcome_backed` / `kind_supported`
-  directly (cardinalhq/conductor#1322). No inference from errors or
-  body shape needed.
-- If nothing in the cluster fits any artifact-bearing kind, it's a
-  `gap` — a signal worth naming in conversation ("you keep doing X by
-  hand; there's no fitting capability for it yet") with **no artifact
-  and no `generate_agent_spec` call**.
+- **`adopt`** — the cluster's `tool_signature` and label overlap an
+  existing capability you saw in step 3. Recommend the user reach for
+  the existing thing consistently, no new file. Softer signal: the
+  user's own `my_toolkit_adoption` shows the target with meaningful
+  usage already (they know it exists; the miss is inconsistency, not
+  awareness).
+- **`swap`** — cluster overlaps an existing capability, but that
+  existing capability is the wrong shape or wrong model for this work.
+  Recommend replacing it. Harder to justify than `adopt`; state the
+  reason ("existing agent is pinned to opus but the tool_signature is
+  mechanical — swap it for a cheap-tier variant").
+- **`pin`** — cluster runs on a mix of tiers with the org's cheap tier
+  already carrying meaningful share (say, ≥30% of the cluster's
+  `subagent_model` occurrences) and no evidence the reasoning tier is
+  load-bearing. Recommend pinning the existing capability to the
+  cheap tier. Requires you to have located an existing file to edit.
+- **`downgrade`** — cluster runs predominantly on the reasoning tier
+  (say, ≥50% share) but the `tool_signature` looks mechanical
+  (`jaccard_within` ≥ 0.6, small tool set, no reasoning-heavy tools
+  like WebSearch/deep-analysis). Recommend re-tiering the existing
+  capability down. Same file-locate requirement as `pin`.
+- **`extract`** — a recurring inline pattern with no existing named
+  capability to point at. Mint a new sub-agent. This is the one kind
+  where you author a full new `.claude/agents/<name>.md` file from
+  scratch. Requires you to name the capability and derive its
+  `tools:` allowlist from the cluster's `tool_signature`.
+- **`consolidate`** — two clusters look like the same underlying job
+  under two different labels (or two existing capabilities do). No
+  new file; recommend merging. Present conversationally, don't
+  auto-locate the files.
+- **`gap`** (signal only, no artifact) — cluster is real recurring
+  work, but you cannot pick a kind honestly (no adopt target, extract
+  would be premature, `tool_signature` too diffuse to justify a
+  minted agent). Say so plainly, no artifact, no confirmation
+  question, no `estimate_savings` call for this candidate.
 
-Read `estimate.assumptions.placeholder_output_ratio` /
+Thresholds above (30% cheap share, 50% reasoning share, ≥0.6
+jaccard_within) are rules of thumb, not gates. Adjust when the
+cluster's specifics clearly warrant — the point is to reason from the
+evidence, not clear a fixed bar.
+
+### 5. Estimate savings (1 call per non-`gap` candidate)
+
+For each candidate that isn't `gap`, call `outcomes__estimate_savings`
+with the cluster's `total_tokens`, per-component tokens if you can
+derive them from members' fields, `current_model` (the dominant
+`subagent_model` across cluster members), and `target_tier`
+(`"cheap"` for `pin`/`downgrade`/`extract`; `"cheap"` also for
+`adopt`/`swap` if the pointed-to capability runs cheaper). Read
+`estimate.assumptions.placeholder_output_ratio` /
 `placeholder_cache_ratio` and `estimate.estimate` on every response —
 see **Placeholder savings, honestly** below before you say a dollar
 figure out loud.
 
-### 4. Present (no tool call)
+### 6. Author + Present (no tool call; you write the artifact)
 
-One candidate at a time, top-K by headline savings, each with:
+For each candidate, author the artifact yourself from first principles
+before asking for confirmation. The user will see the full artifact,
+not a description of one. Per kind:
 
-- The evidence summary in plain language (not a raw JSON dump).
-- The `matching_sessions` slice if present, referenced inline ("this
-  would have covered your session on Jul 6"), not as a bare count.
-- The full artifact body you'd write (from step 5 — call
-  `outcomes__generate_agent_spec` before presenting, not after
-  confirming, since "full artifact before any confirmation question" is
-  the contract).
+**`extract` — new file at `.claude/agents/<name>.md`.** You author:
+
+- `name`: kebab-case, `^[a-z][a-z0-9-]*$`, derived from the cluster's
+  `representative_label`. Short enough to type. If a same-name file
+  already exists in `.claude/agents/`, disambiguate rather than
+  overwrite.
+- `description`: one sentence stating what work this handles and when
+  Claude should delegate to it. Ground the sentence in the cluster's
+  actual observed work — reference the tool_signature's dominant
+  tools and the label's phrasing. Not a template; you write it.
+- `tools`: derived from the cluster's `tool_signature`. Include the
+  tools that account for the mass of calls, drop the long tail. If
+  the tool_signature is empty (no per-call breakdown), omit the
+  `tools:` line entirely (the subagent inherits the main thread's
+  toolset).
+- `model`: the `target_model_id` from `org_offered_tiers` for the
+  tier you picked in step 5.
+- Body: a short (≤10 line) system prompt describing the role.
+  Grounded in this cluster's specifics — what request shape the
+  subagent handles, what to report back, when to escalate.
+  Absolutely not a template like "handles recurring work" — write it
+  for this specific pattern.
+
+**`pin`/`downgrade` — edit an existing file at `.claude/agents/<name>.md`.**
+You already located the file in step 3. The meaningful change is one
+frontmatter line: `model: <target_model_id>`. Author the dry-run as a
+one-field edit, not a full-file replacement. If you couldn't locate
+the existing file, say so and reframe as a conversational nudge
+("your `<capability>` agent shows heavy reasoning-tier usage; consider
+pinning it to cheap — I couldn't find its file to edit; where should
+this go?").
+
+**`adopt` — usually no file.** Author a plain-language recommendation:
+"stop spawning this inline pattern; your existing `<capability>`
+already handles it — I saw N sessions where it would have applied."
+No confirmation-to-write question; the actionable part is the user's
+future behavior, not a diff. If the user asks for a durable
+reminder, offer to write a short note somewhere they'd see it
+(a CLAUDE.md line, for instance) — only on explicit ask.
+
+**`swap` — edit or replace an existing file.** Author the dry-run as
+the specific edit you'd propose: which file, which field(s) change,
+what the new content is. Do not mint a brand-new file under `swap`
+without the user explicitly asking for one.
+
+**`consolidate` — no automated file work.** Present the two-candidate
+overlap and ask the user which capability should absorb the other.
+Do not attempt auto-locate or auto-merge.
+
+**`gap` — no artifact.** State the pattern, name it as a signal.
+Skip step 7 (Mark) — actually, do call `mark` with `status:
+"presented"` and `proposed_kind: "gap"` for the ledger's sake, but
+skip the write/confirmation loop.
+
+**Present** the authored artifact (or the plain-language
+recommendation) with:
+
+- The evidence summary in plain language.
+- The `matching_sessions` slice from the cluster if present,
+  referenced inline ("this would have covered your session on Jul 6").
 - The savings figure, honestly caveated per placeholder rules.
-- An explicit confirmation question. Do not proceed to writing on
-  silence, "not now," or a topic change — see **Marking honestly**.
+- A plain confirmation question ("write this to `.claude/agents/<name>.md`?
+  yes/no"). One candidate at a time — don't stack.
 
-### 5. Compose (1 call per candidate you present)
+### 7. Write (only on explicit confirmation)
 
-Call `outcomes__generate_agent_spec` with the cluster's id, the chosen
-`target_tier`, and the chosen `kind` (one of `extract`, `pin`,
-`downgrade`, `adopt`, `swap`, `consolidate` — never `gap`, which has no
-artifact). This is a **server-authored** artifact — you do not compose
-the markdown; you present it and, on confirmation, write it verbatim
-(cosmetic adaptation only: renaming to fit repo conventions, trimming an
-obviously-irrelevant tool from the allowlist).
-
-**D5 outcome gate — read directly.** The response carries
-`outcome_backed: boolean` and `kind_supported: boolean`
-(cardinalhq/conductor#1322). Read both before presenting the candidate:
-
-- If `kind_supported === false`, fall back to kind `extract` and tell
-  the user plainly why: "this recommendation kind needs cohort outcome
-  data your sessions don't have populated yet — falling back to
-  `extract`."
-- Never present or write a `pin`/`downgrade`/`adopt`/`swap` artifact
-  when `outcome_backed === false` — this is a hard gate.
-- This is independent of the `warning: "artifact_kind_not_yet_specialized"`
-  field described below in **Known gap** — that flags body
-  specialization (FU-1), not D5 outcome validity. Both can appear on
-  the same response.
-
-**Known gap — be honest about it.** `outcomes__generate_agent_spec`
-today emits the same shape of markdown body regardless of `kind`
-(flagged in the harvester review as FU-1, not yet closed as of this
-writing). That means a `pin` or `adopt` recommendation may come back
-reading like a freshly-minted agent even though nothing about the role
-is actually new. **Say what kind you're rendering and where the target
-file would go even when the body itself is generic** — do not let a
-generic body imply the recommendation is less grounded than it is (the
-evidence and savings numbers are still real; only the prose body is
-currently kind-blind). Per kind:
-
-| kind | what it means | target file | what to do given the generic-body gap |
-|---|---|---|---|
-| `extract` | mint a genuinely new capability from a recurring inline cluster | new file: `.claude/agents/<suggested_name>.md` | Body is expected to be generic-shaped here — this is the one kind `generate_agent_spec` was designed for. Write as-is. |
-| `pin` | keep the existing capability, change only its model tier | existing `.claude/agents/<name>.md` if you can identify it from the conversation/repo; otherwise `.claude/agents/<suggested_name>.md` as a fallback | Tell the user plainly: "this is a `pin` — the meaningful change is the model line (`model: <target_model_id>`), not a new role description. I'd normally just edit that one field on your existing agent file rather than replace it with this generic body; let me know which existing file this should target." Prefer a minimal edit over a full-body overwrite when you can locate the existing file. |
-| `downgrade` | same as `pin` but framed as re-tiering an over-qualified capability down | same as `pin` | Same honesty note as `pin`. |
-| `adopt` | stop minting this pattern inline; an existing capability already covers it | usually **no new file** | Say so directly: "this is an `adopt` — no new file is needed, `<existing capability>` already covers this. I'll skip writing anything; the actionable part is reaching for it next time." Only write something (e.g., a short note) if the user asks for a durable reminder. |
-| `swap` | replace a capability with a better-fit existing one | the **existing** capability's file, if identifiable | Same posture as `adopt` — this is a pointer to something that already exists, not new content. Don't write a new agent file under this kind without the user explicitly asking for one. |
-| `consolidate` | merge near-duplicate capabilities | the files being merged, once the user identifies them | `generate_agent_spec` doesn't return which files are duplicates — it only scores the cluster. Present the opportunity conversationally; don't attempt to auto-locate or auto-merge files. Only write once the user tells you which files are involved. |
-| `gap` | no fitting capability exists | none — no artifact | Never call `generate_agent_spec` for this kind. Present as a signal only. |
-
-`TODO(reviewer)`: this table is this skill's interpretation of how to
-stay honest around the FU-1 generic-body gap — confirm it against
-product intent once `generate_agent_spec` becomes kind-aware, and
-simplify accordingly.
-
-### 6. Write (only on explicit confirmation)
-
-**Validate the target-file basename before anything else.** The
-`suggested_name` field is server-authored so this is defence in depth,
-but names are used as path segments — reject if `suggested_name` (a)
-contains `/` or `\`, (b) contains `..`, or (c) doesn't match
-kebab-case `^[a-z][a-z0-9-]*$`. On rejection, surface the value
-verbatim to the user with the specific reason and stop — do not
-attempt a rewrite or a slugification pass.
-
-**Dry-run first, always.** Before writing anything, show:
-
-- The exact target file path (from the table above).
-- Whether it's a new file or an edit to an existing one, and if an
-  edit, which fields change (ideally just the model line for
-  `pin`/`downgrade`).
-- The full artifact body that would land.
-- A plain confirmation question ("write this to `.claude/agents/
-  <name>.md`? yes/no").
+**Validate the target-file basename before anything else.** Names are
+used as path segments — reject if the name (a) contains `/` or `\`,
+(b) contains `..`, or (c) doesn't match kebab-case
+`^[a-z][a-z0-9-]*$`. On rejection, surface the value verbatim to the
+user with the specific reason and stop.
 
 Only write after an explicit "yes"-shaped answer in the conversation.
-No write on silence, hedging, or topic change. After writing, tell the
-user this **takes effect next session** (agents load at session start;
-there is no live-registration channel for claude-code) — never imply
-the current conversation just changed. Consent, revert, and
+No write on silence, hedging, or topic change. After writing, tell
+the user this **takes effect next session** (agents load at session
+start; there is no live-registration channel for claude-code) — never
+imply the current conversation just changed. Consent, revert, and
 distribution are git: the artifact lands in the working tree like any
 other change, reviewed in the diff, reverted with `git checkout --`,
-shared via the repo. There is no separate revoke/sync mechanism to
-explain.
+shared via the repo.
 
-### 7. Mark (1 call per candidate you presented)
+### 8. Mark (1 call per candidate you presented)
 
 **Exactly one `mark` call per candidate you showed, carrying its
-terminal status.** Not one call per state transition, not a stream of
-"presented → accepted" updates — the ledger reads the status as the
-single terminal outcome. Don't double-mark. Pick from:
+terminal status and — when there is one — the artifact body you
+authored.** Not one call per state transition, not a stream of
+"presented → accepted" updates. Pick from:
 
 - `status: "accepted"` — confirmed and written.
-- `status: "dismissed"` — **explicit refusal only** ("no," "don't want
-  this"). Ask one short follow-up ("what didn't fit?") and forward the
-  answer verbatim as `reason` (cap ~200 chars; do not paraphrase or
-  classify it yourself — the raw text is the learning signal).
+- `status: "dismissed"` — **explicit refusal only** ("no," "don't
+  want this"). Ask one short follow-up ("what didn't fit?") and
+  forward the answer verbatim as `reason` (cap ~200 chars).
 - `status: "presented"` — shown, no decision either way ("not now,"
-  topic change, session ends without an answer). **Never auto-dismiss
-  on non-confirmation** — hesitation must not read as a refusal;
-  dismissals are sticky server-side (2× pooled-cost reopen) and
-  poisoning that with a false dismissal is worse than a missed mark.
+  topic change, session ends without an answer). **Never
+  auto-dismiss on non-confirmation.** Dismissals are sticky
+  server-side (2× pooled-cost reopen); a false dismissal is worse
+  than a missed mark.
 
-Use `action: { kind: "cluster", cluster_id, proposed_kind }` — these are
-live cluster-derived decisions, not legacy ledger rows. Mark is
-best-effort: if the call fails, don't error the conversation over it —
-the artifact write (or its absence) is the real outcome; the ledger is
-measurement, not the source of truth.
+Use `action: { kind: "cluster", cluster_id, proposed_kind }`. When
+the candidate is `extract`/`pin`/`downgrade`/`swap`/`consolidate` and
+you authored an artifact, pass `agent_spec_md` (your authored body,
+verbatim) and `est_savings_low_usd` / `est_savings_high_usd` (from
+`estimate_savings`) so the ledger row isn't lossy. For `adopt` with
+no file written, and for `gap`, omit those fields.
+
+Mark is best-effort: if the call fails, don't error the conversation
+over it — the artifact write (or its absence) is the real outcome;
+the ledger is measurement, not the source of truth.
 
 ## Failure handling for non-`mark` tools
 
 `mark` is the one tool that follows the silent-log rule above — every
 other tool is on the hard-stop rule. If any of `my_turn_pattern`,
-`my_toolkit_adoption`, `cluster_spawns`, `org_offered_tiers`,
-`estimate_savings`, or `generate_agent_spec` returns `503`
-(lakerunner-not-configured), `400` (invalid body), or an empty result
-set where the flow depends on at least one row, **surface the error
-verbatim to the user, stop the flow, do not retry**. An empty
-`cluster_spawns` result means "no clusters cleared the recurrence
-floor — nothing to pitch," not "try again with looser thresholds."
+`my_toolkit_adoption`, `cluster_spawns`, `org_offered_tiers`, or
+`estimate_savings` returns `503` (lakerunner-not-configured), `400`
+(invalid body), or an empty result set where the flow depends on at
+least one row, **surface the error verbatim to the user, stop the
+flow, do not retry**. An empty `cluster_spawns` result means "no
+clusters cleared the recurrence floor — nothing to pitch," not "try
+again with looser thresholds."
 
 ## Placeholder savings, honestly
 
 Every `outcomes__estimate_savings` response carries fields that exist
 specifically so you don't overstate a number:
 
-- `estimate: "no_cohort_catalog_only"` means there's no cohort of other
-  engineers/orgs to compare against yet — the figure is **catalog
-  pricing math only**, not validated against how the tier actually
-  performs for this kind of work. Say this out loud: "this is a
-  catalog-only estimate — I don't have cohort data yet to confirm the
-  cheaper tier holds up for this pattern; treat it as a ceiling, not a
-  promise." Do not drop the caveat just because the number is
-  attractive.
-- `assumptions.placeholder_output_ratio` / `placeholder_cache_ratio` set
-  to `true` mean the estimate fell back to typical ratios because the
-  cluster didn't carry per-component token data. Say "estimated within
-  a wide band" rather than quoting a bare point figure when either flag
-  is set.
+- `estimate: "no_cohort_catalog_only"` means there's no cohort of
+  other engineers/orgs to compare against yet — the figure is
+  **catalog pricing math only**, not validated against how the tier
+  actually performs for this kind of work. Say this out loud: "this
+  is a catalog-only estimate — I don't have cohort data yet to
+  confirm the cheaper tier holds up for this pattern; treat it as a
+  ceiling, not a promise." Do not drop the caveat just because the
+  number is attractive.
+- `assumptions.placeholder_output_ratio` / `placeholder_cache_ratio`
+  set to `true` mean the estimate fell back to typical ratios because
+  the cluster didn't carry per-component token data. Say "estimated
+  within a wide band" rather than quoting a bare point figure when
+  either flag is set.
 - When `current_cost_usd` is `null` (current model unpriced), don't
   imply a before/after delta — state the projected cost alone.
 
@@ -337,16 +349,22 @@ confidently you say the number, not whether you say it.
 
 ## What not to do
 
-- Don't re-analyze the repo beyond confirming a target file path exists
-  or locating the existing file a `pin`/`downgrade`/`swap` targets.
-- Don't spawn a sub-agent to do independent investigation — the server
-  already computed everything you need.
+- Don't spawn a sub-agent to do independent investigation — you
+  already have the evidence you need from the six tools plus a
+  couple of targeted local file reads.
 - Don't invent a cohort comparison when a tool response says there
   isn't one.
-- Don't write anything without an explicit "yes" in this conversation.
+- Don't write anything without an explicit "yes" in this
+  conversation.
 - Don't auto-invoke yourself — this skill is command-only
   (`disable-model-invocation: true`); only run it when the user types
   `/cardinal:optimize-toolkit`.
-- Don't exceed the ~10-call budget; if you're reaching for more calls
-  than that, stop and say the pipeline needs more than a thin skill can
-  responsibly do here.
+- Don't paper over a bad pick with a plausibly-worded artifact.
+  Authoring from first principles means the artifact should read as
+  specific to the cluster's actual pattern. If you find yourself
+  writing template-shaped prose ("handles recurring work of this
+  kind"), that's a signal the evidence isn't strong enough to
+  recommend — reclassify as `gap` and say so.
+- Don't exceed the ~10-call budget on `outcomes__*` tools; if you're
+  reaching for more, stop and say the pipeline needs more than a
+  thin skill can responsibly do here.
