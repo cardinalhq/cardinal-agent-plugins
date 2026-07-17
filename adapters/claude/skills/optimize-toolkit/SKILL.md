@@ -198,6 +198,34 @@ actual `cheap` and `reasoning` model tiers. **Never suggest a model
 the org isn't offered**; if a tier is `null`, that door is closed for
 this org.
 
+**Drill into sub-clusters — meta-clusters are framing, not the
+recommendation unit.** The meta-cluster tells you the organizing shape
+of an engineer's work (Research is heavy, Code Review is heavy); the
+actionable play lives one level deeper, at the sub-cluster level: the
+individual verb-bucket from the reducer with its specific
+`top_labels`, `dominant_tool_shapes`, `sample_top_by_tokens[].model`,
+`session_count`, and `burst_count`. Pitching at the meta-cluster level
+alone produces truisms ("mechanical work should run on Haiku") — the
+non-obvious plays only appear when you compare a sub-cluster's shape
+against `my_toolkit_adoption`.
+
+**Strongest pattern (empirically): toolkit-consistency adopt.** When a
+sub-cluster's verb + `dominant_tool_shapes` matches an existing agent
+in `my_toolkit_adoption` (e.g. code-review-shaped labels + Bash+Read +
+no Agent/Skill call in the tool_signature → `pr-review-toolkit:code-reviewer`
+covers this), the play is `adopt` — the user has the tool, they're
+inconsistently skipping it. Contrast evidence sharpens the pitch: if
+another spawn in the same window DID show `Agent` or `Skill` in its
+tool_signature for the same verb, cite that ("you already use this
+tool sometimes — 3 of your same-shape spawns bypassed it").
+
+**Tie-break — adopt beats downgrade when both fire.** If a sub-cluster
+is both `adopt`-covered (an existing agent handles this shape) AND
+downgrade-shaped (running on reasoning tier with a mechanical
+tool_signature), pitch `adopt` alone. The existing agent's own model
+config is a separate concern; routing the work to the agent captures
+the primary win. Do not double-recommend.
+
 For each of the top-K meta-clusters, reason about kind from the
 evidence in front of you (the semantic cluster label, its member verb
 buckets, its dominant tool shapes, its token magnitude, and the
@@ -403,8 +431,14 @@ specifically so you don't overstate a number:
   the cluster didn't carry per-component token data. Say "estimated
   within a wide band" rather than quoting a bare point figure when
   either flag is set.
-- When `current_cost_usd` is `null` (current model unpriced), don't
-  imply a before/after delta — state the projected cost alone.
+- **`current_cost_usd: null` — dominant model not priced in this
+  org's catalog.** If the sub-cluster's dominant model (e.g.,
+  `claude-opus-4-8`) isn't in `org_offered_tiers.all`,
+  `estimate_savings` returns `current_cost_usd: null` and
+  `savings_high/low_usd: 0`. Do not quote a $ figure. Pitch the play
+  on consistency or shape grounds ("mechanical tool-use pattern, better
+  routed through <existing agent>") — the savings surface just isn't
+  usable in this org for this model.
 
 None of this blocks presenting the candidate — it changes how
 confidently you say the number, not whether you say it.
