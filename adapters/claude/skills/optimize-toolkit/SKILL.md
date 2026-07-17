@@ -113,7 +113,7 @@ response to a temp file and pipe it through the reducer that ships
 alongside this SKILL.md. The reducer collapses N-identical labels,
 groups by first content-word (verb), sub-groups by dominant-tool
 signature, and collapses same-session bursts. It turns 100+ raw spawn
-records into ~15–30 verb buckets — a small enough set for the semantic
+records into ~15–30 sub-clusters — a small enough set for the semantic
 pass in 3b to reason over without paging in the whole raw population.
 
 ```bash
@@ -128,9 +128,9 @@ python3 "$REDUCER" < /tmp/spawns_raw.json > /tmp/spawns_reduced.json
 cat /tmp/spawns_reduced.json
 ```
 
-Output shape: `{ input_spawns, input_verb_buckets, reduced_rows: [{verb,
+Output shape: `{ input_spawns, input_verb_buckets, reduced_rows: [{verb, tool_shape,
 spawn_count, unique_labels, top_labels[:8], tokens_total, session_count,
-burst_count, dominant_tool_shapes, sample_top_by_tokens}] }`. Rows come
+burst_count, tool_shape, sample_top_by_tokens}] }`. Rows come
 sorted by `tokens_total` descending.
 
 **Stage 3b — semantic cluster (your reasoning, in-context).** Read the
@@ -148,7 +148,7 @@ in front of you.
 
 The semantic pass is **your judgment** — no server-side taxonomy. Use
 the reducer's rich per-bucket evidence (top_labels, session_count,
-dominant_tool_shapes) to justify each grouping. A verb bucket that
+tool_shape) to justify each grouping. A verb bucket that
 doesn't cleanly fit any meta-cluster stays as its own single-bucket
 meta-cluster; don't force-fit for symmetry.
 
@@ -172,13 +172,13 @@ still be there next session." For each of the top-K meta-clusters:
 
 - If `my_toolkit_adoption` shows an agent/skill whose name looks like
   it might cover the meta-cluster's dominant verb buckets +
-  `dominant_tool_shapes`, `Read` the matching file under
+  `tool_shape`, `Read` the matching file under
   `.claude/agents/` or `.claude/skills/` (including plugin-installed
   paths under `~/.claude/plugins/`) to confirm the fit before
   recommending `adopt`. Bad `adopt` recommendations happen when the
   name matches but the actual scope doesn't.
 - If you're considering `extract` (mint new), `Grep` under
-  `.claude/agents/` for the meta-cluster's `dominant_tool_shapes` — a
+  `.claude/agents/` for the meta-cluster's `tool_shape` — a
   similar-shape agent may already exist under a name your
   `my_toolkit_adoption` scan didn't surface.
 - If you're considering `pin`/`downgrade`, locate the existing agent
@@ -203,14 +203,14 @@ recommendation unit.** The meta-cluster tells you the organizing shape
 of an engineer's work (Research is heavy, Code Review is heavy); the
 actionable play lives one level deeper, at the sub-cluster level: the
 individual verb-bucket from the reducer with its specific
-`top_labels`, `dominant_tool_shapes`, `sample_top_by_tokens[].model`,
+`top_labels`, `tool_shape`, `sample_top_by_tokens[].model`,
 `session_count`, and `burst_count`. Pitching at the meta-cluster level
 alone produces truisms ("mechanical work should run on Haiku") — the
 non-obvious plays only appear when you compare a sub-cluster's shape
 against `my_toolkit_adoption`.
 
 **Strongest pattern (empirically): toolkit-consistency adopt.** When a
-sub-cluster's verb + `dominant_tool_shapes` matches an existing agent
+sub-cluster's verb + `tool_shape` matches an existing agent
 in `my_toolkit_adoption` (e.g. code-review-shaped labels + Bash+Read +
 no Agent/Skill call in the tool_signature → `pr-review-toolkit:code-reviewer`
 covers this), the play is `adopt` — the user has the tool, they're
