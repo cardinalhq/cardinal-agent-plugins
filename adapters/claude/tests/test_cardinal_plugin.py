@@ -72,6 +72,10 @@ class StubMaestro:
         self.ingest_probe_count = 0
         self.revoke_calls: list[tuple[str, str | None]] = []
         self.revoke_status = 204
+        # When True, the act block is emitted WITHOUT api_key — simulates a
+        # partial/malformed grant (metadata, no plaintext) the client must not
+        # stamp into state or claim it wrote.
+        self.bundle_act_no_api_key = False
         # Spend-limits status endpoint: the verdict to serve (None → 404,
         # simulating a maestro without the limits feature) + call count.
         self.limits_verdict: dict | None = None
@@ -139,6 +143,8 @@ class StubMaestro:
                         "key_prefix": "ACTPLAIN",
                         "created_at": "2026-07-17T00:00:00Z",
                     }
+                    if outer.bundle_act_no_api_key:
+                        del bundle["act"]["api_key"]
                 if "mcp:invoke" in outer.last_scopes:
                     bundle["mcp"] = {
                         "url": f"{outer.url()}/api/orgs/org-uuid-1/mcp",
@@ -403,8 +409,10 @@ class ConnectTests(unittest.TestCase):
         self.assertEqual(secrets["act_endpoint"], self.stub.url())
 
         # The token must NEVER land in settings.json (the whole point).
-        if self.settings.exists():
-            self.assertNotIn("ACTPLAINTEXT", self.settings.read_text())
+        # Unconditional: settings.json is always written by connect, so this
+        # security assertion must not silently no-op if that ever changes.
+        self.assertTrue(self.settings.exists())
+        self.assertNotIn("ACTPLAINTEXT", self.settings.read_text())
 
         # State carries non-secret metadata only, at schema v4.
         state = read_json(self.state)
@@ -412,15 +420,36 @@ class ConnectTests(unittest.TestCase):
         self.assertEqual(state["act_key_id"], "act-key-uuid-1")
         self.assertNotIn("ACTPLAINTEXT", self.state.read_text())
 
-    def test_reconnect_without_actions_drops_prior_act_secret(self):
+    def test_reconnect_without_actions_drops_and_revokes_prior_act(self):
         # Grant actions, then re-connect without the flag: the token must be
-        # reconciled off disk, mirroring the env-key merge.
+        # reconciled off disk AND revoked server-side — otherwise a live
+        # "acts as you" token orbits un-revokable once its key_id is gone.
         run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions"], self.home)
         secrets_path = self.home / ".claude" / "cardinal-secrets.json"
         self.assertTrue(secrets_path.exists())
+        self.stub.revoke_calls.clear()
+
         run_plugin(CONNECT, ["--host", self.stub.url(), "--rotate"], self.home)
         self.assertFalse(secrets_path.exists(),
                          "act token should be dropped when re-connecting without --enable-actions")
+        # Revoked with proof-of-possession (the plaintext), not just the key_id.
+        revoked = dict(self.stub.revoke_calls)
+        self.assertIn("act-key-uuid-1", revoked)
+        self.assertTrue(revoked["act-key-uuid-1"].startswith("ACTPLAINTEXT"))
+        # State no longer advertises the act key.
+        self.assertNotIn("act_key_id", read_json(self.state))
+
+    def test_act_block_without_api_key_is_noop(self):
+        # A partial grant (act metadata, no plaintext) must not write a secret,
+        # must not stamp act_key_id into state, and must not falsely claim it
+        # wrote a token — the exact desync status would otherwise flag.
+        self.stub.bundle_act_no_api_key = True
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        secrets_path = self.home / ".claude" / "cardinal-secrets.json"
+        self.assertFalse(secrets_path.exists())
+        self.assertNotIn("act_key_id", read_json(self.state))
+        self.assertNotIn("Wrote control-plane token", res.stdout)
 
     def test_enable_actions_preserves_sibling_secret(self):
         # A pre-existing secret (e.g. an ingest key) must survive the act write.
@@ -794,6 +823,34 @@ class DisconnectTests(unittest.TestCase):
         self.assertNotIn("act-key-uuid-1", dict(self.stub.revoke_calls))
         self.assertTrue(secrets_path.exists())
 
+    def test_disconnect_strips_act_secret_even_when_revoke_fails(self):
+        # A failed server-side revoke must NOT leave the plaintext on disk —
+        # the local copy is stripped regardless and the user is pointed at the
+        # UI. This is the core security guarantee of the teardown path.
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions", "--rotate"], self.home)
+        secrets_path = self.home / ".claude" / "cardinal-secrets.json"
+        self.assertTrue(secrets_path.exists())
+        self.stub.revoke_status = 500
+
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(secrets_path.exists())
+        self.assertIn("settings/api-keys", res.stdout)
+
+    def test_disconnect_malformed_secrets_does_not_claim_removal(self):
+        # If the secret file is malformed, the strip refuses to touch it and the
+        # CLI must NOT print "✓ Removed" — it warns instead, so the user isn't
+        # told a token is gone when it's still on disk.
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions", "--rotate"], self.home)
+        secrets_path = self.home / ".claude" / "cardinal-secrets.json"
+        secrets_path.write_text("{ this is not json")
+
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("Removed control-plane token", res.stdout)
+        self.assertIn("Could not remove", res.stdout)
+        self.assertTrue(secrets_path.exists())
+
     def test_no_state_file_no_op(self):
         self.state.unlink()
         if self.settings.exists():
@@ -830,6 +887,22 @@ class StatusTests(unittest.TestCase):
         self.assertIn("telemetry-and-mcp", res.stdout)
         self.assertIn("Telemetry endpoint", res.stdout)
         self.assertIn("MCP endpoint", res.stdout)
+
+    def test_status_reports_act_token_present(self):
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions"], self.home, timeout=15)
+        res = run_plugin(STATUS, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Actions:", res.stdout)
+        self.assertIn("ACTPLAIN", res.stdout)  # key prefix
+        self.assertIn("Act token stored:", res.stdout)
+
+    def test_status_flags_act_secret_desync(self):
+        # State advertises an act key but the secret file is gone → status must
+        # flag the desync and point at the repair path, not silently pass.
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--enable-actions"], self.home, timeout=15)
+        (self.home / ".claude" / "cardinal-secrets.json").unlink()
+        res = run_plugin(STATUS, [], self.home)
+        self.assertIn("Act token missing", res.stdout)
 
     def test_status_fails_when_mcp_env_vars_missing(self):
         # Connect, then nuke just the env vars from settings.json so the
