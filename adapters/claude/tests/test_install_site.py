@@ -167,11 +167,16 @@ def write_secrets(home: Path, endpoint: str):
     )
 
 
-def make_fake_helm(dir_: Path, record: Path, exit_code=0):
+def make_fake_helm(dir_: Path, record: Path, exit_code=0, echo_stderr=False):
+    """Fake helm: records argv to `record`. When echo_stderr, it also writes
+    argv to stderr (as real helm does on a --set error) so the key-scrub path
+    is actually exercised."""
     helm = dir_ / "helm"
+    stderr_line = 'printf "%s\\n" "$@" >&2\n' if echo_stderr else ""
     helm.write_text(
         "#!/usr/bin/env bash\n"
         f'printf "%s\\n" "$@" >> "{record}"\n'
+        f"{stderr_line}"
         f"exit {exit_code}\n"
     )
     helm.chmod(0o755)
@@ -243,17 +248,43 @@ class InstallSiteTests(unittest.TestCase):
         self.assertNotIn(PSK, res.stdout)
         self.assertIn("REDACTED", out["command"])
 
-    def test_install_perch_helm_failure_is_recoverable_and_scrubs_key(self):
+    def test_install_perch_helm_failure_scrubs_key_from_echoed_stderr(self):
+        # Real helm echoes --set values back on a failure. The fake helm does
+        # too (echo_stderr=True), so the scrub in cardinal-install-site is
+        # actually exercised — without the scrub, PSK would appear in out.stderr.
         bindir = self.home / "fakebin"
         bindir.mkdir()
         record = self.home / "helm-args.txt"
-        make_fake_helm(bindir, record, exit_code=1)
+        make_fake_helm(bindir, record, exit_code=1, echo_stderr=True)
 
         res, out = run(self.home, ["install-perch", "--org", "org-1", "--site", "site-new",
                                    "--namespace", "cardinal"], extra_path=str(bindir))
         self.assertNotEqual(res.returncode, 0)
         self.assertEqual(out["error"], "helm_failed")
-        self.assertNotIn(PSK, res.stdout)  # scrubbed even from helm stderr
+        # helm really did receive the key (so it really was in its stderr)…
+        self.assertIn(f"site.apiKey={PSK}", record.read_text())
+        # …but the surfaced stderr — and all stdout — is scrubbed.
+        self.assertIn("REDACTED", out["stderr"])
+        self.assertNotIn(PSK, out["stderr"])
+        self.assertNotIn(PSK, res.stdout)
+
+    def test_install_perch_missing_helm_is_actionable(self):
+        # Empty PATH-prefix dir → helm not found. (PATH still has system dirs,
+        # but none named `helm` in CI/test envs is not guaranteed, so point PATH
+        # at an isolated dir only.)
+        bindir = self.home / "emptybin"
+        bindir.mkdir()
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = str(bindir)  # only this dir; no helm anywhere
+        res = subprocess.run(
+            [sys.executable, str(BIN), "install-perch", "--org", "org-1",
+             "--site", "site-new", "--namespace", "cardinal"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        out = json.loads(res.stdout)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(out["error"], "helm_missing")
 
     def test_install_perch_after_phone_home_reports_key_gone(self):
         self.stub.phoned_home = True
@@ -304,6 +335,40 @@ class InstallSiteTests(unittest.TestCase):
                                    "--name", "lr", "--namespace", "cardinal"])
         self.assertNotEqual(res.returncode, 0)
         self.assertEqual(out["error"], "contact_sales")
+
+    def test_add_lakerunner_not_eligible_is_actionable(self):
+        self.stub.license_decision = "not_eligible"  # → 403 from license/resolve
+        res, out = run(self.home, ["add-lakerunner", "--org", "org-1", "--site", "site-new",
+                                   "--name", "lr", "--namespace", "cardinal"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(out["error"], "trial_not_eligible")
+
+    def test_add_lakerunner_maps_not_operator_managed(self):
+        # The invariant this skill is built around: create-site always sends
+        # operator_managed, so this 409 should never happen — but if it does,
+        # it must be an actionable message, not a raw 409.
+        self.stub.lakerunner_reason = "site_not_operator_managed"
+        res, out = run(self.home, ["add-lakerunner", "--org", "org-1", "--site", "site-new",
+                                   "--name", "lr", "--namespace", "cardinal"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(out["error"], "not_operator_managed")
+
+    def test_reservation_file_unreadable_does_not_clobber_other_sites(self):
+        # An unreadable installs file must fail loudly, NOT rewrite the file with
+        # only the current site (which would wipe every other site's key).
+        installs = self.home / ".claude" / "cardinal-installs.json"
+        installs.parent.mkdir(parents=True, exist_ok=True)
+        # A directory at that path makes read_text raise OSError deterministically
+        # (no permission-bit flakiness).
+        installs.mkdir()
+        res, out = run(self.home, ["add-lakerunner", "--org", "org-1", "--site", "site-new",
+                                   "--name", "lr", "--namespace", "cardinal"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(out["error"], "installs_unreadable")
+        # The path was not overwritten — still the directory we made.
+        self.assertTrue(installs.is_dir())
+        # And the lakerunner install never fired.
+        self.assertIsNone(self.stub.last_lakerunner_body)
 
     def test_connect_info_renders_port_forward_and_password_commands(self):
         res, out = run(self.home, ["connect-info", "--org", "org-1", "--site", "site-new"])
