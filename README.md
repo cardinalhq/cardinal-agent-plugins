@@ -23,16 +23,27 @@ migrated with byte-equal golden parity against their shipped plugins
 `docs/specs/agent-core.md` for the plan and
 `docs/specs/core-gaps-followup.md` for the core 0.2.0 reconciliation.
 
-Until the release-mirror CI lands, the plugin repos remain the shipping
-sources:
+## Release flow
+
+Development happens here; each adapter is published to a per-CLI **release
+mirror**, where users install from. Install URLs and marketplace slugs keep
+working; the mirrors are build outputs, not sources.
 
 - [cardinal-claude-plugin](https://github.com/cardinalhq/cardinal-claude-plugin)
 - [cardinal-codex-plugin](https://github.com/cardinalhq/cardinal-codex-plugin)
 - [cardinal-cursor-plugin](https://github.com/cardinalhq/cardinal-cursor-plugin)
 - [cardinal-gemini-plugin](https://github.com/cardinalhq/cardinal-gemini-plugin)
 
-After migration those repos become release mirrors: install URLs and
-marketplace slugs keep working; development happens here.
+Bumping an adapter's `plugin.json` version on `main` triggers
+`.github/workflows/release-mirrors.yml`, which runs `build/release.py` to
+push the built artifact (adapter code + vendored `cardinal_core`) plus a
+`vX.Y.Z` tag to that adapter's mirror, syncing `marketplace.json` so the CLI
+offers the update. `release.py` is idempotent — mirrors already at the tag
+no-op.
+
+The two pip packages ship to PyPI separately (`.github/workflows/release.yml`,
+via OIDC trusted publishing) on tags: `core-vX.Y.Z` → `cardinal-agent-core`,
+`omnigent-vX.Y.Z` → `cardinal-omnigent-policy`.
 
 ## Omnigent
 
