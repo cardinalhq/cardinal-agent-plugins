@@ -23,6 +23,10 @@ migrated with byte-equal golden parity against their shipped plugins
 `docs/specs/agent-core.md` for the plan and
 `docs/specs/core-gaps-followup.md` for the core 0.2.0 reconciliation.
 
+The Claude adapter also ships an auto-installed Invariant `PreToolUse`
+hook (`adapters/claude/hooks/invariant-check.py`) — advisory-only, fires
+before Edit/Write/MultiEdit on code covered by an Invariant guarantee.
+
 ## Release flow
 
 Development happens here; each adapter is published to a per-CLI **release
