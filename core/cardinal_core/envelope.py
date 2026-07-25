@@ -464,12 +464,22 @@ def _validate_node_payload(payload: _NodePayloadBase) -> None:
             node_kind == NodeKind.INVOCATION,
             "invocation_kind may only be set when node_kind == invocation",
         )
+    else:
+        _require(
+            node_kind != NodeKind.INVOCATION,
+            "invocation_kind is required when node_kind == invocation",
+        )
 
     if payload.tool_kind is not None:
         _enum_value(payload.tool_kind, ToolKind, "tool_kind")
         _require(
             invocation_kind == InvocationKind.TOOL,
             "tool_kind may only be set when invocation_kind == tool",
+        )
+    else:
+        _require(
+            invocation_kind != InvocationKind.TOOL,
+            "tool_kind is required when invocation_kind == tool",
         )
 
     for field_name, enum_cls in (
@@ -575,8 +585,8 @@ def _validate_execution_context_payload(payload: ExecutionContext) -> None:
         _require(
             isinstance(payload.pr_number, int)
             and not isinstance(payload.pr_number, bool)
-            and payload.pr_number > 0,
-            f"pr_number must be a positive int, got {payload.pr_number!r}",
+            and 0 < payload.pr_number <= 2_147_483_647,
+            f"pr_number must be a positive int32 (1..2^31-1), got {payload.pr_number!r}",
         )
 
     _validate_context_attributes(payload.attributes)

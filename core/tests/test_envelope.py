@@ -144,6 +144,26 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(env.EnvelopeValidationError):
             env.validate(e)
 
+    def test_invocation_node_without_invocation_kind_rejected(self) -> None:
+        payload = env.NodeObserved(**_node_kwargs(
+            node_kind=env.NodeKind.INVOCATION,
+            invocation_kind=None,
+            tool_kind=None,
+        ))
+        e = _envelope(env.RecordType.NODE_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_tool_invocation_without_tool_kind_rejected(self) -> None:
+        payload = env.NodeObserved(**_node_kwargs(
+            node_kind=env.NodeKind.INVOCATION,
+            invocation_kind=env.InvocationKind.TOOL,
+            tool_kind=None,
+        ))
+        e = _envelope(env.RecordType.NODE_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
     def test_missing_provenance_axis_on_node_payload_rejected(self) -> None:
         payload = env.NodeObserved(**_node_kwargs(usage_source=None))
         e = _envelope(env.RecordType.NODE_OBSERVED, payload)
@@ -266,6 +286,18 @@ class ExecutionContextValidationTests(unittest.TestCase):
         )
         e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
         env.validate(e)  # no raise
+
+    def test_pr_number_exceeding_int32_rejected(self) -> None:
+        # Go-side stores pr_number as int32; Python must reject overflow to
+        # avoid contract-breaking asymmetry at ingest time.
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.PR_CREATED,
+            pr_number=2_147_483_648,
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
 
     def test_repository_url_with_userinfo_rejected(self) -> None:
         payload = env.ExecutionContext(

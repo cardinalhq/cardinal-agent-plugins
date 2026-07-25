@@ -75,13 +75,20 @@ PERMISSIVE_ACTIVE = REDACT_MODE == "permissive" and os.environ.get("CARDINAL_ENV
 # catches the common `AWS_SECRET_ACCESS_KEY=...` env-assignment shape.
 KNOWN_SECRET_PATTERNS: tuple[tuple[str, str], ...] = (
     ("AWS_ACCESS_KEY_ID", r"\bAKIA[0-9A-Z]{16}\b"),
-    ("GITHUB_PAT", r"\b(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22}_[A-Za-z0-9]{59})\b"),
+    # gh[pousr]_ covers classic (ghp_), OAuth (gho_), user-to-server (ghu_),
+    # server-to-server (ghs_), and refresh (ghr_) tokens; github_pat_ is the
+    # fine-grained two-segment form.
+    ("GITHUB_PAT", r"\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22}_[A-Za-z0-9]{59})\b"),
     ("SLACK_TOKEN", r"\bxox[abpsr]-[A-Za-z0-9-]+"),
     ("GENERIC_ENV_SECRET_ASSIGNMENT", r"\b[A-Z_][A-Z0-9_]*_(?:KEY|TOKEN|SECRET|PASSWORD)\s*=\s*\S+"),
     ("JWT_LIKE", r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
     ("PRIVATE_KEY_BLOCK", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     ("BEARER_TOKEN", r"[Bb]earer\s+[A-Za-z0-9._-]{20,}"),
     ("REMOTE_URL_USERINFO", r"://[^/@\s]+@"),
+    ("NPM_TOKEN", r"\bnpm_[A-Za-z0-9]{36}\b"),
+    ("PYPI_TOKEN", r"\bpypi-AgE[A-Za-z0-9_-]{50,}"),
+    ("STRIPE_KEY", r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{24,}\b"),
+    ("GCP_API_KEY", r"\bAIza[A-Za-z0-9_-]{35}\b"),
 )
 
 _COMPILED_PATTERNS: tuple[tuple[str, re.Pattern], ...] = tuple(

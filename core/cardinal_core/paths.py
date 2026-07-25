@@ -97,8 +97,14 @@ def dump_debug_payload(event: str, payload: dict[str, Any], debug_dir: Path) -> 
     """
     try:
         debug_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(debug_dir, 0o700)
+        except OSError:
+            pass
         path = debug_dir / f"{event}-{time.time_ns()}.json"
-        path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(payload, indent=2, default=str) + "\n")
     except (OSError, TypeError, ValueError):
         pass
 

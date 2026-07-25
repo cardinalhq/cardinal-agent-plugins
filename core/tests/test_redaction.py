@@ -129,8 +129,30 @@ class SecretDetectionTests(unittest.TestCase):
         for expected in (
             "AWS_ACCESS_KEY_ID", "GITHUB_PAT", "SLACK_TOKEN",
             "GENERIC_ENV_SECRET_ASSIGNMENT", "JWT_LIKE",
+            "NPM_TOKEN", "PYPI_TOKEN", "STRIPE_KEY", "GCP_API_KEY",
         ):
             self.assertIn(expected, names)
+
+    def test_github_oauth_and_server_tokens_detected(self) -> None:
+        # Contract-review: doc claimed gh[pousr]_ but code only had ghp_.
+        for tok in ("gho_1234567890abcdefGHIJKLmnopqrstuvwxyz",
+                    "ghu_1234567890abcdefGHIJKLmnopqrstuvwxyz",
+                    "ghs_1234567890abcdefGHIJKLmnopqrstuvwxyz",
+                    "ghr_1234567890abcdefGHIJKLmnopqrstuvwxyz"):
+            _, patterns = redaction.scrub_secrets(f"header: {tok} rest")
+            self.assertIn("GITHUB_PAT", patterns, f"missed {tok}")
+
+    def test_new_secret_patterns_detected(self) -> None:
+        cases = [
+            ("NPM_TOKEN", "npm_" + "A" * 36),
+            ("PYPI_TOKEN", "pypi-AgE" + "A" * 60),
+            ("STRIPE_KEY", "sk_live_" + "A" * 30),
+            ("STRIPE_KEY", "rk_test_" + "A" * 30),
+            ("GCP_API_KEY", "AIza" + "A" * 35),
+        ]
+        for expected_name, token in cases:
+            _, patterns = redaction.scrub_secrets(f"x={token} y")
+            self.assertIn(expected_name, patterns, f"missed {token}")
 
 
 class HashFieldTests(unittest.TestCase):

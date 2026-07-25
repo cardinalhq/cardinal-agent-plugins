@@ -314,11 +314,22 @@ presenting inferred data as fact.
 
 ## 10. Provenance precedence
 
-Global precedence order, applied per field during reduction:
+Precedence is **per-axis**, not global — each of the six axes in §9 has
+its own ordered vocabulary and its own ranking. There is no cross-axis
+merge; a `timing_source` observation and an `identity_source` observation
+compare independently. The ordering below is the SHAPE that every axis
+follows (higher on the left wins), read against each axis's own §9
+vocabulary — not a literal universal ranking:
 
 ```
 native > reconstructed > derived > estimated > inferred > unknown
 ```
+
+For example: `identity_source` values are only `{native, derived, synthetic}`,
+so its actual ranking is `native > derived > synthetic`, following the same
+shape. Concrete per-axis rank tables live in the reducer implementation
+(`internal/executiongraph/envelope.go` in lakerunner) and MUST match the
+§9 vocabulary.
 
 Reducer behavior on each new observation, compared to the current
 canonical value for that field:

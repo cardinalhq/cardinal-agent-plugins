@@ -667,6 +667,21 @@ class DumpDebugPayloadTests(unittest.TestCase):
             blocker.write_text("not a directory")
             dump_debug_payload("Stop", {"a": 1}, blocker / "debug")  # must not raise
 
+    def test_dumps_are_owner_only_readable(self) -> None:
+        # Security review H1: debug dumps must not be world-readable — they
+        # can carry raw (or partially-scrubbed) session content.
+        import os as _os
+        import stat as _stat
+        with TemporaryDirectory() as td:
+            debug_dir = Path(td) / "debug"
+            dump_debug_payload("Stop", {"session_id": "s1"}, debug_dir)
+            dir_mode = _stat.S_IMODE(_os.stat(debug_dir).st_mode)
+            self.assertEqual(dir_mode, 0o700, f"debug_dir mode was {oct(dir_mode)}")
+            dumps = list(debug_dir.glob("Stop-*.json"))
+            self.assertEqual(len(dumps), 1)
+            file_mode = _stat.S_IMODE(_os.stat(dumps[0]).st_mode)
+            self.assertEqual(file_mode, 0o600, f"dump file mode was {oct(file_mode)}")
+
 
 if __name__ == "__main__":
     unittest.main()
