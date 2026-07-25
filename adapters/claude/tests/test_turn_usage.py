@@ -26,20 +26,19 @@ HOOK = (
 
 class _OTLPStub(BaseHTTPRequestHandler):
     received: list[dict] = []
-    # Phase 1 execution-graph POSTs (NDJSON to /v1/envelopes) land on this
-    # same stub server, at the same host:port as /v1/logs, since the
-    # execution-graph connection falls back to the OTLP endpoint's base
-    # when no CARDINAL_EXECUTION_GRAPH_ENDPOINT override is set. Kept
-    # separate from `received` (which assumes single-JSON OTLP bodies) so
-    # NDJSON parsing doesn't collide with it.
-    envelope_requests: list[list[dict]] = []
+    # Phase 1 execution-graph POSTs (OTLP/HTTP JSON resourceSpans to
+    # /v1/traces — docs/canonical-model.md §14) land on this same stub
+    # server, at the same host:port as /v1/logs: envelopes ride the SAME
+    # ingest connection as the turn-usage/plan-usage OTLP emission, no
+    # separate endpoint discovery. Kept separate from `received` (which
+    # assumes /v1/logs bodies) purely for readability in assertions below.
+    trace_requests: list[dict] = []
     delay_s: float = 0.0
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        if self.path == "/v1/envelopes":
-            lines = [ln for ln in body.decode("utf-8").split("\n") if ln.strip()]
-            type(self).envelope_requests.append([json.loads(ln) for ln in lines])
+        if self.path == "/v1/traces":
+            type(self).trace_requests.append(json.loads(body))
         else:
             type(self).received.append(json.loads(body))
         if type(self).delay_s > 0:
@@ -49,6 +48,21 @@ class _OTLPStub(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+
+def _spans_of(trace_request: dict) -> list[dict]:
+    return trace_request["resourceSpans"][0]["scopeSpans"][0]["spans"]
+
+
+def _resource_attrs_of(trace_request: dict) -> dict:
+    out = {}
+    for kv in trace_request["resourceSpans"][0]["resource"]["attributes"]:
+        v = kv["value"]
+        if "stringValue" in v:
+            out[kv["key"]] = v["stringValue"]
+        elif "intValue" in v:
+            out[kv["key"]] = int(v["intValue"])
+    return out
 
 
 def _log_records(event_body: dict) -> list[dict]:
@@ -111,7 +125,7 @@ def _tool_use_block(name: str, input_: dict, block_id: str = "tu1") -> dict:
 class TurnUsageHookTest(unittest.TestCase):
     def setUp(self):
         _OTLPStub.received = []
-        _OTLPStub.envelope_requests = []
+        _OTLPStub.trace_requests = []
         _OTLPStub.delay_s = 0.0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -624,16 +638,35 @@ class TurnUsageHookTest(unittest.TestCase):
         self.assertEqual(observed, ts_values)
 
 
+def _span_attrs(span: dict) -> dict:
+    out = {}
+    for kv in span["attributes"]:
+        v = kv["value"]
+        if "stringValue" in v:
+            out[kv["key"]] = v["stringValue"]
+        elif "intValue" in v:
+            out[kv["key"]] = int(v["intValue"])
+        elif "doubleValue" in v:
+            out[kv["key"]] = v["doubleValue"]
+        elif "boolValue" in v:
+            out[kv["key"]] = v["boolValue"]
+    return out
+
+
 class ExecutionGraphWiringTest(unittest.TestCase):
     """Phase 1 execution-graph emission (docs/local-notes/plans/
-    agent-execution-graph.md): CARDINAL_EMIT_EXECUTION_GRAPH gates a
-    second, independent POST (NDJSON to /v1/envelopes) from the same Stop
-    firing that already emits cardinal.turn_usage/cardinal.turn_tool. It
-    must default OFF and must never disturb the existing OTLP emission."""
+    agent-execution-graph.md; wire shape docs/canonical-model.md §14):
+    CARDINAL_EMIT_EXECUTION_GRAPH gates a second, independent POST (OTLP
+    resourceSpans to /v1/traces) from the same Stop firing that already
+    emits cardinal.turn_usage/cardinal.turn_tool to /v1/logs. It must
+    default OFF and must never disturb the existing OTLP emission. There
+    is no separate execution-graph endpoint or connection discovery —
+    both POSTs share the same ingest connection built from
+    OTEL_EXPORTER_OTLP_ENDPOINT, just a different OTLP signal path."""
 
     def setUp(self):
         _OTLPStub.received = []
-        _OTLPStub.envelope_requests = []
+        _OTLPStub.trace_requests = []
         _OTLPStub.delay_s = 0.0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -688,15 +721,15 @@ class ExecutionGraphWiringTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         return proc
 
-    def test_default_off_no_envelopes_posted(self):
+    def test_default_off_no_spans_posted(self):
         path = self._write_transcript("sess-eg-1")
         self._run_hook({"session_id": "sess-eg-1", "transcript_path": str(path)})
         # Existing OTLP path still fires...
         self.assertEqual(len(_OTLPStub.received), 1)
-        # ...but nothing landed at /v1/envelopes without the opt-in flag.
-        self.assertEqual(_OTLPStub.envelope_requests, [])
+        # ...but nothing landed at /v1/traces without the opt-in flag.
+        self.assertEqual(_OTLPStub.trace_requests, [])
 
-    def test_flag_enabled_emits_envelopes_without_disturbing_otlp(self):
+    def test_flag_enabled_emits_spans_without_disturbing_otlp_logs(self):
         path = self._write_transcript("sess-eg-2")
         self._run_hook(
             {"session_id": "sess-eg-2", "transcript_path": str(path)},
@@ -707,41 +740,25 @@ class ExecutionGraphWiringTest(unittest.TestCase):
         by_event = _records_by_event(_OTLPStub.received[0])
         self.assertIn("cardinal.turn_usage", by_event)
 
-        # And the execution-graph envelopes landed too, at the OTLP
-        # endpoint's base (no CARDINAL_EXECUTION_GRAPH_ENDPOINT override
-        # configured here).
-        self.assertGreaterEqual(len(_OTLPStub.envelope_requests), 1)
-        lines = [line for req in _OTLPStub.envelope_requests for line in req]
-        self.assertGreater(len(lines), 0)
+        # And the execution-graph spans landed too, at the SAME OTLP
+        # endpoint (no separate execution-graph connection discovery —
+        # /v1/traces vs /v1/logs is the only difference).
+        self.assertGreaterEqual(len(_OTLPStub.trace_requests), 1)
+        spans = [s for req in _OTLPStub.trace_requests for s in _spans_of(req)]
+        self.assertGreater(len(spans), 0)
 
-        hooks_dir = str(Path(__file__).resolve().parent.parent / "hooks")
-        if hooks_dir not in sys.path:
-            sys.path.insert(0, hooks_dir)
-        from cardinal_core import envelope as env_mod
+        for span in spans:
+            self.assertIn("traceId", span)
+            self.assertEqual(len(bytes.fromhex(span["traceId"])), 16)
+            self.assertIn("spanId", span)
+            self.assertEqual(len(bytes.fromhex(span["spanId"])), 8)
+            attrs = _span_attrs(span)
+            self.assertIn("cardinal.envelope.record_id", attrs)
 
-        for line in lines:
-            env_mod.validate(env_mod.from_json(line))
-        self.assertEqual({line["org_id"] for line in lines}, {"acme"})
-        self.assertEqual({line["session_id"] for line in lines}, {"sess-eg-2"})
-
-    def test_explicit_endpoint_override_used_over_otlp_base(self):
-        # A second stub server stands in for a dedicated execution-graph
-        # endpoint, distinct from the OTLP one already configured in
-        # setUp — proves CARDINAL_EXECUTION_GRAPH_ENDPOINT wins.
-        eg_server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
-        threading.Thread(target=eg_server.serve_forever, daemon=True).start()
-        try:
-            path = self._write_transcript("sess-eg-3")
-            self._run_hook(
-                {"session_id": "sess-eg-3", "transcript_path": str(path)},
-                extra_env={
-                    "CARDINAL_EMIT_EXECUTION_GRAPH": "1",
-                    "CARDINAL_EXECUTION_GRAPH_ENDPOINT": f"http://127.0.0.1:{eg_server.server_port}",
-                },
-            )
-            self.assertGreaterEqual(len(_OTLPStub.envelope_requests), 1)
-        finally:
-            eg_server.shutdown()
+        resource_attrs = _resource_attrs_of(_OTLPStub.trace_requests[0])
+        self.assertEqual(resource_attrs.get("cardinal.org.id"), "acme")
+        self.assertEqual(resource_attrs.get("cardinal.session.id"), "sess-eg-2")
+        self.assertEqual(resource_attrs.get("service.name"), "claude-code")
 
     def test_no_assistant_records_does_not_block_execution_graph(self):
         # A Stop firing with nothing new for turn-usage (no assistant
@@ -765,7 +782,7 @@ class ExecutionGraphWiringTest(unittest.TestCase):
         # No current-turn assistant records -> no turn-usage OTLP POST...
         self.assertEqual(len(_OTLPStub.received), 0)
         # ...but the execution-graph walk (whole-transcript) still ran.
-        self.assertGreaterEqual(len(_OTLPStub.envelope_requests), 1)
+        self.assertGreaterEqual(len(_OTLPStub.trace_requests), 1)
 
 
 if __name__ == "__main__":
