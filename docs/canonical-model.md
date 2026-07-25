@@ -405,6 +405,16 @@ node project onto that node's **Span**. This mirrors the execution-wide
 vs. node-specific split in §8 — resource attributes are exactly the
 inheritable fields, span attributes are exactly the node-specific ones.
 
+This table is the field-name/scope authority; §14 is the concrete
+application of it when materializing envelopes into OTLP spans for Phase
+1 — every attribute name below appears verbatim in §14's per-record-type
+shape, and §14 additionally documents where a `cardinal.envelope.*`
+namespaced attribute (record-level bookkeeping this table doesn't cover:
+`record_type`, `record_id`, `schema_version`, provenance axes, etc.)
+coexists alongside the SemConv-mapped name for the same field. If the two
+sections ever disagree on a mapped field's OTel name, this table wins —
+§14 must be corrected to match, not the reverse.
+
 ## 13. Ingestion contract
 
 Envelopes carry observations, never writes. Ingest appends every envelope
@@ -422,7 +432,157 @@ reducer (0.2.b) derives a single resolved `execution_context` row per
 execution under `CONTEXT_SOURCE_PRECEDENCE` (§8), field by field — not a
 separate ingestion path.
 
-## 14. Compatibility projection
+## 14. OTLP wire format — envelopes as spans
+
+Envelopes describe span-shaped execution atoms: a node has a start/end
+(or a marker timestamp standing in for one); an edge, event, usage, or
+artifact-link observation is a zero-duration fact anchored to a single
+instant. This section is the **normative wire spec** for materializing
+schema-v1 envelopes as OTLP `ResourceSpans` and is implemented verbatim
+in `core/cardinal_core/traces.py`. It replaces the custom `/v1/envelopes`
+HTTP endpoint from the first Phase 1 attempt (commit `a4a26ad` and
+related) — that endpoint was an architectural mistake; envelopes ride the
+OTLP **traces** signal instead, the same intake endpoint the plugin
+already uses for logs (`core/cardinal_core/otlp.py::emit_records` ->
+`/v1/logs`), just a different signal (`/v1/traces`).
+
+### Identity derivation (non-secret, deterministic)
+
+- `trace_id` (16 bytes) = `SHA-256(f"{org_id}|{adapter}|{session_id}")[:16]`
+- `span_id` (8 bytes) — per record type:
+  - node payloads (`node_observed`/`node_updated`): `SHA-256(f"{trace_id.hex()}|node|{node_key}")[:8]`
+  - `edge_observed`: `SHA-256(f"{trace_id.hex()}|edge|{record_id}")[:8]`
+  - `execution_event`: `SHA-256(f"{trace_id.hex()}|event|{record_id}")[:8]`
+  - `usage_observed`: `SHA-256(f"{trace_id.hex()}|usage|{record_id}")[:8]`
+  - `artifact_link_observed`: `SHA-256(f"{trace_id.hex()}|artifact|{record_id}")[:8]`
+  - `context_observed`: `SHA-256(f"{trace_id.hex()}|context|{record_id}")[:8]`
+- `parent_span_id` (8 bytes, optional) — only set for node payloads when
+  the payload has a natural `parent_of`-derivable predecessor within the
+  transcript. Left unset otherwise; lakerunner reconstructs edges from
+  `edge_observed` spans regardless.
+
+  **Implementation note (resolved ambiguity):** `traces.py::envelope_to_span`
+  is a pure, single-envelope function — it has no visibility into the
+  accumulated edge set for an execution, so it can never itself tell
+  whether a node has a `parent_of`-derivable predecessor without a
+  second, graph-aware correlation pass. Phase 1 therefore never sets
+  `parent_span_id`; every span is emitted parentless at the OTLP layer.
+  This is intentional, not an oversight: `parent_span_id` is optional per
+  the rule above, and lakerunner's reducer already reconstructs the full
+  graph from `edge_observed` spans independent of whether the OTLP
+  `parentSpanId` field is populated. A future enhancement could add a
+  graph-aware batch pass (accepting the full node+edge envelope set and
+  filling `parent_span_id` for direct `parent_of` predecessors), but nothing
+  downstream depends on it today. **Lakerunner must read this same rule** —
+  do not treat a missing `parent_span_id` as a data gap; it is the
+  documented Phase 1 behavior.
+
+**Rationale**: HMAC dropped in favor of SHA-256 because `trace_id`/`span_id`
+are public on the OTLP wire — they identify but do not need to be
+unforgeable (auth happens via the ingest API key on the POST itself, not
+via trace/span identity). Lakerunner recomputes the same SHA-256 for
+lookup, so no shared secret needs to be distributed to adapters or cross
+the wire.
+
+### Resource attributes
+
+Constant for an execution — set once per `ResourceSpans` batch
+(`traces.py::trace_resource_attrs`):
+
+| Attribute | Value |
+|---|---|
+| `service.name` | adapter name (e.g. `"claude-code"`) |
+| `service.version` | `plugin_version` |
+| `cardinal.org.id` | `org_id` |
+| `cardinal.adapter` | `adapter` |
+| `cardinal.session.id` | `session_id` |
+| `cardinal.plugin_version` | same as `service.version` |
+| `cardinal.core_version` | `CORE_VERSION` |
+
+### Common span attributes
+
+Present on every envelope-carrying span:
+
+| Attribute | Value |
+|---|---|
+| `cardinal.envelope.record_type` | one of the seven `RecordType` values (§11) |
+| `cardinal.envelope.record_id` | for reducer idempotency (see below) |
+| `cardinal.envelope.schema_version` | `1` |
+| `cardinal.envelope.observed_ns` | always present |
+| `cardinal.envelope.effective_ns` | always present |
+
+### Per-record-type span shape
+
+Cross-references §11 (payload shapes) and §12 (SemConv mapping).
+
+- **`node_observed` / `node_updated`** — span name = `node_name`;
+  start/end from the payload's `start_ns`/`end_ns` (falling back to
+  `observed_ns` when unset, then to `start_ns` for `end_ns`).
+  Attributes: `cardinal.envelope.node_kind`, `.invocation_kind` (if set),
+  `.tool_kind` (if set); all six §9 provenance axes as
+  `cardinal.envelope.provenance.identity_source`,
+  `.provenance.parent_source`, `.provenance.timing_source`,
+  `.provenance.model_source`, `.provenance.toolkit_source`,
+  `.provenance.usage_source`; the SemConv-mapped fields per §12
+  (`gen_ai.request.model` for `request_model`, `cardinal.orchestrator.model`
+  for `orchestrator_model`, when set); and the payload's `attributes`
+  dict expanded as `cardinal.envelope.attributes.<key>` (nested one level
+  as `.attributes.<key>.<subkey>`; deeper nesting or lists are
+  JSON-encoded to a string rather than dropped).
+- **`edge_observed`** — zero-duration span (`start = end = observed_ns`);
+  name = `f"edge:{edge_kind}"`. Attributes:
+  `cardinal.envelope.edge.source_node_key`, `.edge.target_node_key`,
+  `.edge.kind`, `.edge.attributes.<key>`.
+- **`execution_event`** — zero-duration span (`start = end = event_ns`);
+  name = `f"event:{event_kind}"`. Attributes: `cardinal.envelope.event.kind`,
+  `.event.related_node_key` (if set), `.event.ns`, `.event.attributes.<key>`.
+- **`usage_observed`** — zero-duration span (`start = end = effective_ns`);
+  name = `"usage"`. Attributes: `cardinal.envelope.usage.node_key`,
+  `.usage.input_tokens`, `.usage.output_tokens`, `.usage.cached_tokens`
+  (if set), `.usage.cost_usd` (if set), `.usage.source`.
+- **`artifact_link_observed`** — zero-duration span (`start = end =
+  effective_ns`); name = `f"artifact:{artifact_kind}"`. Attributes:
+  `cardinal.envelope.artifact.kind`, `.artifact.ref`, `.artifact.node_key`,
+  `.artifact.attributes.<key>`.
+- **`context_observed`** — zero-duration span (`start = end =
+  effective_ns`); name = `f"context:{context_source}"`. Attributes carry
+  every populated inheritable field (§8) as
+  `cardinal.envelope.context.<field>`, PLUS — for every field that has a
+  §12 SemConv mapping (`repository_name` -> `vcs.repository.name`,
+  `branch` -> `vcs.ref.head.name`, `commit_sha` -> `vcs.ref.head.revision`,
+  `pr_number` -> `cardinal.pr.number`, `actor_id` -> `enduser.id`,
+  `environment` -> `deployment.environment.name`, and so on for every
+  other mapped field in §12) — that SemConv-mapped attribute name too, so
+  downstream OTel-native consumers see the standard names AND lakerunner
+  can round-trip cleanly against `cardinal.envelope.context.*`. This
+  applies to every mapped field uniformly, not only the VCS examples
+  above — see `traces.py::_CONTEXT_SEMCONV_SPAN_ATTRS` for the full table.
+
+### Wire encoding
+
+OTLP/HTTP JSON (`content-type: application/json`) — matches what
+`otlp.py::emit_records` already uses for logs. Endpoint =
+`<OTEL_EXPORTER_OTLP_ENDPOINT>/v1/traces`.
+
+### Idempotency
+
+The reducer dedupes by `cardinal.envelope.record_id` (from
+`execution_observations.record_id`'s unique constraint). Same envelope
+emitted twice = one canonical row, regardless of how many times its span
+crosses the OTLP wire.
+
+### Design note
+
+Multiple observations of the same node produce multiple OTLP spans
+sharing the same `span_id` (each with a distinct `record_id`). This is
+legal OTLP and the reducer handles it via the §10 precedence rule. OTel
+backends that don't dedupe on `(trace_id, span_id)` will show these as
+duplicate spans in a raw trace view — an accepted trade-off of the
+observation model (§13): the OTLP projection is for interoperability, not
+the source of truth, and the reducer is what makes `execution_nodes`
+canonical.
+
+## 15. Compatibility projection
 
 The existing `agent_sessions_toolkit_maps.{skills_used, agents_used,
 mcp_servers_used, tool_counts}` columns become a **derived read model**:
@@ -434,7 +594,7 @@ exclusive per-session — the old hook-based writer is disabled exactly
 where the projector takes over — so existing dashboards keep reading the
 same columns unmodified throughout the migration.
 
-## 15. Schema version and evolution rules
+## 16. Schema version and evolution rules
 
 `SCHEMA_VERSION = 1` is locked by this document and by
 `envelope.SCHEMA_VERSION` in code. Evolution rules:

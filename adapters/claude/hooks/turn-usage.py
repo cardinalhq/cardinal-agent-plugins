@@ -43,7 +43,7 @@ import _plugin_version  # noqa: E402
 from cardinal_core.bashclass import classify_bash_command  # noqa: E402
 from cardinal_core.otlp import emit_records, kv, parse_ts_ns  # noqa: E402
 
-# trace_emit / envelope_client (Phase 1 execution-graph emission) are
+# trace_emit / cardinal_core.traces (Phase 1 execution-graph emission) are
 # imported LAZILY inside _emit_execution_graph, not at module scope: they
 # pull in cardinal_core.envelope, which uses enum.StrEnum (Python 3.11+).
 # This hook's existing turn-usage/plan-usage emission must keep working
@@ -57,10 +57,10 @@ from cardinal_core.otlp import emit_records, kv, parse_ts_ns  # noqa: E402
 HOOK_TIMEOUT_SEC = 2.0
 
 # Phase 1 execution-graph emission (docs/local-notes/plans/
-# agent-execution-graph.md) is opt-in per session: the lakerunner receiver
-# sits behind LAKERUNNER_EXECUTION_GRAPH_HMAC_KEY and isn't rolled out
-# everywhere yet, so a bare install must not start POSTing to
-# /v1/envelopes until an operator flips this flag.
+# agent-execution-graph.md; wire shape is docs/canonical-model.md §14) is
+# opt-in per session: lakerunner's OTLP trace ingest isn't rolled out
+# everywhere yet, so a bare install must not start POSTing to /v1/traces
+# until an operator flips this flag.
 EMIT_EXECUTION_GRAPH_ENV = "CARDINAL_EMIT_EXECUTION_GRAPH"
 DEBUG_ENV = "CARDINAL_DEBUG"
 
@@ -271,20 +271,25 @@ def _emit_execution_graph(
     settings_env: dict,
 ) -> None:
     """Phase 1 execution-graph emission (docs/local-notes/plans/
-    agent-execution-graph.md): walk the transcript via trace_emit and POST
-    the resulting Envelope records to lakerunner's `/v1/envelopes`.
+    agent-execution-graph.md; wire shape docs/canonical-model.md §14):
+    walk the transcript via trace_emit and POST the resulting Envelope
+    records as OTLP spans to the SAME ingest connection the
+    turn-usage/plan-usage OTLP emission above already uses — there is no
+    separate execution-graph endpoint or connection discovery; envelopes
+    ride the OTLP traces signal (`/v1/traces`) at the same endpoint the
+    plugin already uses for logs (`/v1/logs`).
 
     Best-effort end-to-end: any failure here (transcript walk, connection
-    discovery, or the POST itself) is swallowed and, at most, logged to
+    lookup, or the POST itself) is swallowed and, at most, logged to
     stderr under CARDINAL_DEBUG=1 — this must never surface as a hook
     failure or disturb the turn-usage/plan-usage emission above it.
     """
     try:
-        connection = _otel_settings.execution_graph_connection(settings_env)
+        connection = _otel_settings.ingest_connection(settings_env)
         if connection is None:
             return
         import trace_emit  # noqa: E402 (lazy — see import-site comment above)
-        from cardinal_core.envelope_client import emit_envelopes  # noqa: E402
+        from cardinal_core.traces import emit_envelope_spans, trace_resource_attrs  # noqa: E402
 
         resource = _otel_settings.resource_attrs(settings_env)
         org_id = resource.get("cardinal.org") or "unknown"
@@ -295,7 +300,14 @@ def _emit_execution_graph(
         )
         if not envelopes:
             return
-        emit_envelopes(envelopes, connection, timeout=HOOK_TIMEOUT_SEC)
+        trace_resource = trace_resource_attrs(
+            service_name="claude-code",
+            adapter="claude",
+            plugin_version=_plugin_version.plugin_version(),
+            org_id=org_id,
+            session_id=session_id,
+        )
+        emit_envelope_spans(envelopes, connection, trace_resource, timeout=HOOK_TIMEOUT_SEC)
     except Exception as exc:  # noqa: BLE001 - telemetry must not break the agent loop
         if os.environ.get(DEBUG_ENV) == "1":
             print(f"cardinal: execution-graph emit failed: {exc!r}", file=sys.stderr)
