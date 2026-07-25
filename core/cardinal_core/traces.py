@@ -143,13 +143,16 @@ def _attributes_dict_to_kv(prefix: str, attributes: dict[str, Any] | None) -> li
 
 def _common_attrs(envelope: Envelope) -> list[dict[str, Any]]:
     """Attributes present on every envelope-carrying span (§14 "Common
-    span attributes")."""
+    span attributes"). Every payload carries `execution_key` — emit it
+    here so downstream taps can look up the parent execution without
+    switching on record_type."""
     return [
         kv("cardinal.envelope.record_type", envelope.record_type.value),
         kv("cardinal.envelope.record_id", envelope.record_id),
         kv("cardinal.envelope.schema_version", envelope.schema_version),
         kv("cardinal.envelope.observed_ns", envelope.observed_ns),
         kv("cardinal.envelope.effective_ns", envelope.effective_ns),
+        kv("cardinal.envelope.execution_key", envelope.payload.execution_key),
     ]
 
 
@@ -173,7 +176,10 @@ def _node_span_fields(envelope: Envelope) -> tuple[str, int, int, list[dict[str,
     start_ns = payload.start_ns if payload.start_ns is not None else envelope.observed_ns
     end_ns = payload.end_ns if payload.end_ns is not None else start_ns
 
-    attrs: list[dict[str, Any]] = [kv("cardinal.envelope.node_kind", payload.node_kind.value)]
+    attrs: list[dict[str, Any]] = [
+        kv("cardinal.envelope.node_key", payload.node_key),
+        kv("cardinal.envelope.node_kind", payload.node_kind.value),
+    ]
     if payload.invocation_kind is not None:
         attrs.append(kv("cardinal.envelope.invocation_kind", payload.invocation_kind.value))
     if payload.tool_kind is not None:

@@ -510,6 +510,7 @@ Present on every envelope-carrying span:
 | `cardinal.envelope.schema_version` | `1` |
 | `cardinal.envelope.observed_ns` | always present |
 | `cardinal.envelope.effective_ns` | always present |
+| `cardinal.envelope.execution_key` | every payload carries `execution_key`; emitting here lets the reducer look up the parent execution without switching on `record_type` |
 
 ### Per-record-type span shape
 
@@ -518,8 +519,10 @@ Cross-references §11 (payload shapes) and §12 (SemConv mapping).
 - **`node_observed` / `node_updated`** — span name = `node_name`;
   start/end from the payload's `start_ns`/`end_ns` (falling back to
   `observed_ns` when unset, then to `start_ns` for `end_ns`).
-  Attributes: `cardinal.envelope.node_kind`, `.invocation_kind` (if set),
-  `.tool_kind` (if set); all six §9 provenance axes as
+  Attributes: `cardinal.envelope.node_key` (required — the reducer's
+  identity seed for this node; span_id is a truncated hash of it and
+  is not reversible); `cardinal.envelope.node_kind`,
+  `.invocation_kind` (if set), `.tool_kind` (if set); all six §9 provenance axes as
   `cardinal.envelope.provenance.identity_source`,
   `.provenance.parent_source`, `.provenance.timing_source`,
   `.provenance.model_source`, `.provenance.toolkit_source`,

@@ -128,6 +128,11 @@ class EnvelopeToSpanTests(unittest.TestCase):
         self.assertEqual(attrs["cardinal.envelope.record_type"], "node_observed")
         self.assertEqual(attrs["cardinal.envelope.record_id"], "rec-1")
         self.assertEqual(attrs["cardinal.envelope.schema_version"], 1)
+        # Reducer needs execution_key + node_key on the wire — span_id is a
+        # truncated hash and not reversible. Without these, downstream
+        # taps cannot reconstruct the envelope.
+        self.assertEqual(attrs["cardinal.envelope.execution_key"], "exec-1")
+        self.assertEqual(attrs["cardinal.envelope.node_key"], "node-1")
         self.assertEqual(attrs["cardinal.envelope.node_kind"], "invocation")
         self.assertEqual(attrs["cardinal.envelope.invocation_kind"], "tool")
         self.assertEqual(attrs["cardinal.envelope.tool_kind"], "builtin")
