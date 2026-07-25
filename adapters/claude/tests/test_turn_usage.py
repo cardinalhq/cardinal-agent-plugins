@@ -10,6 +10,7 @@ Run with: python3 -m unittest tests.test_turn_usage -v
 
 import json
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -25,11 +26,22 @@ HOOK = (
 
 class _OTLPStub(BaseHTTPRequestHandler):
     received: list[dict] = []
+    # Phase 1 execution-graph POSTs (NDJSON to /v1/envelopes) land on this
+    # same stub server, at the same host:port as /v1/logs, since the
+    # execution-graph connection falls back to the OTLP endpoint's base
+    # when no CARDINAL_EXECUTION_GRAPH_ENDPOINT override is set. Kept
+    # separate from `received` (which assumes single-JSON OTLP bodies) so
+    # NDJSON parsing doesn't collide with it.
+    envelope_requests: list[list[dict]] = []
     delay_s: float = 0.0
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        type(self).received.append(json.loads(body))
+        if self.path == "/v1/envelopes":
+            lines = [ln for ln in body.decode("utf-8").split("\n") if ln.strip()]
+            type(self).envelope_requests.append([json.loads(ln) for ln in lines])
+        else:
+            type(self).received.append(json.loads(body))
         if type(self).delay_s > 0:
             time.sleep(type(self).delay_s)
         self.send_response(200)
@@ -99,6 +111,7 @@ def _tool_use_block(name: str, input_: dict, block_id: str = "tu1") -> dict:
 class TurnUsageHookTest(unittest.TestCase):
     def setUp(self):
         _OTLPStub.received = []
+        _OTLPStub.envelope_requests = []
         _OTLPStub.delay_s = 0.0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -125,11 +138,15 @@ class TurnUsageHookTest(unittest.TestCase):
         path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
         return path
 
-    def _run_hook(self, payload: dict, expect_rc: int = 0) -> subprocess.CompletedProcess:
+    def _run_hook(
+        self, payload: dict, expect_rc: int = 0, extra_env: dict | None = None,
+    ) -> subprocess.CompletedProcess:
+        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        env.update(extra_env or {})
         proc = subprocess.run(
             ["python3", str(HOOK)],
             input=json.dumps(payload).encode(),
-            env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+            env=env,
             capture_output=True,
             timeout=10,
         )
@@ -605,6 +622,150 @@ class TurnUsageHookTest(unittest.TestCase):
         # sync so server-side chq_tsns derivation can use either).
         observed = [int(r["observedTimeUnixNano"]) for r in log_records]
         self.assertEqual(observed, ts_values)
+
+
+class ExecutionGraphWiringTest(unittest.TestCase):
+    """Phase 1 execution-graph emission (docs/local-notes/plans/
+    agent-execution-graph.md): CARDINAL_EMIT_EXECUTION_GRAPH gates a
+    second, independent POST (NDJSON to /v1/envelopes) from the same Stop
+    firing that already emits cardinal.turn_usage/cardinal.turn_tool. It
+    must default OFF and must never disturb the existing OTLP emission."""
+
+    def setUp(self):
+        _OTLPStub.received = []
+        _OTLPStub.envelope_requests = []
+        _OTLPStub.delay_s = 0.0
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        claude_dir = self.home / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(json.dumps({
+            "env": {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{self.server.server_port}",
+                "OTEL_EXPORTER_OTLP_HEADERS": "x-cardinalhq-api-key=test-key",
+                "OTEL_RESOURCE_ATTRIBUTES": "user.email=t@example.com,cardinal.org=acme",
+            }
+        }))
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.tmp.cleanup()
+
+    def _write_transcript(self, session_id: str) -> Path:
+        proj = self.home / "proj"
+        proj.mkdir(exist_ok=True)
+        path = proj / f"{session_id}.jsonl"
+        records = [
+            _user_text_msg("investigate the flaky test"),
+            _assistant_msg(
+                {"input_tokens": 10, "output_tokens": 5},
+                content=[_tool_use_block("Read", {"file_path": "a.ts"}, "t1")],
+            ),
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        return path
+
+    def _run_hook(self, payload: dict, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        env.update(extra_env or {})
+        proc = subprocess.run(
+            # sys.executable, not the other tests' bare "python3": these
+            # tests specifically exercise the lazy trace_emit/cardinal_core
+            # .envelope import, which needs Python 3.11+ (enum.StrEnum;
+            # core/pyproject.toml already declares requires-python = ">=3.11").
+            # The system "python3" resolved off a bare /usr/bin:/bin PATH
+            # may be older than that floor on some machines — using the
+            # interpreter actually running this test suite keeps the test
+            # meaningful regardless of what "python3" happens to resolve to.
+            [sys.executable, str(HOOK)],
+            input=json.dumps(payload).encode(),
+            env=env,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        return proc
+
+    def test_default_off_no_envelopes_posted(self):
+        path = self._write_transcript("sess-eg-1")
+        self._run_hook({"session_id": "sess-eg-1", "transcript_path": str(path)})
+        # Existing OTLP path still fires...
+        self.assertEqual(len(_OTLPStub.received), 1)
+        # ...but nothing landed at /v1/envelopes without the opt-in flag.
+        self.assertEqual(_OTLPStub.envelope_requests, [])
+
+    def test_flag_enabled_emits_envelopes_without_disturbing_otlp(self):
+        path = self._write_transcript("sess-eg-2")
+        self._run_hook(
+            {"session_id": "sess-eg-2", "transcript_path": str(path)},
+            extra_env={"CARDINAL_EMIT_EXECUTION_GRAPH": "1"},
+        )
+        # turn-usage/plan-usage OTLP emission is unaffected.
+        self.assertEqual(len(_OTLPStub.received), 1)
+        by_event = _records_by_event(_OTLPStub.received[0])
+        self.assertIn("cardinal.turn_usage", by_event)
+
+        # And the execution-graph envelopes landed too, at the OTLP
+        # endpoint's base (no CARDINAL_EXECUTION_GRAPH_ENDPOINT override
+        # configured here).
+        self.assertGreaterEqual(len(_OTLPStub.envelope_requests), 1)
+        lines = [line for req in _OTLPStub.envelope_requests for line in req]
+        self.assertGreater(len(lines), 0)
+
+        hooks_dir = str(Path(__file__).resolve().parent.parent / "hooks")
+        if hooks_dir not in sys.path:
+            sys.path.insert(0, hooks_dir)
+        from cardinal_core import envelope as env_mod
+
+        for line in lines:
+            env_mod.validate(env_mod.from_json(line))
+        self.assertEqual({line["org_id"] for line in lines}, {"acme"})
+        self.assertEqual({line["session_id"] for line in lines}, {"sess-eg-2"})
+
+    def test_explicit_endpoint_override_used_over_otlp_base(self):
+        # A second stub server stands in for a dedicated execution-graph
+        # endpoint, distinct from the OTLP one already configured in
+        # setUp — proves CARDINAL_EXECUTION_GRAPH_ENDPOINT wins.
+        eg_server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
+        threading.Thread(target=eg_server.serve_forever, daemon=True).start()
+        try:
+            path = self._write_transcript("sess-eg-3")
+            self._run_hook(
+                {"session_id": "sess-eg-3", "transcript_path": str(path)},
+                extra_env={
+                    "CARDINAL_EMIT_EXECUTION_GRAPH": "1",
+                    "CARDINAL_EXECUTION_GRAPH_ENDPOINT": f"http://127.0.0.1:{eg_server.server_port}",
+                },
+            )
+            self.assertGreaterEqual(len(_OTLPStub.envelope_requests), 1)
+        finally:
+            eg_server.shutdown()
+
+    def test_no_assistant_records_does_not_block_execution_graph(self):
+        # A Stop firing with nothing new for turn-usage (no assistant
+        # records this "current turn") must still let the execution-graph
+        # walk run — trace_emit walks the WHOLE transcript, not just the
+        # current-turn slice, so a prior turn's history is still there to
+        # emit even when this particular Stop has nothing incremental.
+        proj = self.home / "proj"
+        proj.mkdir(exist_ok=True)
+        path = proj / "sess-eg-4.jsonl"
+        records = [
+            _user_text_msg("first"),
+            _assistant_msg({"input_tokens": 1, "output_tokens": 1}),
+            _user_text_msg("second, nothing follows yet"),
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        self._run_hook(
+            {"session_id": "sess-eg-4", "transcript_path": str(path)},
+            extra_env={"CARDINAL_EMIT_EXECUTION_GRAPH": "1"},
+        )
+        # No current-turn assistant records -> no turn-usage OTLP POST...
+        self.assertEqual(len(_OTLPStub.received), 0)
+        # ...but the execution-graph walk (whole-transcript) still ran.
+        self.assertGreaterEqual(len(_OTLPStub.envelope_requests), 1)
 
 
 if __name__ == "__main__":

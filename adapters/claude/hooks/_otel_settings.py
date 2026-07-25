@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,17 @@ from cardinal_core.otlp import IngestConnection, passthrough_resource_attrs  # n
 import _plugin_version  # noqa: E402
 
 API_KEY_HEADER = "x-cardinalhq-api-key"
+
+# Execution-graph (Phase 1, docs/local-notes/plans/agent-execution-graph.md)
+# endpoint override — takes precedence over the OTLP-endpoint-base fallback
+# in execution_graph_connection() below.
+EXECUTION_GRAPH_ENDPOINT_ENV = "CARDINAL_EXECUTION_GRAPH_ENDPOINT"
+
+# Matches a trailing "/v1" or "/v1/<segment>" at the end of an OTLP
+# endpoint (e.g. ".../v1/logs", ".../v1/traces", or bare ".../v1") so the
+# execution-graph fallback can derive "<base>/v1/envelopes" from whatever
+# path shape OTEL_EXPORTER_OTLP_ENDPOINT was configured with.
+_V1_SUFFIX_RE = re.compile(r"/v1(?:/[A-Za-z0-9_-]+)?/?$")
 
 # Bound at import time (hooks are one process per invocation) — the same
 # semantics the pre-migration _limits_common module had, which the
@@ -88,6 +100,54 @@ def ingest_connection(settings_env: dict[str, str]) -> IngestConnection | None:
         endpoint=endpoint.rstrip("/"), api_key=key, api_header=header,
         extra_headers=extra,
     )
+
+
+def _otlp_endpoint_base(endpoint: str) -> str:
+    """Strip a trailing `/v1` or `/v1/<segment>` (e.g. `/v1/logs`) off an
+    OTLP endpoint so `<base>/v1/envelopes` can be built from it. An
+    endpoint with no such suffix (already a bare base) is returned as-is."""
+    stripped = _V1_SUFFIX_RE.sub("", endpoint.rstrip("/"))
+    return stripped or endpoint
+
+
+def execution_graph_connection(settings_env: dict[str, str]) -> IngestConnection | None:
+    """Connection for POSTing to `/v1/envelopes` (Phase 1 execution graph —
+    docs/local-notes/plans/agent-execution-graph.md). Precedence:
+
+    1. `CARDINAL_EXECUTION_GRAPH_ENDPOINT` — explicit override (settings.json
+       `env` block wins over process env, matching every other setting in
+       this module); used verbatim as the connection base.
+    2. Otherwise, `OTEL_EXPORTER_OTLP_ENDPOINT`'s base — a trailing
+       `/v1/logs` or `/v1/<anything>` is stripped so envelopes land at
+       `<base>/v1/envelopes` alongside the existing OTLP `/v1/logs` traffic.
+    3. Neither configured → None (emit becomes a no-op, same silent-exit
+       contract as ingest_connection()).
+
+    Auth mirrors ingest_connection(): every pair parsed from
+    OTEL_EXPORTER_OTLP_HEADERS rides on the POST — the Cardinal key pair
+    (else the first pair) becomes the auth header, the rest ride via
+    extra_headers.
+    """
+    explicit = _setting(settings_env, EXECUTION_GRAPH_ENDPOINT_ENV)
+    if explicit:
+        base = explicit.rstrip("/")
+    else:
+        otlp_endpoint = _setting(settings_env, "OTEL_EXPORTER_OTLP_ENDPOINT")
+        if not otlp_endpoint:
+            return None
+        base = _otlp_endpoint_base(otlp_endpoint)
+
+    headers = otlp_headers(settings_env)
+    header, key = API_KEY_HEADER, ""
+    for k, v in headers.items():
+        if k.lower() == API_KEY_HEADER:
+            header, key = k, v
+            break
+    else:
+        if headers:
+            header, key = next(iter(headers.items()))
+    extra = tuple((k, v) for k, v in headers.items() if k != header)
+    return IngestConnection(endpoint=base, api_key=key, api_header=header, extra_headers=extra)
 
 
 def ingest_api_key(settings_env: dict[str, str] | None = None) -> str | None:
