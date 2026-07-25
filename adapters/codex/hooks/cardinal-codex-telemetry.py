@@ -29,6 +29,7 @@ from cardinal_core import bashclass, initiative, limits, otlp, pricing  # noqa: 
 from cardinal_core import session as core_session  # noqa: E402
 from cardinal_core import redaction  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
+from cardinal_core.paths import dump_debug_payload as _core_dump_debug_payload  # noqa: E402
 
 
 PLUGIN_VERSION = _plugin_version.plugin_version()
@@ -117,16 +118,13 @@ def emit_records(records: list[dict[str, Any]]) -> None:
 
 def dump_debug_payload(event: str, payload: dict[str, Any]) -> None:
     """Env-gated raw hook-payload dump for shape capture. A no-op unless
-    CARDINAL_CODEX_DEBUG_PAYLOADS=1; best-effort like everything else."""
+    CARDINAL_CODEX_DEBUG_PAYLOADS=1; best-effort like everything else.
+    The write itself (mkdir + filename shape + best-effort try/except) is
+    the shared core.paths.dump_debug_payload primitive — this wrapper is
+    just the env-var gate, which differs per adapter."""
     if os.environ.get(DEBUG_PAYLOADS_ENV) != "1":
         return
-    try:
-        debug_dir = codex_paths().debug_dir
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        path = debug_dir / f"{event}-{time.time_ns()}.json"
-        path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
-    except (OSError, TypeError, ValueError):
-        pass
+    _core_dump_debug_payload(event, payload, codex_paths().debug_dir)
 
 
 def handle_user_prompt_submit(payload: dict[str, Any]) -> None:

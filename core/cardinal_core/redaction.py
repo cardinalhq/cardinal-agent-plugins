@@ -135,6 +135,29 @@ def scrub_secrets(value: str | None) -> tuple[str, list[str]]:
     return cleaned, detected
 
 
+def scrub_payload_recursively(value: Any) -> Any:
+    """Walk a JSON-shaped value (nested dicts/lists) and run every string
+    leaf through scrub_secrets, replacing detected secrets with the same
+    `<redacted:PATTERN_NAME>` placeholder scrub_secrets uses elsewhere.
+    Structure — dict keys, list order/length, non-string leaf types
+    (int/float/bool/None) — is left untouched; only string VALUES change.
+
+    Built for debug-payload capture (CARDINAL_*_DEBUG_PAYLOADS): unlike
+    the mode-aware wrappers above, which hash/drop whole fields for the
+    live telemetry wire, a raw session-shape dump needs to stay
+    human-readable for fixture work while still being safe to commit —
+    so this scrubs in place rather than hashing.
+    """
+    if isinstance(value, str):
+        cleaned, _ = scrub_secrets(value)
+        return cleaned
+    if isinstance(value, dict):
+        return {k: scrub_payload_recursively(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [scrub_payload_recursively(v) for v in value]
+    return value
+
+
 def redact_command(cmd: str | None) -> dict:
     """Bash/shell-specific redaction. Wraps classify_bash_command
     (cardinal_core.bashclass) + scrub_secrets + hash_field.

@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _debug_capture  # noqa: E402
 import _otel_settings  # noqa: E402
 import _plan_cache  # noqa: E402
 import _plugin_version  # noqa: E402
@@ -81,6 +82,10 @@ def main() -> None:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         _silent_exit()
+
+    # Capture FIRST, before any redaction/processing below — even a hook
+    # that errors later still leaves a fixture-shape dump behind.
+    _debug_capture.dump_if_enabled("UserPromptSubmit", payload)
 
     # settings.json wins over env, because Claude Code strips OTEL_* and
     # CLAUDE_PROJECT_DIR from hook subprocess envs in practice.

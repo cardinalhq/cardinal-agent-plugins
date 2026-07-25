@@ -78,6 +78,31 @@ def atomic_write_secret(path: Path, content: str) -> None:
         raise
 
 
+def dump_debug_payload(event: str, payload: dict[str, Any], debug_dir: Path) -> None:
+    """Write a raw hook/event payload to `debug_dir` for later fixture
+    harvesting (Phase 0.D of the Agent Execution Graph plan). Filename is
+    `<event>-<time_ns>.json`, matching the shape every adapter's debug
+    dump already produces.
+
+    Gating on the adapter's own CARDINAL_<ADAPTER>_DEBUG_PAYLOADS env var
+    is the CALLER's responsibility, not this function's — different
+    adapters use different env var names, and some callers additionally
+    want to scrub the payload before it ever reaches this function
+    (Claude's tool inputs/outputs can carry file contents; Codex/Cursor/
+    Gemini's raw hook payloads historically have not, so their callers
+    pass the payload through unscrubbed to preserve exact capture).
+
+    Best-effort and silent like every other telemetry side-channel in
+    this package: a capture failure must never surface to the caller.
+    """
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        path = debug_dir / f"{event}-{time.time_ns()}.json"
+        path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
 def backup(path: Path) -> Path | None:
     if not path.exists():
         return None

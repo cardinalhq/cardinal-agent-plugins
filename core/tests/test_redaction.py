@@ -314,6 +314,46 @@ class RedactToolArgsAndOutputTests(unittest.TestCase):
         self.assertEqual(redaction.redact_tool_output(None), {"secret_patterns": []})
 
 
+class ScrubPayloadRecursivelyTests(unittest.TestCase):
+    """cardinal_core.redaction.scrub_payload_recursively — the
+    capture-time scrub used by CARDINAL_CLAUDE_DEBUG_PAYLOADS (see
+    adapters/claude/hooks/_debug_capture.py). Structure must survive
+    untouched; only string leaves change."""
+
+    def test_scrubs_secret_in_nested_string(self) -> None:
+        # A bare token (no KEY/TOKEN/SECRET/PASSWORD= prefix) so it's the
+        # GITHUB_PAT pattern that matches, not GENERIC_ENV_SECRET_ASSIGNMENT.
+        token = "ghp_" + "a" * 36
+        payload = {
+            "tool_input": {"env": [f"using {token} for auth", "PATH=/usr/bin"]},
+            "session_id": "sess-1",
+        }
+        cleaned = redaction.scrub_payload_recursively(payload)
+        serialized = str(cleaned)
+        self.assertNotIn(token, serialized)
+        self.assertIn("<redacted:GITHUB_PAT>", serialized)
+        # Structure preserved: same keys, same list length.
+        self.assertEqual(set(cleaned.keys()), {"tool_input", "session_id"})
+        self.assertEqual(len(cleaned["tool_input"]["env"]), 2)
+        self.assertEqual(cleaned["tool_input"]["env"][1], "PATH=/usr/bin")
+        self.assertEqual(cleaned["session_id"], "sess-1")
+
+    def test_non_string_leaves_untouched(self) -> None:
+        payload = {"count": 42, "ok": True, "ratio": 0.5, "nothing": None}
+        cleaned = redaction.scrub_payload_recursively(payload)
+        self.assertEqual(cleaned, payload)
+
+    def test_list_order_and_length_preserved(self) -> None:
+        payload = ["a", {"x": "b"}, ["c", "d"]]
+        cleaned = redaction.scrub_payload_recursively(payload)
+        self.assertEqual(cleaned, ["a", {"x": "b"}, ["c", "d"]])
+
+    def test_scalar_passthrough(self) -> None:
+        self.assertEqual(redaction.scrub_payload_recursively("plain text"), "plain text")
+        self.assertEqual(redaction.scrub_payload_recursively(7), 7)
+        self.assertIsNone(redaction.scrub_payload_recursively(None))
+
+
 class StrictModeTests(unittest.TestCase):
     def test_redact_prompt_returns_none_in_strict_mode(self) -> None:
         with _redact_env(CARDINAL_REDACT_MODE="strict") as mod:

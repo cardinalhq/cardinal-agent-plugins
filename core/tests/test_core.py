@@ -14,7 +14,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from cardinal_core import bashclass, deviceflow, initiative, limits, otlp, pricing, session
-from cardinal_core.paths import AgentPaths, atomic_write_json_compact
+from cardinal_core.paths import AgentPaths, atomic_write_json_compact, dump_debug_payload
 
 from tests.harness import StubIngest
 
@@ -623,6 +623,49 @@ class Core020ApiTests(unittest.TestCase):
             self.assertLess(time.monotonic() - t0, 2.0, "empty ladder must not sleep")
         finally:
             stub.stop()
+
+
+class DumpDebugPayloadTests(unittest.TestCase):
+    """cardinal_core.paths.dump_debug_payload — the shared primitive
+    lifted out of codex/cursor/gemini's identical local copies (Phase 0.D
+    of the Agent Execution Graph plan; also used by Claude's new
+    adapters/claude/hooks/_debug_capture.py). This function does its own
+    I/O only; env-var gating is entirely the caller's responsibility."""
+
+    def test_writes_json_with_event_time_ns_filename_shape(self) -> None:
+        with TemporaryDirectory() as td:
+            debug_dir = Path(td) / "debug"
+            dump_debug_payload("UserPromptSubmit", {"session_id": "s1", "n": 3}, debug_dir)
+            dumps = list(debug_dir.glob("UserPromptSubmit-*.json"))
+            self.assertEqual(len(dumps), 1)
+            suffix = dumps[0].name[len("UserPromptSubmit-"):-len(".json")]
+            self.assertTrue(suffix.isdigit())
+            self.assertEqual(json.loads(dumps[0].read_text()), {"session_id": "s1", "n": 3})
+
+    def test_creates_debug_dir_if_missing(self) -> None:
+        with TemporaryDirectory() as td:
+            debug_dir = Path(td) / "nested" / "debug"
+            self.assertFalse(debug_dir.exists())
+            dump_debug_payload("Stop", {}, debug_dir)
+            self.assertTrue(debug_dir.exists())
+
+    def test_non_serializable_value_falls_back_to_str_not_raise(self) -> None:
+        with TemporaryDirectory() as td:
+            debug_dir = Path(td) / "debug"
+            dump_debug_payload("Stop", {"weird": {1, 2, 3}}, debug_dir)
+            dumps = list(debug_dir.glob("Stop-*.json"))
+            self.assertEqual(len(dumps), 1)
+            # default=str coerces the unserializable set to its repr string.
+            loaded = json.loads(dumps[0].read_text())
+            self.assertIn("weird", loaded)
+
+    def test_unwritable_dir_does_not_raise(self) -> None:
+        # A file where a directory is expected makes mkdir() raise
+        # FileExistsError (an OSError subclass) — best-effort silence.
+        with TemporaryDirectory() as td:
+            blocker = Path(td) / "blocked"
+            blocker.write_text("not a directory")
+            dump_debug_payload("Stop", {"a": 1}, blocker / "debug")  # must not raise
 
 
 if __name__ == "__main__":

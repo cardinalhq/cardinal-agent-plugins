@@ -36,6 +36,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _debug_capture  # noqa: E402
 import _otel_settings  # noqa: E402
 from cardinal_core.initiative import is_git_repo  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
@@ -69,6 +70,10 @@ def main() -> None:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+
+    # Capture FIRST, before any processing below.
+    _debug_capture.dump_if_enabled("SessionStart", payload)
+
     cwd = (
         payload.get("cwd")
         or os.environ.get("CLAUDE_PROJECT_DIR")

@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _debug_capture  # noqa: E402
 import _otel_settings  # noqa: E402
 import _plan_cache  # noqa: E402
 import _plugin_version  # noqa: E402
@@ -251,6 +252,9 @@ def main() -> None:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         _silent_exit()
+
+    # Capture FIRST, before any processing below.
+    _debug_capture.dump_if_enabled("Stop", payload)
 
     session_id = (
         payload.get("session_id")

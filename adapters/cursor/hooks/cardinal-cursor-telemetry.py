@@ -50,6 +50,7 @@ from cardinal_core.initiative import (  # noqa: E402,F401
     strip_worktree_noise,
 )
 from cardinal_core.paths import AgentPaths  # noqa: E402
+from cardinal_core.paths import dump_debug_payload as _core_dump_debug_payload  # noqa: E402
 
 PLUGIN_VERSION = _plugin_version.plugin_version()
 SCOPE_NAME = "cardinal-cursor-plugin"
@@ -190,15 +191,12 @@ def read_plan_stamp() -> dict[str, Any]:
 
 def dump_debug_payload(event: str, payload: dict[str, Any]) -> None:
     """Env-gated raw hook-payload dump. No-op unless
-    CARDINAL_CURSOR_DEBUG_PAYLOADS=1."""
+    CARDINAL_CURSOR_DEBUG_PAYLOADS=1. The write itself is the shared
+    core.paths.dump_debug_payload primitive; this wrapper is just the
+    env-var gate, which differs per adapter."""
     if os.environ.get(DEBUG_PAYLOADS_ENV) != "1":
         return
-    try:
-        PATHS.debug_dir.mkdir(parents=True, exist_ok=True)
-        path = PATHS.debug_dir / f"{event}-{time.time_ns()}.json"
-        path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
-    except (OSError, TypeError, ValueError):
-        pass
+    _core_dump_debug_payload(event, payload, PATHS.debug_dir)
 
 
 # ---------------------------------------------------------------------------
