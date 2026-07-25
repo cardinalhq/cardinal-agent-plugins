@@ -257,11 +257,25 @@ No emitter or ingest code ships. Deliverables:
   `{native | derivable | heuristic | unavailable}`) with a fixture path
   proving each `native`/`derivable` cell.
 - **Empirical resolutions**:
-  - Claude `parent_tool_use_id` presence on Task calls.
-  - Codex `SubagentStop` payload shape.
-  - Cursor per-turn identity beyond `generation_id`.
-  - Gemini `AfterAgent` payload keys.
-  - Omnigent claude/codex-native subagent visibility gap.
+  - **Claude `parent_tool_use_id`** — RESOLVED 2026-07-25 against real
+    transcripts: the field is **never present**. Every invocation node's
+    `parent_source` is `TRANSCRIPT` (positional inference), never `NATIVE`.
+  - **Claude subagent tool name** — RESOLVED 2026-07-25: the tool is named
+    `Agent`, not `Task`. Prior plan/spec text referring to `Task` is a
+    documentation drift.
+  - **Claude skill mechanism** — RESOLVED 2026-07-25: skills surface as a
+    `Skill` tool_use with `input={"skill": name, "args": ...}`. There is
+    no `SlashCommand` tool_use in real transcripts (kept as a
+    forward-compat alias only).
+  - **Claude subagent identity link** — RESOLVED 2026-07-25: the reliable
+    correlation is `<transcript_dir>/subagents/agent-<id>.meta.json`'s
+    `toolUseId` field. Static `tool_result` for a subagent call carries
+    free text, not a structured `agentId` (that only appears on the live
+    hook payload, not the transcript).
+  - Codex `SubagentStop` payload shape — still open.
+  - Cursor per-turn identity beyond `generation_id` — still open.
+  - Gemini `AfterAgent` payload keys — still open.
+  - Omnigent claude/codex-native subagent visibility gap — still open.
 
 **Gate**: given fixtures, can the reducer produce a `toolkit_invocation_facts`
 row with `toolkit_name`, `orchestrator_model`, `duration_ns`, and (at least)
