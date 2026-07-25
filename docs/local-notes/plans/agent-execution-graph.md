@@ -207,20 +207,31 @@ toolkit_invocation_facts
     ├── new toolkit UX / drilldown
     └── compat projector → agent_sessions_toolkit_maps → existing dashboard
 
-    (separately, from execution_{nodes,edges}):
-    → OTLP projection → /v1/traces → Tempo / Honeycomb / Datadog
-```
+Adapters serialize each envelope as an OTLP `Span` on emit (per
+`canonical-model.md` §14 "OTLP wire format — envelopes as spans") and POST
+`ResourceSpans` to the same OTLP intake `/v1/traces` endpoint that already
+carries every other adapter signal. No custom `/v1/envelopes` endpoint, no
+separate auth, no HMAC gate.
 
-### OTLP as projection
+### OTLP as wire format (revised from earlier design)
 
-A materialization walks the graph and emits `ResourceSpans`: turn → skill →
-subagent → tool → llm_call, with **span-links** where the graph edge isn't
-`parent_of` (multi-file, cross-session, workflow contribution). Emitted from
-the ingest side, never from the adapter. Adapters emit envelopes only.
-Field-level mapping (Cardinal field → OTel attribute → resource/span scope)
-is normative in `docs/canonical-model.md` §OpenTelemetry semantic
-conventions mapping — Phase 2 reads that table directly rather than
-re-deriving its own attribute names.
+**Original plan called for a separate `/v1/envelopes` handler with
+adapter→envelope→lakerunner→OTLP projection.** Corrected 2026-07-25:
+envelopes describe span-shaped execution atoms, so the natural wire
+representation IS OTLP traces. This collapses "Phase 2 OTLP projection"
+into "Phase 1 emission" — the traces are valid the moment they leave the
+adapter, and Tempo/Honeycomb/Datadog render them meaningfully without
+lakerunner in the loop.
+
+Lakerunner's job: **tap** the OTLP trace pipeline (same tap pattern as
+`internal/agentsessions/processor.go` uses for log records today), filter
+spans with `cardinal.envelope.record_type` present, deserialize back into
+`Envelope`, run the reducer. No HTTP handler on lakerunner.
+
+Field-level mapping (Cardinal field → OTel attribute → resource/span
+scope) is normative in `docs/canonical-model.md` §12 (SemConv) and §14
+(wire format). Both plugin emit and lakerunner tap read those tables
+directly.
 
 ### Ownership boundary
 
@@ -332,13 +343,13 @@ building the 0.2.b reducer against a contract that might still move.
   case-file view (user turn → skill with lifecycle_state badge → subagents →
   tools → files → PR). **No Gantt yet.** Model mix widget adjacent.
 
-### Phase 2 — OTLP projection
+### Phase 2 — OTLP projection ~~(deferred/collapsed)~~
 
-- Ingest-side materialization from execution graph to OTLP `ResourceSpans`.
-- New `/v1/traces` endpoint on lakerunner (read-through or scheduled emit).
-- Sanity render in Tempo and Honeycomb.
-- Span-links used where edge kind isn't `parent_of`.
-- **No adapter-side OTLP code.** Trace generation stays server-side.
+**Collapsed into Phase 1** by the 2026-07-25 rewire: envelopes are OTLP
+spans on the wire, so the "projection" step vanishes. Anything remaining
+here is downstream polish (backend-specific trace-view tuning, span-link
+ergonomics for non-parent_of edges once real cross-file/cross-session
+graphs land). Not a blocker for any subsequent phase.
 
 ### Phase 3 — Codex + Gemini
 
