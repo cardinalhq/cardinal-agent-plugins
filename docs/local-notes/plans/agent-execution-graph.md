@@ -164,13 +164,23 @@ toolkit_invocation_facts(        -- one row per actual invocation
   input_tokens, output_tokens, cached_tokens, cost_usd,
   start_ns, end_ns, duration_ns,
   outcome_id,                    -- FK to outcome linkage (nullable)
-  provenance JSONB               -- six axes verbatim, so UX can qualify
+  provenance JSONB,              -- six axes verbatim, so UX can qualify
+  context_snapshot_ns,           -- point-in-time marker: which execution_context
+                                  -- state was baked into this row (see Phase 0.2.b)
+  repository_name, branch, pr_number, initiative_id, actor_id, ...
+                                  -- inheritable ExecutionContext fields, snapshotted
+                                  -- at projection time (Phase 0.2.b), not joined live
 )
 ```
 
 Rollups (7d / 30d / per-repo / per-engineer / per-initiative) are
 `SELECT ... GROUP BY` at query time initially. Add an acceleration table
 only when a specific query proves slow — never as the semantic layer.
+Per-repo/per-engineer/per-initiative rollups are made possible by the
+`ExecutionContext` contract (Phase 0.2, see below) — the fact table
+snapshots the resolved context per row, so a late-bound field (e.g.
+`pr_number` arriving after the session ends) does not retroactively change
+rows already written; a re-projection picks up the enrichment.
 
 ### Compatibility projection
 
@@ -207,6 +217,10 @@ A materialization walks the graph and emits `ResourceSpans`: turn → skill →
 subagent → tool → llm_call, with **span-links** where the graph edge isn't
 `parent_of` (multi-file, cross-session, workflow contribution). Emitted from
 the ingest side, never from the adapter. Adapters emit envelopes only.
+Field-level mapping (Cardinal field → OTel attribute → resource/span scope)
+is normative in `docs/canonical-model.md` §OpenTelemetry semantic
+conventions mapping — Phase 2 reads that table directly rather than
+re-deriving its own attribute names.
 
 ### Ownership boundary
 
@@ -253,6 +267,37 @@ No emitter or ingest code ships. Deliverables:
 row with `toolkit_name`, `orchestrator_model`, `duration_ns`, and (at least)
 `end_ns`, each with honest provenance? Yes → adapter is Phase-1-ready. No →
 matrix documents the gap.
+
+### Phase 0.2 — Execution context contract and reducer
+
+Gate between Phase 0 and Phase 1: repo/PR/initiative/engineer dimensions
+must be first-class in the contract *before* the lakerunner reducer
+hardens, or every rollup query ends up rediscovering them from ad-hoc
+`attributes` JSONB per adapter. Two sub-items:
+
+- **0.2.a — contract update** (this task). Adds `ExecutionContext` as a
+  first-class, execution-wide, inheritable tagging contract:
+  `core/cardinal_core/envelope.py` gains `RecordType.CONTEXT_OBSERVED` +
+  the `ExecutionContext` payload + `ContextSource` provenance axis +
+  `CONTEXT_SOURCE_PRECEDENCE`; `docs/canonical-model.md` gains the
+  "Execution context and inheritance" and "OpenTelemetry semantic
+  conventions mapping" sections. Contract-only — no ingest/reducer code,
+  no adapter emission changes. `SCHEMA_VERSION` stays 1 (additive).
+- **0.2.b — lakerunner reducer extension** (follow-up, other repo). New
+  `execution_context` table: `org_id, execution_id` (one row per
+  execution), every inheritable field as a nullable column, `attributes`
+  JSONB, and `context_source_per_field` JSONB tracking which
+  `ContextSource` set each field (so the precedence merge is auditable
+  per field, not just per row). Late-bound enrichment applied via
+  `CONTEXT_SOURCE_PRECEDENCE` per field, same observation model as node
+  reduction (§9 of the canonical model). The OTLP projection (Phase 2)
+  consumes this table at span-emit time using the mapping table added in
+  0.2.a.
+
+**Gate**: `ExecutionContext` roundtrips through `envelope.to_json`/
+`from_json`, validation rejects empty/malformed observations, and
+`CONTEXT_SOURCE_PRECEDENCE` is committed — before lakerunner starts
+building the 0.2.b reducer against a contract that might still move.
 
 ### Phase 1 — Claude vertical slice (end-to-end, thin)
 
@@ -360,6 +405,26 @@ grouped; sequential gates are named.
   │              [P0.G phase-0-gate]        (sequential)             │
   │  in: matrix + fixtures                                           │
   │  out: per-adapter go/no-go for Phase 1                           │
+  └──────────────────────────────────────────────────────────────────┘
+```
+
+### Phase 0.2 — Execution context contract and reducer (gate before P1)
+
+```
+  ┌──────────────────────────────────────────────────────────────────┐
+  │ Phase 0.2 — Execution context contract                           │
+  │                                                                  │
+  │  [P0.2.a context-contract]      (sequential, this task)          │
+  │  in: canonical-model.md + envelope.py (Phase 0 baseline)         │
+  │  out: ExecutionContext + ContextSource + CONTEXT_SOURCE_PRECEDENCE│
+  │       in envelope.py; "Execution context and inheritance" +      │
+  │       "OTel SemConv mapping" sections in canonical-model.md      │
+  │                       │                                          │
+  │                       ↓                                          │
+  │  [P0.2.b context-reducer]       (sequential, other repo)         │
+  │  in: P0.2.a contract (frozen)                                    │
+  │  out: lakerunner execution_context table + per-field precedence  │
+  │       merge + OTLP projection reads the table at span-emit time  │
   └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -513,6 +578,9 @@ grouped; sequential gates are named.
 ```
        P0 (evidence & contract)
               │
+              ↓
+       P0.2 (execution context contract [0.2.a] → reducer [0.2.b])
+              │        (gate: contract lands before reducer hardens)
               ↓
        P1 (Claude vertical slice)
          ┌────┴────┐

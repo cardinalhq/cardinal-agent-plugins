@@ -19,6 +19,7 @@ import dataclasses
 import enum
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Union
 
@@ -41,6 +42,7 @@ class RecordType(enum.StrEnum):
     EXECUTION_EVENT = "execution_event"
     USAGE_OBSERVED = "usage_observed"
     ARTIFACT_LINK_OBSERVED = "artifact_link_observed"
+    CONTEXT_OBSERVED = "context_observed"
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +169,41 @@ class UsageSource(enum.StrEnum):
 
 
 # ---------------------------------------------------------------------------
+# Context provenance — a single axis for ExecutionContext observations.
+# Distinct from the six-axis node provenance above: a context observation
+# describes execution-wide, inheritable facts (repo, PR, initiative,
+# engineer, ...), not a single node, so it carries one source rather than
+# six independent ones.
+# ---------------------------------------------------------------------------
+
+
+class ContextSource(enum.StrEnum):
+    SESSION_START = "session_start"
+    GIT_STATE = "git_state"
+    PR_CREATED = "pr_created"
+    OUTCOME_RESOLVED = "outcome_resolved"
+    INITIATIVE_MATCHED = "initiative_matched"
+    USER_SUPPLIED = "user_supplied"
+    UNKNOWN = "unknown"
+
+
+# Precedence for the reducer (implemented in 0.2.b): per field, the
+# observation with the higher-precedence source wins; equal precedence with
+# a different value keeps the first value and emits
+# execution_events(event_kind='record_conflict'). See
+# docs/canonical-model.md §Execution context and inheritance.
+CONTEXT_SOURCE_PRECEDENCE: dict[ContextSource, int] = {
+    ContextSource.PR_CREATED: 60,
+    ContextSource.OUTCOME_RESOLVED: 60,
+    ContextSource.INITIATIVE_MATCHED: 50,
+    ContextSource.USER_SUPPLIED: 40,
+    ContextSource.GIT_STATE: 30,
+    ContextSource.SESSION_START: 20,
+    ContextSource.UNKNOWN: 10,
+}
+
+
+# ---------------------------------------------------------------------------
 # Record payloads
 # ---------------------------------------------------------------------------
 
@@ -244,6 +281,58 @@ class ArtifactLinkObserved:
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ExecutionContext:
+    """Execution-wide, inheritable context — set once per execution and
+    inherited by every node in it (see docs/canonical-model.md §Execution
+    context and inheritance). Transport-level identity (org_id, adapter,
+    session_id) already lives on the Envelope wrapper and is deliberately
+    NOT duplicated here.
+
+    A single RecordType (CONTEXT_OBSERVED) covers both the first observation
+    and every later enrichment (e.g. a PR opening mid-session, an outcome
+    resolving after the fact) — the reducer (0.2.b) applies
+    CONTEXT_SOURCE_PRECEDENCE per field, the same "observation, not write"
+    model used for nodes.
+
+    `record_id_for` dedup: pass the full to_json(envelope)["payload"] dict
+    (execution_key + context_source + every content field, canonically
+    sorted) to `record_id_for`. Two observations with identical
+    execution_key, context_source, and field values hash identically and
+    dedupe; a different context_source or any different field value changes
+    the hash and is treated as a genuine new observation.
+    """
+
+    execution_key: str
+    context_source: ContextSource
+
+    # Engineer / org placement.
+    actor_id: str | None = None  # engineer identity (email/ID); see also
+    # OTel resource attr enduser.id — distinct from adapter-side user_email.
+    workspace_id: str | None = None
+    team_id: str | None = None
+
+    # Repository / VCS state.
+    repository_id: str | None = None  # Cardinal-canonical ID, if known
+    repository_name: str | None = None  # "owner/repo"
+    repository_url: str | None = None  # must be userinfo-scrubbed already
+    branch: str | None = None
+    commit_sha: str | None = None
+
+    # PR / initiative / outcome linkage.
+    pr_id: str | None = None  # Cardinal-canonical ID, if known
+    pr_number: int | None = None  # GitHub-style number
+    initiative_id: str | None = None
+    outcome_id: str | None = None
+
+    # Environment / runtime.
+    environment: str | None = None  # e.g. "dev", "prod-shadow"
+    agent_runtime_version: str | None = None  # e.g. Claude Code version
+    plugin_version: str | None = None  # Cardinal plugin version
+
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
 RecordPayload = Union[
     NodeObserved,
     NodeUpdated,
@@ -251,6 +340,7 @@ RecordPayload = Union[
     ExecutionEvent,
     UsageObserved,
     ArtifactLinkObserved,
+    ExecutionContext,
 ]
 
 
@@ -282,6 +372,7 @@ _PAYLOAD_CLASS_FOR_RECORD_TYPE: dict[RecordType, type] = {
     RecordType.EXECUTION_EVENT: ExecutionEvent,
     RecordType.USAGE_OBSERVED: UsageObserved,
     RecordType.ARTIFACT_LINK_OBSERVED: ArtifactLinkObserved,
+    RecordType.CONTEXT_OBSERVED: ExecutionContext,
 }
 
 _NODE_ENUM_FIELDS: dict[str, type[enum.Enum]] = {
@@ -303,12 +394,44 @@ _ENUM_FIELDS_FOR_PAYLOAD_CLASS: dict[type, dict[str, type[enum.Enum]]] = {
     ExecutionEvent: {"event_kind": EventKind},
     UsageObserved: {"usage_source": UsageSource},
     ArtifactLinkObserved: {},
+    ExecutionContext: {"context_source": ContextSource},
 }
 
 
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
+
+
+# Mirrors cardinal_core.redaction._USERINFO_RE (core/cardinal_core/redaction.py).
+# Kept as a local, dependency-free copy — this module stays stdlib-only and is
+# mirrored independently into every adapter. This is a validation safety net
+# only: callers are expected to have already run strip_url_userinfo() before
+# emitting; if the two patterns ever need to diverge, update both together.
+_UNSTRIPPED_USERINFO_RE = re.compile(r"://[^/@\s]+@")
+
+# Fields on ExecutionContext considered "inheritable content" for the
+# not-empty check — everything except execution_key/context_source
+# (identity/provenance, not content) and attributes (checked separately).
+_EXECUTION_CONTEXT_INHERITABLE_FIELDS = (
+    "actor_id",
+    "workspace_id",
+    "team_id",
+    "repository_id",
+    "repository_name",
+    "repository_url",
+    "branch",
+    "commit_sha",
+    "pr_id",
+    "pr_number",
+    "initiative_id",
+    "outcome_id",
+    "environment",
+    "agent_runtime_version",
+    "plugin_version",
+)
+
+_JSON_PRIMITIVE_TYPES = (str, int, float, bool, type(None))
 
 
 def _require(condition: bool, message: str) -> None:
@@ -393,6 +516,72 @@ def _validate_artifact_link_payload(payload: ArtifactLinkObserved) -> None:
     _require(bool(payload.artifact_ref), "artifact_ref is required")
 
 
+def _validate_context_attribute_value(key: str, value: Any, *, allow_nested_dict: bool) -> None:
+    """attributes values must be JSON-serializable primitives: no bytes, and
+    dicts may nest at most one level (a dict of primitives is fine; a dict
+    whose values are themselves dicts is not)."""
+    if isinstance(value, bytes):
+        raise EnvelopeValidationError(f"attributes[{key!r}] must not be bytes")
+    if isinstance(value, _JSON_PRIMITIVE_TYPES):
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_context_attribute_value(key, item, allow_nested_dict=False)
+        return
+    if isinstance(value, dict):
+        _require(
+            allow_nested_dict,
+            f"attributes[{key!r}] nests a dict beyond one level, which is not allowed",
+        )
+        for inner_key, inner_value in value.items():
+            _validate_context_attribute_value(
+                f"{key}.{inner_key}", inner_value, allow_nested_dict=False
+            )
+        return
+    raise EnvelopeValidationError(
+        f"attributes[{key!r}]={value!r} ({type(value).__name__}) is not a "
+        "JSON-serializable primitive"
+    )
+
+
+def _validate_context_attributes(attributes: dict[str, Any]) -> None:
+    _require(isinstance(attributes, dict), "attributes must be a dict")
+    for key, value in attributes.items():
+        _validate_context_attribute_value(key, value, allow_nested_dict=True)
+
+
+def _validate_execution_context_payload(payload: ExecutionContext) -> None:
+    _require(bool(payload.execution_key), "execution_key is required")
+    _enum_value(payload.context_source, ContextSource, "context_source")
+
+    has_signal = bool(payload.attributes) or any(
+        getattr(payload, name) is not None for name in _EXECUTION_CONTEXT_INHERITABLE_FIELDS
+    )
+    _require(
+        has_signal,
+        "ExecutionContext observation must populate at least one inheritable "
+        "field or attributes entry — empty context observations carry no signal",
+    )
+
+    if payload.repository_url is not None:
+        _require(
+            _UNSTRIPPED_USERINFO_RE.search(payload.repository_url) is None,
+            "repository_url must be userinfo-scrubbed (no user[:pass]@ before "
+            f"the host); run strip_url_userinfo() before emitting: "
+            f"{payload.repository_url!r}",
+        )
+
+    if payload.pr_number is not None:
+        _require(
+            isinstance(payload.pr_number, int)
+            and not isinstance(payload.pr_number, bool)
+            and payload.pr_number > 0,
+            f"pr_number must be a positive int, got {payload.pr_number!r}",
+        )
+
+    _validate_context_attributes(payload.attributes)
+
+
 def validate(envelope: Envelope) -> None:
     """Raises EnvelopeValidationError on any schema-v1 contract violation.
     See docs/canonical-model.md for the full rule set this enforces."""
@@ -424,6 +613,8 @@ def validate(envelope: Envelope) -> None:
         _validate_usage_payload(payload)
     elif isinstance(payload, ArtifactLinkObserved):
         _validate_artifact_link_payload(payload)
+    elif isinstance(payload, ExecutionContext):
+        _validate_execution_context_payload(payload)
     else:
         raise EnvelopeValidationError(f"unrecognized payload type: {type(payload).__name__}")
 

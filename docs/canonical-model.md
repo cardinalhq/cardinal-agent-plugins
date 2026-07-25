@@ -127,7 +127,7 @@ Events are instantaneous facts, not spans — they never carry `start_ns`/
 | `file_mutation`       | A file is created/edited/deleted, independent of the tool node     |
 | `skill_resolution`    | A skill transitions lifecycle state (see §5)                       |
 | `execution_failure`   | A node fails terminally (uncaught error, timeout)                  |
-| `record_conflict`     | Reducer sees two same-provenance observations disagree (see §9)    |
+| `record_conflict`     | Reducer sees two same-provenance observations disagree (see §10)   |
 
 ## 5. Skill lifecycle
 
@@ -183,7 +183,121 @@ exists solely for the OTLP projection (Phase 2) and must never be used as
 a join key for product queries — `execution_key`/`node_key` are the only
 stable identity for that.
 
-## 8. Provenance axes
+## 8. Execution context and inheritance
+
+Phase 0.1 made `org_id`, `model` (request vs. orchestrator), and
+`outcome_id` linkage first-class. It did not make **repo, PR, initiative,
+or engineer/actor** first-class — those dimensions would otherwise end up
+scattered across ad-hoc `attributes` JSONB, rediscovered independently by
+every adapter and every rollup query. Phase 0.2.a fixes this with an
+**inheritance contract**: a two-class split between execution-wide context
+and node-specific context.
+
+### The two-class split
+
+- **Execution-wide inheritable context** — set once per execution (on an
+  `ExecutionContext` observation, `RecordType.CONTEXT_OBSERVED`) and
+  inherited by every node in that execution: org/repo/branch/commit/PR/
+  initiative/outcome/engineer/adapter/session. This is *who, where, and
+  what for* — it does not change from one tool call to the next within a
+  single execution.
+- **Node-specific context** — stays on individual nodes: `request_model`,
+  `orchestrator_model`, `toolkit_type`/`toolkit_name`, and the six-axis
+  provenance (§9). This is *what happened at this step*.
+
+Transport-level identity (`org_id`, `adapter`, `session_id`) already lives
+on the `Envelope` wrapper and is never duplicated onto `ExecutionContext`.
+
+### `ExecutionContext` field reference
+
+| Field | Meaning | Example | Typical source(s) |
+|---|---|---|---|
+| `actor_id` | Engineer identity (email or ID); distinct from the OTel resource attr `user_email` | `rjha@cardinalhq.io` | `session_start`, `user_supplied` |
+| `workspace_id` | Cardinal workspace grouping | `ws_9f2a` | `session_start` |
+| `team_id` | Cardinal team grouping | `team_platform` | `session_start`, `user_supplied` |
+| `repository_id` | Cardinal-canonical repo ID, if known | `repo_3a1c` | `git_state` (once resolved) |
+| `repository_name` | `owner/repo` form | `cardinalhq/lakerunner` | `git_state` |
+| `repository_url` | Canonical URL, userinfo-scrubbed | `https://github.com/cardinalhq/lakerunner.git` | `git_state` |
+| `branch` | Current branch at observation time | `feat/agent-execution-graph-p0` | `git_state` |
+| `commit_sha` | Current commit at observation time | `abc1234` | `git_state` |
+| `pr_id` | Cardinal-canonical PR ID, if known | `pr_771` | `pr_created` |
+| `pr_number` | GitHub-style PR number | `42` | `pr_created` |
+| `initiative_id` | Matched initiative | `init_2026h2_toolkit` | `initiative_matched` |
+| `outcome_id` | Linked outcome record | `outcome_9911` | `outcome_resolved` |
+| `environment` | Deployment/runtime environment | `dev`, `prod-shadow` | `session_start`, `user_supplied` |
+| `agent_runtime_version` | Adapter/agent runtime version | Claude Code `1.5.2` | `session_start` |
+| `plugin_version` | Cardinal plugin version | `0.9.0` | `session_start` |
+| `attributes` | Extensibility escape hatch for org-specific context fields | `{"cost_center": "eng-42"}` | any |
+
+### Inheritance rule
+
+Nodes inherit context **by `execution_id` at query time** — the query
+layer joins a node to the resolved `ExecutionContext` row for its
+execution, it does not copy context fields onto every node. The
+fact-projection (`toolkit_invocation_facts`) additionally **snapshots**
+context at projection time, so a fact row reflects the context as it was
+known when that row was written, not whatever it later evolves into (see
+§Fact model in the architecture plan).
+
+Nodes MAY override specific fields for themselves — e.g. a subagent
+working against a different repository sets `repository_name` in its own
+node `attributes`. The precedence rule for overrides:
+
+> **`node.attributes` wins over inherited context for that node's own
+> attributes only; child nodes inherit the execution-wide context, not
+> the parent node's override.**
+
+In other words, an override is scoped to the single node that set it and
+does not propagate down the tree — every child still inherits from
+`ExecutionContext` unless it sets its own override.
+
+### Late-bound enrichment example
+
+Context fields do not all arrive at once. A single execution typically
+accumulates them over its lifetime, each field independently:
+
+```
+t0  session_start   → actor_id, workspace_id, environment, plugin_version
+t1  git_state       → repository_name, repository_url, branch, commit_sha
+t2  pr_created       → pr_id, pr_number         (mid-session: PR opened from a branch push)
+t3  outcome_resolved → outcome_id               (after session ends: outcome marked in review)
+```
+
+Each of these is a separate `CONTEXT_OBSERVED` envelope for the same
+`execution_key`. The reducer (0.2.b) merges them per field under
+`CONTEXT_SOURCE_PRECEDENCE` — `commit_sha` set at `t1` and `pr_number` set
+at `t2` both coexist on the resolved context; neither observation
+overwrites fields the other didn't touch.
+
+### `ContextSource` values and precedence
+
+Single provenance axis for `ExecutionContext` observations — distinct from
+the six-axis node provenance in §9, since a context observation describes
+execution-wide facts, not a single node.
+
+| `ContextSource` | Precedence | Meaning |
+|---|---|---|
+| `pr_created` | 60 | PR is late-bound but authoritative once it arrives |
+| `outcome_resolved` | 60 | Outcome linkage is late-bound but authoritative once resolved |
+| `initiative_matched` | 50 | Initiative-matching heuristic/service result |
+| `user_supplied` | 40 | Manual override from user/org config |
+| `git_state` | 30 | Git-state hook at session start or turn boundary |
+| `session_start` | 20 | `SessionStart` hook basic info |
+| `unknown` | 10 | No better source available |
+
+Reducer semantics (implemented in Phase 0.2.b, documented here so the
+contract and the reducer never drift apart):
+
+- **Per field**, the observation with higher precedence wins.
+- **Equal precedence, different value** → keep the first value, emit
+  `execution_events(event_kind='record_conflict')` with both values (same
+  pattern as node-field conflicts in §9).
+- **Fields evolve independently** — `pr_number` may arrive later from
+  `pr_created` while `commit_sha` was already set at `git_state`; both
+  values persist on the resolved context simultaneously. Precedence is
+  evaluated per field, never across the whole record.
+
+## 9. Provenance axes
 
 Every node carries all six axes. Downstream UX reads them directly to
 qualify what it renders (e.g. "timing estimated" badges) rather than
@@ -198,7 +312,7 @@ presenting inferred data as fact.
 | `toolkit_source`  | `native`, `command_parse`, `prompt_inference`, `unknown`      | native: adapter reports the toolkit call directly. command_parse: parsed from a `/command` invocation. prompt_inference: inferred from prompt text. unknown: no toolkit attribution possible. |
 | `usage_source`    | `native`, `allocated`, `estimated`, `unknown`                 | native: adapter-reported token/cost usage. allocated: usage split across sibling nodes by a rule. estimated: modeled from heuristics. unknown: no usage data available. |
 
-## 9. Provenance precedence
+## 10. Provenance precedence
 
 Global precedence order, applied per field during reduction:
 
@@ -220,7 +334,7 @@ canonical value for that field:
 regenerable from `execution_observations` — replay is `TRUNCATE
 execution_nodes; SELECT reduce(observations)`.
 
-## 10. Envelope record types
+## 11. Envelope record types
 
 Adapters emit `Envelope` records. `record_type` and the payload's
 dataclass are 1:1 — `envelope.validate()` rejects any mismatch.
@@ -233,19 +347,71 @@ dataclass are 1:1 — `envelope.validate()` rejects any mismatch.
 | `execution_event`          | An instantaneous fact occurs                                           | `ExecutionEvent` — `event_kind` + `event_ns` + optional related node  |
 | `usage_observed`           | Token/cost usage is attributed to a node                               | `UsageObserved` — input/output/cached tokens + cost + `usage_source`  |
 | `artifact_link_observed`   | A node is linked to an artifact reference (file path, PR URL, etc.)    | `ArtifactLinkObserved` — `artifact_kind` + `artifact_ref`             |
+| `context_observed`         | Execution-wide context is observed or enriched (first observation or a later enrichment — same record type; see §8) | `ExecutionContext` — inheritable fields + `context_source` |
 
-## 11. Ingestion contract
+## 12. OpenTelemetry semantic conventions mapping
+
+This section is **normative** — Phase 2's OTLP projection (see the
+architecture plan's "OTLP as projection") reads from this table when
+materializing `execution_nodes`/`ExecutionContext` into `ResourceSpans`.
+It is the single place adapter/context/node fields are assigned an OTel
+attribute name and scope.
+
+**Rule: use OTel SemConv where a stable one exists; use the `cardinal.*`
+namespace only for concepts OTel does not define cleanly.**
+
+| Cardinal field | OTel projection | Attribute scope | Notes |
+|---|---|---|---|
+| `org_id` | `cardinal.org.id` | Resource | Cardinal namespace — no OTel equivalent |
+| `adapter` | `cardinal.adapter` | Resource | |
+| `execution_id` | `cardinal.execution.id` | Resource | |
+| `session_id` | `cardinal.session.id` | Resource | |
+| `plugin_version` | `service.version` | Resource | OTel standard |
+| `agent_runtime_version` | `cardinal.agent.runtime.version` | Resource | |
+| `actor_id` | `enduser.id` | Resource | OTel standard (informational) |
+| `workspace_id` | `cardinal.workspace.id` | Resource | |
+| `team_id` | `cardinal.team.id` | Resource | |
+| `environment` | `deployment.environment.name` | Resource | OTel standard (renamed from `deployment.environment` in newer conventions) |
+| `repository_name` | `vcs.repository.name` | Span | OTel VCS SemConv |
+| `repository_url` | `vcs.repository.url.full` | Span | OTel VCS SemConv |
+| `branch` | `vcs.ref.head.name` | Span | OTel VCS SemConv |
+| `commit_sha` | `vcs.ref.head.revision` | Span | OTel VCS SemConv |
+| `pr_number` | `cardinal.pr.number` | Span | No stable OTel PR convention yet |
+| `pr_id` | `cardinal.pr.id` | Span | |
+| `initiative_id` | `cardinal.initiative.id` | Span | |
+| `outcome_id` | `cardinal.outcome.id` | Span | |
+| `request_model` | `gen_ai.request.model` | Span | OTel GenAI SemConv |
+| `orchestrator_model` | `cardinal.orchestrator.model` | Span | Cardinal-specific — no OTel equivalent for "orchestrating LLM" |
+| `toolkit_type` | `cardinal.toolkit.type` | Span | |
+| `toolkit_name` | `cardinal.toolkit.name` | Span | |
+| `invocation_kind` | `cardinal.invocation.kind` | Span | |
+| `tool_kind` | `cardinal.tool.kind` | Span | |
+
+Scope convention: fields that are constant for the whole execution
+(everything sourced from `ExecutionContext`, plus adapter/session
+identity) project onto the OTLP **Resource**; fields specific to a single
+node project onto that node's **Span**. This mirrors the execution-wide
+vs. node-specific split in §8 — resource attributes are exactly the
+inheritable fields, span attributes are exactly the node-specific ones.
+
+## 13. Ingestion contract
 
 Envelopes carry observations, never writes. Ingest appends every envelope
 to `execution_observations` (append-only, raw) and a reducer derives
 canonical state into `execution_nodes`/`execution_edges`/
-`execution_events` under the precedence rule in §9. The canonical tables
+`execution_events` under the precedence rule in §10. The canonical tables
 are a materialized view over the raw log in every meaningful sense: they
 are always fully regenerable by replaying observations from scratch, so a
 reducer bug or ontology fix never loses information — it is fixed by
 re-running the reducer, not by backfilling adapters.
 
-## 12. Compatibility projection
+`context_observed` records follow the exact same append-only + reducer
+flow: each is appended to `execution_observations` verbatim, and the
+reducer (0.2.b) derives a single resolved `execution_context` row per
+execution under `CONTEXT_SOURCE_PRECEDENCE` (§8), field by field — not a
+separate ingestion path.
+
+## 14. Compatibility projection
 
 The existing `agent_sessions_toolkit_maps.{skills_used, agents_used,
 mcp_servers_used, tool_counts}` columns become a **derived read model**:
@@ -257,7 +423,7 @@ exclusive per-session — the old hook-based writer is disabled exactly
 where the projector takes over — so existing dashboards keep reading the
 same columns unmodified throughout the migration.
 
-## 13. Schema version and evolution rules
+## 15. Schema version and evolution rules
 
 `SCHEMA_VERSION = 1` is locked by this document and by
 `envelope.SCHEMA_VERSION` in code. Evolution rules:

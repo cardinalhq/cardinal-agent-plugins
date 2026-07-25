@@ -6,6 +6,7 @@ Run:
 
 from __future__ import annotations
 
+import dataclasses
 import unittest
 
 from cardinal_core import envelope as env
@@ -108,6 +109,20 @@ class RoundtripTests(unittest.TestCase):
         env.validate(e)
         self.assertEqual(env.from_json(env.to_json(e)), e)
 
+    def test_execution_context_roundtrip(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.GIT_STATE,
+            repository_name="cardinalhq/lakerunner",
+            repository_url="https://github.com/cardinalhq/lakerunner.git",
+            branch="main",
+            commit_sha="abc123",
+            attributes={"nested": {"a": 1}, "list": [1, 2, "x"]},
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        env.validate(e)
+        self.assertEqual(env.from_json(env.to_json(e)), e)
+
 
 class ValidationTests(unittest.TestCase):
     def test_invocation_kind_on_non_invocation_node_rejected(self) -> None:
@@ -175,6 +190,190 @@ class ValidationTests(unittest.TestCase):
             env.from_json(data)
 
 
+class ExecutionContextValidationTests(unittest.TestCase):
+    def test_valid_context_passes(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.SESSION_START,
+            actor_id="rjha@cardinalhq.io",
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        env.validate(e)  # no raise
+
+    def test_empty_context_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.SESSION_START,
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_attributes_only_is_sufficient_signal(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.USER_SUPPLIED,
+            attributes={"org_specific_flag": True},
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        env.validate(e)  # no raise
+
+    def test_invalid_context_source_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source="bogus",  # type: ignore[arg-type]
+            branch="main",
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_malformed_pr_number_zero_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.PR_CREATED,
+            pr_number=0,
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_malformed_pr_number_negative_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.PR_CREATED,
+            pr_number=-5,
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_malformed_pr_number_non_int_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.PR_CREATED,
+            pr_number="42",  # type: ignore[arg-type]
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_valid_pr_number_passes(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.PR_CREATED,
+            pr_number=42,
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        env.validate(e)  # no raise
+
+    def test_repository_url_with_userinfo_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.GIT_STATE,
+            repository_url="https://x-access-token:ghp_secret@github.com/org/repo.git",
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_repository_url_scrubbed_passes(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.GIT_STATE,
+            repository_url="https://github.com/org/repo.git",
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        env.validate(e)  # no raise
+
+    def test_repository_url_scp_style_passes(self) -> None:
+        # SCP-style remotes (git@host:org/repo.git) have no "://" and are
+        # not userinfo in the credential sense — mirrors redaction.py.
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.GIT_STATE,
+            repository_url="git@github.com:org/repo.git",
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        env.validate(e)  # no raise
+
+    def test_attributes_nested_dict_beyond_one_level_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.USER_SUPPLIED,
+            attributes={"outer": {"inner": {"too_deep": 1}}},
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_attributes_bytes_value_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.USER_SUPPLIED,
+            attributes={"blob": b"not json safe"},
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+    def test_missing_execution_key_rejected(self) -> None:
+        payload = env.ExecutionContext(
+            execution_key="",
+            context_source=env.ContextSource.GIT_STATE,
+            branch="main",
+        )
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        with self.assertRaises(env.EnvelopeValidationError):
+            env.validate(e)
+
+
+class ExecutionContextRecordIdTests(unittest.TestCase):
+    def _payload_dict(self, **overrides) -> dict:
+        payload = env.ExecutionContext(
+            execution_key="ek-1",
+            context_source=env.ContextSource.GIT_STATE,
+            branch="main",
+            commit_sha="abc123",
+        )
+        for k, v in overrides.items():
+            payload = dataclasses.replace(payload, **{k: v})
+        e = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
+        return env.to_json(e)["payload"]
+
+    def test_identical_observations_produce_same_id(self) -> None:
+        d1 = self._payload_dict()
+        d2 = self._payload_dict()
+        self.assertEqual(env.record_id_for(d1), env.record_id_for(d2))
+
+    def test_different_context_source_produces_different_id(self) -> None:
+        d1 = self._payload_dict()
+        d2 = self._payload_dict(context_source=env.ContextSource.PR_CREATED)
+        self.assertNotEqual(env.record_id_for(d1), env.record_id_for(d2))
+
+    def test_different_field_value_produces_different_id(self) -> None:
+        d1 = self._payload_dict()
+        d2 = self._payload_dict(branch="other-branch")
+        self.assertNotEqual(env.record_id_for(d1), env.record_id_for(d2))
+
+
+class ContextSourcePrecedenceTests(unittest.TestCase):
+    def test_all_context_sources_have_precedence(self) -> None:
+        self.assertEqual(
+            set(env.CONTEXT_SOURCE_PRECEDENCE.keys()), set(env.ContextSource)
+        )
+
+    def test_precedence_ordering(self) -> None:
+        p = env.CONTEXT_SOURCE_PRECEDENCE
+        self.assertEqual(p[env.ContextSource.PR_CREATED], 60)
+        self.assertEqual(p[env.ContextSource.OUTCOME_RESOLVED], 60)
+        self.assertGreater(p[env.ContextSource.PR_CREATED], p[env.ContextSource.INITIATIVE_MATCHED])
+        self.assertGreater(p[env.ContextSource.INITIATIVE_MATCHED], p[env.ContextSource.USER_SUPPLIED])
+        self.assertGreater(p[env.ContextSource.USER_SUPPLIED], p[env.ContextSource.GIT_STATE])
+        self.assertGreater(p[env.ContextSource.GIT_STATE], p[env.ContextSource.SESSION_START])
+        self.assertGreater(p[env.ContextSource.SESSION_START], p[env.ContextSource.UNKNOWN])
+
+
 class RecordIdTests(unittest.TestCase):
     def test_deterministic_same_input(self) -> None:
         payload = {"a": 1, "b": "x"}
@@ -206,6 +405,16 @@ class EnumValueSpotCheckTests(unittest.TestCase):
     def test_record_type_values(self) -> None:
         self.assertEqual(env.RecordType.NODE_OBSERVED.value, "node_observed")
         self.assertEqual(env.RecordType.ARTIFACT_LINK_OBSERVED.value, "artifact_link_observed")
+        self.assertEqual(env.RecordType.CONTEXT_OBSERVED.value, "context_observed")
+
+    def test_context_source_values(self) -> None:
+        self.assertEqual(
+            {v.value for v in env.ContextSource},
+            {
+                "session_start", "git_state", "pr_created", "outcome_resolved",
+                "initiative_matched", "user_supplied", "unknown",
+            },
+        )
 
     def test_node_kind_values(self) -> None:
         self.assertEqual(
