@@ -127,6 +127,12 @@
                       }
                     },
                     {
+                      "key": "cardinal_remote_url_credential_scrubbed",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
                       "key": "cardinal_initiative_name",
                       "value": {
                         "stringValue": "golden-fixture"

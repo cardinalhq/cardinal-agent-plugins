@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plugin_version  # noqa: E402
 from cardinal_core import bashclass, initiative, limits, otlp, pricing  # noqa: E402
 from cardinal_core import session as core_session  # noqa: E402
+from cardinal_core import redaction  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
 
 
@@ -152,7 +153,12 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
     head_sha = initiative.git(["rev-parse", "HEAD"], cwd)
     if head_sha:
         branch = initiative.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-        remote_url = initiative.git(["remote", "get-url", "origin"], cwd)
+        # PRIVACY (docs/privacy-redaction.md §3, §7): origin URLs can embed
+        # live credentials — strip userinfo BEFORE canonical_repo() too,
+        # since that regex has no userinfo awareness.
+        raw_remote_url = initiative.git(["remote", "get-url", "origin"], cwd)
+        remote_url = redaction.strip_url_userinfo(raw_remote_url) if raw_remote_url else None
+        credential_scrubbed = bool(raw_remote_url and remote_url != raw_remote_url)
         repo = initiative.canonical_repo(remote_url)
         initiative_name, initiative_type = initiative.resolve_initiative(branch)
         attrs: dict[str, Any] = {
@@ -162,6 +168,7 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
             "cardinal_branch": branch,
             "cardinal_repo": repo,
             "cardinal_remote_url": remote_url,
+            "cardinal_remote_url_credential_scrubbed": credential_scrubbed,
             "cardinal_initiative_name": initiative_name,
             "cardinal_initiative_type": initiative_type,
             "cardinal_command": initiative.detect_command(
@@ -347,6 +354,7 @@ def append_tool_call_event(
     call: dict[str, Any],
     state: dict[str, Any],
     ts_ns: int,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
     raw_name = str(call.get("name") or "")
     args = parse_args_json(call.get("arguments"))
@@ -359,6 +367,12 @@ def append_tool_call_event(
             v = args.get(key)
             if isinstance(v, str) and v:
                 target = v
+    # PRIVACY (docs/privacy-redaction.md §3 attributes.file_path): verbatim
+    # only when the path resolves inside this session's cwd; hashed
+    # placeholder otherwise (a stray absolute path can leak a home-dir
+    # username or an unrelated project name).
+    if target is not None:
+        target = redaction.redact_file_path(target, cwd)
     plan_stamp = state.get("plan_stamp") if isinstance(state.get("plan_stamp"), dict) else {}
     attrs: dict[str, Any] = {
         "session_id": session_id,
@@ -405,17 +419,51 @@ def append_tool_result_event(
     output: Any,
     ts_ns: int,
 ) -> None:
+    # PRIVACY REGRESSION FIX (docs/privacy-redaction.md §7): this event
+    # used to serialize `tool_input`/`tool_parameters` as raw JSON of the
+    # full tool-call arguments — for Bash the entire command string, for
+    # apply_patch the entire diff/patch text. Route through the same
+    # redact_command/hash_field discipline cardinal.turn_tool already
+    # uses, so the two events can't diverge (spec §7 "must fix").
+    tool_name = pending.get("tool_name")
     tool_input = pending.get("tool_input") if isinstance(pending.get("tool_input"), dict) else {}
     params = pending.get("tool_parameters") if isinstance(pending.get("tool_parameters"), dict) else {}
     attrs: dict[str, Any] = {
         "session_id": session_id,
         "agent_runtime": "codex",
-        "tool_name": pending.get("tool_name"),
+        "tool_name": tool_name,
         "success": output_success(output),
-        "tool_parameters": json.dumps(params, separators=(",", ":")) if params else None,
-        "tool_input": json.dumps(tool_input, separators=(",", ":")) if tool_input else None,
     }
+    if tool_name == "mcp_tool":
+        # Names only — allowed verbatim (spec §2).
+        attrs["mcp_server_name"] = params.get("mcp_server_name")
+        attrs["mcp_tool_name"] = params.get("mcp_tool_name")
+
+    arg_redaction = redaction.redact_tool_args(tool_name, tool_input)
+    arg_patterns = arg_redaction.pop("secret_patterns", [])
+    attrs.update(arg_redaction)
+
+    out_redaction = redaction.redact_tool_output(output)
+    out_patterns = out_redaction.pop("secret_patterns", [])
+    attrs.update(out_redaction)
+
     records.append(otlp.log_record("tool_result", attrs, ts_ns))
+
+    # Spec §3 "Secrets": a human-auditable signal that a known secret
+    # pattern was found and scrubbed — never the matched text itself.
+    detected: dict[str, list[str]] = {}
+    if arg_patterns:
+        detected["tool_input"] = arg_patterns
+    if out_patterns:
+        detected["output"] = out_patterns
+    if detected:
+        records.append(otlp.log_record("cardinal.secret_detected", {
+            "session_id": session_id,
+            "agent_runtime": "codex",
+            "event": "tool_result",
+            "fields": ",".join(sorted(detected)),
+            "secret_patterns": ",".join(sorted({p for ps in detected.values() for p in ps})),
+        }, ts_ns))
 
 
 def handle_stop(payload: dict[str, Any]) -> None:
@@ -491,7 +539,9 @@ def handle_stop(payload: dict[str, Any]) -> None:
         item_type = body.get("type")
         if item_type == "function_call":
             call_id = body.get("call_id")
-            normalized = append_tool_call_event(records, session_id, body, state, ts_ns)
+            normalized = append_tool_call_event(
+                records, session_id, body, state, ts_ns, cwd=meta.get("cwd")
+            )
             if isinstance(call_id, str) and call_id:
                 pending[call_id] = normalized
             continue

@@ -12,6 +12,7 @@ Run from adapters/codex/:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -799,9 +800,14 @@ class ParityHookTests(unittest.TestCase):
         first = self.stub.log_batches[0]
         self.assertEqual(event_names(first).count("cardinal.plan_state"), 1)
         self.assertEqual(event_names(first).count("cardinal.plan_usage"), 1)
-        # TARGET_KEYS wiring: the Read call's file_path becomes target.
+        # TARGET_KEYS wiring: the Read call's file_path becomes target,
+        # redacted (docs/privacy-redaction.md §3) since /tmp/x.py resolves
+        # outside this scenario's cwd (self.home). The placeholder is
+        # keyed on the absolute path alone (cwd-independent — see
+        # redact_file_path docstring), so it's reproducible here.
         (tool,) = records_named(first, "cardinal.turn_tool")
-        self.assertEqual(tool["target"], "/tmp/x.py")
+        expected_target = "outside-cwd:" + hashlib.sha256(b"/tmp/x.py").hexdigest()[:16]
+        self.assertEqual(tool["target"], expected_target)
         self.assertIn("ts", tool)
         # First model call of the turn.
         (usage,) = records_named(first, "cardinal.turn_usage")
@@ -945,6 +951,47 @@ class ParityHookTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "")
+
+    def test_git_state_strips_origin_url_credentials(self):
+        """Regression test for docs/privacy-redaction.md §7: `git remote
+        get-url origin` can return a URL with embedded credentials
+        (`https://x-access-token:TOKEN@host/...`, common on CI-cloned or
+        PAT-authenticated checkouts). cardinal_remote_url must never carry
+        the token, and cardinal_remote_url_credential_scrubbed flags that
+        scrubbing happened without revealing what was removed."""
+        repo = self.make_git_repo("feat/creds-test")
+        token = "ghp_" + "s" * 36
+        subprocess.run(
+            ["git", "remote", "add", "origin", f"https://x-access-token:{token}@github.com/cardinalhq/private-repo.git"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        result = run_hook(
+            ["--event", "UserPromptSubmit"], self.home,
+            {"session_id": "sess-creds-1", "cwd": str(repo), "prompt": "hi"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        git_state = records_named(self.stub.log_batches[-1], "cardinal.git_state")[0]
+        self.assertEqual(git_state["cardinal_remote_url"], "https://github.com/cardinalhq/private-repo.git")
+        self.assertEqual(git_state["cardinal_remote_url_credential_scrubbed"], True)
+        self.assertEqual(git_state["cardinal_repo"], "cardinalhq/private-repo")
+        raw = json.dumps(raw_records_named(self.stub.log_batches[-1], "cardinal.git_state")[0])
+        self.assertNotIn(token, raw)
+        self.assertNotIn("x-access-token", raw)
+
+    def test_git_state_clean_origin_url_not_flagged(self):
+        repo = self.make_git_repo("feat/no-creds-test")
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/cardinalhq/public-repo.git"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        result = run_hook(
+            ["--event", "UserPromptSubmit"], self.home,
+            {"session_id": "sess-creds-2", "cwd": str(repo), "prompt": "hi"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        git_state = records_named(self.stub.log_batches[-1], "cardinal.git_state")[0]
+        self.assertEqual(git_state["cardinal_remote_url"], "https://github.com/cardinalhq/public-repo.git")
+        self.assertEqual(git_state["cardinal_remote_url_credential_scrubbed"], False)
 
 
 class EnrichmentHookTests(unittest.TestCase):
@@ -1105,6 +1152,44 @@ class EnrichmentHookTests(unittest.TestCase):
         raw = json.dumps(raw_tool)
         for fragment in ("rm -rf", "git push", "/private/scratch", cmd):
             self.assertNotIn(fragment, raw)
+
+    def test_bash_tool_result_never_carries_command_text(self):
+        """Regression test for docs/privacy-redaction.md §7: tool_result
+        used to serialize the raw exec_command arguments (the full Bash
+        command string) verbatim into tool_input/tool_parameters. It must
+        now carry only bash_class/command_hash, matching turn_tool's
+        discipline."""
+        session_id = "sess-bash-result-1"
+        transcript = self.home / "bash_result.jsonl"
+        cmd = "curl -H 'Authorization: Bearer supersecrettoken1234567890' https://internal.example.com/api"
+        rows = self.preamble_rows(session_id, str(self.home))
+        rows.append(self.user_message_row("2026-07-01T00:00:02Z"))
+        rows.extend(self.call_rows("2026-07-01T00:00:03Z", "exec_command",
+                                   {"cmd": cmd}, "c1"))
+        rows.append(self.token_count_row("2026-07-01T00:00:04Z"))
+        self.write_transcript(transcript, rows)
+
+        result = run_hook(["--event", "Stop"], self.home,
+                          {"session_id": session_id, "transcript_path": str(transcript)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        batch = self.stub.log_batches[0]
+
+        (tool_result,) = records_named(batch, "tool_result")
+        self.assertEqual(tool_result["tool_name"], "Bash")
+        self.assertEqual(tool_result["bash_class"], "network")
+        self.assertIn("command_hash", tool_result)
+        self.assertIn("command_length", tool_result)
+        # A known secret pattern embedded in the command is flagged, never
+        # forwarded — and cardinal.secret_detected names the pattern, not
+        # the matched text.
+        (secret_event,) = records_named(batch, "cardinal.secret_detected")
+        self.assertIn("BEARER_TOKEN", secret_event["secret_patterns"])
+
+        raw_result = json.dumps(raw_records_named(batch, "tool_result")[0])
+        raw_secret_event = json.dumps(raw_records_named(batch, "cardinal.secret_detected")[0])
+        for fragment in (cmd, "supersecrettoken1234567890", "Bearer supersecrettoken"):
+            self.assertNotIn(fragment, raw_result)
+            self.assertNotIn(fragment, raw_secret_event)
 
     def test_subagent_stop_debug_dump_env_gated(self):
         debug_dir = self.home / ".codex" / "cardinal" / "telemetry" / "debug"

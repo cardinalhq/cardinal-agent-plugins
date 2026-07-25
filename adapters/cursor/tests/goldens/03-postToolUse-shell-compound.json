@@ -180,9 +180,39 @@
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "bash_class",
                       "value": {
-                        "stringValue": "{\"command\":\"tsc && pytest -k parity\"}"
+                        "stringValue": "build"
+                      }
+                    },
+                    {
+                      "key": "command_hash",
+                      "value": {
+                        "stringValue": "a289e524fdf3cd35a9ff0056fce0dd27b2957aeb212731b19ea42087405c4349"
+                      }
+                    },
+                    {
+                      "key": "command_length",
+                      "value": {
+                        "intValue": "23"
+                      }
+                    },
+                    {
+                      "key": "bash_multi",
+                      "value": {
+                        "boolValue": true
+                      }
+                    },
+                    {
+                      "key": "output_hash",
+                      "value": {
+                        "stringValue": "7bf80153c76bbd0349cf864643353664f2c9c0652f17d97f5e116013581799bc"
+                      }
+                    },
+                    {
+                      "key": "output_length",
+                      "value": {
+                        "intValue": "35"
                       }
                     }
                   ]

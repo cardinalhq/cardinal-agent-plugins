@@ -38,6 +38,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plugin_version  # noqa: E402
 from cardinal_core import bashclass, initiative, limits, otlp, pricing, session  # noqa: E402
+from cardinal_core import redaction  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
 
 
@@ -141,7 +142,12 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
     head_sha = initiative.git(["rev-parse", "HEAD"], cwd)
     if head_sha:
         branch = initiative.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-        remote_url = initiative.git(["remote", "get-url", "origin"], cwd)
+        # PRIVACY (docs/privacy-redaction.md §3, §7): origin URLs can embed
+        # live credentials — strip userinfo BEFORE canonical_repo() too,
+        # since that regex has no userinfo awareness.
+        raw_remote_url = initiative.git(["remote", "get-url", "origin"], cwd)
+        remote_url = redaction.strip_url_userinfo(raw_remote_url) if raw_remote_url else None
+        credential_scrubbed = bool(raw_remote_url and remote_url != raw_remote_url)
         repo = initiative.canonical_repo(remote_url)
         initiative_name, initiative_type = initiative.resolve_initiative(branch)
         attrs: dict[str, Any] = {
@@ -151,6 +157,7 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
             "cardinal_branch": branch,
             "cardinal_repo": repo,
             "cardinal_remote_url": remote_url,
+            "cardinal_remote_url_credential_scrubbed": credential_scrubbed,
             "cardinal_initiative_name": initiative_name,
             "cardinal_initiative_type": initiative_type,
             "cardinal_command": initiative.detect_command(payload.get("prompt")),
@@ -324,6 +331,12 @@ def handle_after_tool(payload: dict[str, Any]) -> None:
             v = args.get(key)
             if isinstance(v, str) and v:
                 target = v
+    # PRIVACY (docs/privacy-redaction.md §3 attributes.file_path): verbatim
+    # only when the path resolves inside this session's cwd; hashed
+    # placeholder otherwise.
+    if target is not None:
+        cwd = str(payload.get("cwd") or os.getcwd())
+        target = redaction.redact_file_path(target, cwd)
 
     state = session.load_progress(PATHS, session_id)
     plan_stamp = state.get("plan_stamp") if isinstance(state.get("plan_stamp"), dict) else {}
@@ -370,19 +383,53 @@ def handle_after_tool(payload: dict[str, Any]) -> None:
     else:
         success_str = "true"
 
+    # PRIVACY REGRESSION FIX (docs/privacy-redaction.md §7): this event
+    # used to serialize `tool_input`/`tool_parameters` as raw JSON of the
+    # full tool-call arguments — for a shell tool the entire command
+    # string, for a file-write tool the full path/content payload. Route
+    # through the same redact_command/hash_field discipline
+    # cardinal.turn_tool already uses, so the two events can't diverge
+    # (spec §7 "must fix").
     result_attrs: dict[str, Any] = {
         "session_id": session_id,
         "agent_runtime": "gemini",
         "tool_name": tool_name,
         "success": success_str,
-        "tool_parameters": json.dumps(params, separators=(",", ":")) if params else None,
-        "tool_input": json.dumps(args, separators=(",", ":")) if args else None,
     }
+    if tool_name == "mcp_tool":
+        result_attrs["mcp_server_name"] = params.get("mcp_server_name")
+        result_attrs["mcp_tool_name"] = params.get("mcp_tool_name")
+
+    arg_redaction = redaction.redact_tool_args(tool_name, args)
+    arg_patterns = arg_redaction.pop("secret_patterns", [])
+    result_attrs.update(arg_redaction)
+
+    tool_output = payload.get("output") or payload.get("result")
+    out_redaction = redaction.redact_tool_output(tool_output)
+    out_patterns = out_redaction.pop("secret_patterns", [])
+    result_attrs.update(out_redaction)
 
     records = [
         otlp.log_record("cardinal.turn_tool", attrs, ts_ns),
         otlp.log_record("tool_result", result_attrs, ts_ns + 1),
     ]
+
+    # Spec §3 "Secrets": human-auditable signal a known pattern was found
+    # and scrubbed — never the matched text itself.
+    detected: dict[str, list[str]] = {}
+    if arg_patterns:
+        detected["tool_input"] = arg_patterns
+    if out_patterns:
+        detected["output"] = out_patterns
+    if detected:
+        records.append(otlp.log_record("cardinal.secret_detected", {
+            "session_id": session_id,
+            "agent_runtime": "gemini",
+            "event": "tool_result",
+            "fields": ",".join(sorted(detected)),
+            "secret_patterns": ",".join(sorted({p for ps in detected.values() for p in ps})),
+        }, ts_ns + 1))
+
     emit_records(records)
     state["tool_seq"] += 1
     session.save_progress(PATHS, session_id, state)

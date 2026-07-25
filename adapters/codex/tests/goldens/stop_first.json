@@ -142,15 +142,39 @@
                   }
                 },
                 {
-                  "key": "tool_parameters",
+                  "key": "bash_class",
                   "value": {
-                    "stringValue": "{\"full_command\":\"go test ./... && git status\",\"bash_command\":\"go\"}"
+                    "stringValue": "test"
                   }
                 },
                 {
-                  "key": "tool_input",
+                  "key": "command_hash",
                   "value": {
-                    "stringValue": "{\"cmd\":\"go test ./... && git status\"}"
+                    "stringValue": "aaa7fd17c7a23ddc534b40842b8f33aaec44a68a784361c68a1fdb75c0f868e3"
+                  }
+                },
+                {
+                  "key": "command_length",
+                  "value": {
+                    "intValue": "27"
+                  }
+                },
+                {
+                  "key": "bash_multi",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "output_hash",
+                  "value": {
+                    "stringValue": "4e4b3a73a4bc65e4c6f492d20ad83d0acce7f217ff9283e5c2508c19f4fda845"
+                  }
+                },
+                {
+                  "key": "output_length",
+                  "value": {
+                    "intValue": "27"
                   }
                 }
               ],
@@ -209,7 +233,7 @@
                 {
                   "key": "target",
                   "value": {
-                    "stringValue": "/workspace/src/main.py"
+                    "stringValue": "outside-cwd:a9613a4dc262220b"
                   }
                 }
               ],
@@ -254,9 +278,27 @@
                   }
                 },
                 {
-                  "key": "tool_input",
+                  "key": "args_hash",
                   "value": {
-                    "stringValue": "{\"file_path\":\"/workspace/src/main.py\"}"
+                    "stringValue": "2728ca137daadc638ca1eecd12d989c017830866f7d3d2be82d478abbe7045e4"
+                  }
+                },
+                {
+                  "key": "args_length",
+                  "value": {
+                    "intValue": "38"
+                  }
+                },
+                {
+                  "key": "output_hash",
+                  "value": {
+                    "stringValue": "7bb6f9f7a47a63e684925af3608c059edcc371eb81188c48c9714896fb1091fd"
+                  }
+                },
+                {
+                  "key": "output_length",
+                  "value": {
+                    "intValue": "13"
                   }
                 }
               ],
@@ -360,9 +402,27 @@
                   }
                 },
                 {
-                  "key": "tool_input",
+                  "key": "args_hash",
                   "value": {
-                    "stringValue": "{\"patch\":\"*** Begin Patch\\n*** Update File: src/app.py\\n@@\\n-a\\n+b\\n*** End Patch\"}"
+                    "stringValue": "2159aea4528116e59d3e9eed064e1a28849076543c354475643a97e62b985962"
+                  }
+                },
+                {
+                  "key": "args_length",
+                  "value": {
+                    "intValue": "83"
+                  }
+                },
+                {
+                  "key": "output_hash",
+                  "value": {
+                    "stringValue": "b4e19ee2ae632036a1bdee053d808dc889103022507c9a342d0ca0983a74a314"
+                  }
+                },
+                {
+                  "key": "output_length",
+                  "value": {
+                    "intValue": "5"
                   }
                 }
               ],
@@ -472,15 +532,39 @@
                   }
                 },
                 {
-                  "key": "tool_parameters",
+                  "key": "mcp_server_name",
                   "value": {
-                    "stringValue": "{\"mcp_server_name\":\"lakerunner\",\"mcp_tool_name\":\"list_services\"}"
+                    "stringValue": "lakerunner"
                   }
                 },
                 {
-                  "key": "tool_input",
+                  "key": "mcp_tool_name",
                   "value": {
-                    "stringValue": "{\"query\":\"checkout\"}"
+                    "stringValue": "list_services"
+                  }
+                },
+                {
+                  "key": "args_hash",
+                  "value": {
+                    "stringValue": "be8b5a0737754e8e9a3a3017efab1ffdeeb744594af056924468d0ede05f953b"
+                  }
+                },
+                {
+                  "key": "args_length",
+                  "value": {
+                    "intValue": "20"
+                  }
+                },
+                {
+                  "key": "output_hash",
+                  "value": {
+                    "stringValue": "860bd8efc66c26fae9f43f882ea9fc81fa6d4ed270b1412151ab21e696386cee"
+                  }
+                },
+                {
+                  "key": "output_length",
+                  "value": {
+                    "intValue": "27"
                   }
                 }
               ],

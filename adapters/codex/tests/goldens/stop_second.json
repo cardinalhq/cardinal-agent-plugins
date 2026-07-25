@@ -148,15 +148,33 @@
                   }
                 },
                 {
-                  "key": "tool_parameters",
+                  "key": "bash_class",
                   "value": {
-                    "stringValue": "{\"full_command\":\"pytest -q\",\"bash_command\":\"pytest\"}"
+                    "stringValue": "test"
                   }
                 },
                 {
-                  "key": "tool_input",
+                  "key": "command_hash",
                   "value": {
-                    "stringValue": "{\"cmd\":\"pytest -q\"}"
+                    "stringValue": "c3b206874e8a7a233c1954889847b7d584a619e7ae1a29c44cfa2f1b06214867"
+                  }
+                },
+                {
+                  "key": "command_length",
+                  "value": {
+                    "intValue": "9"
+                  }
+                },
+                {
+                  "key": "output_hash",
+                  "value": {
+                    "stringValue": "4e4b3a73a4bc65e4c6f492d20ad83d0acce7f217ff9283e5c2508c19f4fda845"
+                  }
+                },
+                {
+                  "key": "output_length",
+                  "value": {
+                    "intValue": "27"
                   }
                 }
               ],
