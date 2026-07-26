@@ -229,32 +229,8 @@ class EnvelopeToSpanTests(unittest.TestCase):
         self.assertEqual(attrs["cardinal.envelope.artifact.node_key"], "node-1")
         self.assertEqual(attrs["cardinal.envelope.artifact.attributes.lines_changed"], 12)
 
-    def test_context_observed_span_shape_writes_semconv_and_cardinal_names(self) -> None:
-        payload = env.ExecutionContext(
-            execution_key="exec-1", context_source=env.ContextSource.GIT_STATE,
-            repository_name="cardinalhq/lakerunner", branch="main", commit_sha="abc123",
-            actor_id="rjha@cardinalhq.io",
-        )
-        envelope = _envelope(env.RecordType.CONTEXT_OBSERVED, payload)
-        span = envelope_to_span(envelope)
-        self.assertEqual(span["name"], "context:git_state")
-        attrs = _span_attrs(span)
-        # cardinal.envelope.context.<field> always present...
-        self.assertEqual(attrs["cardinal.envelope.context.repository_name"], "cardinalhq/lakerunner")
-        self.assertEqual(attrs["cardinal.envelope.context.branch"], "main")
-        self.assertEqual(attrs["cardinal.envelope.context.commit_sha"], "abc123")
-        self.assertEqual(attrs["cardinal.envelope.context.actor_id"], "rjha@cardinalhq.io")
-        # ...AND the §12 SemConv-mapped name, same value, written alongside.
-        self.assertEqual(attrs["vcs.repository.name"], "cardinalhq/lakerunner")
-        self.assertEqual(attrs["vcs.ref.head.name"], "main")
-        self.assertEqual(attrs["vcs.ref.head.revision"], "abc123")
-        self.assertEqual(attrs["enduser.id"], "rjha@cardinalhq.io")
-        # Unpopulated fields are absent, not emitted as null/empty.
-        self.assertNotIn("cardinal.envelope.context.pr_number", attrs)
-        self.assertNotIn("cardinal.pr.number", attrs)
-
     def test_every_record_type_validates_and_produces_a_span(self) -> None:
-        """All 7 RecordType values must be dispatchable — a KeyError here
+        """Every RecordType value must be dispatchable — a KeyError here
         would mean §14's per-record-type table and the code drifted."""
         node_env = _envelope(env.RecordType.NODE_OBSERVED, _node_payload())
         edge_env = _envelope(env.RecordType.EDGE_OBSERVED, env.EdgeObserved(
@@ -271,15 +247,11 @@ class EnvelopeToSpanTests(unittest.TestCase):
         artifact_env = _envelope(env.RecordType.ARTIFACT_LINK_OBSERVED, env.ArtifactLinkObserved(
             execution_key="exec-1", node_key="node-1", artifact_kind="pr", artifact_ref="123",
         ))
-        context_env = _envelope(env.RecordType.CONTEXT_OBSERVED, env.ExecutionContext(
-            execution_key="exec-1", context_source=env.ContextSource.SESSION_START,
-            actor_id="a@x.io",
-        ))
         node_updated_env = _envelope(
             env.RecordType.NODE_UPDATED, env.NodeUpdated(**dataclasses.asdict(_node_payload()))
         )
 
-        for e in (node_env, edge_env, event_env, usage_env, artifact_env, context_env, node_updated_env):
+        for e in (node_env, edge_env, event_env, usage_env, artifact_env, node_updated_env):
             env.validate(e)  # sanity: every synthesized envelope is contract-valid
             span = envelope_to_span(e)
             self.assertIn("traceId", span)

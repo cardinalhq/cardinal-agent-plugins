@@ -4,7 +4,7 @@ spans", replacing the custom `/v1/envelopes` HTTP endpoint that Phase 1
 mistakenly built (see `docs/local-notes/plans/agent-execution-graph.md`).
 
 Envelopes describe span-shaped execution atoms (a node has a start/end, an
-edge/event/usage/artifact/context observation is a zero-duration fact), so
+edge/event/usage/artifact observation is a zero-duration fact), so
 they ride the OTLP **traces** signal — the same intake endpoint the plugin
 already uses for logs (`otlp.py::emit_records` -> `/v1/logs`), just a
 different signal (`/v1/traces`). This module mirrors otlp.py's connection
@@ -35,7 +35,6 @@ from .envelope import (
     ArtifactLinkObserved,
     EdgeObserved,
     Envelope,
-    ExecutionContext,
     ExecutionEvent,
     NodeObserved,
     NodeUpdated,
@@ -80,7 +79,6 @@ _SPAN_ID_NAMESPACE: dict[RecordType, str] = {
     RecordType.EXECUTION_EVENT: "event",
     RecordType.USAGE_OBSERVED: "usage",
     RecordType.ARTIFACT_LINK_OBSERVED: "artifact",
-    RecordType.CONTEXT_OBSERVED: "context",
 }
 
 
@@ -116,9 +114,8 @@ def span_id_for_envelope(envelope: Envelope, trace_id: bytes) -> bytes:
 def _flatten(prefix: str, value: Any, out: list[dict[str, Any]], *, allow_nested: bool = True) -> None:
     """Expand one attributes-dict entry into one-or-more OTLP KeyValue
     dicts. Scalars become `prefix`; a dict nests one level as
-    `prefix.subkey` (matching envelope.py's own one-level nesting
-    allowance for context attributes); anything deeper, and lists, are
-    JSON-encoded to a string rather than dropped or raising."""
+    `prefix.subkey`; anything deeper, and lists, are JSON-encoded to a
+    string rather than dropped or raising."""
     if value is None or value == "":
         return
     if isinstance(value, dict):
@@ -256,65 +253,6 @@ def _artifact_span_fields(envelope: Envelope) -> tuple[str, int, int, list[dict[
     return name, ts, ts, attrs
 
 
-# ExecutionContext inheritable fields with a §12 SemConv mapping. Every
-# populated inheritable field is ALSO written as cardinal.envelope.context.
-# <field> (see _context_span_fields) — this table adds the SemConv name
-# alongside it so both an OTel-native consumer and lakerunner's round-trip
-# read the same span (§14: "write BOTH").
-_CONTEXT_SEMCONV_SPAN_ATTRS: dict[str, str] = {
-    "actor_id": "enduser.id",
-    "workspace_id": "cardinal.workspace.id",
-    "team_id": "cardinal.team.id",
-    "environment": "deployment.environment.name",
-    "agent_runtime_version": "cardinal.agent.runtime.version",
-    "plugin_version": "service.version",
-    "repository_name": "vcs.repository.name",
-    "repository_url": "vcs.repository.url.full",
-    "branch": "vcs.ref.head.name",
-    "commit_sha": "vcs.ref.head.revision",
-    "pr_number": "cardinal.pr.number",
-    "pr_id": "cardinal.pr.id",
-    "initiative_id": "cardinal.initiative.id",
-    "outcome_id": "cardinal.outcome.id",
-}
-
-_CONTEXT_INHERITABLE_FIELDS = (
-    "actor_id",
-    "workspace_id",
-    "team_id",
-    "repository_id",
-    "repository_name",
-    "repository_url",
-    "branch",
-    "commit_sha",
-    "pr_id",
-    "pr_number",
-    "initiative_id",
-    "outcome_id",
-    "environment",
-    "agent_runtime_version",
-    "plugin_version",
-)
-
-
-def _context_span_fields(envelope: Envelope) -> tuple[str, int, int, list[dict[str, Any]]]:
-    payload = envelope.payload
-    assert isinstance(payload, ExecutionContext)
-    ts = envelope.effective_ns
-    name = f"context:{payload.context_source.value}"
-    attrs: list[dict[str, Any]] = []
-    for field_name in _CONTEXT_INHERITABLE_FIELDS:
-        value = getattr(payload, field_name)
-        if value is None:
-            continue
-        attrs.append(kv(f"cardinal.envelope.context.{field_name}", value))
-        semconv_key = _CONTEXT_SEMCONV_SPAN_ATTRS.get(field_name)
-        if semconv_key is not None:
-            attrs.append(kv(semconv_key, value))
-    attrs.extend(_attributes_dict_to_kv("cardinal.envelope.context.attributes", payload.attributes))
-    return name, ts, ts, attrs
-
-
 _FIELD_BUILDERS = {
     RecordType.NODE_OBSERVED: _node_span_fields,
     RecordType.NODE_UPDATED: _node_span_fields,
@@ -322,7 +260,6 @@ _FIELD_BUILDERS = {
     RecordType.EXECUTION_EVENT: _event_span_fields,
     RecordType.USAGE_OBSERVED: _usage_span_fields,
     RecordType.ARTIFACT_LINK_OBSERVED: _artifact_span_fields,
-    RecordType.CONTEXT_OBSERVED: _context_span_fields,
 }
 
 

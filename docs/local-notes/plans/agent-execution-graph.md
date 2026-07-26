@@ -1,5 +1,12 @@
 # Agent Execution Graph — implementation plan
 
+> **Update 2026-07-26 (post-p1)**: The `ExecutionContext` / `context_observed`
+> contract described in §0.2.a was dropped after p1 validation — every field
+> duplicated an existing `agent_sessions` column. See `docs/canonical-model.md
+> §8` for the current story. References to `ExecutionContext`,
+> `CONTEXT_OBSERVED`, `ContextSource`, `CONTEXT_SOURCE_PRECEDENCE`, or the
+> `execution_context` table below are historical.
+
 ## Purpose
 
 Build a **causal execution graph** of agent work across every adapter Cardinal
