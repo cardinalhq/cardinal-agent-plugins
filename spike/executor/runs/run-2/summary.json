@@ -1,0 +1,23 @@
+{
+  "runId": "run-20260801T233342Z-2ddbac",
+  "sentinelDigest": "sha256:e8ea2203d8c4b78de8c577daadd65ff62f7f2a58b08c39fece6ecfef9b27c0df",
+  "startedAt": "2026-08-01T23:33:42Z",
+  "endedAt": "2026-08-01T23:33:42Z",
+  "durationMs": 3,
+  "nodeStates": {
+    "query-metric-timeseries-baseline": "SUCCEEDED",
+    "query-metric-by-dimensions": "SUCCEEDED",
+    "query-related-counter-by-labels": "SUCCEEDED",
+    "locate-metric-emission-code": "SKIPPED",
+    "interpret-metric-semantics-from-code": "SKIPPED",
+    "detect-degeneracy": "SUCCEEDED",
+    "detect-counter-label-dominance": "SUCCEEDED",
+    "degeneracy-condition": "SUCCEEDED",
+    "capacity-starvation-condition": "SUCCEEDED",
+    "emit-degeneracy-finding": "SKIPPED",
+    "emit-capacity-starvation-finding": "SKIPPED"
+  },
+  "nodeErrors": {},
+  "exitCode": 0,
+  "findings": []
+}

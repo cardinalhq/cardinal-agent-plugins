@@ -1,0 +1,510 @@
+apiVersion: mechanize.dev/v1alpha1
+kind: Sentinel
+metadata:
+  name: worklane-metric-degeneracy-and-cause
+  displayName: Worklane metric degeneracy and workload-cause explanation
+  version: 0.1.0
+  createdAt: 2026-08-01T00:00:00Z
+  createdBy:
+    type: agent-session
+    captureId: e470b9a9-8ccb-4059-a4f0-13da5373b70c
+  labels:
+    domain: observability
+    procedure: metric-anomaly-explanation
+    origin: skill-driven-harvest-v3
+spec:
+  purpose:
+    summary: >
+      When a worklane-class histogram metric shows a suspicious flat
+      "spike" across a lookback window, decide whether the observation
+      is a metric-emission bug (degenerate histogram summary) or a
+      real workload signal, and — where a sibling cause-hypothesis
+      counter is available — classify the workload-shape driving it.
+    reusableQuestion: >
+      Is this flat metric plateau a metric-emission degeneracy, a
+      real workload symptom, or both — and are they the same
+      underlying cause?
+    conclusionType: metric-integrity-and-workload-explanation
+  inputs:
+    instance:
+      type: string
+      required: true
+      default: prod
+    service:
+      type: string
+      required: true
+    signal:
+      type: string
+      required: true
+      default: logs
+    metricName:
+      type: string
+      required: true
+    triggerMetricName:
+      type: string
+      required: true
+    lookbackWindow:
+      type: duration
+      required: true
+      default: 3h
+    codeRepoPath:
+      type: string
+      required: true
+    groupByDimensions:
+      type: array
+      itemsType: string
+      default: [action, level]
+    triggerGroupByDimensions:
+      type: array
+      itemsType: string
+      default: [action, level, trigger]
+    flatnessTolerance:
+      type: number
+      default: 0.01
+      constraints:
+        minimum: 0
+    ageStarvationTriggerFraction:
+      type: number
+      default: 0.95
+      constraints:
+        minimum: 0
+        maximum: 1
+  capabilities:
+    required:
+      - id: metrics.query-timeseries
+        capabilityType: tool
+      - id: code.grep
+        capabilityType: tool
+      - id: code.read-file
+        capabilityType: tool
+  variationPoints:
+    - path: /spec/inputs/service
+      operations: [bind]
+    - path: /spec/inputs/instance
+      operations: [bind]
+    - path: /spec/inputs/metricName
+      operations: [bind]
+    - path: /spec/inputs/triggerMetricName
+      operations: [bind]
+    - path: /spec/inputs/codeRepoPath
+      operations: [bind]
+    - path: /spec/inputs/lookbackWindow
+      operations: [replace]
+    - path: /spec/inputs/flatnessTolerance
+      operations: [replace]
+    - path: /spec/inputs/ageStarvationTriggerFraction
+      operations: [replace]
+    - path: /spec/nodes/query-metric-aggregate/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/query-metric-by-dimension/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/query-trigger-rate-by-dimension/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/interpret-metric-semantics/config/modelPolicy
+      operations: [replace]
+    - path: /spec/nodes/assess-findings-relationship/config/modelPolicy
+      operations: [replace]
+  nodes:
+    locate-metric-emission-site:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: code.grep
+        toolBindingHint: bash.grep
+        arguments:
+          pattern: "${inputs.metricName}"
+          fileGlob: "*.go"
+          cwd: "${inputs.codeRepoPath}"
+          listFilesOnly: true
+        timeout: 30s
+      output:
+        schema:
+          type: object
+          required: [matches]
+          properties:
+            matches:
+              type: array
+              items:
+                type: object
+                required: [path]
+                properties:
+                  path: { type: string }
+                  line: { type: integer }
+    read-emission-code:
+      kind: tool
+      dependsOn: [locate-metric-emission-site]
+      config:
+        toolRef: code.read-file
+        toolBindingHint: bash.cat
+        arguments:
+          paths: "${nodes.locate-metric-emission-site.output.matches[*].path}"
+          cwd: "${inputs.codeRepoPath}"
+          maxBytesPerFile: 20000
+        timeout: 30s
+      output:
+        schema:
+          type: object
+          required: [files]
+          properties:
+            files:
+              type: array
+              items:
+                type: object
+                required: [path, contents]
+                properties:
+                  path: { type: string }
+                  contents: { type: string }
+    interpret-metric-semantics:
+      kind: llm
+      dependsOn: [read-emission-code]
+      config:
+        task: >
+          Given the source code that emits the named metric, decide
+          which dimensions this metric should legitimately vary across,
+          whether cross-dimension flatness would be diagnostic of a
+          degenerate/collapsed histogram, and what tolerance
+          approximates 'operationally flat' for this metric. Use only
+          the supplied source and the metric name.
+        modelPolicy: analytical-small
+        maxInputTokens: 12000
+        maxOutputTokens: 800
+        temperature: 0
+        evidence:
+          metricName: "${inputs.metricName}"
+          emissionCode: "${nodes.read-emission-code.output.files}"
+        outputSchema:
+          type: object
+          required:
+            - classification
+            - dimensionsExpectedToVary
+            - expectedCrossDimensionalVariance
+            - flatnessTolerance
+            - reasoning
+          properties:
+            classification:
+              enum: [interpretable, inconclusive]
+            dimensionsExpectedToVary:
+              type: array
+              items: { type: string }
+            expectedCrossDimensionalVariance:
+              type: boolean
+            flatnessTolerance:
+              type: number
+              minimum: 0
+            reasoning:
+              type: string
+    query-metric-aggregate:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: metrics.query-timeseries
+        toolBindingHint: mcp.lakerunner.execute_metrics_query
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            avg(${inputs.metricName}{service_name="${inputs.service}",
+              signal="${inputs.signal}"})
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+        timeout: 60s
+        retry:
+          maxAttempts: 2
+          backoff: 2s
+      output:
+        schema:
+          type: object
+          required: [summary, ddsketches]
+    query-metric-by-dimension:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: metrics.query-timeseries
+        toolBindingHint: mcp.lakerunner.execute_metrics_query
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            avg by (${join(inputs.groupByDimensions, ", ")})
+            (${inputs.metricName}{service_name="${inputs.service}",
+              signal="${inputs.signal}"})
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+        timeout: 60s
+        retry:
+          maxAttempts: 2
+          backoff: 2s
+      output:
+        schema:
+          type: object
+          required: [summary, ddsketches]
+    query-trigger-rate-by-dimension:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: metrics.query-timeseries
+        toolBindingHint: mcp.lakerunner.execute_metrics_query
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            sum by (${join(inputs.triggerGroupByDimensions, ", ")})
+            (rate(${inputs.triggerMetricName}{
+              service_name="${inputs.service}",
+              signal="${inputs.signal}"}[5m]))
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+        timeout: 60s
+        retry:
+          maxAttempts: 2
+          backoff: 2s
+      output:
+        schema:
+          type: object
+          required: [summary, ddsketches]
+    detect-histogram-degeneracy:
+      kind: function
+      dependsOn:
+        - interpret-metric-semantics
+        - query-metric-aggregate
+        - query-metric-by-dimension
+      config:
+        runtime: nodejs22
+        source: functions/detect-histogram-degeneracy.mjs
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 15s
+        arguments:
+          metricSemantics: "${nodes.interpret-metric-semantics.output}"
+          aggregate: "${nodes.query-metric-aggregate.output}"
+          perDimension: "${nodes.query-metric-by-dimension.output}"
+          flatnessTolerance: "${inputs.flatnessTolerance}"
+      output:
+        schema:
+          type: object
+          required:
+            - isDegenerate
+            - aggregateIsFlat
+            - crossDimensionalVarianceObserved
+            - identicalStatisticsAcrossDimensions
+            - evidenceSeriesCount
+            - reason
+          properties:
+            isDegenerate: { type: boolean }
+            aggregateIsFlat: { type: boolean }
+            crossDimensionalVarianceObserved: { type: number }
+            identicalStatisticsAcrossDimensions: { type: boolean }
+            evidenceSeriesCount: { type: integer }
+            reason: { type: string }
+    classify-trigger-pattern:
+      kind: function
+      dependsOn: [query-trigger-rate-by-dimension]
+      config:
+        runtime: nodejs22
+        source: functions/classify-trigger-pattern.mjs
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 10s
+        arguments:
+          triggerBreakdown: "${nodes.query-trigger-rate-by-dimension.output}"
+          ageStarvationTriggerFraction: "${inputs.ageStarvationTriggerFraction}"
+      output:
+        schema:
+          type: object
+          required:
+            - triggerPattern
+            - ageFractionByLane
+            - sizeFractionByLane
+            - hasSufficientSamples
+          properties:
+            triggerPattern:
+              enum:
+                - age-starved
+                - size-driven
+                - mixed
+                - insufficient-data
+            ageFractionByLane:
+              type: object
+              additionalProperties: { type: number }
+            sizeFractionByLane:
+              type: object
+              additionalProperties: { type: number }
+            hasSufficientSamples: { type: boolean }
+    assess-findings-relationship:
+      kind: llm
+      dependsOn:
+        - detect-histogram-degeneracy
+        - classify-trigger-pattern
+        - interpret-metric-semantics
+      config:
+        task: >
+          Given the histogram-degeneracy result and the
+          trigger-pattern classification, decide whether these two
+          findings are (a) a single root cause manifesting twice,
+          (b) two independent phenomena that co-occur, or
+          (c) one is real and the other is an emission artifact
+          that should not be interpreted as a workload signal.
+          Use only the supplied evidence and metric semantics.
+        modelPolicy: analytical-small
+        maxInputTokens: 6000
+        maxOutputTokens: 500
+        temperature: 0
+        evidence:
+          degeneracy: "${nodes.detect-histogram-degeneracy.output}"
+          triggerPattern: "${nodes.classify-trigger-pattern.output}"
+          metricSemantics: "${nodes.interpret-metric-semantics.output}"
+        outputSchema:
+          type: object
+          required:
+            - relationship
+            - confidence
+            - reasoning
+          properties:
+            relationship:
+              enum:
+                - same-root-cause
+                - independent-co-occurrence
+                - one-is-artifact
+                - inconclusive
+            confidence:
+              type: number
+              minimum: 0
+              maximum: 1
+            reasoning:
+              type: string
+    degeneracy-finding-condition:
+      kind: condition
+      dependsOn: [detect-histogram-degeneracy]
+      config:
+        expression: >
+          nodes.detect-histogram-degeneracy.output.isDegenerate == true
+      output:
+        schema: { type: boolean }
+    starvation-finding-condition:
+      kind: condition
+      dependsOn: [classify-trigger-pattern]
+      config:
+        expression: >
+          nodes.classify-trigger-pattern.output.hasSufficientSamples == true &&
+          nodes.classify-trigger-pattern.output.triggerPattern == "age-starved"
+      output:
+        schema: { type: boolean }
+    emit-degeneracy-finding:
+      kind: emit
+      dependsOn:
+        - detect-histogram-degeneracy
+        - assess-findings-relationship
+        - degeneracy-finding-condition
+      when: "${nodes.degeneracy-finding-condition.output == true}"
+      config:
+        finding:
+          type: metric-histogram-degeneracy
+          title: >
+            Histogram-emission degeneracy suspected for
+            ${inputs.metricName} on ${inputs.service}
+          severityExpression: >
+            nodes.detect-histogram-degeneracy.output.identicalStatisticsAcrossDimensions == true
+              ? "warning"
+              : "info"
+          dedupeKey: >
+            ${inputs.instance}:${inputs.service}:${inputs.metricName}:degeneracy
+          evidence:
+            - "${nodes.interpret-metric-semantics.output}"
+            - "${nodes.detect-histogram-degeneracy.output}"
+            - "${nodes.assess-findings-relationship.output}"
+          attributes:
+            relationshipToWorkload: "${nodes.assess-findings-relationship.output.relationship}"
+    emit-starvation-finding:
+      kind: emit
+      dependsOn:
+        - classify-trigger-pattern
+        - assess-findings-relationship
+        - starvation-finding-condition
+      when: "${nodes.starvation-finding-condition.output == true}"
+      config:
+        finding:
+          type: worklane-age-starvation
+          title: >
+            Ingest lane age-starved on ${inputs.service}
+            (${inputs.signal})
+          severityExpression: >
+            nodes.classify-trigger-pattern.output.ageFractionByLane["ingest:0"] >= 0.99
+              ? "warning"
+              : "info"
+          dedupeKey: >
+            ${inputs.instance}:${inputs.service}:${inputs.signal}:starvation
+          evidence:
+            - "${nodes.classify-trigger-pattern.output}"
+            - "${nodes.query-trigger-rate-by-dimension.output.summary}"
+            - "${nodes.assess-findings-relationship.output}"
+          attributes:
+            relationshipToMetricEmission: "${nodes.assess-findings-relationship.output.relationship}"
+  outputs:
+    degeneracyFinding:
+      value: "${nodes.emit-degeneracy-finding.output}"
+      required: false
+    starvationFinding:
+      value: "${nodes.emit-starvation-finding.output}"
+      required: false
+    assessment:
+      value:
+        metricSemantics: "${nodes.interpret-metric-semantics.output}"
+        degeneracy: "${nodes.detect-histogram-degeneracy.output}"
+        triggerPattern: "${nodes.classify-trigger-pattern.output}"
+        relationship: "${nodes.assess-findings-relationship.output}"
+  execution:
+    concurrency: 2
+    failureMode: fail-fast
+    defaultTimeout: 5m
+    maxCost:
+      llmTokens: 20000
+      toolCalls: 20
+    deterministicReplay:
+      supported: true
+  provenance:
+    captureId: e470b9a9-8ccb-4059-a4f0-13da5373b70c
+    sessionPath: >
+      ~/.claude/projects/<lakerunner-cwd>/e470b9a9-8ccb-4059-a4f0-13da5373b70c.jsonl
+    retainedSteps:
+      - tool-call-ord-26     # bash.grep locate emission
+      - tool-call-ord-30     # Read telemetry.go
+      - tool-call-ord-33     # bash.grep claimWaitHist
+      - tool-call-ord-35     # Read manager.go (recording site)
+      - tool-call-ord-43     # bash.grep effectiveMaxAge (level cap semantics)
+      - tool-call-ord-83     # list_instances (input replaces)
+      - tool-call-ord-94     # aggregate metric query
+      - tool-call-ord-104    # trigger rate by dimension
+      - tool-call-ord-106    # metric by dimension
+      - tool-call-ord-114    # spill-projection (COLLAPSED into ord-106)
+      - tool-call-ord-116    # spill-projection (COLLAPSED into ord-104)
+    omittedSteps:
+      - id: tool-call-ord-27
+        reason: supporting-code-navigation-superseded-by-ord-33
+      - id: tool-call-ord-46
+        reason: exploratory-git-log-did-not-find-cause
+      - id: tool-call-ord-48
+        reason: exploratory-broader-grep-no-additional-signal
+      - id: tool-call-ord-50
+        reason: exploratory-kb-doc-read-not-cited
+      - id: tool-call-ord-55
+        reason: incidental-tool-schema-loading
+      - id: tool-call-ord-63
+        reason: failed-kubectl-sso-expired
+      - id: tool-call-ord-64
+        reason: exploratory-kube-pod-lookup-no-match
+      - id: tool-call-ord-68
+        reason: exploratory-kube-pod-lookup-no-match
+      - id: tool-call-ord-70
+        reason: exploratory-namespace-listing-abandoned
+      - id: tool-call-ord-86
+        reason: incidental-meta-grep-under-home-dot-claude
+    omittedAttachments:
+      - id: attachment-ord-8
+        kind: image
+        mimeType: image/png
+        disposition: replaced-by-plain-input
+        replacedByInputs: [metricName, service]
+        reason: >
+          User pasted a screenshot showing the correlated metric name;
+          the operator's inference ("the metric is
+          lakerunner_worklane_claim_wait_ms on process-logs") became
+          the load-bearing fact and is now carried by typed inputs.

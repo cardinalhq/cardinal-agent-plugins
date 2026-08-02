@@ -1,0 +1,18 @@
+{
+  "summary": "1 time series, 358 data points | aggregation: min | avg=1.01 min=1.01 max=1.01",
+  "ddsketches": {
+    "{}": {
+      "avg": 1.01,
+      "count": 358,
+      "min": 1.01,
+      "max": 1.01,
+      "p50": 1.01,
+      "p90": 1.01,
+      "p95": 1.01,
+      "p99": 1.01,
+      "sum": 361.58
+    }
+  },
+  "series_total": 1,
+  "data_points_total": 358
+}

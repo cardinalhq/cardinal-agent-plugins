@@ -1,0 +1,15 @@
+{
+  "toolRef": "observability.query-metrics",
+  "arguments": {
+    "instance": "prod",
+    "metric_name": "k8s_deployment_available",
+    "metric_type": "gauge",
+    "filters": {
+      "service_name": null
+    },
+    "aggregation": "min",
+    "start": "2026-08-01T19:18:33Z",
+    "end": "2026-08-02T01:18:33Z",
+    "question": "Minimum available replica count over the health window.\n"
+  }
+}

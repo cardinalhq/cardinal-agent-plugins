@@ -1,0 +1,10 @@
+{
+  "toolRef": "observability.query-metrics",
+  "arguments": {
+    "instance": "prod",
+    "expression": "avg(lakerunner_worklane_claim_wait_ms{service_name=\"lakerunner-process-logs\",\n                         signal=\"logs\"})\n",
+    "start": "2026-08-01T21:09:50Z",
+    "end": "2026-08-02T00:09:50Z",
+    "question": "baseline timeseries for lakerunner_worklane_claim_wait_ms on lakerunner-process-logs\n"
+  }
+}

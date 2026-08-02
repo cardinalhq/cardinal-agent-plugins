@@ -1,0 +1,408 @@
+# GROUND TRUTH — Session A (finalized 2026-08-01)
+#
+# Compiled by claude, decisions ratified by <operator>.
+# See DECISIONS.md for the 8 GT-DIFFs vs. spike-2 output and how each
+# was resolved.
+#
+# This file is the SCORING ANCHOR for spike-2 v2. It is not a runnable
+# Sentinel; some fields (function source, prompt templates) are
+# specified at the intent level, not the executable level.
+
+apiVersion: mechanize.dev/v1alpha1
+kind: Sentinel
+metadata:
+  name: correlated-anomaly-explanation
+  displayName: Correlated-anomaly explanation
+  version: 0.1.0-gt
+  labels:
+    domain: observability
+    procedure: anomaly-triage-with-integrity-check
+    compiledFromCapture: e470b9a9-8ccb-4059-a4f0-13da5373b70c
+
+spec:
+  purpose:
+    summary: >
+      Given a reported anomaly on a symptom metric and a suspected
+      correlated driver metric, determine (a) whether the driver
+      metric is trustworthy given its emission semantics, and (b) if
+      not, what other correlated signal actually explains the symptom.
+    reusableQuestion: >
+      Is this correlated metric explaining the anomaly, or is it a
+      degenerate/misleading signal masking the real driver?
+    conclusionType: anomaly-explanation
+
+  inputs:
+    symptomMetric:
+      type: string
+      required: true
+      description: >
+        The metric whose anomaly triggered the investigation
+        (e.g. lakerunner_worklane_depth).
+    suspectedDriverMetric:
+      type: string
+      required: true
+      description: >
+        The metric hypothesized to explain the symptom
+        (e.g. lakerunner_worklane_claim_wait_ms).
+    serviceName:
+      type: string
+      required: true
+    instance:
+      type: string
+      required: true
+    signal:
+      type: string
+      required: false
+    lookbackWindow:
+      type: duration
+      default: 3h
+    codeRepoPath:
+      type: string
+      required: true
+      description: >
+        Local checkout of the code that emits the driver metric.
+        Required — the summarize-driver-semantics node uses this to
+        justify the integrity check against the emitted-metric shape.
+    candidateAlternativeDrivers:
+      type: array
+      itemType: string
+      required: false
+      description: >
+        If the driver metric fails the integrity check, these metrics
+        are probed for the real explanatory signal. In the source
+        investigation: [lakerunner_worklane_claim_trigger].
+
+  capabilities:
+    required:
+      - id: observability.query-metrics
+        capabilityType: tool
+      - id: code.grep
+        capabilityType: tool
+      - id: code.read
+        capabilityType: tool
+      - id: llm.reason
+        capabilityType: llm
+        description: >
+          General-purpose LLM invocation with restricted tool access.
+          Used by summarize-driver-semantics and explain-real-signal
+          for qualitative code-semantic and causal reasoning.
+
+  variationPoints:
+    - path: /spec/inputs/symptomMetric
+      operations: [bind]
+    - path: /spec/inputs/suspectedDriverMetric
+      operations: [bind]
+    - path: /spec/inputs/candidateAlternativeDrivers
+      operations: [bind]
+    - path: /spec/nodes/summarize-driver-semantics/config/toolsAvailable
+      operations: [replace]
+    - path: /spec/nodes/query-driver-timeseries/config/toolRef
+      operations: [replace-binding]
+
+  nodes:
+
+    # ---------- Understand the driver metric ----------
+
+    locate-driver-emission:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: code.grep
+        arguments:
+          pattern: "${inputs.suspectedDriverMetric}"
+          path: "${inputs.codeRepoPath}"
+          fileGlobs: ["*.go", "*.py", "*.ts", "*.java"]
+      output:
+        schema:
+          type: object
+          required: [matches]
+
+    summarize-driver-semantics:
+      kind: llm
+      dependsOn: [locate-driver-emission]
+      config:
+        capabilityRef: llm.reason
+        toolsAvailable: [code.read]
+        promptTemplate: |
+          Metric name: ${inputs.suspectedDriverMetric}
+          Grep matches from the emitting codebase:
+          ${nodes.locate-driver-emission.output.matches}
+
+          Read the relevant files (you have code.read available) and
+          produce a structured summary:
+
+          1. measures: what quantity does this metric measure?
+          2. dimensionsEmitted: list of label names this metric emits.
+          3. dimensionsShouldVary: for each dimension, does the value
+             SHOULD differ across dimension values under normal
+             operation? Justify each answer from the code.
+          4. shape: bounded | unbounded | cumulative | gauge |
+             histogram | histogram-summary.
+          5. expectedRange: rough expected numeric range, if derivable.
+        justification: >
+          The bridge from "flat numbers across dimensions" to "metric
+          is degenerate" requires knowing what the metric OUGHT to
+          look like. That is code-semantic qualitative reasoning; no
+          deterministic function over grep output can produce it.
+      output:
+        schema:
+          type: object
+          required: [measures, dimensionsEmitted, dimensionsShouldVary, shape]
+
+    # ---------- Query the driver metric ----------
+
+    query-driver-timeseries:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: observability.query-metrics
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            avg(${inputs.suspectedDriverMetric}{service_name="${inputs.serviceName}"})
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+      output:
+        schema:
+          type: object
+          required: [summary, dataPoints, seriesCount]
+
+    query-driver-by-dimensions:
+      kind: tool
+      dependsOn: [summarize-driver-semantics]
+      config:
+        toolRef: observability.query-metrics
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            avg by (${join(nodes.summarize-driver-semantics.output.dimensionsEmitted, ", ")})
+              (${inputs.suspectedDriverMetric}{service_name="${inputs.serviceName}"})
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+      output:
+        schema:
+          type: object
+          required: [seriesSummaries, seriesCount]
+
+    # ---------- Integrity check ----------
+
+    detect-degeneracy:
+      kind: function
+      dependsOn:
+        - query-driver-timeseries
+        - query-driver-by-dimensions
+        - summarize-driver-semantics
+      config:
+        runtime: python3.12
+        source: functions/detect-degeneracy.py
+        entrypoint: run
+        arguments:
+          seriesSummaries: "${nodes.query-driver-by-dimensions.output.seriesSummaries}"
+          dimensionsShouldVary: "${nodes.summarize-driver-semantics.output.dimensionsShouldVary}"
+          expectedRange: "${nodes.summarize-driver-semantics.output.expectedRange}"
+      output:
+        schema:
+          type: object
+          required:
+            - crossDimensionCollapse
+            - withinSeriesFlat
+            - integrityFailed
+            - sufficientData
+            - degeneracyEvidence
+
+    integrity-condition:
+      kind: condition
+      dependsOn: [detect-degeneracy]
+      config:
+        expression: >
+          nodes.detect-degeneracy.output.sufficientData == true &&
+          nodes.detect-degeneracy.output.integrityFailed == true
+
+    # ---------- Find the real driver ----------
+
+    query-alternative-drivers:
+      kind: tool
+      dependsOn: [integrity-condition]
+      when: >
+        ${nodes.integrity-condition.output == true &&
+          size(inputs.candidateAlternativeDrivers) > 0}
+      config:
+        toolRef: observability.query-metrics
+        arguments:
+          instance: "${inputs.instance}"
+          expressions: >
+            ${map(inputs.candidateAlternativeDrivers,
+                  m -> "rate(" + m + "{service_name=\"" + inputs.serviceName + "\"}[5m])")}
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+      output:
+        schema:
+          type: object
+          required: [timeseriesByMetric]
+
+    explain-real-signal:
+      kind: llm
+      dependsOn:
+        - query-alternative-drivers
+        - summarize-driver-semantics
+        - detect-degeneracy
+      when: ${nodes.integrity-condition.output == true}
+      config:
+        capabilityRef: llm.reason
+        promptTemplate: |
+          The suspected driver metric ${inputs.suspectedDriverMetric}
+          failed the integrity check. Evidence of degeneracy:
+          ${nodes.detect-degeneracy.output.degeneracyEvidence}
+
+          Driver metric's emission semantics:
+          ${nodes.summarize-driver-semantics.output}
+
+          Alternative-driver time series:
+          ${nodes.query-alternative-drivers.output.timeseriesByMetric}
+
+          Symptom metric under investigation: ${inputs.symptomMetric}
+
+          Propose the most likely real driver of the symptom. Cite the
+          specific alternative metric and its pattern. Return:
+          - proposedDriver: metric name.
+          - reasoning: 1–3 sentences.
+          - confidence: low | medium | high.
+        justification: >
+          Correlating a specific pattern in one metric ("100% of
+          claims fired on trigger=age") with a symptom in another
+          ("worklane depth climb"), given metric semantics, to
+          conclude a causal driver ("size-starved ingest") is
+          qualitative causal reasoning. Not expressible as a
+          deterministic function.
+      output:
+        schema:
+          type: object
+          required: [proposedDriver, reasoning, confidence]
+
+    # ---------- Emit ----------
+
+    emit-explanation:
+      kind: emit
+      dependsOn:
+        - detect-degeneracy
+        - integrity-condition
+        - explain-real-signal
+      when: ${nodes.integrity-condition.output == true}
+      config:
+        finding:
+          type: correlated-anomaly-explanation
+          title: >
+            ${inputs.suspectedDriverMetric} is a red herring for
+            ${inputs.symptomMetric}; real driver appears to be
+            ${nodes.explain-real-signal.output.proposedDriver}
+          severity: warning
+          dedupeKey: >
+            ${inputs.instance}:${inputs.serviceName}:${inputs.symptomMetric}:${inputs.suspectedDriverMetric}
+          parts:
+            integrityAssessment:
+              driverMetric: "${inputs.suspectedDriverMetric}"
+              integrityFailed: "${nodes.detect-degeneracy.output.integrityFailed}"
+              evidence: "${nodes.detect-degeneracy.output.degeneracyEvidence}"
+              emissionSemantics: "${nodes.summarize-driver-semantics.output}"
+            realDriverHypothesis:
+              proposedDriver: "${nodes.explain-real-signal.output.proposedDriver}"
+              reasoning: "${nodes.explain-real-signal.output.reasoning}"
+              confidence: "${nodes.explain-real-signal.output.confidence}"
+              evidence:
+                - nodeRef: query-alternative-drivers
+
+    emit-inconclusive:
+      kind: emit
+      dependsOn: [detect-degeneracy, integrity-condition]
+      when: ${nodes.detect-degeneracy.output.sufficientData == false}
+      config:
+        finding:
+          type: correlated-anomaly-inconclusive
+          title: >
+            Integrity check on ${inputs.suspectedDriverMetric}
+            inconclusive (insufficient series)
+          severity: info
+
+    emit-driver-confirmed:
+      kind: emit
+      dependsOn: [detect-degeneracy, integrity-condition]
+      when: ${nodes.integrity-condition.output == false &&
+             nodes.detect-degeneracy.output.sufficientData == true}
+      config:
+        finding:
+          type: correlated-anomaly-driver-confirmed
+          title: >
+            ${inputs.suspectedDriverMetric} passed integrity check;
+            correlation with ${inputs.symptomMetric} may be genuine
+          severity: info
+
+  outputs:
+    finding:
+      value: >
+        ${nodes.emit-explanation.output ??
+          nodes.emit-driver-confirmed.output ??
+          nodes.emit-inconclusive.output}
+      required: true
+
+  execution:
+    concurrency: 3
+    failureMode: fail-fast
+    defaultTimeout: 10m
+    maxCost:
+      toolCalls: 12
+      llmCalls: 2
+    deterministicReplay:
+      supported: partial
+      note: >
+        summarize-driver-semantics and explain-real-signal are LLM
+        nodes; replay reproduces inputs but not outputs.
+
+  provenance:
+    captureId: e470b9a9-8ccb-4059-a4f0-13da5373b70c
+    groundTruthAuthor: <operator>
+    strawmanAuthor: claude (ratified by rjha)
+
+    retainedSteps:
+      - tool-call-2   # → locate-driver-emission
+      - tool-call-3   # → summarize-driver-semantics (read telemetry.go)
+      - tool-call-4   # → summarize-driver-semantics (grep for recording call)
+      - tool-call-5   # → summarize-driver-semantics (read manager.go)
+      - tool-call-6   # → summarize-driver-semantics (grep for effectiveMaxAge)
+      - tool-call-8   # → summarize-driver-semantics (locate phase-latency.md)
+      - tool-call-9   # → summarize-driver-semantics (read the spec)
+      - tool-call-17  # → query-driver-timeseries
+      - tool-call-18  # → query-alternative-drivers (via spill #21)
+      - tool-call-19  # → query-driver-by-dimensions (via spill #20)
+      - tool-call-20  # collapsed with #19 (spill-recovery)
+      - tool-call-21  # collapsed with #18 (spill-recovery)
+
+    omittedSteps:
+      - id: tool-call-1
+        reason: exploratory-empty-hypothesis-rejected
+      - id: tool-call-7
+        reason: exploratory-recent-commits-not-cited
+      - id: tool-call-10
+        reason: incidental-session-runtime
+      - id: tool-call-11
+        reason: failed-sso-expired
+      - id: tool-call-12
+        reason: failed-wrong-labels
+      - id: tool-call-13
+        reason: failed-wrong-namespace
+      - id: tool-call-14
+        reason: exploratory-namespace-discovery-collapsed-into-input
+      - id: tool-call-15
+        reason: exploratory-instance-discovery-collapsed-into-input
+      - id: tool-call-16
+        reason: exploratory-user-hint-dead-end
+
+    omittedAttachments:
+      - id: att-1
+        kind: image
+        mimeType: image/png
+        contentDigest: sha256:33020f7e704a1493
+        disposition: replaced-by-plain-input
+        reason: >
+          The screenshot's information (symptomMetric and
+          suspectedDriverMetric names) is captured as string inputs.
+          Sentinel does not describe attachment content as evidence.

@@ -1,0 +1,11 @@
+{
+  "metricName": "lakerunner_worklane_claim_wait_ms",
+  "serviceName": "lakerunner-process-logs",
+  "instance": "prod",
+  "signal": "logs",
+  "dimensionalBreakdown": ["action", "level"],
+  "lookbackWindow": "3h",
+  "relatedCounterMetric": "lakerunner_worklane_claim_trigger",
+  "relatedCounterLabels": ["action", "level", "trigger"],
+  "relatedCounterDominanceLabel": "trigger"
+}

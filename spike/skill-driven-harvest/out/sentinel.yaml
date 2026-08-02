@@ -1,0 +1,366 @@
+apiVersion: mechanize.dev/v1alpha1
+kind: Sentinel
+metadata:
+  name: metric-anomaly-integrity-check
+  displayName: Metric-anomaly integrity check
+  version: 0.1.0-spike
+  labels:
+    domain: observability
+    procedure: cross-dimension-collapse-detection
+    spikeGeneratedBy: skill-driven-harvest v0
+    compiledFromCapture: e470b9a9-8ccb-4059-a4f0-13da5373b70c
+spec:
+  purpose:
+    summary: >
+      Determine whether a reported metric spike is a real workload event
+      or an artifact of a degenerate metric emission (stuck histogram
+      summary, exporter republishing stale cumulative state, etc.).
+    reusableQuestion: >
+      Is this metric anomaly real, or is the metric itself degenerate?
+    conclusionType: metric-integrity-classification
+  inputs:
+    metricName:
+      type: string
+      required: true
+      description: >
+        Fully-qualified metric name as it appears in the observability
+        backend (e.g. lakerunner_worklane_claim_wait_ms).
+    instance:
+      type: string
+      required: true
+      description: >
+        Observability backend instance / tenant identifier (e.g. prod).
+    serviceName:
+      type: string
+      required: true
+      description: >
+        Value of the service_name label to scope the query.
+    signal:
+      type: string
+      required: false
+      description: >
+        Value of the signal label (e.g. logs); omit to query across all
+        signals.
+    lookbackWindow:
+      type: duration
+      default: 3h
+      description: >
+        Query window ending at execution.now.
+    dimensionalBreakdown:
+      type: array
+      itemType: string
+      required: true
+      description: >
+        Labels to group by when checking for cross-dimension collapse
+        (e.g. [action, level]). These are dimensions on which values
+        SHOULD differ if the metric is healthy.
+    minSeriesForIntegrity:
+      type: integer
+      default: 3
+      description: >
+        Minimum number of series required before the collapse check is
+        meaningful. Below this, integrityCondition is inconclusive.
+    withinSeriesFlatnessTolerance:
+      type: number
+      default: 0.001
+      description: >
+        Relative tolerance (0..1) for treating a series' min, max, p50,
+        p95, p99 as identical. Below this the series is flagged as
+        flat-within-series.
+    codeRepoPath:
+      type: string
+      required: false
+      description: >
+        Absolute path to a local checkout of the code that emits the
+        metric. If provided, locate-metric-emission-context runs and its
+        output is attached to the finding for reviewer context.
+  capabilities:
+    required:
+      - id: observability.query-metrics
+        capabilityType: tool
+        description: >
+          Time-series query against the observability backend, returning
+          summary statistics per series (min, max, avg, p50, p95, p99,
+          count) in addition to raw data points.
+      - id: code.grep
+        capabilityType: tool
+        description: >
+          Recursive grep-style search over a local filesystem path;
+          returns file:line:content matches.
+        required: false
+  variationPoints:
+    - path: /spec/inputs/metricName
+      operations: [bind]
+    - path: /spec/inputs/instance
+      operations: [bind]
+    - path: /spec/inputs/serviceName
+      operations: [bind]
+    - path: /spec/inputs/signal
+      operations: [bind]
+    - path: /spec/inputs/lookbackWindow/default
+      operations: [replace]
+    - path: /spec/inputs/dimensionalBreakdown
+      operations: [bind]
+    - path: /spec/inputs/withinSeriesFlatnessTolerance/default
+      operations: [replace]
+    - path: /spec/nodes/query-metric-timeseries/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/query-metric-by-dimensions/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/detect-degeneracy
+      operations: [replace]
+    - extensionPoint: before-degeneracy-condition
+      operations: [insert-node]
+  nodes:
+    query-metric-timeseries:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: observability.query-metrics
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            avg(${inputs.metricName}{service_name="${inputs.serviceName}",
+                                     signal="${inputs.signal}"})
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+          question: >
+            baseline series for ${inputs.metricName} on
+            ${inputs.serviceName}
+        timeout: 60s
+      output:
+        schema:
+          type: object
+          required: [summary, series_total]
+          properties:
+            summary: { type: string }
+            series_total: { type: integer }
+            data_points_total: { type: integer }
+
+    query-metric-by-dimensions:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: observability.query-metrics
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            avg by (${join(inputs.dimensionalBreakdown, ", ")})
+              (${inputs.metricName}{service_name="${inputs.serviceName}",
+                                    signal="${inputs.signal}"})
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+          question: >
+            dimensional breakdown of ${inputs.metricName} by
+            ${join(inputs.dimensionalBreakdown, ", ")}
+        timeout: 60s
+      output:
+        schema:
+          type: object
+          required: [summary, series_total, ddsketches]
+          properties:
+            summary: { type: string }
+            series_total: { type: integer }
+            ddsketches:
+              type: object
+              description: >
+                Map from series-attribute-set (as string key) to summary
+                stats {avg, min, max, p50, p90, p95, p99, count}.
+
+    locate-metric-emission-context:
+      kind: tool
+      dependsOn: []
+      when: "${inputs.codeRepoPath != null}"
+      config:
+        toolRef: code.grep
+        arguments:
+          pattern: "${inputs.metricName}"
+          path: "${inputs.codeRepoPath}"
+          fileGlobs: ["*.go", "*.py", "*.ts", "*.js", "*.java", "*.md", "*.yaml"]
+          maxMatches: 40
+        timeout: 30s
+      output:
+        schema:
+          type: object
+          required: [matches]
+          properties:
+            matches:
+              type: array
+              items:
+                type: object
+                required: [file, line, text]
+
+    detect-degeneracy:
+      kind: function
+      dependsOn: [query-metric-timeseries, query-metric-by-dimensions]
+      config:
+        runtime: python3.12
+        source: functions/detect-degeneracy.py
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 10s
+        arguments:
+          baselineSummary: "${nodes.query-metric-timeseries.output.summary}"
+          dimensionedSketches: "${nodes.query-metric-by-dimensions.output.ddsketches}"
+          minSeriesForIntegrity: "${inputs.minSeriesForIntegrity}"
+          withinSeriesFlatnessTolerance: "${inputs.withinSeriesFlatnessTolerance}"
+      output:
+        schema:
+          type: object
+          required:
+            - crossDimensionCollapse
+            - withinSeriesFlat
+            - distinctValueCount
+            - seriesCount
+            - collapseValue
+            - sufficientData
+          properties:
+            crossDimensionCollapse:
+              type: boolean
+              description: >
+                True when every series in the dimensional breakdown has
+                the same avg (within tolerance).
+            withinSeriesFlat:
+              type: boolean
+              description: >
+                True when every series has min ≈ max ≈ p50 ≈ p95 ≈ p99
+                (within tolerance). Healthy histograms should have
+                spread.
+            distinctValueCount:
+              type: integer
+              description: >
+                Count of distinct summary values across series (after
+                rounding to tolerance).
+            seriesCount:
+              type: integer
+            collapseValue:
+              type: number
+              description: >
+                The single value all series collapsed to, when
+                crossDimensionCollapse == true; else null.
+            sufficientData:
+              type: boolean
+
+    degeneracy-condition:
+      kind: condition
+      dependsOn: [detect-degeneracy]
+      config:
+        expression: >
+          nodes.detect-degeneracy.output.sufficientData == true &&
+          nodes.detect-degeneracy.output.crossDimensionCollapse == true &&
+          nodes.detect-degeneracy.output.withinSeriesFlat == true
+      output:
+        schema:
+          type: boolean
+
+    emit-degeneracy-finding:
+      kind: emit
+      dependsOn:
+        - query-metric-by-dimensions
+        - detect-degeneracy
+        - degeneracy-condition
+      when: "${nodes.degeneracy-condition.output == true}"
+      config:
+        finding:
+          type: metric-integrity-degenerate
+          title: >
+            Metric ${inputs.metricName} on ${inputs.serviceName} appears
+            degenerate (identical summary across ${join(inputs.dimensionalBreakdown, ", ")})
+          severityExpression: >
+            nodes.detect-degeneracy.output.seriesCount >= 5
+              ? "warning"
+              : "info"
+          dedupeKey: >
+            ${inputs.instance}:${inputs.serviceName}:${inputs.metricName}:degenerate
+          evidence:
+            - nodeRef: query-metric-by-dimensions
+              field: summary
+            - nodeRef: query-metric-by-dimensions
+              field: ddsketches
+            - nodeRef: detect-degeneracy
+              field: output
+            - nodeRef: locate-metric-emission-context
+              field: matches
+              optional: true
+          attributes:
+            metricName: "${inputs.metricName}"
+            serviceName: "${inputs.serviceName}"
+            instance: "${inputs.instance}"
+            collapseValue: "${nodes.detect-degeneracy.output.collapseValue}"
+            seriesCount: "${nodes.detect-degeneracy.output.seriesCount}"
+  outputs:
+    finding:
+      value: "${nodes.emit-degeneracy-finding.output}"
+      required: false
+    assessment:
+      value:
+        baselineSummary: "${nodes.query-metric-timeseries.output.summary}"
+        dimensionedSummary: "${nodes.query-metric-by-dimensions.output.summary}"
+        degeneracy: "${nodes.detect-degeneracy.output}"
+        codeContext: "${nodes.locate-metric-emission-context.output}"
+        triggered: "${nodes.degeneracy-condition.output}"
+      required: true
+  execution:
+    concurrency: 2
+    failureMode: fail-fast
+    defaultTimeout: 5m
+    maxCost:
+      toolCalls: 6
+    deterministicReplay:
+      supported: true
+  provenance:
+    captureId: e470b9a9-8ccb-4059-a4f0-13da5373b70c
+    retainedSteps:
+      - tool-call-2   # locate-metric-emission-context (grep for metric name)
+      - tool-call-17  # query-metric-timeseries
+      - tool-call-19  # query-metric-by-dimensions
+      - tool-call-20  # extraction of #19's spilled result (collapsed into node output)
+      - tool-call-21  # extraction of #18's spilled result (collapsed into node output)
+    omittedSteps:
+      - id: tool-call-1
+        reason: exploratory-empty-result
+      - id: tool-call-3
+        reason: supporting-code-inspection-not-parameterizable
+      - id: tool-call-4
+        reason: supporting-code-inspection-not-parameterizable
+      - id: tool-call-5
+        reason: supporting-code-inspection-not-parameterizable
+      - id: tool-call-6
+        reason: supporting-code-inspection-informed-manual-judgment
+      - id: tool-call-7
+        reason: exploratory-recent-commits-not-cited
+      - id: tool-call-8
+        reason: supporting-spec-locate-not-parameterizable
+      - id: tool-call-9
+        reason: supporting-spec-read-informed-manual-judgment
+      - id: tool-call-10
+        reason: incidental-tool-preparation
+      - id: tool-call-11
+        reason: failed-sso-expired
+      - id: tool-call-12
+        reason: failed-empty-wrong-labels
+      - id: tool-call-13
+        reason: failed-empty-wrong-namespace
+      - id: tool-call-14
+        reason: exploratory-namespace-listing-not-cited
+      - id: tool-call-15
+        reason: exploratory-instance-discovery-collapsed-into-input
+      - id: tool-call-16
+        reason: exploratory-user-hint-dead-end
+      - id: tool-call-18
+        reason: >
+          required-but-collapsed - queried by query-metric-related-counter
+          in the "extended" variant; not needed for the core degeneracy
+          detection so omitted from v0.1.0 core DAG. See rationale.
+    omittedAttachments:
+      - id: att-1
+        kind: image
+        mimeType: image/png
+        contentDigest: sha256:33020f7e704a1493
+        disposition: replaced-by-plain-input
+        reason: >
+          The screenshot's information content (which metric spiked, on
+          which service) is captured by the metricName and serviceName
+          inputs. The Sentinel does not need visual input; it does not
+          emit any text purporting to describe image content.

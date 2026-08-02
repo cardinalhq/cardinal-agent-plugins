@@ -1,0 +1,187 @@
+{
+  "runId": "run-20260801T233243Z-fdcc63",
+  "sentinelDigest": "sha256:e8ea2203d8c4b78de8c577daadd65ff62f7f2a58b08c39fece6ecfef9b27c0df",
+  "startedAt": "2026-08-01T23:32:43Z",
+  "endedAt": "2026-08-01T23:32:43Z",
+  "durationMs": 5,
+  "nodeStates": {
+    "query-metric-timeseries-baseline": "SUCCEEDED",
+    "query-metric-by-dimensions": "SUCCEEDED",
+    "query-related-counter-by-labels": "SUCCEEDED",
+    "locate-metric-emission-code": "SKIPPED",
+    "interpret-metric-semantics-from-code": "SKIPPED",
+    "detect-degeneracy": "SUCCEEDED",
+    "detect-counter-label-dominance": "SUCCEEDED",
+    "degeneracy-condition": "SUCCEEDED",
+    "capacity-starvation-condition": "SUCCEEDED",
+    "emit-degeneracy-finding": "SUCCEEDED",
+    "emit-capacity-starvation-finding": "SKIPPED"
+  },
+  "nodeErrors": {},
+  "exitCode": 0,
+  "findings": [
+    {
+      "type": "metric-integrity-degenerate",
+      "title": "Metric lakerunner_worklane_claim_wait_ms on lakerunner-process-logs appears degenerate (identical summary across action, level)",
+      "severity": "warning",
+      "dedupeKey": "prod:lakerunner-process-logs:lakerunner_worklane_claim_wait_ms:degenerate",
+      "dedupeHash": "e74bbd05453b7d3b422b6860fbdfdcbccfccd96ffcd488efacabef075b69ee73",
+      "observedAt": "2026-08-01T23:32:43Z",
+      "sentinelDigest": "sha256:e8ea2203d8c4b78de8c577daadd65ff62f7f2a58b08c39fece6ecfef9b27c0df",
+      "variationDigest": "",
+      "evidence": [
+        {
+          "nodeRef": "query-metric-by-dimensions",
+          "field": "summary",
+          "value": "8 time series, 535 data points | aggregation: avg\n\nSeries (sorted by avg desc):\n  {action=\"compact\", level=\"5\"} | avg=2.014e+04 min=2.014e+04 max=2.014e+04 p50=2.014e+04 p90=2.014e+04 p95=2.014e+04 p99=2.014e+04 count=40\n  {action=\"compact\", level=\"7\"} | avg=2.014e+04 min=2.014e+04 max=2.014e+04 p50=2.014e+04 p90=2.014e+04 p95=2.014e+04 p99=2.014e+04 count=12\n  {action=\"ingest\", level=\"0\"} | avg=2.014e+04 min=2.014e+04 max=2.014e+04 p50=2.014e+04 p90=2.014e+04 p95=2.014e+04 p99=2.014e+04 count=179\n  {action=\"compact\", level=\"0\"} | avg=2.014e+04 min=2.014e+04 max=2.014e+04 p50=2.014e+04 p90=2.014e+04 p95=2.014e+04 p99=2.014e+04 count=171\n  {action=\"compact\", level=\"3\"} | avg=2.014e+04 min=2.014e+04 max=2.014e+04 p50=2.014e+04 p90=2.014e+04 p95=2.014e+04 p99=2.014e+04 count=30\n  {action=\"compact\", level=\"4\"} | avg=2.014e+04 min=2.014e+04 max=2.014e+04 p50=2.014e+04 p90=2.014e+04 p95=2.014e+04 p99=2.014e+04 count=13\n  {action=\"compact\", level=\"1\"} | avg=2.014e+04 min=2.014e+04 max=2.014e+04 p50=2.014e+04 p90=2.014e+04 p95=2.014e+04 p99=2.014e+04 count=75\n  {action=\"compact\", level=\"2\"} | avg=2.014e+04 min=2.014e+04 max=2.014e+04 p50=2.014e+04 p90=2.014e+04 p95=2.014e+04 p99=2.014e+04 count=15\n",
+          "optional": false
+        },
+        {
+          "nodeRef": "query-metric-by-dimensions",
+          "field": "ddsketches",
+          "value": {
+            "{action=\"compact\", level=\"0\"}": {
+              "avg": 20136.318429987667,
+              "count": 171,
+              "end_timestamp": "2026-08-01T23:29:00Z",
+              "max": 20136.318429987667,
+              "min": 20136.318429987667,
+              "p50": 20136.318429987667,
+              "p90": 20136.318429987667,
+              "p95": 20136.318429987667,
+              "p99": 20136.318429987667,
+              "start_timestamp": "2026-08-01T20:32:00Z",
+              "sum": 3443310.451527891
+            },
+            "{action=\"compact\", level=\"1\"}": {
+              "avg": 20136.318429987667,
+              "count": 75,
+              "end_timestamp": "2026-08-01T23:25:00Z",
+              "max": 20136.318429987667,
+              "min": 20136.318429987667,
+              "p50": 20136.318429987667,
+              "p90": 20136.318429987667,
+              "p95": 20136.318429987667,
+              "p99": 20136.318429987667,
+              "start_timestamp": "2026-08-01T20:45:00Z",
+              "sum": 1510223.882249075
+            },
+            "{action=\"compact\", level=\"2\"}": {
+              "avg": 20136.318429987667,
+              "count": 15,
+              "end_timestamp": "2026-08-01T23:29:00Z",
+              "max": 20136.318429987667,
+              "min": 20136.318429987667,
+              "p50": 20136.318429987667,
+              "p90": 20136.318429987667,
+              "p95": 20136.318429987667,
+              "p99": 20136.318429987667,
+              "start_timestamp": "2026-08-01T20:47:00Z",
+              "sum": 302044.776449815
+            },
+            "{action=\"compact\", level=\"3\"}": {
+              "avg": 20136.318429987667,
+              "count": 30,
+              "end_timestamp": "2026-08-01T23:30:00Z",
+              "max": 20136.318429987667,
+              "min": 20136.318429987667,
+              "p50": 20136.318429987667,
+              "p90": 20136.318429987667,
+              "p95": 20136.318429987667,
+              "p99": 20136.318429987667,
+              "start_timestamp": "2026-08-01T20:32:00Z",
+              "sum": 604089.55289963
+            },
+            "{action=\"compact\", level=\"4\"}": {
+              "avg": 20136.318429987667,
+              "count": 13,
+              "end_timestamp": "2026-08-01T23:30:00Z",
+              "max": 20136.318429987667,
+              "min": 20136.318429987667,
+              "p50": 20136.318429987667,
+              "p90": 20136.318429987667,
+              "p95": 20136.318429987667,
+              "p99": 20136.318429987667,
+              "start_timestamp": "2026-08-01T20:35:00Z",
+              "sum": 261772.13958983967
+            },
+            "{action=\"compact\", level=\"5\"}": {
+              "avg": 20136.318429987667,
+              "count": 40,
+              "end_timestamp": "2026-08-01T23:12:00Z",
+              "max": 20136.318429987667,
+              "min": 20136.318429987667,
+              "p50": 20136.318429987667,
+              "p90": 20136.318429987667,
+              "p95": 20136.318429987667,
+              "p99": 20136.318429987667,
+              "start_timestamp": "2026-08-01T21:24:00Z",
+              "sum": 805452.7371995067
+            },
+            "{action=\"compact\", level=\"7\"}": {
+              "avg": 20136.318429987667,
+              "count": 12,
+              "end_timestamp": "2026-08-01T22:51:00Z",
+              "max": 20136.318429987667,
+              "min": 20136.318429987667,
+              "p50": 20136.318429987667,
+              "p90": 20136.318429987667,
+              "p95": 20136.318429987667,
+              "p99": 20136.318429987667,
+              "start_timestamp": "2026-08-01T22:33:00Z",
+              "sum": 241635.821159852
+            },
+            "{action=\"ingest\", level=\"0\"}": {
+              "avg": 20136.318429987667,
+              "count": 179,
+              "end_timestamp": "2026-08-01T23:30:00Z",
+              "max": 20136.318429987667,
+              "min": 20136.318429987667,
+              "p50": 20136.318429987667,
+              "p90": 20136.318429987667,
+              "p95": 20136.318429987667,
+              "p99": 20136.318429987667,
+              "start_timestamp": "2026-08-01T20:32:00Z",
+              "sum": 3604400.9989677924
+            }
+          },
+          "optional": false
+        },
+        {
+          "nodeRef": "detect-degeneracy",
+          "field": "output",
+          "value": {
+            "crossDimensionCollapse": true,
+            "withinSeriesFlat": true,
+            "distinctValueCount": 1,
+            "seriesCount": 8,
+            "collapseValue": 20136.318429987667,
+            "sufficientData": true
+          },
+          "optional": false
+        },
+        {
+          "nodeRef": "interpret-metric-semantics-from-code",
+          "field": "output",
+          "value": null,
+          "optional": true,
+          "reason": "upstream-not-produced"
+        },
+        {
+          "nodeRef": "locate-metric-emission-code",
+          "field": "matches",
+          "value": null,
+          "optional": true,
+          "reason": "upstream-not-produced"
+        }
+      ],
+      "attributes": {
+        "metricName": "lakerunner_worklane_claim_wait_ms",
+        "serviceName": "lakerunner-process-logs",
+        "instance": "prod",
+        "collapseValue": 20136.318429987667,
+        "seriesCount": 8
+      }
+    }
+  ]
+}

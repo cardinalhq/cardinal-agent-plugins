@@ -1,0 +1,10 @@
+{
+  "toolRef": "observability.query-logs",
+  "arguments": {
+    "instance": "prod",
+    "query": "sum by (level) (count_over_time({service_name=\"null\"}[3600s]))\n",
+    "start": "2026-08-01T19:18:33Z",
+    "end": "2026-08-02T01:18:33Z",
+    "question": "Log volume broken down by level over the health window.\n"
+  }
+}

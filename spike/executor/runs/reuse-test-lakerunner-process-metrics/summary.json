@@ -1,0 +1,27 @@
+{
+  "runId": "run-20260802T012004Z-8e5035",
+  "sentinelDigest": "sha256:1e6e53ee0ff2dd12478a066a1901bf1817d8ec39b1c25342af12c7f2267fe1fb",
+  "startedAt": "2026-08-02T01:20:04Z",
+  "endedAt": "2026-08-02T01:20:04Z",
+  "durationMs": 5,
+  "nodeStates": {
+    "resolve-service": "SUCCEEDED",
+    "pick-resolved-service": "SUCCEEDED",
+    "query-error-overview": "SUCCEEDED",
+    "count-body-error-terms": "SUCCEEDED",
+    "count-logs-by-level": "SUCCEEDED",
+    "measure-deployment-availability": "SUCCEEDED",
+    "measure-pod-uptime": "SUCCEEDED",
+    "measure-cpu-utilization": "SUCCEEDED",
+    "measure-memory-utilization": "SUCCEEDED",
+    "compute-health-summary": "SUCCEEDED",
+    "compute-error-count-reconciliation": "SUCCEEDED",
+    "degraded-condition": "SUCCEEDED",
+    "reconciliation-mismatch-condition": "SUCCEEDED",
+    "emit-health-finding": "SKIPPED",
+    "emit-reconciliation-finding": "SKIPPED"
+  },
+  "nodeErrors": {},
+  "exitCode": 0,
+  "findings": []
+}

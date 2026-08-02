@@ -1,0 +1,14 @@
+{
+  "services": [
+    {
+      "name": "lakerunner-process-metrics",
+      "signals": [
+        "logs",
+        "metrics"
+      ]
+    }
+  ],
+  "shown": 1,
+  "summary": "Found 1 services (service_name~=lakerunner-process-metrics)",
+  "total_count": 1
+}
