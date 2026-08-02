@@ -1,0 +1,20 @@
+{
+  "summary": "1 time series | INFO avg=6656 min=6440 max=6838",
+  "ddsketches": {
+    "{level=\"INFO\"}": {
+      "avg": 6655.987,
+      "count": 356,
+      "min": 6439.73,
+      "max": 6837.96,
+      "p50": 6702.55,
+      "p90": 6702.55,
+      "p95": 6702.55,
+      "p99": 6702.55,
+      "sum": 2369531.36,
+      "start_timestamp": "2026-08-01T19:19:00Z",
+      "end_timestamp": "2026-08-02T01:16:00Z"
+    }
+  },
+  "series_total": 1,
+  "data_points_total": 356
+}

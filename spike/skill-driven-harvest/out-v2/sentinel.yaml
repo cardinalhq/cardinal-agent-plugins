@@ -1,0 +1,592 @@
+apiVersion: mechanize.dev/v1alpha1
+kind: Sentinel
+metadata:
+  name: metric-anomaly-explanation
+  displayName: Metric-anomaly explanation
+  version: 0.1.0-spike2
+  labels:
+    domain: observability
+    procedure: metric-integrity-and-workload-branch
+    spikeGeneratedBy: skill-driven-harvest v2
+    compiledFromCapture: e470b9a9-8ccb-4059-a4f0-13da5373b70c
+spec:
+  purpose:
+    summary: >
+      Explain a reported metric spike by (a) checking whether the metric
+      itself is degenerate (stuck histogram summary, exporter republishing
+      stale cumulative state) versus a real observation, and (b) when the
+      metric is honest, characterizing the correlated workload pattern
+      from a companion counter (e.g. why-was-work-done trigger labels).
+    reusableQuestion: >
+      Why did this metric spike — is the metric itself trustworthy, and
+      if so, what workload pattern in a related counter explains the
+      correlated signal?
+    conclusionType: metric-anomaly-explanation
+  inputs:
+    metricName:
+      type: string
+      required: true
+      description: >
+        Fully-qualified metric under investigation (e.g.
+        lakerunner_worklane_claim_wait_ms).
+    instance:
+      type: string
+      required: true
+      description: >
+        Observability backend instance / tenant identifier (e.g. prod).
+    serviceName:
+      type: string
+      required: true
+      description: >
+        service_name label value scoping the query.
+    signal:
+      type: string
+      required: false
+      description: >
+        signal label value (e.g. logs); omit to query across all signals.
+    lookbackWindow:
+      type: duration
+      default: 3h
+      description: >
+        Query window ending at execution.now.
+    dimensionalBreakdown:
+      type: array
+      itemType: string
+      required: true
+      description: >
+        Labels on which the metric SHOULD vary if healthy (e.g.
+        [action, level]). Used for the integrity check.
+    relatedCounterMetric:
+      type: string
+      required: false
+      description: >
+        Companion counter whose label distribution characterizes WHY
+        work is happening (e.g. lakerunner_worklane_claim_trigger).
+        When present, its trigger-label breakdown is queried and
+        assessed for one-label dominance (size-starved / age-starved
+        pattern).
+    relatedCounterLabels:
+      type: array
+      itemType: string
+      required: false
+      description: >
+        Grouping labels for relatedCounterMetric (e.g.
+        [action, level, trigger]).
+    relatedCounterDominanceLabel:
+      type: string
+      required: false
+      description: >
+        The specific label whose one-value dominance flags a workload
+        pattern (e.g. "trigger"). Required when relatedCounterMetric
+        is set.
+    withinSeriesFlatnessTolerance:
+      type: number
+      default: 0.001
+      description: >
+        Relative tolerance for treating a series' min, max, p50, p95,
+        p99 as identical. Below this, the series is flagged flat.
+    minSeriesForIntegrity:
+      type: integer
+      default: 3
+      description: >
+        Minimum series count before the collapse check is meaningful.
+    dominanceRatioThreshold:
+      type: number
+      default: 0.9
+      description: >
+        Fraction of counter samples that must fall under a single
+        dominanceLabel value for capacity-starvation to fire.
+    codeRepoPath:
+      type: string
+      required: false
+      description: >
+        Absolute path to a local checkout of the code that emits the
+        metric. When provided, locate-metric-emission-code + optional
+        interpret-metric-semantics-from-code run and their output
+        attaches to the finding as reviewer context.
+  capabilities:
+    required:
+      - id: observability.query-metrics
+        capabilityType: tool
+        description: >
+          Time-series query against the observability backend, returning
+          summary statistics per series (avg/min/max/p50/p95/p99/count)
+          plus data points. Must expose a ddsketches-shaped map when
+          queried with a group-by clause.
+      - id: code.grep
+        capabilityType: tool
+        required: false
+        description: >
+          Recursive grep-style search over a local filesystem path;
+          returns file:line:content matches.
+      - id: analytical.small
+        capabilityType: llm
+        required: false
+        description: >
+          Small analytical LLM invoked only when codeRepoPath is
+          provided AND the interpret-metric-semantics-from-code node
+          runs. Emits a structured claim about what the metric measures
+          and which dimensions SHOULD vary.
+  variationPoints:
+    - path: /spec/inputs/metricName
+      operations: [bind]
+    - path: /spec/inputs/instance
+      operations: [bind]
+    - path: /spec/inputs/serviceName
+      operations: [bind]
+    - path: /spec/inputs/signal
+      operations: [bind]
+    - path: /spec/inputs/dimensionalBreakdown
+      operations: [bind]
+    - path: /spec/inputs/lookbackWindow/default
+      operations: [replace]
+    - path: /spec/inputs/withinSeriesFlatnessTolerance/default
+      operations: [replace]
+    - path: /spec/inputs/dominanceRatioThreshold/default
+      operations: [replace]
+    - path: /spec/inputs/relatedCounterMetric
+      operations: [bind]
+    - path: /spec/inputs/relatedCounterLabels
+      operations: [bind]
+    - path: /spec/inputs/relatedCounterDominanceLabel
+      operations: [bind]
+    - path: /spec/nodes/query-metric-timeseries-baseline/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/query-metric-by-dimensions/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/query-related-counter-by-labels/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/detect-degeneracy
+      operations: [replace]
+    - path: /spec/nodes/detect-counter-label-dominance
+      operations: [replace]
+    - extensionPoint: before-degeneracy-condition
+      operations: [insert-node]
+    - extensionPoint: before-counter-dominance-condition
+      operations: [insert-node]
+  nodes:
+    query-metric-timeseries-baseline:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: observability.query-metrics
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            avg(${inputs.metricName}{service_name="${inputs.serviceName}",
+                                     signal="${inputs.signal}"})
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+          question: >
+            baseline timeseries for ${inputs.metricName} on
+            ${inputs.serviceName}
+        timeout: 60s
+      output:
+        schema:
+          type: object
+          required: [summary, data_points_total, series_total]
+          properties:
+            summary: { type: string }
+            data_points_total: { type: integer }
+            series_total: { type: integer }
+    query-metric-by-dimensions:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: observability.query-metrics
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            avg by (${join(inputs.dimensionalBreakdown, ", ")})
+              (${inputs.metricName}{service_name="${inputs.serviceName}",
+                                    signal="${inputs.signal}"})
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+          question: >
+            dimensional integrity check for ${inputs.metricName} grouped
+            by ${join(inputs.dimensionalBreakdown, ", ")}
+        timeout: 60s
+      output:
+        schema:
+          type: object
+          required: [summary, series_total, ddsketches]
+          properties:
+            summary: { type: string }
+            series_total: { type: integer }
+            ddsketches:
+              type: object
+              description: >
+                Map from series-attribute-set (string key) to per-series
+                {avg, min, max, p50, p90, p95, p99, count}.
+    query-related-counter-by-labels:
+      kind: tool
+      dependsOn: []
+      when: "${inputs.relatedCounterMetric != null}"
+      config:
+        toolRef: observability.query-metrics
+        arguments:
+          instance: "${inputs.instance}"
+          expression: >
+            sum by (${join(inputs.relatedCounterLabels, ", ")})
+              (rate(${inputs.relatedCounterMetric}{
+                service_name="${inputs.serviceName}",
+                signal="${inputs.signal}"}[5m]))
+          start: "${execution.now - inputs.lookbackWindow}"
+          end: "${execution.now}"
+          question: >
+            trigger-label distribution for
+            ${inputs.relatedCounterMetric}
+        timeout: 60s
+      output:
+        schema:
+          type: object
+          required: [summary, series_total, ddsketches]
+          properties:
+            summary: { type: string }
+            series_total: { type: integer }
+            ddsketches:
+              type: object
+    locate-metric-emission-code:
+      kind: tool
+      dependsOn: []
+      when: "${inputs.codeRepoPath != null}"
+      config:
+        toolRef: code.grep
+        arguments:
+          pattern: "${inputs.metricName}"
+          path: "${inputs.codeRepoPath}"
+          fileGlobs: ["*.go", "*.py", "*.ts", "*.js", "*.java", "*.rs", "*.md", "*.yaml"]
+          maxMatches: 40
+        timeout: 30s
+      output:
+        schema:
+          type: object
+          required: [matches]
+          properties:
+            matches:
+              type: array
+              items:
+                type: object
+                required: [file, line, text]
+    interpret-metric-semantics-from-code:
+      kind: llm
+      dependsOn: [locate-metric-emission-code]
+      when: "${inputs.codeRepoPath != null}"
+      config:
+        modelPolicy: analytical-small
+        maxInputTokens: 8000
+        maxOutputTokens: 800
+        temperature: 0
+        task: >
+          Given the grep matches for the metric under investigation,
+          identify (a) the exact source location where the metric is
+          recorded, (b) a one-sentence definition of what the metric
+          measures, (c) which of the dimensionalBreakdown labels
+          SHOULD vary if the metric is healthy, and (d) any expected
+          value ranges implied by adjacent config (max-age caps,
+          thresholds). Return "inconclusive" for any field the code
+          does not decide.
+        evidence:
+          matches: "${nodes.locate-metric-emission-code.output.matches}"
+          metricName: "${inputs.metricName}"
+          dimensionalBreakdown: "${inputs.dimensionalBreakdown}"
+        outputSchema:
+          type: object
+          required: [emissionSites, definition, dimensionsShouldVary, inconclusiveFields]
+          properties:
+            emissionSites:
+              type: array
+              items:
+                type: object
+                required: [file, line]
+            definition: { type: string }
+            dimensionsShouldVary:
+              type: array
+              itemType: string
+            expectedRangeHints:
+              type: array
+              itemType: string
+            inconclusiveFields:
+              type: array
+              itemType: string
+      output:
+        schemaRef: inline
+    detect-degeneracy:
+      kind: function
+      dependsOn: [query-metric-by-dimensions]
+      config:
+        runtime: python3.12
+        source: functions/detect-degeneracy.py
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 10s
+        arguments:
+          dimensionedSketches: "${nodes.query-metric-by-dimensions.output.ddsketches}"
+          minSeriesForIntegrity: "${inputs.minSeriesForIntegrity}"
+          withinSeriesFlatnessTolerance: "${inputs.withinSeriesFlatnessTolerance}"
+      output:
+        schema:
+          type: object
+          required:
+            - crossDimensionCollapse
+            - withinSeriesFlat
+            - distinctValueCount
+            - seriesCount
+            - collapseValue
+            - sufficientData
+          properties:
+            crossDimensionCollapse:
+              type: boolean
+              description: >
+                True when every series in the breakdown has the same
+                avg (within tolerance).
+            withinSeriesFlat:
+              type: boolean
+              description: >
+                True when every series has min approximately-equal max
+                approximately-equal p50/p95/p99 (within tolerance).
+                Healthy histograms should have spread.
+            distinctValueCount: { type: integer }
+            seriesCount: { type: integer }
+            collapseValue:
+              type: number
+              description: >
+                The single value all series collapsed to when
+                crossDimensionCollapse is true, else null.
+            sufficientData: { type: boolean }
+    detect-counter-label-dominance:
+      kind: function
+      dependsOn: [query-related-counter-by-labels]
+      when: "${inputs.relatedCounterMetric != null}"
+      config:
+        runtime: python3.12
+        source: functions/detect-counter-label-dominance.py
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 10s
+        arguments:
+          dimensionedSketches: "${nodes.query-related-counter-by-labels.output.ddsketches}"
+          dominanceLabel: "${inputs.relatedCounterDominanceLabel}"
+          dominanceRatioThreshold: "${inputs.dominanceRatioThreshold}"
+      output:
+        schema:
+          type: object
+          required:
+            - dominantLabelValue
+            - dominanceRatio
+            - dominancePresent
+            - sampleSufficient
+          properties:
+            dominantLabelValue:
+              type: string
+              description: >
+                The label value that accounts for more than
+                dominanceRatioThreshold of counter samples.
+            dominanceRatio: { type: number }
+            dominancePresent: { type: boolean }
+            sampleSufficient: { type: boolean }
+    degeneracy-condition:
+      kind: condition
+      dependsOn: [detect-degeneracy]
+      config:
+        expression: >
+          nodes.detect-degeneracy.output.sufficientData == true &&
+          nodes.detect-degeneracy.output.crossDimensionCollapse == true &&
+          nodes.detect-degeneracy.output.withinSeriesFlat == true
+      output:
+        schema:
+          type: boolean
+    capacity-starvation-condition:
+      kind: condition
+      dependsOn: [detect-counter-label-dominance, degeneracy-condition]
+      when: "${inputs.relatedCounterMetric != null}"
+      config:
+        expression: >
+          nodes.detect-counter-label-dominance.output.sampleSufficient == true &&
+          nodes.detect-counter-label-dominance.output.dominancePresent == true &&
+          nodes.degeneracy-condition.output == false
+      output:
+        schema:
+          type: boolean
+    emit-degeneracy-finding:
+      kind: emit
+      dependsOn:
+        - query-metric-by-dimensions
+        - detect-degeneracy
+        - degeneracy-condition
+      when: "${nodes.degeneracy-condition.output == true}"
+      config:
+        finding:
+          type: metric-integrity-degenerate
+          title: >
+            Metric ${inputs.metricName} on ${inputs.serviceName} appears
+            degenerate (identical summary across
+            ${join(inputs.dimensionalBreakdown, ", ")})
+          severityExpression: >
+            nodes.detect-degeneracy.output.seriesCount >= 5
+              ? "warning"
+              : "info"
+          dedupeKey: >
+            ${inputs.instance}:${inputs.serviceName}:${inputs.metricName}:degenerate
+          evidence:
+            - nodeRef: query-metric-by-dimensions
+              field: summary
+            - nodeRef: query-metric-by-dimensions
+              field: ddsketches
+            - nodeRef: detect-degeneracy
+              field: output
+            - nodeRef: interpret-metric-semantics-from-code
+              field: output
+              optional: true
+            - nodeRef: locate-metric-emission-code
+              field: matches
+              optional: true
+          attributes:
+            metricName: "${inputs.metricName}"
+            serviceName: "${inputs.serviceName}"
+            instance: "${inputs.instance}"
+            collapseValue: "${nodes.detect-degeneracy.output.collapseValue}"
+            seriesCount: "${nodes.detect-degeneracy.output.seriesCount}"
+    emit-capacity-starvation-finding:
+      kind: emit
+      dependsOn:
+        - query-related-counter-by-labels
+        - detect-counter-label-dominance
+        - capacity-starvation-condition
+      when: "${nodes.capacity-starvation-condition.output == true}"
+      config:
+        finding:
+          type: workload-capacity-starvation
+          title: >
+            ${inputs.relatedCounterMetric} on ${inputs.serviceName} shows
+            ${nodes.detect-counter-label-dominance.output.dominanceRatio}
+            dominance on
+            ${inputs.relatedCounterDominanceLabel}=${nodes.detect-counter-label-dominance.output.dominantLabelValue}
+            (metric ${inputs.metricName} is honest; correlated anomaly
+            reflects a real workload pattern)
+          severityExpression: >
+            nodes.detect-counter-label-dominance.output.dominanceRatio >= 0.99
+              ? "warning"
+              : "info"
+          dedupeKey: >
+            ${inputs.instance}:${inputs.serviceName}:${inputs.relatedCounterMetric}:${inputs.relatedCounterDominanceLabel}-dominance
+          evidence:
+            - nodeRef: query-related-counter-by-labels
+              field: summary
+            - nodeRef: query-related-counter-by-labels
+              field: ddsketches
+            - nodeRef: detect-counter-label-dominance
+              field: output
+            - nodeRef: query-metric-timeseries-baseline
+              field: summary
+              optional: true
+          attributes:
+            metricName: "${inputs.metricName}"
+            relatedCounterMetric: "${inputs.relatedCounterMetric}"
+            dominantLabelValue: "${nodes.detect-counter-label-dominance.output.dominantLabelValue}"
+            dominanceRatio: "${nodes.detect-counter-label-dominance.output.dominanceRatio}"
+  outputs:
+    degeneracyFinding:
+      value: "${nodes.emit-degeneracy-finding.output}"
+      required: false
+    capacityStarvationFinding:
+      value: "${nodes.emit-capacity-starvation-finding.output}"
+      required: false
+    assessment:
+      value:
+        baseline: "${nodes.query-metric-timeseries-baseline.output.summary}"
+        dimensioned: "${nodes.query-metric-by-dimensions.output.summary}"
+        degeneracy: "${nodes.detect-degeneracy.output}"
+        counter: "${nodes.query-related-counter-by-labels.output.summary}"
+        counterDominance: "${nodes.detect-counter-label-dominance.output}"
+        codeInterpretation: "${nodes.interpret-metric-semantics-from-code.output}"
+        degenerateTriggered: "${nodes.degeneracy-condition.output}"
+        capacityStarvationTriggered: "${nodes.capacity-starvation-condition.output}"
+      required: true
+  execution:
+    concurrency: 3
+    failureMode: continue-independent
+    defaultTimeout: 5m
+    maxCost:
+      toolCalls: 6
+      llmTokens: 10000
+    deterministicReplay:
+      supported: true
+  provenance:
+    captureId: e470b9a9-8ccb-4059-a4f0-13da5373b70c
+    retainedSteps:
+      - tool-call-2   # -> locate-metric-emission-code
+      - tool-call-17  # -> query-metric-timeseries-baseline
+      - tool-call-18  # -> query-related-counter-by-labels (spill of #18 collapsed via #21)
+      - tool-call-19  # -> query-metric-by-dimensions (spill of #19 collapsed via #20)
+    collapsedSteps:
+      - id: tool-call-20
+        collapsedInto: query-metric-by-dimensions
+        reason: >
+          Spill-projection: jq -r '.summary' against the spill path from
+          #19 (mcp-plugin_cardinal_cardinal-lakerunner__execute_metrics_query
+          -1785184690849.txt). Represents extraction of the summary field
+          from a runtime-truncated tool result, not a separate operation.
+      - id: tool-call-21
+        collapsedInto: query-related-counter-by-labels
+        reason: >
+          Spill-projection: jq -r '.summary' against the spill path from
+          #18 (mcp-plugin_cardinal_cardinal-lakerunner__execute_metrics_query
+          -1785184689334.txt). Same rationale as #20.
+    omittedSteps:
+      - id: tool-call-1
+        reason: exploratory-empty-result
+      - id: tool-call-3
+        reason: >
+          code-reading-supporting-not-encoded-as-tool: judgment output
+          absorbed into optional interpret-metric-semantics-from-code
+          LLM node (Stage 2.5 Option A hybrid).
+      - id: tool-call-4
+        reason: code-reading-supporting-not-encoded-as-tool
+      - id: tool-call-5
+        reason: code-reading-supporting-not-encoded-as-tool
+      - id: tool-call-6
+        reason: code-reading-supporting-not-encoded-as-tool
+      - id: tool-call-7
+        reason: exploratory-recent-commits-not-cited
+      - id: tool-call-8
+        reason: code-reading-supporting-not-encoded-as-tool
+      - id: tool-call-9
+        reason: code-reading-supporting-not-encoded-as-tool
+      - id: tool-call-10
+        reason: incidental-tool-preparation
+      - id: tool-call-11
+        reason: failed-sso-expired
+      - id: tool-call-12
+        reason: failed-empty-wrong-labels
+      - id: tool-call-13
+        reason: failed-empty-wrong-namespace
+      - id: tool-call-14
+        reason: exploratory-namespace-listing-not-cited
+      - id: tool-call-15
+        reason: >
+          exploratory-instance-discovery-collapsed-into-input: the
+          list-instances call produced (otel-demo, prod); operator
+          picked prod. In the Sentinel instance is an input.
+      - id: tool-call-16
+        reason: >
+          exploratory-user-hint-dead-end (grep for "oportun" per user
+          course-correction; spilled to bg7l3svd7.txt with no follow-up
+          read — genuine INCIDENTAL per Stage 1.5 discriminator).
+    omittedAttachments:
+      - id: att-1
+        kind: image
+        mimeType: image/png
+        location: >
+          user message L7, sourceRef <operator-desktop>/Screenshot
+          2026-07-27 at 1.32.14 PM.png
+        disposition: replaced-by-plain-input
+        attachmentChooserQuestion: Q1
+        reason: >
+          Operator's inference from the screenshot became the metricName,
+          serviceName, and instance inputs. The Sentinel does not need
+          visual input at runtime; the plain-typed inputs carry the
+          load-bearing extraction. No text describing screenshot content
+          is emitted as evidence anywhere in the DAG.

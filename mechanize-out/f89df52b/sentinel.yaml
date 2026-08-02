@@ -1,0 +1,415 @@
+apiVersion: mechanize.dev/v1alpha1
+kind: Sentinel
+metadata:
+  name: service-health-assessment
+  displayName: Service health assessment via observability signals
+  version: 0.1.0
+  labels:
+    domain: observability
+    procedure: multi-signal-health-check
+spec:
+  purpose:
+    summary: >
+      Assess a service's operational health by combining Kubernetes
+      availability, container uptime, resource-limit utilization, and
+      log-level distribution. Separately reconcile the platform's
+      total-error count against direct log-body error matches to
+      surface cases where errors are reported without corresponding
+      log lines.
+    reusableQuestion: >
+      Is a named service currently healthy, and does the platform's
+      error count reconcile with what the log body actually contains?
+    conclusionType: service-health-report
+  inputs:
+    instance:
+      type: string
+      required: true
+    serviceQuery:
+      type: string
+      required: true
+    window:
+      type: duration
+      default: 6h
+    cpuLimitPeakThreshold:
+      type: number
+      default: 0.80
+      constraints:
+        minimum: 0
+        maximum: 1
+    memoryLimitPeakThreshold:
+      type: number
+      default: 0.80
+      constraints:
+        minimum: 0
+        maximum: 1
+    minAvailableReplicas:
+      type: number
+      default: 1
+      constraints:
+        minimum: 0
+    aggregationBucket:
+      type: duration
+      default: 1h
+  capabilities:
+    required:
+      - id: lakerunner.list-services
+        capabilityType: tool
+      - id: lakerunner.error-overview
+        capabilityType: tool
+      - id: lakerunner.execute-logs-query
+        capabilityType: tool
+      - id: lakerunner.execute-metrics-query
+        capabilityType: tool
+  variationPoints:
+    - path: /spec/inputs/instance
+      operations: [bind]
+    - path: /spec/inputs/serviceQuery
+      operations: [bind]
+    - path: /spec/inputs/window/default
+      operations: [replace]
+    - path: /spec/inputs/cpuLimitPeakThreshold/default
+      operations: [replace]
+    - path: /spec/inputs/memoryLimitPeakThreshold/default
+      operations: [replace]
+    - path: /spec/inputs/minAvailableReplicas/default
+      operations: [replace]
+    - path: /spec/nodes/resolve-service/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/query-error-overview/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/measure-deployment-availability/config/toolRef
+      operations: [replace-binding]
+  nodes:
+    resolve-service:
+      kind: tool
+      dependsOn: []
+      config:
+        toolRef: lakerunner.list-services
+        arguments:
+          instance: "${inputs.instance}"
+          filters:
+            service_name: "${inputs.serviceQuery}"
+        timeout: 30s
+      output:
+        schema:
+          type: object
+          required: [services]
+          properties:
+            services:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string }
+    pick-resolved-service:
+      kind: function
+      dependsOn: [resolve-service]
+      config:
+        runtime: nodejs22
+        source: functions/pick-resolved-service.mjs
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 5s
+        arguments:
+          resolved: "${nodes.resolve-service.output}"
+      output:
+        schema:
+          type: object
+          required: [name]
+          properties:
+            name: { type: string }
+            candidateCount: { type: number }
+    query-error-overview:
+      kind: tool
+      dependsOn: [pick-resolved-service]
+      config:
+        toolRef: lakerunner.error-overview
+        arguments:
+          instance: "${inputs.instance}"
+          services:
+            - "${nodes.pick-resolved-service.output.name}"
+          skip_lookback: true
+        timeout: 60s
+      output:
+        schema:
+          type: object
+          required: [services]
+    count-body-error-terms:
+      kind: tool
+      dependsOn: [pick-resolved-service]
+      config:
+        toolRef: lakerunner.execute-logs-query
+        arguments:
+          instance: "${inputs.instance}"
+          query: >
+            sum(count_over_time({service_name="${nodes.pick-resolved-service.output.name}"}
+              |~ "(?i)(error|panic|fatal|failed|failure)"[5m]))
+          start: "${execution.now - inputs.window}"
+          end: "${execution.now}"
+          question: >
+            Count of log lines whose body matches error/panic/fatal/failed/failure.
+        timeout: 60s
+      output:
+        schema:
+          type: object
+    count-logs-by-level:
+      kind: tool
+      dependsOn: [pick-resolved-service]
+      config:
+        toolRef: lakerunner.execute-logs-query
+        arguments:
+          instance: "${inputs.instance}"
+          query: >
+            sum by (level) (count_over_time({service_name="${nodes.pick-resolved-service.output.name}"}[${inputs.aggregationBucket}]))
+          start: "${execution.now - inputs.window}"
+          end: "${execution.now}"
+          question: >
+            Log volume broken down by level over the health window.
+        timeout: 60s
+      output:
+        schema:
+          type: object
+    measure-deployment-availability:
+      kind: tool
+      dependsOn: [pick-resolved-service]
+      config:
+        toolRef: lakerunner.execute-metrics-query
+        arguments:
+          instance: "${inputs.instance}"
+          metric_name: k8s_deployment_available
+          metric_type: gauge
+          filters:
+            service_name: "${nodes.pick-resolved-service.output.name}"
+          aggregation: min
+          start: "${execution.now - inputs.window}"
+          end: "${execution.now}"
+          question: >
+            Minimum available replica count over the health window.
+        timeout: 60s
+      output:
+        schema:
+          type: object
+    measure-pod-uptime:
+      kind: tool
+      dependsOn: [pick-resolved-service]
+      config:
+        toolRef: lakerunner.execute-metrics-query
+        arguments:
+          instance: "${inputs.instance}"
+          metric_name: container_uptime
+          metric_type: gauge
+          filters:
+            service_name: "${nodes.pick-resolved-service.output.name}"
+          group_by: [k8s_pod_name]
+          aggregation: min
+          start: "${execution.now - inputs.window}"
+          end: "${execution.now}"
+          question: >
+            Per-pod container uptime series. Monotonic increase implies
+            no restart; a decrease implies a restart.
+        timeout: 60s
+      output:
+        schema:
+          type: object
+    measure-cpu-utilization:
+      kind: tool
+      dependsOn: [pick-resolved-service]
+      config:
+        toolRef: lakerunner.execute-metrics-query
+        arguments:
+          instance: "${inputs.instance}"
+          metric_name: k8s_container_cpu_limit_utilization
+          metric_type: gauge
+          filters:
+            service_name: "${nodes.pick-resolved-service.output.name}"
+          aggregation: max
+          start: "${execution.now - inputs.window}"
+          end: "${execution.now}"
+          question: >
+            Peak CPU utilization relative to the container limit.
+        timeout: 60s
+      output:
+        schema:
+          type: object
+    measure-memory-utilization:
+      kind: tool
+      dependsOn: [pick-resolved-service]
+      config:
+        toolRef: lakerunner.execute-metrics-query
+        arguments:
+          instance: "${inputs.instance}"
+          metric_name: k8s_container_memory_limit_utilization
+          metric_type: gauge
+          filters:
+            service_name: "${nodes.pick-resolved-service.output.name}"
+          aggregation: max
+          start: "${execution.now - inputs.window}"
+          end: "${execution.now}"
+          question: >
+            Peak memory utilization relative to the container limit.
+        timeout: 60s
+      output:
+        schema:
+          type: object
+    compute-health-summary:
+      kind: function
+      dependsOn:
+        - measure-deployment-availability
+        - measure-pod-uptime
+        - measure-cpu-utilization
+        - measure-memory-utilization
+        - count-logs-by-level
+      config:
+        runtime: nodejs22
+        source: functions/compute-health-summary.mjs
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 10s
+        arguments:
+          deploymentAvailability: "${nodes.measure-deployment-availability.output}"
+          podUptime: "${nodes.measure-pod-uptime.output}"
+          cpuUtilization: "${nodes.measure-cpu-utilization.output}"
+          memoryUtilization: "${nodes.measure-memory-utilization.output}"
+          logsByLevel: "${nodes.count-logs-by-level.output}"
+          minAvailableReplicas: "${inputs.minAvailableReplicas}"
+          cpuLimitPeakThreshold: "${inputs.cpuLimitPeakThreshold}"
+          memoryLimitPeakThreshold: "${inputs.memoryLimitPeakThreshold}"
+      output:
+        schema:
+          type: object
+          required:
+            - overall
+            - signals
+          properties:
+            overall:
+              enum: [healthy, degraded, critical, inconclusive]
+            signals:
+              type: object
+              required:
+                - availability
+                - restarts
+                - cpu
+                - memory
+                - logLevels
+              properties:
+                availability:
+                  type: object
+                  required: [status, minReplicas]
+                restarts:
+                  type: object
+                  required: [status, restartCount, podCount]
+                cpu:
+                  type: object
+                  required: [status, peakUtilization]
+                memory:
+                  type: object
+                  required: [status, peakUtilization]
+                logLevels:
+                  type: object
+                  required: [status, distribution]
+    compute-error-count-reconciliation:
+      kind: function
+      dependsOn:
+        - query-error-overview
+        - count-body-error-terms
+      config:
+        runtime: nodejs22
+        source: functions/compute-error-count-reconciliation.mjs
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 10s
+        arguments:
+          errorOverview: "${nodes.query-error-overview.output}"
+          bodyErrorCount: "${nodes.count-body-error-terms.output}"
+      output:
+        schema:
+          type: object
+          required:
+            - mismatchDetected
+            - totalErrorsReported
+            - bodyMatchesFound
+          properties:
+            mismatchDetected: { type: boolean }
+            totalErrorsReported: { type: number }
+            bodyMatchesFound: { type: number }
+            errorMessageBreakdownPresent: { type: boolean }
+    degraded-condition:
+      kind: condition
+      dependsOn: [compute-health-summary]
+      config:
+        expression: >
+          nodes.compute-health-summary.output.overall != "healthy" &&
+          nodes.compute-health-summary.output.overall != "inconclusive"
+      output:
+        schema:
+          type: boolean
+    reconciliation-mismatch-condition:
+      kind: condition
+      dependsOn: [compute-error-count-reconciliation]
+      config:
+        expression: >
+          nodes.compute-error-count-reconciliation.output.mismatchDetected == true
+      output:
+        schema:
+          type: boolean
+    emit-health-finding:
+      kind: emit
+      dependsOn:
+        - resolve-service
+        - compute-health-summary
+        - degraded-condition
+      when: "${nodes.degraded-condition.output == true}"
+      config:
+        finding:
+          type: service-health-degraded
+          title: "Service ${nodes.pick-resolved-service.output.name} health: ${nodes.compute-health-summary.output.overall}"
+          severityExpression: >
+            nodes.compute-health-summary.output.overall == "critical"
+              ? "critical"
+              : "warning"
+          dedupeKey: "${inputs.instance}:${nodes.pick-resolved-service.output.name}:health"
+          evidence:
+            - "${nodes.compute-health-summary.output}"
+    emit-reconciliation-finding:
+      kind: emit
+      dependsOn:
+        - resolve-service
+        - compute-error-count-reconciliation
+        - reconciliation-mismatch-condition
+      when: "${nodes.reconciliation-mismatch-condition.output == true}"
+      config:
+        finding:
+          type: error-count-reconciliation-mismatch
+          title: "Error count does not reconcile against log body for ${nodes.pick-resolved-service.output.name}"
+          severity: info
+          dedupeKey: "${inputs.instance}:${nodes.pick-resolved-service.output.name}:reconciliation"
+          evidence:
+            - "${nodes.query-error-overview.output}"
+            - "${nodes.count-body-error-terms.output}"
+            - "${nodes.compute-error-count-reconciliation.output}"
+  outputs:
+    healthReport:
+      value:
+        service: "${nodes.pick-resolved-service.output.name}"
+        overall: "${nodes.compute-health-summary.output.overall}"
+        signals: "${nodes.compute-health-summary.output.signals}"
+        errorReconciliation: "${nodes.compute-error-count-reconciliation.output}"
+    healthFinding:
+      value: "${nodes.emit-health-finding.output}"
+      required: false
+    reconciliationFinding:
+      value: "${nodes.emit-reconciliation-finding.output}"
+      required: false
+  execution:
+    concurrency: 4
+    failureMode: continue-independent
+    defaultTimeout: 5m
+    maxCost:
+      toolCalls: 15
+    deterministicReplay:
+      supported: true

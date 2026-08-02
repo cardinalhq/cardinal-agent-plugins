@@ -1,0 +1,499 @@
+apiVersion: mechanize.dev/v1alpha1
+kind: Sentinel
+metadata:
+  name: log-event-root-cause-from-code
+  version: 0.1.0
+  createdBy:
+    type: agent-session
+    captureId: session-93710745-d81f-4c90-897a-8b4e1f50b721
+  labels:
+    domain: reliability
+    procedure: code-archaeology-root-cause
+spec:
+  purpose:
+    summary: >
+      Given a single production ERROR log event, locate the source-code
+      site that emits its message, trace the call chain backward far enough
+      to identify the triggering condition, optionally corroborate against
+      recent live logs, and produce a root-cause explanation citing
+      concrete file:line references.
+    conclusionType: root-cause-code-explanation
+    reusableQuestion: >
+      Why does this specific error log message fire, what code path emits
+      it, and what upstream event causes that code path to execute?
+  inputs:
+    logEvent:
+      type: object
+      required: true
+      description: >
+        Concrete event to investigate. Must carry at minimum: message
+        (verbatim string as emitted), service_name, timestamp, and
+        labels (map<string,string>) which may contain an inner-error
+        phrase under labels.err.
+      constraints:
+        requiredProperties: [message, service_name, timestamp, labels]
+    serviceRepoMap:
+      type: object
+      required: true
+      description: >
+        Operator-supplied mapping service_name -> local code repo path.
+        Bound at execution time. The Sentinel refuses to run if the
+        target service has no entry (see §32: judgment about which repo
+        backs which service is a binding-time responsibility, not a
+        runtime LLM guess).
+      constraints:
+        additionalProperties:
+          type: string
+    telemetryInstance:
+      type: string
+      required: false
+      description: >
+        Optional telemetry instance to query for live-log corroboration.
+        If null, live-log corroboration is skipped and the DAG delivers
+        a code-only diagnosis.
+    logLookbackWindow:
+      type: duration
+      default: 30m
+    logLookforwardWindow:
+      type: duration
+      default: 5m
+    maxCallChainHops:
+      type: integer
+      default: 2
+      constraints:
+        minimum: 1
+        maximum: 5
+  capabilities:
+    required:
+      - id: bash.grep
+        capabilityType: tool
+      - id: bash.cat
+        capabilityType: tool
+    optional:
+      - id: telemetry.execute_logs_query
+        capabilityType: tool
+  variationPoints:
+    - path: /spec/inputs/logEvent
+      operations: [bind]
+    - path: /spec/inputs/serviceRepoMap
+      operations: [bind]
+    - path: /spec/inputs/telemetryInstance
+      operations: [bind]
+    - path: /spec/inputs/maxCallChainHops/default
+      operations: [replace]
+    - path: /spec/nodes/query-corroborating-logs/config/toolRef
+      operations: [replace-binding]
+    - path: /spec/nodes/synthesize-root-cause/config/modelPolicy
+      operations: [replace]
+    - extensionPoint: before-emit-finding
+      operations: [insert-node]
+      note: >
+        Reserved for Variations that want to insert an ask_human node to
+        ratify the code-derived hypothesis before emission (see §14a).
+        Not embedded in the base Sentinel to keep unattended execution
+        possible; see rationale §"Ask-human considered".
+  nodes:
+    resolve-target-service-repo:
+      kind: function
+      dependsOn: []
+      config:
+        runtime: python3
+        source: functions/resolve-target-service-repo.py
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 5s
+        arguments:
+          logEvent: "${inputs.logEvent}"
+          serviceRepoMap: "${inputs.serviceRepoMap}"
+      output:
+        schema:
+          type: object
+          required: [serviceName, repoPath]
+          properties:
+            serviceName: { type: string }
+            repoPath:    { type: string }
+    extract-inner-error-phrase:
+      kind: function
+      dependsOn: []
+      config:
+        runtime: python3
+        source: functions/extract-inner-error-phrase.py
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 5s
+        arguments:
+          logEvent: "${inputs.logEvent}"
+      output:
+        schema:
+          type: object
+          required: [innerErrorPhrase, wrapperPrefixes]
+          properties:
+            innerErrorPhrase:
+              type: string
+              description: >
+                Atomic inner-error text with counts, worker IDs, and other
+                per-event runtime identifiers stripped. Empty string when
+                no inner-error phrase can be extracted.
+            wrapperPrefixes:
+              type: array
+              items: { type: string }
+              description: >
+                Constant prefix strings that wrap the inner phrase in the
+                emitted message (e.g. "worker-batch (N segments) dispatch:").
+                Used as additional grep targets when the outer message is
+                a runtime format string.
+    grep-outer-message:
+      kind: tool
+      dependsOn: [resolve-target-service-repo]
+      config:
+        toolRef: bash.grep
+        arguments:
+          command: >
+            grep -rn ${quote(inputs.logEvent.message)}
+              --include="*.go"
+              ${nodes.resolve-target-service-repo.output.repoPath}
+        timeout: 30s
+      output:
+        schema:
+          type: array
+          items:
+            type: object
+            required: [file, line, snippet]
+    grep-wrapper-prefixes:
+      kind: tool
+      dependsOn: [resolve-target-service-repo, extract-inner-error-phrase]
+      when: "${length(nodes.extract-inner-error-phrase.output.wrapperPrefixes) > 0}"
+      config:
+        toolRef: bash.grep
+        arguments:
+          command: >
+            grep -rn ${join(nodes.extract-inner-error-phrase.output.wrapperPrefixes, "\\|") | quote}
+              --include="*.go"
+              ${nodes.resolve-target-service-repo.output.repoPath}
+        timeout: 30s
+      output:
+        schema:
+          type: array
+    grep-inner-error:
+      kind: tool
+      dependsOn: [resolve-target-service-repo, extract-inner-error-phrase]
+      when: "${nodes.extract-inner-error-phrase.output.innerErrorPhrase != ''}"
+      config:
+        toolRef: bash.grep
+        arguments:
+          command: >
+            grep -rn ${quote(nodes.extract-inner-error-phrase.output.innerErrorPhrase)}
+              --include="*.go"
+              ${nodes.resolve-target-service-repo.output.repoPath}
+        timeout: 30s
+      output:
+        schema:
+          type: array
+    select-primary-hits:
+      kind: function
+      dependsOn: [grep-outer-message, grep-wrapper-prefixes, grep-inner-error]
+      config:
+        runtime: python3
+        source: functions/select-primary-hits.py
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 5s
+        arguments:
+          outerHits:   "${nodes.grep-outer-message.output}"
+          wrapperHits: "${nodes.grep-wrapper-prefixes.output}"
+          innerHits:   "${nodes.grep-inner-error.output}"
+      output:
+        schema:
+          type: object
+          required: [emissionSites, mintSites]
+          properties:
+            emissionSites:
+              type: array
+              items:
+                type: object
+                required: [file, line]
+            mintSites:
+              type: array
+              items:
+                type: object
+                required: [file, line]
+    read-emission-contexts:
+      kind: tool
+      dependsOn: [select-primary-hits]
+      config:
+        toolRef: bash.cat
+        arguments:
+          command: >
+            for h in ${format(nodes.select-primary-hits.output.emissionSites, "%s:%d")}; do
+              file=${h.split(":")[0]};
+              line=${h.split(":")[1]};
+              echo "----- $file:$line -----";
+              sed -n "$((line-40)),$((line+40))p" "$file";
+            done
+        timeout: 15s
+      output:
+        schema:
+          type: object
+          required: [snippets]
+    read-mint-contexts:
+      kind: tool
+      dependsOn: [select-primary-hits]
+      when: "${length(nodes.select-primary-hits.output.mintSites) > 0}"
+      config:
+        toolRef: bash.cat
+        arguments:
+          command: >
+            for h in ${format(nodes.select-primary-hits.output.mintSites, "%s:%d")}; do
+              file=${h.split(":")[0]};
+              line=${h.split(":")[1]};
+              echo "----- $file:$line -----";
+              sed -n "$((line-40)),$((line+40))p" "$file";
+            done
+        timeout: 15s
+      output:
+        schema:
+          type: object
+          required: [snippets]
+    identify-enclosing-symbols:
+      kind: function
+      dependsOn: [read-emission-contexts, read-mint-contexts]
+      config:
+        runtime: python3
+        source: functions/identify-enclosing-symbols.py
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 10s
+        arguments:
+          emissionSnippets: "${nodes.read-emission-contexts.output.snippets}"
+          mintSnippets:     "${nodes.read-mint-contexts.output.snippets}"
+      output:
+        schema:
+          type: object
+          required: [symbolNames]
+          properties:
+            symbolNames:
+              type: array
+              items: { type: string }
+              description: >
+                Function/method names surrounding the emission and mint
+                sites, extracted by textual match against a Go-specific
+                regex (v0 scope: Go only).
+    trace-callers:
+      kind: tool
+      dependsOn: [resolve-target-service-repo, identify-enclosing-symbols]
+      config:
+        toolRef: bash.grep
+        arguments:
+          command: >
+            grep -rn ${join(nodes.identify-enclosing-symbols.output.symbolNames, "\\|") | quote}
+              --include="*.go"
+              ${nodes.resolve-target-service-repo.output.repoPath}
+        timeout: 30s
+      output:
+        schema:
+          type: array
+    read-caller-contexts:
+      kind: function
+      dependsOn: [trace-callers]
+      config:
+        runtime: python3
+        source: functions/read-caller-contexts.py
+        entrypoint: run
+        network: disabled
+        filesystem: readonly
+        timeout: 15s
+        arguments:
+          hits:    "${nodes.trace-callers.output}"
+          maxHops: "${inputs.maxCallChainHops}"
+      output:
+        schema:
+          type: object
+          required: [callerSnippets]
+    query-corroborating-logs:
+      kind: tool
+      dependsOn: [resolve-target-service-repo, extract-inner-error-phrase]
+      when: "${inputs.telemetryInstance != null}"
+      config:
+        toolRef: telemetry.execute_logs_query
+        arguments:
+          instance: "${inputs.telemetryInstance}"
+          query: >-
+            {service_name=~"${nodes.resolve-target-service-repo.output.serviceName}.*"}
+            |~ "(?i)${nodes.extract-inner-error-phrase.output.innerErrorPhrase}"
+          start: "${inputs.logEvent.timestamp - inputs.logLookbackWindow}"
+          end:   "${inputs.logEvent.timestamp + inputs.logLookforwardWindow}"
+        timeout: 60s
+        retry:
+          maxAttempts: 1
+      output:
+        schema:
+          type: object
+          required: [status, matchCount, sampleMatches]
+          properties:
+            status:
+              enum: [matched, empty, unavailable]
+            matchCount:   { type: integer }
+            sampleMatches:
+              type: array
+              maxItems: 20
+    synthesize-root-cause:
+      kind: llm
+      dependsOn:
+        - read-emission-contexts
+        - read-mint-contexts
+        - read-caller-contexts
+        - query-corroborating-logs
+      config:
+        task: >
+          Given the emission-site snippets, the mint-site snippets (if
+          any), the caller-context snippets, and the live-log corroboration
+          result (if any), state the conditions under which this log
+          message fires. Cite specific file:line locations from the
+          supplied snippets only — do not invent references. Return
+          classification "explained" when the code trace fully accounts
+          for the error, "partial" when the trace explains part but a
+          gap remains, "inconclusive" otherwise.
+        modelPolicy: analytical-medium
+        maxInputTokens: 20000
+        maxOutputTokens: 2500
+        temperature: 0
+        evidence:
+          logEvent:            "${inputs.logEvent}"
+          emissionContexts:    "${nodes.read-emission-contexts.output.snippets}"
+          mintContexts:        "${nodes.read-mint-contexts.output.snippets}"
+          callerContexts:      "${nodes.read-caller-contexts.output.callerSnippets}"
+          liveLogsCorroboration: "${nodes.query-corroborating-logs.output}"
+        outputSchema:
+          type: object
+          required:
+            - classification
+            - confidence
+            - rootCauseSummary
+            - triggeringConditions
+            - codeReferences
+            - liveLogSupport
+          properties:
+            classification:
+              enum: [explained, partial, inconclusive]
+            confidence:
+              type: number
+              minimum: 0
+              maximum: 1
+            rootCauseSummary:
+              type: string
+            triggeringConditions:
+              type: array
+              items: { type: string }
+            codeReferences:
+              type: array
+              items:
+                type: object
+                required: [file, line, role]
+                properties:
+                  file: { type: string }
+                  line: { type: integer }
+                  role:
+                    enum: [emission-site, mint-site, caller, event-source]
+            liveLogSupport:
+              enum: [supports, refutes, absent]
+      judgmentJustification:
+        kind: llm
+        deterministicAlternativeConsidered: true
+        reasonRejected: >
+          The source investigation's central act was synthesizing a
+          causal chain across three code files that use different
+          identifiers, wrapper types, and error-formatting styles. A
+          deterministic rule set would have to encode the language, the
+          calling conventions, the error-wrapping idioms, and the mapping
+          from "what fires" to "why" for every codebase this Sentinel
+          may run against. That is not mechanizable at v0. What IS
+          deterministic (grep, context reading, symbol extraction) is
+          already function/tool nodes above; the LLM is scoped to the
+          irreducible synthesis over those outputs.
+        delegationSafetyConsidered:
+          autonomousDelegationAcceptable: true
+          reason: >
+            Downstream consumers are read-only: emit-finding produces a
+            finding, no remediation. A wrong classification yields a
+            wrong finding, not a destructive action. §32 rule 2 (b) is
+            satisfied. Operators who want a ratification gate should
+            insert an ask_human node at the declared extension point
+            before-emit-finding via a Variation.
+    emit-finding:
+      kind: emit
+      dependsOn: [synthesize-root-cause, resolve-target-service-repo]
+      when: "${nodes.synthesize-root-cause.output.classification != 'inconclusive'}"
+      config:
+        finding:
+          type: log-event-root-cause
+          title: >
+            Root cause for '${inputs.logEvent.message}'
+            in ${nodes.resolve-target-service-repo.output.serviceName}
+          severityExpression: >
+            nodes.synthesize-root-cause.output.classification == "explained"
+              ? "info"
+              : "warning"
+          dedupeKey: >
+            ${nodes.resolve-target-service-repo.output.serviceName}
+            :${inputs.logEvent.message}
+          evidence:
+            - "${nodes.synthesize-root-cause.output}"
+            - "${nodes.query-corroborating-logs.output}"
+  outputs:
+    rootCause:
+      value: "${nodes.synthesize-root-cause.output}"
+      required: true
+    finding:
+      value: "${nodes.emit-finding.output}"
+      required: false
+  execution:
+    concurrency: 2
+    failureMode: continue-independent
+    defaultTimeout: 4m
+    maxCost:
+      llmTokens: 30000
+      toolCalls: 25
+    deterministicReplay:
+      supported: true
+  provenance:
+    captureId: session-93710745-d81f-4c90-897a-8b4e1f50b721
+    retainedSteps:
+      - tool-use-1   # grep outer message
+      - tool-use-2   # grep inner phrase ("no workers available for reassignment")
+      - tool-use-3   # grep wrapper ("worker-batch")
+      - tool-use-4   # Read workmanager/manager.go (emission context)
+      - tool-use-13  # Read core/workcoord/coordinator.go
+      - tool-use-16  # Read core/workcoord/assignment.go
+      - tool-use-17  # Read queryapi/metrics_evaluator.go
+      - tool-use-18  # Read queryapi/pushdown_artifact.go
+      - tool-use-20  # Read workmanager/manager.go (deeper)
+      - tool-use-21  # Read core/workcoord/worker_state.go
+      - tool-use-23  # Read workmanager/manager.go (HandleWorkerDisconnected)
+      - tool-use-25  # Read streammanager/manager.go (caller)
+      - tool-use-27  # execute_logs_query on cardinalhq (instance-required error)
+      - tool-use-29  # execute_logs_query on prod (empty)
+      - tool-use-30  # execute_logs_query on prod (worker ID trace, empty)
+      - tool-use-32  # execute_logs_query on prod (frequency probe, empty)
+    omittedSteps:
+      - id: tool-uses-5-12
+        reason: exploratory-micro-probes-collapsed-into-trace-callers
+      - id: tool-use-15
+        reason: collapsed-into-trace-callers
+      - id: tool-use-19
+        reason: collapsed-into-identify-enclosing-symbols
+      - id: tool-use-22
+        reason: collapsed-into-trace-callers
+      - id: tool-use-24
+        reason: collapsed-into-trace-callers
+      - id: tool-use-26
+        reason: tool-search-meta
+      - id: tool-use-28
+        reason: tool-search-meta
+      - id: tool-use-31
+        reason: exploratory-probe-single-worker-id-not-generalizable
+      - id: tool-uses-33-98
+        reason: task-execution-phase-not-part-of-investigation

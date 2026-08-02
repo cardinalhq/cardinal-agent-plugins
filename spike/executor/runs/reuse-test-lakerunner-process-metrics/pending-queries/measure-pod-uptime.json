@@ -1,0 +1,18 @@
+{
+  "toolRef": "observability.query-metrics",
+  "arguments": {
+    "instance": "prod",
+    "metric_name": "container_uptime",
+    "metric_type": "gauge",
+    "filters": {
+      "service_name": null
+    },
+    "group_by": [
+      "k8s_pod_name"
+    ],
+    "aggregation": "min",
+    "start": "2026-08-01T19:18:33Z",
+    "end": "2026-08-02T01:18:33Z",
+    "question": "Per-pod container uptime series. Monotonic increase implies no restart; a decrease implies a restart.\n"
+  }
+}

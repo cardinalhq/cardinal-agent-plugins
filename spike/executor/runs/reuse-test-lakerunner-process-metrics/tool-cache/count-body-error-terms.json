@@ -1,0 +1,8 @@
+{
+  "deadend": true,
+  "query_info": {
+    "query": "sum(count_over_time({service_name=\"lakerunner-process-metrics\"} |~ \"(?i)(error|panic|fatal|failed|failure)\"[5m]))",
+    "start": "now-6h",
+    "end": "now"
+  }
+}

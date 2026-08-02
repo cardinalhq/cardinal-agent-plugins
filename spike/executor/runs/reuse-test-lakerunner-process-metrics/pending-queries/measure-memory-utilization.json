@@ -1,0 +1,15 @@
+{
+  "toolRef": "observability.query-metrics",
+  "arguments": {
+    "instance": "prod",
+    "metric_name": "k8s_container_memory_limit_utilization",
+    "metric_type": "gauge",
+    "filters": {
+      "service_name": null
+    },
+    "aggregation": "max",
+    "start": "2026-08-01T19:18:33Z",
+    "end": "2026-08-02T01:18:33Z",
+    "question": "Peak memory utilization relative to the container limit.\n"
+  }
+}

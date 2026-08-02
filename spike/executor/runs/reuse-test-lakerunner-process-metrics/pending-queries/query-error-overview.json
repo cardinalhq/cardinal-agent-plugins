@@ -1,0 +1,10 @@
+{
+  "toolRef": "observability.error-overview",
+  "arguments": {
+    "instance": "prod",
+    "services": [
+      null
+    ],
+    "skip_lookback": true
+  }
+}

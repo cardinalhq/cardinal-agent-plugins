@@ -1,0 +1,9 @@
+{
+  "toolRef": "observability.list-services",
+  "arguments": {
+    "instance": "prod",
+    "filters": {
+      "service_name": "lakerunner-process-metrics"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "toolRef": "observability.query-metrics",
+  "arguments": {
+    "instance": "prod",
+    "expression": "avg by (action, level)\n  (lakerunner_worklane_claim_wait_ms{service_name=\"lakerunner-process-logs\",\n                        signal=\"logs\"})\n",
+    "start": "2026-08-01T21:06:27Z",
+    "end": "2026-08-02T00:06:27Z",
+    "question": "dimensional integrity check for lakerunner_worklane_claim_wait_ms grouped by action, level\n"
+  }
+}

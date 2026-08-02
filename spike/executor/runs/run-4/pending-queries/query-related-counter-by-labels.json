@@ -1,0 +1,10 @@
+{
+  "toolRef": "observability.query-metrics",
+  "arguments": {
+    "instance": "prod",
+    "expression": "sum by (action, level, trigger)\n  (rate(lakerunner_worklane_claim_trigger{\n    service_name=\"lakerunner-process-logs\",\n    signal=\"logs\"}[5m]))\n",
+    "start": "2026-08-01T21:08:29Z",
+    "end": "2026-08-02T00:08:29Z",
+    "question": "trigger-label distribution for lakerunner_worklane_claim_trigger\n"
+  }
+}
