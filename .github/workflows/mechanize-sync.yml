@@ -1,0 +1,66 @@
+name: Mechanize skill sync + release gate
+
+# Two guards for the mechanize skill:
+#
+#   1. check-sync — the shared files (sentinels.md, FINDINGS.md, CORE.md)
+#      must be byte-identical across every adapter's skills/mechanize/,
+#      because each adapter is distributed as a self-contained plugin.
+#      build/sync_mechanize.py is the source of truth; --check mode fails
+#      on drift.
+#
+#   2. release-gate (PR-only) — a mechanize source change must be
+#      accompanied by a plugin.json version bump for every affected
+#      adapter. Otherwise release-mirrors.yml (which watches plugin.json
+#      changes) will not fire and users will not receive the new
+#      mechanize files. build/check_mechanize_release.py enforces this.
+
+on:
+  pull_request:
+    paths:
+      - "sentinels.md"
+      - "common/mechanize/**"
+      - "adapters/*/skills/mechanize/**"
+      - "adapters/*/.claude-plugin/plugin.json"
+      - "adapters/*/.codex-plugin/plugin.json"
+      - "adapters/*/.cursor-plugin/plugin.json"
+      - "adapters/*/.gemini-plugin/plugin.json"
+      - "build/sync_mechanize.py"
+      - "build/check_mechanize_release.py"
+      - ".github/workflows/mechanize-sync.yml"
+  push:
+    branches: [main]
+    paths:
+      - "sentinels.md"
+      - "common/mechanize/**"
+      - "adapters/*/skills/mechanize/**"
+      - "build/sync_mechanize.py"
+      - ".github/workflows/mechanize-sync.yml"
+  workflow_dispatch:
+
+jobs:
+  check-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify mechanize shared files are in sync across adapters
+        run: python3 build/sync_mechanize.py --check
+
+  release-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch enough history to diff against the PR base.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify mechanize changes ship with plugin.json version bumps
+        run: |
+          python3 build/check_mechanize_release.py \
+            --base "origin/${{ github.base_ref }}" \
+            --head "${{ github.event.pull_request.head.sha }}"
