@@ -473,15 +473,32 @@ def coerce_inputs(spec: dict, raw_inputs: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def load_function(source: str) -> Callable[[dict], dict]:
-    src_path = (Path(__file__).parent / source.replace("-", "_")).resolve()
-    if not src_path.exists():
-        # Try the literal path (in case the compiler used dashes intentionally).
-        alt = (Path(__file__).parent / source).resolve()
-        if alt.exists():
-            src_path = alt
-        else:
-            raise DagValidationError(f"function source not found: {source}")
+def load_function(source: str, sentinel_dir: Path) -> Callable[[dict], dict]:
+    """Load a function-node body relative to the Sentinel's directory.
+
+    A Sentinel ships as a directory: `sentinel.yaml` plus `functions/<id>.py`
+    files that its nodes reference via `source: functions/<id>.py`. The Sentinel
+    is self-contained on disk. The executor resolves `source` under sentinel_dir
+    (falling back to its own directory only for legacy/spike Sentinels whose
+    functions live next to executor.py).
+    """
+    # Preferred: sibling to the Sentinel's YAML.
+    candidates: list[Path] = [
+        (sentinel_dir / source.replace("-", "_")).resolve(),
+        (sentinel_dir / source).resolve(),
+    ]
+    # Legacy: functions bundled with the executor (pre-self-contained Sentinels).
+    executor_dir = Path(__file__).parent
+    candidates.extend([
+        (executor_dir / source.replace("-", "_")).resolve(),
+        (executor_dir / source).resolve(),
+    ])
+    src_path = next((p for p in candidates if p.exists()), None)
+    if src_path is None:
+        raise DagValidationError(
+            f"function source not found: {source} "
+            f"(looked in {sentinel_dir} and {executor_dir})"
+        )
     spec = importlib_util.spec_from_file_location(src_path.stem, src_path)
     assert spec and spec.loader
     module = importlib_util.module_from_spec(spec)
@@ -639,7 +656,7 @@ def execute(
         })
 
         try:
-            output = _run_node(node_id, node, env, run_dir, plan_only=plan_only)
+            output = _run_node(node_id, node, env, run_dir, plan_only=plan_only, sentinel_dir=sentinel_path.parent)
         except capabilities.MissingCacheError as e:
             node_states[node_id] = "FAILED"
             node_errors[node_id] = f"missing tool cache: {e.cache_path}"
@@ -750,7 +767,7 @@ def _write_audit(audit_path: Path, node_id: str, node_spec: dict, state: str, ou
         f.write(json.dumps(rec, default=_json_default) + "\n")
 
 
-def _run_node(node_id: str, node: dict, env: _Env, run_dir: Path, plan_only: bool) -> Any:
+def _run_node(node_id: str, node: dict, env: _Env, run_dir: Path, plan_only: bool, sentinel_dir: Path) -> Any:
     kind = node.get("kind")
     config = node.get("config") or {}
     if kind == "tool":
@@ -767,7 +784,7 @@ def _run_node(node_id: str, node: dict, env: _Env, run_dir: Path, plan_only: boo
         return binding(node_id, args, run_dir)
     if kind == "function":
         args = render_deep(config.get("arguments") or {}, env)
-        entry = load_function(config["source"])
+        entry = load_function(config["source"], sentinel_dir)
         return entry(args)
     if kind == "condition":
         expr = config.get("expression") or ""
