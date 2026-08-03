@@ -381,10 +381,96 @@ so downstream tools (executor, PR review, matcher) know not to silently trust th
 Write these files to `OUT_DIR`:
 
 1. `sentinel.yaml` — the final Sentinel candidate.
-2. `rationale.md` — for each retained node: which tool_use ordinal(s) it derived from, why this node kind, what was preserved verbatim, what was generalized, what was guessed. Also list every tool call NOT retained with its classification and rationale. Include an `Attachment handling` subsection per Stage 4.5 and a `Code-reading option chosen` subsection per Stage 2.5.
-3. `audit.jsonl` — per §47, one entry per capture event with the compiler's decision. Skip if too expensive — but the rationale.md is mandatory.
+2. `functions/<node-id>.py` — one file per function node in the DAG. See "Function-body emission" below for how to fill each one.
+3. `rationale.md` — for each retained node: which tool_use ordinal(s) it derived from, why this node kind, what was preserved verbatim, what was generalized, what was guessed. Also list every tool call NOT retained with its classification and rationale. Include an `Attachment handling` subsection per Stage 4.5 and a `Code-reading option chosen` subsection per Stage 2.5. For each function node, name in the rationale whether its body was **generated** (M-pattern impl) or is a **stub** (operator must fill in).
+4. `audit.jsonl` — per §47, one entry per capture event with the compiler's decision. Skip if too expensive — but the rationale.md is mandatory.
 
-At the end, tell the user (a) where you wrote the files, (b) the top-line summary (node count by kind, procedure signature), (c) what you refused to compile and why (task-execution phases, mixed-phase splits), (d) the largest single judgment call you had to make.
+**Function-body emission rules.** The Sentinel ships as a directory, not a single file — every `source: functions/<node-id>.py` reference must resolve to a real file next to `sentinel.yaml`. The executor loads them by re-rooting `source` at the Sentinel's directory (per `spike/executor/executor.py load_function`).
+
+For each function node, pick one:
+
+**Generated body (M1 / M2 / M3 patterns only).** If Stage 3.5 tagged the node with an M-pattern, emit the reference implementation below verbatim. These bodies are pattern-defined, small, and provably deterministic — generating them is honest, not speculation. Every generated file MUST begin with a header comment naming the M-pattern and the source-session ordinal(s) it derived from, so a reviewer can audit against the rationale.
+
+- **M1 series-statistic-reduction** (`def summarize_series(points, stats) -> dict`):
+
+  ```python
+  # Generated: M1 series-statistic-reduction from tool_call ordinal <N>
+  from statistics import mean
+
+  def run(args):
+      points = args["points"]
+      stats = args["stats"]
+      out = {}
+      for s in stats:
+          if s == "peak":       out[s] = max(points) if points else None
+          elif s == "min":      out[s] = min(points) if points else None
+          elif s == "avg":      out[s] = mean(points) if points else None
+          elif s == "p95":      out[s] = _quantile(points, 0.95)
+          elif s == "p99":      out[s] = _quantile(points, 0.99)
+          elif s == "monotonic": out[s] = all(a <= b for a, b in zip(points, points[1:]))
+          else: raise ValueError(f"unknown stat: {s}")
+      return out
+
+  def _quantile(xs, q):
+      if not xs: return None
+      s = sorted(xs)
+      i = min(int(q * (len(s) - 1) + 0.5), len(s) - 1)
+      return s[i]
+  ```
+
+- **M2 cross-source-quantity-reconciliation** (`def reconcile_counts(source_a, source_b, subject) -> dict`):
+
+  ```python
+  # Generated: M2 cross-source-quantity-reconciliation from tool_call ordinals <N>, <M>
+  def run(args):
+      a = _extract_count(args["source_a"])
+      b = _extract_count(args["source_b"])
+      subject = args["subject"]
+      agrees = (a is not None and b is not None and a == b)
+      delta = (a - b) if (a is not None and b is not None) else None
+      explain = f"{subject}: source_a={a}, source_b={b}, " + ("match" if agrees else f"delta={delta}")
+      return {"agrees": agrees, "delta": delta, "explain": explain}
+
+  def _extract_count(source):
+      if source is None: return None
+      if isinstance(source, (int, float)): return source
+      if isinstance(source, dict):
+          for k in ("count", "total", "n"):
+              if k in source: return source[k]
+      if isinstance(source, list): return len(source)
+      return None
+  ```
+
+- **M3 json-field-extract-and-carry** (`def pick_field(response, path) -> Any`):
+
+  ```python
+  # Generated: M3 json-field-extract-and-carry from tool_call ordinal <N>
+  def run(args):
+      cur = args["response"]
+      for seg in args["path"].split("."):
+          if seg == "": continue
+          if seg.endswith("]"):
+              key, _, idx = seg[:-1].partition("[")
+              if key: cur = cur[key]
+              cur = cur[int(idx)]
+          else:
+              cur = cur[seg] if isinstance(cur, dict) else getattr(cur, seg)
+      return cur
+  ```
+
+**Stub body (all other function nodes).** For any function node §32 selected as `function` outside the M-patterns — genuine operator transformations the compiler couldn't pattern-match — emit a stub the operator must fill in:
+
+```python
+# STUB: fill in the body. This node was classified as `function` by CORE.md §32
+# selection (deterministic transformation), not by Stage 3.5 mechanization (no
+# M-pattern matched). See rationale.md for the operator's original judgment.
+def run(args):
+    raise NotImplementedError("fill in <node-id>: <one-line paraphrase of what this node computes>")
+```
+
+The stub body MUST include the node-id and the one-line paraphrase — otherwise a reviewer opening a directory of stubs has no way to prioritize which to implement first.
+
+At the end, tell the user (a) where you wrote the files (Sentinel directory), (b) the top-line summary (node count by kind, procedure signature), (c) how many function bodies were **generated** vs how many are **stubs** requiring operator fill-in, (d) what you refused to compile and why (task-execution phases, mixed-phase splits), (e) the largest single judgment call you had to make.
 
 ## Known capability registry
 
