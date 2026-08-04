@@ -271,19 +271,25 @@ def main() -> int:
         )
         return 1
 
-    # Best-effort enable auto-merge so the PR lands when required checks
-    # pass without a human squash click. Silently fine if the repo doesn't
-    # allow auto-merge — falls back to the human merging the printed PR.
+    # Merge strategy: try immediate squash first. Mirror repos have no
+    # required status checks (release-mirrors.yml already ran the tests
+    # before this step), so the PR is instantly mergeable. `gh pr merge
+    # --auto` is designed to wait for required checks and is flaky when
+    # there's nothing to wait for — sometimes silently no-ops leaving the
+    # PR open. Fall back to `--auto` only if immediate merge fails, and
+    # then to human intervention if that fails too.
     try:
-        run(["gh", "pr", "merge", pr_url, "--auto", "--squash"], cwd=clone)
-        print(f"{adapter}: auto-merge enabled on {pr_url}")
+        run(["gh", "pr", "merge", pr_url, "--squash"], cwd=clone)
+        print(f"{adapter}: merged immediately: {pr_url}")
     except subprocess.CalledProcessError:
-        # No annotation — this is expected on repos that don't allow
-        # auto-merge; the PR still exists and is mergeable manually.
-        print(
-            f"{adapter}: auto-merge not enabled (repo may not allow it); "
-            f"land the PR manually: {pr_url}"
-        )
+        try:
+            run(["gh", "pr", "merge", pr_url, "--auto", "--squash"], cwd=clone)
+            print(f"{adapter}: auto-merge enabled on {pr_url}")
+        except subprocess.CalledProcessError:
+            print(
+                f"{adapter}: neither immediate merge nor auto-merge succeeded; "
+                f"land the PR manually: {pr_url}"
+            )
 
     return 0
 

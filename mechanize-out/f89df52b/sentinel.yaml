@@ -109,7 +109,7 @@ spec:
       kind: function
       dependsOn: [resolve-service]
       config:
-        runtime: nodejs22
+        runtime: python3.12
         source: functions/pick-resolved-service.py
         entrypoint: run
         network: disabled
@@ -265,7 +265,7 @@ spec:
         - measure-memory-utilization
         - count-logs-by-level
       config:
-        runtime: nodejs22
+        runtime: python3.12
         source: functions/compute-health-summary.py
         entrypoint: run
         network: disabled
@@ -319,7 +319,7 @@ spec:
         - query-error-overview
         - count-body-error-terms
       config:
-        runtime: nodejs22
+        runtime: python3.12
         source: functions/compute-error-count-reconciliation.py
         entrypoint: run
         network: disabled
