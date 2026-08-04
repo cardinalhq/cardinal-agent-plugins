@@ -1,0 +1,48 @@
+name: Sentinel lint
+
+# Fires on PRs that touch Sentinels themselves, the schemas/registry they lint
+# against, the lint code, or the Action wrapper. Push-to-main runs the same
+# check so a merge always leaves main in a passing state.
+on:
+  pull_request:
+    paths:
+      - 'mechanize-out/**'
+      - 'common/deployment-schema.yaml'
+      - 'common/capabilities-registry.yaml'
+      - 'common/mechanize/**'
+      - 'spike/executor/lint*.py'
+      - '.github/actions/sentinel-lint/**'
+      - '.github/workflows/sentinel-lint.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'mechanize-out/**'
+      - 'common/deployment-schema.yaml'
+      - 'common/capabilities-registry.yaml'
+      - 'common/mechanize/**'
+      - 'spike/executor/lint*.py'
+      - '.github/actions/sentinel-lint/**'
+      - '.github/workflows/sentinel-lint.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint checked-in Sentinels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run sentinel-lint
+        # Use the LOCAL Action so a PR that changes the wrapper is tested
+        # by its own version (no chicken-and-egg on main).
+        uses: ./.github/actions/sentinel-lint
+        with:
+          paths: 'mechanize-out/*/'
+          check: all
+          # Pin lint code to the PR head (falls back to the pushed SHA on
+          # push events) so the wrapper and the lint CLI it invokes ship
+          # together within one PR.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
