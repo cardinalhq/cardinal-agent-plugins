@@ -1,0 +1,52 @@
+schemaVersion: mechanize.dev/v1alpha1
+kind: CapabilitiesRegistry
+
+# Registered abstract capabilities. `fixture` is a universally-admitted
+# provider variant for every capability (used by tests and pinned-fixture
+# staging). Remote-mode Sentinels using `provider: fixture` FAIL sentinel-lint
+# R10 unless `execution.allowFixtures: true`.
+capabilities:
+  observability.list-services:
+    providers: [lakerunner]
+  observability.query-metrics:
+    providers: [lakerunner, prometheus]
+  observability.query-logs:
+    providers: [lakerunner]
+  observability.error-overview:
+    providers: [lakerunner]
+  code.grep:
+    providers: [github-checkout, gitlab-checkout]
+  code.read:
+    providers: [github-checkout, gitlab-checkout]
+
+  # LLM capabilities live under capabilities.llm.<subclass>.
+  # R10 and R13 look them up the same way as tool capabilities.
+  llm.analytical-small:
+    providers: [claude-haiku-4-5, gemini-flash-2]
+  llm.analytical-large:
+    providers: [claude-opus-5, claude-sonnet-5]
+
+integrations:
+  runtime:
+    - id: k8s-controller
+      allowsBlockUntilAnswered: true
+    - id: ci-plugin
+      allowsBlockUntilAnswered: false
+      maxWallClockHours: 6
+    - id: daemon                   # Phase 2's long-running service form.
+      allowsBlockUntilAnswered: true
+    - id: manual
+      allowsBlockUntilAnswered: true
+  channel:
+    - id: slack.socket-mode
+    - id: cli-prompt               # Phase 1 stdin/stdout for local dev.
+    - id: test.mock                # In-memory driver for pytest; runtime rejects in remote mode.
+    - id: ticket.jira
+    - id: email
+    - id: pagerduty.incident
+  sink:
+    - id: outcomes-dashboard
+    - id: slack
+    - id: pagerduty
+    - id: jira
+    - id: stdout                   # Phase 1 findings sink.

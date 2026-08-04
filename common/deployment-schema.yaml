@@ -1,0 +1,192 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://mechanize.dev/schemas/deployment.yaml"
+title: SentinelDeployment
+description: |
+  Deployment sidecar for a Sentinel — binds abstract capabilities and
+  operator-comms rails to concrete providers/channels for a given target
+  runtime. See runtime-comms-plan v0.2 and sentinel-lint-plan v0.3 for the
+  authoritative shape (this file MUST stay coherent with both plans).
+
+type: object
+required: [schemaVersion, kind, runtime]
+additionalProperties: true
+properties:
+  schemaVersion:
+    type: string
+    const: mechanize.dev/v1alpha1
+  kind:
+    type: string
+    const: SentinelDeployment
+
+  runtime:
+    description: |
+      Integration id — one of `integrations.runtime.*` in
+      capabilities-registry.yaml (k8s-controller | ci-plugin | daemon |
+      manual).
+    type: string
+
+  defaultParserModel:
+    description: |
+      §14a fallback parser model id — must resolve to `capabilities.llm.*`
+      in the registry. Optional; if absent, every `prose-llm-parse` node
+      must set its own `askHumanBindings.<id>.parserModel`.
+    type: string
+
+  askHumanBindings:
+    type: object
+    additionalProperties:
+      type: object
+      additionalProperties: true
+      required: [channel_ref, identity_policy, reply_normalization]
+      properties:
+        channel_ref:
+          type: string
+        channel_params:
+          type: object
+          additionalProperties: true
+        identity_policy:
+          type: object
+          oneOf:
+            - required: [allowedGroups]
+              properties:
+                allowedGroups:
+                  type: array
+                  minItems: 1
+                  items: {type: string}
+              additionalProperties: false
+            - required: [allowedUsers]
+              properties:
+                allowedUsers:
+                  type: array
+                  minItems: 1
+                  items: {type: string}
+              additionalProperties: false
+            - required: [oncallRotation]
+              properties:
+                oncallRotation:
+                  type: string
+              additionalProperties: false
+        reply_normalization:
+          enum: [structured, prose-llm-parse]
+        parserModel:
+          type: string
+        escalation:
+          type: object
+          # When escalation.afterMinutes elapses without a reply, the runtime
+          # publishes to escalation.channel_ref. Original channel still accepts
+          # a first-reply-wins reply.
+          required: [afterMinutes, channel_ref]
+          properties:
+            afterMinutes:
+              type: number
+              # number (not integer) so tests can exercise sub-second escalation.
+              exclusiveMinimum: 0
+            channel_ref:
+              type: string
+            channel_params:
+              # When omitted, runtime defaults to the parent binding's
+              # channel_params — enables "escalate to the same channel" without
+              # duplicating token_ref/channel_id.
+              type: object
+              additionalProperties: true
+          additionalProperties: true
+
+  capabilityBindings:
+    type: object
+    additionalProperties:
+      type: object
+      required: [provider]
+      additionalProperties: true
+      properties:
+        provider: {type: string}
+        credential_ref: {type: string}
+        rate_limit:
+          type: object
+          additionalProperties: true
+        retry:
+          type: object
+          additionalProperties: true
+        side_effect_class:
+          enum: [read-only, mutating]
+
+  inputBindings:
+    type: object
+    additionalProperties:
+      type: object
+      required: [source]
+      additionalProperties: true
+      properties:
+        source: {type: string}
+        maxSizeBytes: {type: integer, minimum: 1}
+        mimeTypes:
+          type: array
+          items: {type: string}
+
+  llmBindings:
+    type: object
+    additionalProperties:
+      type: object
+      required: [model]
+      additionalProperties: true
+      properties:
+        model: {type: string}
+        tokenBudget: {type: integer, minimum: 1}
+
+  findingsRouting:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      required: [match, sink]
+      additionalProperties: true
+      properties:
+        match:
+          type: object
+          # Exactly one of the three match keys; open-shaped to allow "*": true.
+          additionalProperties: true
+        sink: {type: string}
+        sinkParams:
+          type: object
+          additionalProperties: true
+
+  functions:
+    type: object
+    additionalProperties:
+      type: object
+      additionalProperties: true
+      properties:
+        network:
+          enum: [disabled, enabled]
+          default: disabled
+        filesystem:
+          enum: [none, readonly, scoped]
+          default: none
+        scopedPaths:
+          type: array
+          items: {type: string}
+
+  execution:
+    type: object
+    additionalProperties: true
+    properties:
+      timeout: {type: string}
+      costCap: {type: number, minimum: 0}
+      retryPolicy:
+        type: object
+        additionalProperties: true
+        properties:
+          maxRetries: {type: integer, minimum: 0}
+          onFailure:
+            enum: [emit-run-failure-finding, silent]
+      sinkRetry:
+        type: object
+        additionalProperties: true
+        required: [attempts, onExhausted]
+        properties:
+          attempts: {type: integer, minimum: 1}
+          backoff:
+            enum: [linear, exponential]
+          onExhausted:
+            enum: [spool-to-state, drop-and-audit]
+      nodeOutputMaxBytes: {type: integer, minimum: 1}
+      allowFixtures: {type: boolean}

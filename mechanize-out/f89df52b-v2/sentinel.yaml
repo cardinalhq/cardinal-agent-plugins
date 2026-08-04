@@ -73,6 +73,8 @@ spec:
       operations: [replace]
     - path: /spec/inputs/minAvailableReplicas/default
       operations: [replace]
+    - path: /spec/inputs/aggregationBucket/default
+      operations: [replace]
     - path: /spec/nodes/resolve-service/config/toolRef
       operations: [replace-binding]
     - path: /spec/nodes/query-error-overview/config/toolRef
