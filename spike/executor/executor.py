@@ -913,13 +913,37 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--run", required=True, type=Path, help="Per-run directory")
         p.add_argument("--findings", type=Path, default=None)
 
-    lint_p = sub.add_parser("lint", help="Phase-1 structural lint over a Sentinel directory")
+    lint_p = sub.add_parser("lint", help="Structural + remote-readiness lint over a Sentinel directory")
     lint_p.add_argument("sentinel_dir", type=Path, help="directory containing sentinel.yaml")
     lint_p.add_argument(
         "--format",
         dest="output_format",
         choices=("text", "json"),
         default="text",
+    )
+    lint_p.add_argument(
+        "--check",
+        dest="check_mode",
+        choices=("structural", "remote", "all"),
+        default="all",
+        help=(
+            "'structural' = Phase 1 only; 'remote' = Phase 2 only (no-op unless "
+            "metadata.deployment.mode=remote); 'all' (default) = both."
+        ),
+    )
+    lint_p.add_argument(
+        "--registry",
+        dest="registry_path",
+        type=Path,
+        default=None,
+        help="Path to capabilities-registry.yaml (defaults to <repo>/common/capabilities-registry.yaml).",
+    )
+    lint_p.add_argument(
+        "--schema",
+        dest="schema_path",
+        type=Path,
+        default=None,
+        help="Path to deployment-schema.yaml (defaults to <repo>/common/deployment-schema.yaml).",
     )
 
     # `serve` — Phase 1 runtime subcommand.
@@ -939,7 +963,13 @@ def main(argv: list[str] | None = None) -> int:
         # Local import so `python3 executor.py execute ...` doesn't force lint's
         # dependency graph.
         from lint import run_cli as _lint_cli
-        return _lint_cli(args.sentinel_dir, args.output_format)
+        return _lint_cli(
+            args.sentinel_dir,
+            args.output_format,
+            check_mode=args.check_mode,
+            registry_path=args.registry_path,
+            schema_path=args.schema_path,
+        )
 
     if args.phase == "serve":
         # Deferred import — pulls in state/askhuman/channels only when

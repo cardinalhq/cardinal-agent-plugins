@@ -468,9 +468,94 @@ def format_json(result: LintResult) -> str:
 # CLI helper — invoked from executor.py                                        #
 # --------------------------------------------------------------------------- #
 
-def run_cli(sentinel_dir: Path, output_format: str = "text") -> int:
+def lint_all(
+    sentinel_dir: Path,
+    check_mode: str = "all",
+    registry_path: Path | None = None,
+    schema_path: Path | None = None,
+) -> LintResult:
+    """Run structural + remote-readiness checks per `check_mode`.
+
+    `check_mode`:
+      * ``structural`` — Phase 1 only (universal).
+      * ``remote`` — Phase 2 only (no-op unless the sentinel declares
+        `metadata.deployment.mode: remote`).
+      * ``all`` (default) — both phases; the remote phase is still gated on
+        the manifest's declared mode.
+
+    Loading the sentinel twice is avoided: structural runs first and, if it
+    passes far enough to parse the manifest, we hand the parsed dict to
+    lint_remote via a re-load (lint_remote is designed to be self-contained
+    so tests can drive it directly).
+    """
+    sentinel_dir = Path(sentinel_dir)
+    result = LintResult()
+
+    if check_mode in ("structural", "all"):
+        structural = lint_structural(sentinel_dir)
+        result.findings.extend(structural.findings)
+        # If we couldn't even parse the manifest, remote checks are moot.
+        blocking = {"STRUCT-MISSING", "STRUCT-YAML", "STRUCT-SHAPE",
+                    "STRUCT-VARIATION", "STRUCT-KIND"}
+        if any(f.code in blocking for f in structural.findings):
+            return result
+
+    if check_mode in ("remote", "all"):
+        # Deferred import to keep the structural-only path light.
+        from lint_remote import lint_remote  # noqa: E402
+
+        sentinel_path = sentinel_dir / "sentinel.yaml"
+        if not sentinel_path.exists():
+            # Structural already reported STRUCT-MISSING if check_mode=all;
+            # for check_mode=remote we surface a matching finding.
+            if check_mode == "remote":
+                result.findings.append(LintFinding(
+                    code="STRUCT-MISSING",
+                    severity="FAIL",
+                    file=str(sentinel_path),
+                    line=None,
+                    message="sentinel.yaml not found in sentinel directory",
+                    fix=f"create {sentinel_path.name} at {sentinel_dir}",
+                ))
+            return result
+        try:
+            with sentinel_path.open() as f:
+                sentinel = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            result.findings.append(LintFinding(
+                code="STRUCT-YAML",
+                severity="FAIL",
+                file=str(sentinel_path),
+                line=getattr(getattr(e, "problem_mark", None), "line", None),
+                message=f"YAML parse error: {e}",
+                fix="fix the YAML syntax",
+            ))
+            return result
+        if not isinstance(sentinel, dict):
+            return result
+        remote_result = lint_remote(
+            sentinel_dir, sentinel,
+            registry_path=registry_path, schema_path=schema_path,
+        )
+        result.findings.extend(remote_result.findings)
+
+    return result
+
+
+def run_cli(
+    sentinel_dir: Path,
+    output_format: str = "text",
+    check_mode: str = "all",
+    registry_path: Path | None = None,
+    schema_path: Path | None = None,
+) -> int:
     """Return 0 on PASS/warn-only, 1 on any FAIL."""
-    result = lint_structural(sentinel_dir)
+    result = lint_all(
+        sentinel_dir,
+        check_mode=check_mode,
+        registry_path=registry_path,
+        schema_path=schema_path,
+    )
     if output_format == "json":
         print(format_json(result))
     else:
