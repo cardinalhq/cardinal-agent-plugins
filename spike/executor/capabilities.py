@@ -29,7 +29,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class MissingCacheError(RuntimeError):
@@ -213,4 +213,124 @@ def resolve(capability_id: str):
     return CAPABILITY_BINDINGS[capability_id]
 
 
-__all__ = ["MissingCacheError", "resolve", "CAPABILITY_BINDINGS"]
+# --------------------------------------------------------------------------- #
+# Provider registry (Phase 1 of runtime-comms plan)                           #
+# --------------------------------------------------------------------------- #
+#
+# The existing CAPABILITY_BINDINGS map above is the spike-era single-provider
+# lookup used by the `execute` subcommand. The `serve` subcommand introduced
+# in Phase 1 supports multiple providers per abstract capability, keyed by
+# `deployment.yaml capabilityBindings.<cap>.provider`. New providers register
+# via `@provider("capability.id", "provider-id")` — one file per provider.
+#
+# Signature: provider(capability_id, provider_id) decorates a callable of
+# shape (node_id, args, ctx) -> dict, where `ctx` is a small dict carrying
+# `run_dir`, `sentinel_dir`, and provider-specific state.
+
+
+_PROVIDERS: dict[tuple[str, str], Callable[..., Any]] = {}
+
+
+class UnknownProviderError(KeyError):
+    """Raised when a capability binding names an unregistered provider."""
+
+
+def provider(capability_id: str, provider_id: str):
+    """Register a provider callable for (capability, provider) pair.
+
+    Providers register at import time. Duplicate registration raises.
+    """
+
+    def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        key = (capability_id, provider_id)
+        if key in _PROVIDERS:
+            raise RuntimeError(
+                f"duplicate provider registration for {capability_id!r} / {provider_id!r}"
+            )
+        _PROVIDERS[key] = fn
+        return fn
+
+    return _decorator
+
+
+def resolve_provider(capability_id: str, provider_id: str) -> Callable[..., Any]:
+    key = (capability_id, provider_id)
+    if key not in _PROVIDERS:
+        available = sorted(p for c, p in _PROVIDERS if c == capability_id)
+        raise UnknownProviderError(
+            f"no provider {provider_id!r} for capability {capability_id!r}; "
+            f"registered: {available}"
+        )
+    return _PROVIDERS[key]
+
+
+def registered_providers() -> list[tuple[str, str]]:
+    return sorted(_PROVIDERS.keys())
+
+
+# --------------------------------------------------------------------------- #
+# Fixture provider — universal, test-only                                     #
+# --------------------------------------------------------------------------- #
+#
+# Reads `<sentinel-dir>/fixtures/<capability>.json` and returns it verbatim.
+# One file may hold either `{args...: result}` map keyed by JSON-canonical
+# args, or a single result object. Simplest possible test provider.
+
+
+def _fixture_impl(node_id: str, args: dict[str, Any], ctx: dict[str, Any]) -> Any:
+    sentinel_dir: Path = ctx["sentinel_dir"]
+    capability_id: str = ctx["capability_id"]
+    fixtures_dir = sentinel_dir / "fixtures"
+    # Prefer per-node override, fall back to per-capability.
+    candidates = [
+        fixtures_dir / f"{node_id}.json",
+        fixtures_dir / f"{capability_id}.json",
+        fixtures_dir / (capability_id.replace(".", "_") + ".json"),
+    ]
+    for p in candidates:
+        if p.exists():
+            payload = json.loads(p.read_text())
+            if isinstance(payload, dict) and "_byArgs" in payload:
+                # Optional keyed form.
+                key = json.dumps(args, sort_keys=True, default=str)
+                by_args = payload["_byArgs"]
+                if key in by_args:
+                    return by_args[key]
+                if "_default" in payload:
+                    return payload["_default"]
+                raise KeyError(
+                    f"fixture {p} has no entry for args {key!r} and no _default"
+                )
+            return payload
+    raise FileNotFoundError(
+        f"fixture provider found no file for capability {capability_id!r} "
+        f"under {fixtures_dir} (looked for {[c.name for c in candidates]})"
+    )
+
+
+# Register the fixture provider for every currently-known capability id so
+# tests can pin any capability to a fixture without extra ceremony. The
+# same fn instance is registered under each capability — capability_id in
+# the ctx tells it which fixture file to read.
+_FIXTURE_CAPABILITIES = [
+    "observability.list-services",
+    "observability.query-metrics",
+    "observability.query-logs",
+    "observability.error-overview",
+    "code.grep",
+    "code.read",
+]
+
+for _cap in _FIXTURE_CAPABILITIES:
+    provider(_cap, "fixture")(_fixture_impl)
+
+
+__all__ = [
+    "MissingCacheError",
+    "resolve",
+    "CAPABILITY_BINDINGS",
+    "provider",
+    "resolve_provider",
+    "registered_providers",
+    "UnknownProviderError",
+]

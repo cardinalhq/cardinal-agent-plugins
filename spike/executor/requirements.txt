@@ -1,0 +1,4 @@
+jsonschema>=4.20
+PyYAML>=6.0
+pytest>=8.0
+slack-sdk>=3.30

@@ -903,12 +903,57 @@ def _emit_finding(findings_path: Path, finding: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sentinel spike executor")
-    parser.add_argument("phase", choices=["plan", "execute"])
-    parser.add_argument("--sentinel", required=True, type=Path)
-    parser.add_argument("--inputs", required=True, type=Path)
-    parser.add_argument("--run", required=True, type=Path, help="Per-run directory")
-    parser.add_argument("--findings", type=Path, default=None)
+    sub = parser.add_subparsers(dest="phase", required=True)
+
+    # Legacy positional form kept intact: `executor.py plan|execute --sentinel ...`.
+    for phase in ("plan", "execute"):
+        p = sub.add_parser(phase, help=f"{phase} a Sentinel against tool-cache inputs")
+        p.add_argument("--sentinel", required=True, type=Path)
+        p.add_argument("--inputs", required=True, type=Path)
+        p.add_argument("--run", required=True, type=Path, help="Per-run directory")
+        p.add_argument("--findings", type=Path, default=None)
+
+    lint_p = sub.add_parser("lint", help="Phase-1 structural lint over a Sentinel directory")
+    lint_p.add_argument("sentinel_dir", type=Path, help="directory containing sentinel.yaml")
+    lint_p.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("text", "json"),
+        default="text",
+    )
+
+    # `serve` — Phase 1 runtime subcommand.
+    ps = sub.add_parser(
+        "serve",
+        help="Run a Sentinel using deployment.yaml bindings (Phase 1 runtime).",
+    )
+    ps.add_argument("--sentinel", required=True, type=Path, help="Sentinel directory (holds sentinel.yaml)")
+    ps.add_argument("--deployment", required=True, type=Path, help="Path to deployment.yaml")
+    ps.add_argument("--inputs", required=True, type=Path)
+    ps.add_argument("--state", type=Path, default=None, help="sqlite state DB path")
+    ps.add_argument("--run-id", type=str, default=None)
+
     args = parser.parse_args(argv)
+
+    if args.phase == "lint":
+        # Local import so `python3 executor.py execute ...` doesn't force lint's
+        # dependency graph.
+        from lint import run_cli as _lint_cli
+        return _lint_cli(args.sentinel_dir, args.output_format)
+
+    if args.phase == "serve":
+        # Deferred import — pulls in state/askhuman/channels only when
+        # the runtime subcommand fires, keeping the `execute` path
+        # dependency-light.
+        import runtime_serve as serve_mod  # noqa: E402
+        return serve_mod.run_serve(
+            sentinel_dir=args.sentinel,
+            deployment_path=args.deployment,
+            inputs_path=args.inputs,
+            state_path=args.state,
+            run_id_override=args.run_id,
+        )
+
     findings = args.findings or (args.run.parent / "findings.jsonl")
     try:
         return execute(args.sentinel, args.inputs, args.run, findings, plan_only=(args.phase == "plan"))
