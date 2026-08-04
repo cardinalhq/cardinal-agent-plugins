@@ -1,0 +1,64 @@
+name: 'Sentinel lint'
+description: >-
+  Lint checked-in mechanize.dev Sentinels. Runs structural checks (universal)
+  and remote-readiness checks (for Sentinels declaring metadata.deployment.mode:
+  remote), emitting one workflow annotation per finding so failures render
+  inline in a PR's "Files changed" tab.
+author: 'cardinalhq'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  paths:
+    description: >-
+      Space-separated glob(s) matching Sentinel directories. A Sentinel
+      directory contains a sentinel.yaml at its root. Unmatched patterns and
+      matches without a sentinel.yaml are skipped with a warning, not a
+      failure.
+    required: false
+    default: 'mechanize-out/*/'
+  check:
+    description: >-
+      Lint mode: 'structural' (Phase 1 universal checks only), 'remote' (Phase
+      2 remote-readiness checks only; no-op unless the Sentinel declares
+      metadata.deployment.mode: remote), or 'all' (default; both).
+    required: false
+    default: 'all'
+  ref:
+    description: >-
+      cardinal-agent-plugins ref (branch, tag, or SHA) whose lint code will be
+      used. Defaults to main. Consumers pinning to a specific action version
+      should also pin this to the same ref for reproducible lint output.
+    required: false
+    default: 'main'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check out cardinal-agent-plugins for lint code
+      uses: actions/checkout@v4
+      with:
+        repository: cardinalhq/cardinal-agent-plugins
+        ref: ${{ inputs.ref }}
+        path: .sentinel-lint
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        # 3.12 is the lowest version the lint code (and its jsonschema
+        # dependency) ships cleanly on; bump only when a real requirement
+        # forces it.
+        python-version: '3.12'
+
+    - name: Install lint dependencies
+      shell: bash
+      run: python3 -m pip install --quiet pyyaml jsonschema
+
+    - name: Run sentinel-lint
+      shell: bash
+      env:
+        LINT_ROOT: ${{ github.workspace }}/.sentinel-lint
+        LINT_PATHS: ${{ inputs.paths }}
+        LINT_CHECK: ${{ inputs.check }}
+      run: bash "${GITHUB_ACTION_PATH}/run-lint.sh"
