@@ -131,6 +131,17 @@ def test_mjs_extension_fails(tmp_path):
     assert "FUNC-EXT" in _codes(result), _codes(result)
 
 
+def test_nodejs_runtime_fails(tmp_path):
+    """CORE.md Stage 4 rule: v0 function nodes MUST declare runtime: python3.12."""
+    doc = copy.deepcopy(BASELINE_SENTINEL)
+    doc["spec"]["nodes"]["summarize-metric"]["config"]["runtime"] = "nodejs22"
+    d = _write_baseline(tmp_path, doc)
+    result = lint_structural(d)
+    assert not result.passed
+    codes = _codes(result)
+    assert "FUNC-RUNTIME" in codes, codes
+
+
 def test_missing_run_entrypoint_fails(tmp_path):
     d = _write_baseline(tmp_path)
     (d / "functions" / "summarize-metric.py").write_text("def not_run(args):\n    return {}\n")

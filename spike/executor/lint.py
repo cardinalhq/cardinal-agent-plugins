@@ -299,11 +299,27 @@ def lint_structural(sentinel_dir: Path) -> LintResult:
                     )
                 )
 
-    # 7. function-node source: .py extension + file existence + AST-parses + `run` entrypoint.
+    # 7. function-node source: .py extension + file existence + AST-parses + `run` entrypoint,
+    # plus runtime: python3.12 (v0 constraint per CORE.md Stage 4 "Function-node runtime").
     for nid, node in nodes.items():
         if not isinstance(node, dict) or node.get("kind") != "function":
             continue
         config = node.get("config") or {}
+        runtime = config.get("runtime")
+        if runtime is not None and runtime != "python3.12":
+            result.findings.append(
+                LintFinding(
+                    code="FUNC-RUNTIME",
+                    severity="FAIL",
+                    file=rel,
+                    line=None,
+                    message=(
+                        f"function node {nid!r} declares runtime={runtime!r}; "
+                        f"v0 requires python3.12 (CORE.md Stage 4 rule)"
+                    ),
+                    fix=f"set runtime: python3.12 on {nid} (Node.js and other runtimes are a future concern)",
+                )
+            )
         source = config.get("source")
         if not isinstance(source, str) or not source:
             result.findings.append(
