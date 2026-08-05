@@ -1,0 +1,74 @@
+# Default values for sentinel-controller.
+# Override any of these on `helm install/upgrade` with --set or -f.
+
+image:
+  repository: ghcr.io/cardinalhq/sentinel-controller
+  # If empty, defaults to the chart appVersion at template time.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# List of imagePullSecrets (each an object with a `name` field).
+imagePullSecrets: []
+# - name: ghcr-pull-secret
+
+# Namespace the controller Deployment runs in. Chart creates it if it
+# doesn't already exist (unconditional pre-install apply).
+controllerNamespace: sentinel-system
+
+# Namespaces the controller watches for Sentinel CRs. Empty list means
+# all namespaces (cluster-wide). Otherwise, a comma-joined value is
+# passed to the controller via the WATCH_NAMESPACES env var.
+watchNamespaces: []
+# - lakerunner
+# - chq-prod
+
+# Log level passed to kopf via KOPF_LOG_LEVEL. One of:
+# debug, info, warning, error, critical.
+logLevel: info
+
+# Container resource requests/limits for the controller pod.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+serviceAccount:
+  # If true, a ServiceAccount is created in controllerNamespace.
+  create: true
+  # Name of the ServiceAccount. If create=false, this must already exist.
+  name: sentinel-controller
+  # Optional annotations (e.g. IRSA role ARN on EKS).
+  annotations: {}
+
+crd:
+  # If true, the chart installs the Sentinel CRD. Set false if the CRD
+  # is managed out-of-band (e.g. a separate cluster bootstrap step).
+  install: true
+
+# Optional pod-level scheduling knobs.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Optional pod-level security context.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Extra environment variables to inject into the controller container.
+# Each item is a standard k8s EnvVar (name + value or valueFrom).
+extraEnv: []
+# - name: EXAMPLE
+#   value: "true"
