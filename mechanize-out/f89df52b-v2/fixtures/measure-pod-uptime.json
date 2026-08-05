@@ -1,0 +1,19 @@
+{
+  "ddsketches": {
+    "{\"k8s_pod_name\":\"sentinel-test-service-abc\"}": {
+      "min": 3600,
+      "max": 21600,
+      "avg": 12000,
+      "count": 6
+    },
+    "{\"k8s_pod_name\":\"sentinel-test-service-def\"}": {
+      "min": 12,
+      "max": 800,
+      "avg": 400,
+      "count": 6
+    }
+  },
+  "series_total": 2,
+  "data_points_total": 12,
+  "summary": "one pod uptime near zero implies restart within window"
+}
