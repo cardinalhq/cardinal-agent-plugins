@@ -515,8 +515,12 @@ def load_function(source: str, sentinel_dir: Path) -> Callable[[dict], dict]:
 
 
 def _write_event(events_path: Path, payload: dict) -> None:
+    line = json.dumps(payload, default=_json_default)
     with events_path.open("a") as f:
-        f.write(json.dumps(payload, default=_json_default) + "\n")
+        f.write(line + "\n")
+    # Mirror to stdout so `kubectl logs` shows the DAG play out node-by-node,
+    # not just the file that stays inside the pod. Prefixed for easy grep.
+    print(f"[dag] {line}", flush=True)
 
 
 def _json_default(o: Any) -> Any:
