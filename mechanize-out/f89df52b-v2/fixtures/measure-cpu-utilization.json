@@ -1,0 +1,13 @@
+{
+  "ddsketches": {
+    "{\"service_name\":\"sentinel-test-service\"}": {
+      "min": 0.05,
+      "max": 0.32,
+      "avg": 0.18,
+      "count": 6
+    }
+  },
+  "series_total": 1,
+  "data_points_total": 6,
+  "summary": "peak cpu limit utilization 0.32 — healthy"
+}

@@ -9,3 +9,7 @@ dist/
 .DS_Store
 # vendored copies are build outputs, not source
 adapters/*/hooks/cardinal_core/
+# Stage 8/9 outputs are regenerated on every /mechanize compile — never commit.
+mechanize-out/*/preview.html
+mechanize-out/*/rubric.md
+mechanize-out/*/review.md

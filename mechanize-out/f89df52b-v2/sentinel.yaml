@@ -7,6 +7,8 @@ metadata:
   labels:
     domain: observability
     procedure: multi-signal-health-check
+  deployment:
+    mode: remote
 spec:
   purpose:
     summary: >

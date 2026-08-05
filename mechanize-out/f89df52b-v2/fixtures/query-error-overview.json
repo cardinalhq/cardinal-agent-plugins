@@ -1,0 +1,12 @@
+{
+  "services": [
+    {
+      "name": "sentinel-test-service",
+      "total_errors": 47,
+      "top_messages": [
+        {"message": "connection refused", "count": 30},
+        {"message": "timeout", "count": 17}
+      ]
+    }
+  ]
+}

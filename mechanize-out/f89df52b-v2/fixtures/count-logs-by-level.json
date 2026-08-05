@@ -1,0 +1,9 @@
+{
+  "ddsketches": {
+    "{\"level\":\"INFO\"}": {"count": 12345, "sum": 12345, "avg": 12345, "min": 12345, "max": 12345},
+    "{\"level\":\"WARN\"}": {"count": 12, "sum": 12, "avg": 12, "min": 12, "max": 12}
+  },
+  "series_total": 2,
+  "data_points_total": 2,
+  "summary": "log volumes over window; predominantly INFO with minor WARN traffic"
+}

@@ -1,0 +1,55 @@
+schemaVersion: mechanize.dev/v1alpha1
+kind: SentinelDeployment
+
+# Fixture-only staging deploy for the k8s spike. Zero blast radius:
+# every capability binds to `fixture`, findings go to stdout (pod logs).
+runtime: manual
+
+execution:
+  allowFixtures: true
+
+capabilityBindings:
+  observability.list-services:
+    provider: fixture
+    side_effect_class: read-only
+  observability.error-overview:
+    provider: fixture
+    side_effect_class: read-only
+  observability.query-logs:
+    provider: fixture
+    side_effect_class: read-only
+  observability.query-metrics:
+    provider: fixture
+    side_effect_class: read-only
+
+inputBindings:
+  instance:
+    source: dispatch
+  serviceQuery:
+    source: dispatch
+  window:
+    source: dispatch
+  cpuLimitPeakThreshold:
+    source: dispatch
+  memoryLimitPeakThreshold:
+    source: dispatch
+  minAvailableReplicas:
+    source: dispatch
+  aggregationBucket:
+    source: dispatch
+
+findingsRouting:
+  - match:
+      "*": true
+    sink: stdout
+
+functions:
+  pick-resolved-service:
+    network: disabled
+    filesystem: none
+  compute-health-summary:
+    network: disabled
+    filesystem: none
+  compute-error-count-reconciliation:
+    network: disabled
+    filesystem: none
