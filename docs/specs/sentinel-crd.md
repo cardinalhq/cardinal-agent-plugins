@@ -6,16 +6,16 @@
 
 ## Goal
 
-A team member on any service (lakerunner, chq-*, etc.) can:
+A team member on any repo that owns an **ownership boundary** — usually a service (lakerunner, chq-*), sometimes a platform team's cross-cutting concerns repo (e.g. `cardinal-sentinels` for SRE) — can:
 
-1. `cd` into their service repo.
+1. `cd` into that repo.
 2. Run Claude Code with the Cardinal plugin.
-3. `/mechanize` → produces a Sentinel directory inside their service repo.
+3. `/mechanize` → produces a Sentinel directory inside the repo.
 4. `/cardinal:deploy-sentinel <dir>` → authors a Sentinel CR next to it, referencing the current repo + path.
 5. `git commit && git push`.
-6. Whatever deploys the service already picks up the new CR and applies it. Findings start posting.
+6. Whatever deploys that repo already picks up the new CR and applies it. Findings start posting.
 
-No cross-repo PR. No hand-authored Job manifest. No conversation with a platform engineer. No container image build per Sentinel. Sentinels live in and ship with the code they monitor.
+No cross-repo PR. No hand-authored Job manifest. No conversation with a platform engineer. No container image build per Sentinel. Sentinels live in and ship with whatever they're accountable for — the code they monitor (service-owned), or the cross-cutting question they answer (platform-owned).
 
 ## Non-goals for this cut
 
@@ -23,8 +23,8 @@ No cross-repo PR. No hand-authored Job manifest. No conversation with a platform
 - **No per-tenant RBAC beyond namespace boundaries.** k8s namespace isolation is the tenancy shape. A service's Sentinels run in the service's namespace.
 - **No SentinelRun history CRD.** Each execution is a Job (or CronJob-owned Job). `kubectl get jobs -n <ns>` is the history surface.
 - **No SentinelTrigger CRD.** Runs are one-shot or scheduled. Event-driven is later.
-- **No image-baking of the Sentinel source.** Sentinel directory ships via git-clone at pod startup. The *executor* is a container image (see below); the *Sentinel directory* is git-cloned from the service repo.
-- **No auto-wiring of the service repo's deploy glue.** Each service repo needs a one-time addition to its existing deploy pipeline (Kustomization / Helm / ApplicationSet — depends on the repo) so Sentinel CRs get applied alongside the service. We document the pattern; we don't author the glue programmatically for every repo.
+- **No image-baking of the Sentinel source.** Sentinel directory ships via git-clone at pod startup. The *executor* is a container image (see below); the *Sentinel directory* is git-cloned from the owning repo.
+- **No auto-wiring of the owning repo's deploy glue.** Each repo needs a one-time addition to its existing deploy pipeline (Kustomization / Helm / ApplicationSet — depends on the repo) so Sentinel CRs get applied alongside the rest of what it ships. We document the pattern; we don't author the glue programmatically for every repo.
 - **No web UI.** Status is `kubectl describe sentinel` and pod logs.
 
 ## Deploy topology
@@ -32,14 +32,15 @@ No cross-repo PR. No hand-authored Job manifest. No conversation with a platform
 Three roles. Each owns one layer.
 
 ```
-cardinal-agent-plugins                    <service-repo> (e.g., lakerunner)
-├─ k8s/                                   ├─ src/… (the service)
-│  ├─ controller/    (kopf image)         ├─ sentinels/
-│  ├─ chart/                              │  └─ <sentinel-name>/
-│  └─ crds/                               │     ├─ sentinel.yaml
-├─ spike/executor/   (executor image)     │     ├─ functions/
-└─ adapters/claude/skills/                │     ├─ deployment.yaml
-   └─ deploy-sentinel/                    │     └─ sentinel-cr.yaml   ← authored
+cardinal-agent-plugins                    <owning-repo>
+├─ k8s/                                   ├─ (service code, if service-owned;
+│  ├─ controller/    (kopf image)         │   otherwise just sentinels/)
+│  ├─ chart/                              ├─ sentinels/
+│  └─ crds/                               │  └─ <sentinel-name>/
+├─ spike/executor/   (executor image)     │     ├─ sentinel.yaml
+└─ adapters/claude/skills/                │     ├─ functions/
+   └─ deploy-sentinel/                    │     ├─ deployment.yaml
+                                          │     └─ sentinel-cr.yaml   ← authored
                                           │        by /cardinal:deploy-sentinel
                                           └─ deploy-glue/
                                              (adds sentinels/*/sentinel-cr.yaml
@@ -59,8 +60,8 @@ cardinal-agent-plugins                    <service-repo> (e.g., lakerunner)
   2. `ghcr.io/cardinalhq/sentinel-controller:vX.Y.Z` — the kopf controller image.
   3. A Helm chart under `k8s/chart/` that installs the CRD + controller on any cluster.
   4. The `deploy-sentinel` skill in the Claude plugin.
-- **Each service repo** owns its own Sentinels under `sentinels/<name>/`, plus a small one-time deploy-glue addition so its existing deploy pipeline picks them up.
-- **kubernetes-clusters** installs the sentinel-controller once. After that, it plays no role per-Sentinel — the service repos are the source of truth.
+- **Each owning repo** owns its own Sentinels under `sentinels/<name>/`, plus a small one-time deploy-glue addition so its existing deploy pipeline picks them up. The owning repo is usually a service repo (e.g. `lakerunner` owns Sentinels about lakerunner) and sometimes a cross-cutting platform repo (e.g. `cardinal-sentinels` for cross-service reconciliations owned by an SRE team). The controller doesn't care which — the deploy pattern is identical.
+- **kubernetes-clusters** installs the sentinel-controller once. After that, it plays no role per-Sentinel — the owning repos are the source of truth.
 
 ## Data model — `Sentinel` CRD v1alpha1
 
@@ -203,7 +204,7 @@ Skill is thin — no code, just markdown instructions the model executes. The lo
 
 ## Service repo deploy-glue — one-time per repo
 
-Each service repo needs a one-time addition so its existing deploy pipeline picks up Sentinel CRs alongside the service. What "the pipeline" is varies by repo — Kustomization, Helm chart, ApplicationSet, ArgoCD Application:
+Each owning repo needs a one-time addition so its existing deploy pipeline picks up Sentinel CRs alongside whatever else it ships. What "the pipeline" is varies by repo — Kustomization, Helm chart, ApplicationSet, ArgoCD Application:
 
 - **Kustomization user:** add `sentinels/*/sentinel-cr.yaml` to `resources:` (glob if supported, else explicit paths).
 - **Helm chart user:** add a `sentinels.yaml` template that includes each `sentinel-cr.yaml` as a raw manifest, or list them in `resources:` if the chart uses `kubernetes-clusters`-style resource lists.
@@ -212,7 +213,7 @@ Each service repo needs a one-time addition so its existing deploy pipeline pick
 
 The plan does NOT programmatically add this glue for every repo — the shapes vary too much. `deploy-sentinel` prints instructions the first time it detects `sentinels/` is absent from the repo's obvious deploy paths.
 
-Reference example: `docs/specs/sentinel-crd-examples/` (added in M8) shows the addition for one service repo in each supported shape.
+Reference example: `docs/specs/sentinel-crd-examples/` (added in M8) shows the addition for one owning repo in each supported shape.
 
 ## Repo layout
 
@@ -263,7 +264,7 @@ sentinel-controller/
    └─ values.yaml
 ```
 
-That's the *only* touch on kubernetes-clusters — the one-time controller install. Every Sentinel after that lives in a service repo.
+That's the *only* touch on kubernetes-clusters — the one-time controller install. Every Sentinel after that lives in an owning repo.
 
 ## Milestones — ordered slices, each independently reviewable
 
@@ -275,7 +276,7 @@ That's the *only* touch on kubernetes-clusters — the one-time controller insta
 
 **M4 — kopf handlers + local run (1 day).** Wire the reconciler behind kopf `@kopf.on.create/update/delete`. Run against a local kind cluster; apply a Sentinel CR pointing at any public repo (e.g., cardinal-agent-plugins itself for the first bootstrap); verify the Job appears with correct spec.
 
-**M5 — Real Sentinel end-to-end (1 day).** Pod actually clones the source repo and executes. Fixture: a Sentinel CR pointing at `cardinal-agent-plugins@main:mechanize-out/f89df52b-v2` (until a real service repo has a Sentinel dir). Verify pod logs contain `FINDING` lines.
+**M5 — Real Sentinel end-to-end (1 day).** Pod actually clones the source repo and executes. Fixture: a Sentinel CR pointing at `cardinal-agent-plugins@main:mechanize-out/f89df52b-v2` (until a real owning repo has a Sentinel dir). Verify pod logs contain `FINDING` lines.
 
 **M6 — Capability bindings + secrets + CronJob path (1 day).** Project CR `spec.capabilities` + `SecretRef`s into pod env. Add the `spec.schedule` branch → CronJob. Verify a scheduled Sentinel spawns Jobs on cadence.
 
@@ -298,7 +299,7 @@ Total: ~7.5 working days, one implementer, mergeable in 9 PRs.
 - **Leader election** for controller HA.
 - **Finalizers** for pre-delete cleanup steps.
 - **Controller-side outcomes wiring** (NEXT_SESSION.md backlog item 1, user shelved).
-- **Auto-authoring the deploy-glue** per service repo.
+- **Auto-authoring the deploy-glue** per owning repo.
 
 ## Open questions to lock before starting M1
 
@@ -311,16 +312,16 @@ Total: ~7.5 working days, one implementer, mergeable in 9 PRs.
 
 ## Success criterion
 
-A team member on any service repo can:
+A team member on any owning repo (service or cross-cutting) can:
 
-1. `cd ~/workspace/<their-service>`
+1. `cd ~/workspace/<owning-repo>`
 2. `claude` (Cardinal plugin installed)
 3. `/mechanize` on a completed investigation session
 4. `/cardinal:deploy-sentinel sentinels/<id>/`
 5. `git add sentinels/<id>/ && git commit && git push`
-6. (First time only) add the deploy-glue to the service repo per printed instructions
-7. See findings appearing in Slack or `kubectl logs -l sentinel=<name> -n <ns>` within one cron cycle
+6. (First time only) add the deploy-glue to the owning repo per printed instructions
+7. See findings appearing in Slack or `kubectl logs -l sentinels.cardinalhq.io/sentinel=<name> -n <ns>` within one cron cycle
 
 No cross-repo PR. No hand-authored Job. No container-image build per Sentinel. No conversation with a platform engineer.
 
-If that works for one Sentinel in one real service repo on prod EKS, (b) is done and (c) becomes incremental additions to a working controller.
+If that works for one Sentinel in one real owning repo on prod EKS, (b) is done and (c) becomes incremental additions to a working controller.
