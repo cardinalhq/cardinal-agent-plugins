@@ -2,7 +2,7 @@ apiVersion: v2
 name: sentinel-controller
 description: "Cardinal Sentinel controller — reconciles Sentinel CRs into Kubernetes Jobs/CronJobs."
 type: application
-version: 0.1.1
+version: 0.1.2
 appVersion: "0.1.1"
 kubeVersion: ">=1.24.0-0"
 keywords:
