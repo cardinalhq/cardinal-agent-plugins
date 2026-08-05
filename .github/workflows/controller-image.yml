@@ -82,6 +82,9 @@ jobs:
           context: k8s/controller
           file: k8s/controller/Dockerfile
           push: true
+          # Prod clusters run arm64 nodes (EKS Graviton). amd64 kept for
+          # local dev on x86 Macs / Linux boxes.
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
