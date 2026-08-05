@@ -313,6 +313,11 @@ class StateStore:
             "VALUES(?, ?, ?, ?, ?)",
             (run_id, node_id, event_type, json.dumps(payload, default=str), _utc()),
         )
+        # Mirror to stdout so `kubectl logs` shows the DAG play out node-by-node.
+        # The SQLite row above is the authoritative record; this is for humans
+        # watching the pod live. Prefixed for easy grep.
+        mirror = {"type": event_type, "runId": run_id, "nodeId": node_id, **payload}
+        print(f"[dag] {json.dumps(mirror, default=str)}", flush=True)
 
     def list_audit(self, run_id: str | None = None) -> list[dict[str, Any]]:
         if run_id:
