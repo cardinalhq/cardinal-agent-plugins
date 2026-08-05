@@ -88,6 +88,9 @@ jobs:
           context: .
           file: spike/executor/Dockerfile
           push: true
+          # Prod clusters run arm64 Graviton nodes; amd64 kept for local
+          # dev on x86. Same fix as controller-image.yml applied here.
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
