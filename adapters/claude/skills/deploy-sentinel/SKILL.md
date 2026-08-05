@@ -187,7 +187,7 @@ git push
 
 ### 6.2 Deploy-glue check
 
-Detect whether the service repo's deploy pipeline already picks up `sentinels/*/sentinel-cr.yaml`. Use Bash (from `REPO_ROOT`) to check for these markers, in order:
+Detect whether the owning repo's deploy pipeline already picks up `sentinels/*/sentinel-cr.yaml`. Use Bash (from `REPO_ROOT`) to check for these markers, in order:
 
 - **Kustomize:** `find . -maxdepth 4 -name kustomization.yaml -not -path '*/node_modules/*'`, then grep the matches for the string `sentinels/` or `sentinel-cr.yaml`.
 - **Helm:** `find charts -maxdepth 3 -name 'Chart.yaml' 2>/dev/null` and, if any chart exists, grep its `templates/` for `sentinel-cr`.
