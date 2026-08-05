@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Console-script entrypoint for the sentinel-executor container image.
+
+Dispatches three subcommands to the underlying modules:
+
+    sentinel-executor run     <sentinel-dir> [--inputs P] [--deployment P] ...
+    sentinel-executor lint    <sentinel-dir> [--format ...] [--check ...] ...
+    sentinel-executor preview <sentinel-dir>
+
+`run` maps to `executor.py serve` — the Phase 1 runtime path documented in
+docs/specs/sentinel-crd.md's "Runtime shape" section, whose invocation is:
+
+    sentinel-executor run . --inputs /config/inputs.json --deployment /config/deployment.yaml
+
+The `<sentinel-dir>` positional becomes `--sentinel <dir>` for the underlying
+serve subcommand; all other flags are forwarded verbatim.
+
+`lint` and `preview` forward `<sentinel-dir>` (and any remaining flags for
+lint) directly to the respective modules.
+
+This wrapper deliberately execs the target Python modules with `runpy` so
+argv[0] and error tracebacks stay useful, and so the underlying scripts'
+own argparse continues to own flag definitions.
+"""
+from __future__ import annotations
+
+import runpy
+import sys
+from pathlib import Path
+
+# The image installs this file at /usr/local/bin/sentinel-executor. Source
+# lives at /opt/sentinel-executor with the repo layout preserved (so that
+# spike/executor/lint.py's `_REPO_ROOT = parents[2]` resolves correctly and
+# picks up common/mechanize/ratification.py).
+_REPO_ROOT = Path("/opt/sentinel-executor")
+_EXECUTOR_DIR = _REPO_ROOT / "spike" / "executor"
+_MECHANIZE_DIR = _REPO_ROOT / "common" / "mechanize"
+
+USAGE = (
+    "usage: sentinel-executor {run|lint|preview} <sentinel-dir> [options...]\n"
+    "  run     — execute a Sentinel via the Phase 1 runtime (executor.py serve)\n"
+    "  lint    — structural + remote-readiness lint (lint.py)\n"
+    "  preview — render a Sentinel directory to preview.html (common/mechanize/preview.py)\n"
+)
+
+
+def _exec_module(module_dir: Path, module_file: str, argv: list[str]) -> int:
+    """Run <module_dir>/<module_file> as __main__ with the given argv."""
+    if str(module_dir) not in sys.path:
+        sys.path.insert(0, str(module_dir))
+    sys.argv = [str(module_dir / module_file), *argv]
+    try:
+        runpy.run_path(str(module_dir / module_file), run_name="__main__")
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return 0
+        if isinstance(code, int):
+            return code
+        # Non-int exit codes: print and treat as failure.
+        print(str(code), file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        sys.stderr.write(USAGE)
+        return 2
+
+    sub = argv[1]
+    rest = argv[2:]
+
+    if sub in ("-h", "--help", "help"):
+        sys.stdout.write(USAGE)
+        return 0
+
+    if sub == "run":
+        # `run <dir> [passthrough...]` -> executor.py serve --sentinel <dir> [passthrough...]
+        if not rest:
+            print("sentinel-executor run: missing <sentinel-dir>", file=sys.stderr)
+            return 2
+        sentinel_dir = rest[0]
+        passthrough = rest[1:]
+        forwarded = ["serve", "--sentinel", sentinel_dir, *passthrough]
+        return _exec_module(_EXECUTOR_DIR, "executor.py", forwarded)
+
+    if sub == "lint":
+        # `lint <dir> [flags...]` -> executor.py lint <dir> [flags...]
+        # (executor.py already exposes the `lint` subcommand and calls
+        # into lint.py::run_cli, which is where the flags are declared.)
+        if not rest:
+            print("sentinel-executor lint: missing <sentinel-dir>", file=sys.stderr)
+            return 2
+        forwarded = ["lint", *rest]
+        return _exec_module(_EXECUTOR_DIR, "executor.py", forwarded)
+
+    if sub == "preview":
+        # `preview <dir>` -> common/mechanize/preview.py <dir>
+        if not rest:
+            print("sentinel-executor preview: missing <sentinel-dir>", file=sys.stderr)
+            return 2
+        return _exec_module(_MECHANIZE_DIR, "preview.py", rest)
+
+    sys.stderr.write(f"sentinel-executor: unknown subcommand {sub!r}\n")
+    sys.stderr.write(USAGE)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

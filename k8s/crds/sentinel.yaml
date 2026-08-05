@@ -1,0 +1,267 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sentinels.sentinels.cardinalhq.io
+spec:
+  group: sentinels.cardinalhq.io
+  scope: Namespaced
+  names:
+    kind: Sentinel
+    listKind: SentinelList
+    plural: sentinels
+    singular: sentinel
+    shortNames:
+      - sn
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: PHASE
+          type: string
+          jsonPath: .status.phase
+        - name: LAST-RUN
+          type: date
+          jsonPath: .status.lastRunAt
+        - name: FINDINGS
+          type: integer
+          jsonPath: .status.findingsCount
+        - name: AGE
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: |
+            Sentinel is a reusable investigation procedure compiled from a Claude
+            Code session. The controller reconciles each Sentinel CR into a Job
+            (one-shot) or CronJob (scheduled) that git-clones the referenced
+            Sentinel directory and runs the executor against it.
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - source
+              properties:
+                source:
+                  type: object
+                  description: |
+                    Where the Sentinel directory lives. Only `git` is supported
+                    in v1alpha1; the field is a union to leave room for
+                    `image` / `configMap` variants in later versions.
+                  required:
+                    - git
+                  properties:
+                    git:
+                      type: object
+                      required:
+                        - url
+                        - ref
+                        - path
+                      properties:
+                        url:
+                          type: string
+                          description: HTTPS or SSH git URL of the source repo.
+                        ref:
+                          type: string
+                          description: Branch, tag, or commit SHA to clone.
+                        path:
+                          type: string
+                          description: |
+                            Path within the repo to the Sentinel directory
+                            (the dir containing sentinel.yaml, functions/, etc.).
+                        credentialsSecretRef:
+                          type: string
+                          nullable: true
+                          description: |
+                            Optional name of a Secret (same namespace) holding
+                            a deploy key for private repos. Null/omitted for
+                            public repos.
+                inputs:
+                  type: object
+                  description: |
+                    Free-form inputs merged over the Sentinel directory's own
+                    inputs.json at execution time. Shape is validated by the
+                    executor at runtime, not by the controller.
+                  x-kubernetes-preserve-unknown-fields: true
+                schedule:
+                  type: string
+                  description: |
+                    Optional cron expression. Omit for a one-shot Job; set for
+                    a CronJob (concurrencyPolicy Forbid).
+                runtime:
+                  type: object
+                  description: Pod runtime knobs for the main executor container.
+                  properties:
+                    image:
+                      type: string
+                      description: |
+                        Executor image reference. Defaults to
+                        ghcr.io/cardinalhq/sentinel-executor at the controller's
+                        default version when omitted.
+                    resources:
+                      type: object
+                      description: Standard k8s ResourceRequirements for the container.
+                      properties:
+                        requests:
+                          type: object
+                          additionalProperties:
+                            anyOf:
+                              - type: integer
+                              - type: string
+                            x-kubernetes-int-or-string: true
+                        limits:
+                          type: object
+                          additionalProperties:
+                            anyOf:
+                              - type: integer
+                              - type: string
+                            x-kubernetes-int-or-string: true
+                    timeoutSeconds:
+                      type: integer
+                      minimum: 1
+                      description: |
+                        Soft executor-side timeout. The executor stops the run
+                        after this many seconds and exits non-zero.
+                    activeDeadlineSeconds:
+                      type: integer
+                      minimum: 1
+                      description: |
+                        Hard k8s-side deadline. Passed through to the Job/Pod
+                        spec; should be >= timeoutSeconds.
+                capabilities:
+                  type: array
+                  description: |
+                    Concrete provider bindings for every abstract capability
+                    the Sentinel's spec.capabilities.required[] declares. The
+                    controller writes a Blocked status if any required
+                    capability lacks a binding here.
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - provider
+                    properties:
+                      id:
+                        type: string
+                        description: |
+                          Abstract capability id from the registry
+                          (e.g. observability.list-services, code.grep).
+                      provider:
+                        type: string
+                        description: |
+                          Concrete provider (e.g. mcp) used to satisfy this
+                          capability at runtime.
+                      endpointSecretRef:
+                        type: string
+                        description: |
+                          Name of a Secret (same namespace) holding the
+                          provider endpoint URL, projected into the pod env.
+                      tokenSecretRef:
+                        type: string
+                        description: |
+                          Name of a Secret (same namespace) holding the
+                          provider auth token, projected into the pod env.
+                sinks:
+                  type: array
+                  description: |
+                    Findings sinks. Same shape as the Sentinel directory's own
+                    deployment.yaml. Each sink id selects an emitter; sink-
+                    specific params (e.g. channelSecretRef) live alongside.
+                  items:
+                    type: object
+                    required:
+                      - id
+                    properties:
+                      id:
+                        type: string
+                        description: |
+                          Sink identifier (e.g. stdout, slack.channel).
+                      channelSecretRef:
+                        type: string
+                        description: |
+                          For slack.channel: name of a Secret (same namespace)
+                          holding the target channel id / webhook.
+                    additionalProperties: true
+            status:
+              type: object
+              description: |
+                Populated by the controller. Users do not edit this subresource.
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: |
+                    Generation of the spec last reconciled by the controller.
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Reconciling
+                    - Running
+                    - Succeeded
+                    - Failed
+                    - Blocked
+                  description: |
+                    Coarse lifecycle state. `Blocked` means a validation or
+                    capability-binding problem the user must fix.
+                conditions:
+                  type: array
+                  description: |
+                    Standard k8s conditions. Types include SourceResolved,
+                    CapabilitiesBound, JobReconciled, etc.
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                lastRunAt:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the most recent Job completion observed.
+                lastRunJobName:
+                  type: string
+                  description: Name of the most recent owned Job.
+                lastRunResult:
+                  type: string
+                  enum:
+                    - Succeeded
+                    - Failed
+                    - Timeout
+                  description: Terminal outcome of the most recent Job.
+                findingsCount:
+                  type: integer
+                  minimum: 0
+                  description: |
+                    Best-effort count of `FINDING` lines parsed from the most
+                    recent run's pod logs (stdout sink prefix). Real accounting
+                    lands in a later phase.

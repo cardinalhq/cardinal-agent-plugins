@@ -1,0 +1,17 @@
+{{- /*
+Create the controllerNamespace unconditionally as a pre-install hook.
+Kept idempotent: if the namespace already exists, kubectl apply is a no-op.
+The hook is not tied to Release lifecycle so pre-existing namespaces
+(e.g. sentinel-system already created by cluster bootstrap) are not
+adopted / deleted by Helm.
+*/ -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.controllerNamespace | quote }}
+  labels:
+    {{- include "sentinel-controller.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/resource-policy": keep

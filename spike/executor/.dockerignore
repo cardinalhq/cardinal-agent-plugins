@@ -1,0 +1,14 @@
+# Build-context excludes for spike/executor/Dockerfile.
+#
+# Build context is the repo root (needed so the Dockerfile can COPY both
+# spike/executor and common/); this file is picked up as .dockerignore only
+# when a Docker build is scoped to `spike/executor/` as the context. When
+# building from repo root the top-level .dockerignore (if any) applies —
+# duplicate the entries there if noise becomes an issue.
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+tests/
+runs/
+fixtures/

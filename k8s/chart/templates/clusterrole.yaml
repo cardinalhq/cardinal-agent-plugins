@@ -1,0 +1,51 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "sentinel-controller.fullname" . }}
+  labels:
+    {{- include "sentinel-controller.labels" . | nindent 4 }}
+rules:
+  # The Sentinel CRD itself: reconcile spec + patch status.
+  - apiGroups: ["sentinels.cardinalhq.io"]
+    resources: ["sentinels"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["sentinels.cardinalhq.io"]
+    resources: ["sentinels/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["sentinels.cardinalhq.io"]
+    resources: ["sentinels/finalizers"]
+    verbs: ["update"]
+
+  # Owned workloads reconciled from each Sentinel CR.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Projected config secrets (inputs.json, deployment.yaml) written per-run.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Pod discovery + log parsing for the best-effort findingsCount.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+
+  # kopf uses Events for user-visible reconciliation feedback.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  # Namespace discovery for cluster-wide watches.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]

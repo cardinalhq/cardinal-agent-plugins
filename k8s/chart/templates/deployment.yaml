@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sentinel-controller.fullname" . }}
+  namespace: {{ .Values.controllerNamespace | quote }}
+  labels:
+    {{- include "sentinel-controller.labels" . | nindent 4 }}
+spec:
+  # Single-replica by design. Leader election lands in Phase (c).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "sentinel-controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sentinel-controller.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "sentinel-controller.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ include "sentinel-controller.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: KOPF_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            # Empty string => watch all namespaces (kopf default).
+            # A comma-joined list => the controller narrows to that set.
+            - name: WATCH_NAMESPACES
+              value: {{ join "," .Values.watchNamespaces | quote }}
+            - name: CONTROLLER_NAMESPACE
+              value: {{ .Values.controllerNamespace | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: git-cache
+              mountPath: /var/cache/sentinel-controller
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Ephemeral cache for the controller's git-clone of Sentinel source
+        # dirs (used to read sentinel.yaml when resolving capabilities).
+        - name: git-cache
+          emptyDir: {}
+        # readOnlyRootFilesystem forces /tmp onto its own emptyDir.
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,95 @@
+name: Build sentinel-controller image
+
+# Publishes ghcr.io/cardinalhq/sentinel-controller:v<X.Y.Z> on merges to
+# main that touch the controller source or the Helm chart's version
+# manifest.
+#
+# Version comes from k8s/chart/Chart.yaml's appVersion (single source of
+# truth — the chart and image ship as one release). The workflow is a
+# no-op if the tag already exists in GHCR — bump appVersion (and
+# version) in Chart.yaml to publish a new image.
+#
+# Auth: GHCR pushes ride ${{ secrets.GITHUB_TOKEN }} with packages:write,
+# same as executor-image.yml.
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'k8s/controller/**'
+      - 'k8s/chart/Chart.yaml'
+      - '.github/workflows/controller-image.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: cardinalhq/sentinel-controller
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read appVersion from Chart.yaml
+        id: version
+        # Fails fast if appVersion is missing so we never tag as `v`.
+        run: |
+          set -euo pipefail
+          VERSION=$(awk '/^appVersion:/ {gsub(/["'\'']/,"",$2); print $2; exit}' k8s/chart/Chart.yaml)
+          if [ -z "$VERSION" ]; then
+            echo "appVersion missing from k8s/chart/Chart.yaml" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether tag already exists in GHCR
+        id: exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REF="${REGISTRY}/${IMAGE_NAME}:${{ steps.version.outputs.tag }}"
+          echo "$GH_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          if docker manifest inspect "$REF" >/dev/null 2>&1; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+            echo "::notice::${REF} already published — skipping build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          # Narrow context — controller has no import into common/ or spike/.
+          context: k8s/controller
+          file: k8s/controller/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.title=sentinel-controller
+            org.opencontainers.image.description=Kopf controller reconciling Cardinal Sentinel CRs into Kubernetes Jobs and CronJobs
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
