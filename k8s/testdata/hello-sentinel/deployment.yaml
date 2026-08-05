@@ -1,0 +1,9 @@
+schemaVersion: mechanize.dev/v1alpha1
+kind: SentinelDeployment
+runtime: manual
+findingsRouting:
+  - match:
+      emitNode: emit-hello-finding
+    sink: stdout
+execution:
+  timeout: 1m

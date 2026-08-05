@@ -1,0 +1,48 @@
+schemaVersion: mechanize.dev/v1alpha1
+kind: Sentinel
+metadata:
+  name: hello-sentinel
+spec:
+  inputs:
+    who:
+      type: string
+      default: world
+  nodes:
+    greet:
+      kind: function
+      config:
+        source: functions/greet.py
+        arguments:
+          who: ${inputs.who}
+      output:
+        schema:
+          type: object
+          required: [message]
+          properties:
+            message: {type: string}
+    count-letters:
+      kind: function
+      dependsOn: [greet]
+      config:
+        source: functions/count.py
+        arguments:
+          text: ${nodes.greet.output.message}
+      output:
+        schema:
+          type: object
+          required: [length]
+          properties:
+            length: {type: integer}
+    emit-hello-finding:
+      kind: emit
+      dependsOn: [count-letters]
+      config:
+        finding:
+          type: hello-finding
+          title: "Greeted ${inputs.who}, message length ${nodes.count-letters.output.length}"
+          severityExpression: '"info"'
+          dedupeKey: "hello-${inputs.who}"
+          attributes:
+            who: ${inputs.who}
+            message: ${nodes.greet.output.message}
+            length: ${nodes.count-letters.output.length}
