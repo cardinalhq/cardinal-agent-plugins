@@ -830,15 +830,43 @@ def _stub_from_schema(schema: dict) -> Any:
     return None
 
 
+SEVERITIES = ("info", "warning", "critical")
+
+
+def _resolve_severity(node_id: str, finding_spec: dict, env: _Env) -> str:
+    """Resolve a finding's severity from `severityExpression` or a literal `severity`.
+
+    Both spellings appear in the wild: §8's example computes severity from an
+    expression, while compiled Sentinels commonly pin a constant. Reading only
+    the first silently downgraded every literal to "info" — a `critical`
+    finding arriving as `info` is the same failure mode as evidence arriving
+    empty, so an unresolvable or out-of-range severity fails the node instead.
+    """
+    expr = finding_spec.get("severityExpression")
+    if expr is not None:
+        try:
+            severity = eval_expr(str(expr).strip(), env)
+        except ExpressionError as e:
+            raise DagValidationError(
+                f"emit {node_id!r} severityExpression did not evaluate: {e}"
+            ) from e
+    elif "severity" in finding_spec:
+        severity = finding_spec["severity"]
+    else:
+        return "info"
+
+    if severity not in SEVERITIES:
+        raise DagValidationError(
+            f"emit {node_id!r} resolved severity {severity!r}; must be one of {list(SEVERITIES)}"
+        )
+    return severity
+
+
 def _build_finding(node_id: str, node: dict, env: _Env, run_dir: Path) -> dict:
     finding_spec = (node.get("config") or {}).get("finding") or {}
     finding_type = finding_spec.get("type")
     title = render_template(finding_spec.get("title", ""), env) if finding_spec.get("title") else ""
-    severity_expr = finding_spec.get("severityExpression") or "\"info\""
-    try:
-        severity = eval_expr(severity_expr.strip(), env)
-    except ExpressionError:
-        severity = "info"
+    severity = _resolve_severity(node_id, finding_spec, env)
     dedupe_key_tpl = finding_spec.get("dedupeKey") or ""
     dedupe_key = render_template(dedupe_key_tpl, env) if dedupe_key_tpl else ""
     if isinstance(dedupe_key, str):
@@ -850,31 +878,47 @@ def _build_finding(node_id: str, node: dict, env: _Env, run_dir: Path) -> dict:
 
     # Evidence refs.
     evidence: list[dict[str, Any]] = []
-    for ref in finding_spec.get("evidence") or []:
-        if not isinstance(ref, dict):
-            continue
+    for i, ref in enumerate(finding_spec.get("evidence") or []):
+        if not isinstance(ref, dict) or "nodeRef" not in ref:
+            # A malformed entry used to be skipped silently, which turned a
+            # compiler/runtime contract disagreement into a finding with an
+            # empty evidence list — indistinguishable from "no evidence
+            # existed". Fail the node instead so the mismatch is visible at
+            # trial time rather than in production.
+            raise DagValidationError(
+                f"emit {node_id!r} evidence[{i}] is malformed: {ref!r}. "
+                f"Evidence entries must be mappings of the form "
+                f"{{nodeRef: <node-id>, field: <output-field|output>, optional: <bool>}}. "
+                f"The `${{nodes.<id>.output}}` string form is not accepted — it cannot "
+                f"express `optional` or field selection."
+            )
         node_ref = ref.get("nodeRef")
         field = ref.get("field")
         optional = bool(ref.get("optional"))
         upstream = env.nodes.get(node_ref)
         if upstream is None:
             if optional:
-                evidence.append({"nodeRef": node_ref, "field": field, "value": None, "optional": True, "reason": "upstream-not-produced"})
+                evidence.append({"nodeRef": node_ref, "field": field, "value": None, "optional": True, "resolved": False, "reason": "upstream-not-produced"})
                 continue
             raise DagValidationError(f"emit {node_id!r} evidence references missing node {node_ref!r}")
         upstream_out = upstream.get("output") if isinstance(upstream, dict) else None
         if field == "output" or field is None:
             value = upstream_out
+            resolved = upstream_out is not None
+        elif isinstance(upstream_out, dict):
+            value = upstream_out.get(field)
+            resolved = field in upstream_out
         else:
-            value = upstream_out.get(field) if isinstance(upstream_out, dict) else None
-        evidence.append({"nodeRef": node_ref, "field": field, "value": value, "optional": optional})
+            value = None
+            resolved = False
+        evidence.append({"nodeRef": node_ref, "field": field, "value": value, "optional": optional, "resolved": resolved})
 
     attributes = render_deep(finding_spec.get("attributes") or {}, env)
 
     finding = {
         "type": finding_type,
         "title": title.strip() if isinstance(title, str) else title,
-        "severity": severity if severity in ("info", "warning", "critical") else "info",
+        "severity": severity,
         "dedupeKey": dedupe_key,
         "dedupeHash": dedupe_hash,
         "observedAt": _rfc3339(env.execution["now"]),

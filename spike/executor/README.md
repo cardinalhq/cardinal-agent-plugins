@@ -17,6 +17,7 @@ production engine.
 | `runs/run-N/` | One directory per invocation. `summary.json` + `audit.jsonl` + `events.jsonl` + `pending-queries/` + `tool-cache/`. |
 | `runs/findings.jsonl` | Append-only sink for every emitted finding across all runs. |
 | `RELIABILITY.md` | Post-hoc validation report for the 5-run reliability suite. |
+| `../../common/mechanize/trial.py` | Stage 10/11 trial harness. Drives this executor over a Sentinel's captured fixtures, twice, and compares the result against the original investigation's conclusion. The compiler runs it before it is allowed to finish. |
 
 ## How to run it
 
@@ -77,6 +78,38 @@ Bindings for the Sentinel's declared input schema. In this spike:
   `series_total`, `ddsketches` as dict or list).
 * `code.grep` -> `capabilities.code_grep` (subprocess `grep -rn`, restricted
   to the requested path, with `--include=` globs).
+
+## Trial execution (Stage 10 / Stage 11)
+
+`plan` + `execute` are the operator-driven path. The *compiler*-driven path is
+`common/mechanize/trial.py`, which runs a freshly-compiled Sentinel before
+`/mechanize` reports success:
+
+```bash
+python3 ../../common/mechanize/trial.py <SENTINEL_DIR>
+```
+
+It executes the Sentinel twice via `serve` — the same path production runs —
+against `<SENTINEL_DIR>/fixtures/<node-id>.json`, then checks the result against
+`<SENTINEL_DIR>/expectation.json`. Nine checks (T1–T9) covering trial inputs,
+fixture coverage, stub function bodies, node failures, determinism, evidence
+population, attribute resolution, and conclusion match. Exit 0 passed, 1 failed,
+2 harness error. Writes `<SENTINEL_DIR>/trial/report.json`.
+
+The trial is hermetic: it synthesizes a deployment binding every capability to
+the `fixture` provider, so it never reaches the network.
+
+Two things this catches that nothing upstream did:
+
+* **Findings with empty evidence.** `_build_finding` used to skip any evidence
+  entry it did not recognize, so a compiler emitting the `${nodes.x.output}`
+  string form shipped a `critical` finding backed by `evidence: []`. The runtime
+  now raises on a malformed entry, `sentinel-lint` catches it statically as
+  `EMIT-EVIDENCE`, and T6 catches it dynamically.
+* **Severity silently downgraded.** The runtime read only `severityExpression`,
+  so a literal `severity: critical` resolved to `info`. It now honours both
+  spellings (never together — `FINDING-SEVERITY` fails that) and raises on a
+  value outside the three permitted ones rather than defaulting.
 
 ## Known limits
 
