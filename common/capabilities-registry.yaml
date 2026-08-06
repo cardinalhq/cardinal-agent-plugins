@@ -7,13 +7,13 @@ kind: CapabilitiesRegistry
 # R10 unless `execution.allowFixtures: true`.
 capabilities:
   observability.list-services:
-    providers: [lakerunner]
+    providers: [lakerunner, mcp]
   observability.query-metrics:
-    providers: [lakerunner, prometheus]
+    providers: [lakerunner, prometheus, mcp]
   observability.query-logs:
-    providers: [lakerunner]
+    providers: [lakerunner, mcp]
   observability.error-overview:
-    providers: [lakerunner]
+    providers: [lakerunner, mcp]
   code.grep:
     providers: [github-checkout, gitlab-checkout]
   code.read:

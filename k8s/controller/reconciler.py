@@ -30,12 +30,22 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from projections import project_deployment, project_inputs
+from projections import capability_bindings, project_deployment, project_inputs
 
 
 API_VERSION = "sentinels.cardinalhq.io/v1alpha1"
 KIND = "Sentinel"
-DEFAULT_EXECUTOR_IMAGE = "ghcr.io/cardinalhq/sentinel-executor:v0.1.0"
+# Must track spike/executor/VERSION, which is what .github/workflows/
+# executor-image.yml publishes as v<VERSION>. Two floors, both load-bearing:
+#   * v0.1.0 was amd64-only and fails to pull on the prod arm64 Graviton
+#     nodes; multi-arch builds start at v0.1.1.
+#   * the `mcp` capability provider (spike/executor/providers/mcp.py) first
+#     ships in v0.1.3. Any tag below that raises UnknownProviderError at the
+#     first tool node of a CR that binds `provider: mcp` — which is what
+#     every live-telemetry Sentinel binds.
+# Bump in lockstep with spike/executor/VERSION; the parity is pinned by
+# tests/test_reconciler.py and spike/executor/tests/test_release_versions.py.
+DEFAULT_EXECUTOR_IMAGE = "ghcr.io/cardinalhq/sentinel-executor:v0.1.3"
 GIT_INIT_IMAGE = "alpine/git:latest"
 SENTINEL_DIR = "/sentinel"
 CONFIG_DIR = "/config"
@@ -94,6 +104,30 @@ def reconcile_sentinel(sentinel: dict) -> ReconcileResult:
             error=msg,
         )
 
+    # spec.capabilities is validated up front because the CRD schema does NOT
+    # catch its failure modes: ``required: [id, provider]`` only checks
+    # presence (a blank provider passes), the array has no uniqueness
+    # constraint (a duplicate id passes), and nothing knows that two distinct
+    # ids can collide onto one CARDINAL_CAP_<SLUG>_* pair. The API server
+    # therefore accepts such a CR happily and it lands here. Letting
+    # ``capability_bindings``' ValueError escape would blow up the kopf
+    # handler and spin the Sentinel in a retry loop over input that can never
+    # become valid without an edit, so it is converted into the same terminal
+    # Blocked result the missing-field checks above produce. The validation
+    # itself deliberately stays in projections.py; this is only the seam that
+    # turns it into operator-visible status.
+    try:
+        capability_bindings(spec.get("capabilities"))
+    except (ValueError, TypeError) as exc:
+        msg = f"spec.capabilities is invalid: {exc}"
+        return ReconcileResult(
+            phase="Blocked",
+            conditions=[
+                _condition("CapabilitiesBound", "False", "InvalidCapabilities", msg),
+            ],
+            error=msg,
+        )
+
     hash8 = _spec_hash(spec)
     obj_name = f"sentinel-{name}-{hash8}"
     owner_ref = _owner_ref(name, uid)
@@ -101,10 +135,22 @@ def reconcile_sentinel(sentinel: dict) -> ReconcileResult:
     # Projected config — no dir-side inputs/deployment available at the pure
     # layer, so the merge base is empty. The kopf handler layer (M3+) hydrates
     # the dir side from its cached git clone before calling reconcile again.
-    inputs_json = project_inputs(spec.get("inputs"), {})
-    deployment_yaml = project_deployment(
-        spec.get("sinks"), spec.get("capabilities"), {}
-    )
+    # Same reasoning as the capability check above, for the remaining
+    # projectable spec fields (spec.inputs must be a mapping, spec.sinks a
+    # list — neither shape is enforced by the CRD's x-kubernetes-preserve
+    # sections).
+    try:
+        inputs_json = project_inputs(spec.get("inputs"), {})
+        deployment_yaml = project_deployment(
+            spec.get("sinks"), spec.get("capabilities"), {}
+        )
+    except (ValueError, TypeError) as exc:
+        msg = f"spec cannot be projected into pod config: {exc}"
+        return ReconcileResult(
+            phase="Blocked",
+            conditions=[_condition("SpecInvalid", "False", "InvalidProjection", msg)],
+            error=msg,
+        )
 
     secret = _build_secret(
         name=obj_name,

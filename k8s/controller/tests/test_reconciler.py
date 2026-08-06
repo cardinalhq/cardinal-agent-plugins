@@ -16,11 +16,12 @@ from __future__ import annotations
 import base64
 import copy
 import json
+from pathlib import Path
 
 import pytest
 import yaml
 
-from reconciler import reconcile_sentinel
+from reconciler import DEFAULT_EXECUTOR_IMAGE, reconcile_sentinel
 
 
 def _base_cr() -> dict:
@@ -190,7 +191,22 @@ def test_projected_secret_shape():
 
     deployment = yaml.safe_load(base64.b64decode(sec["data"]["deployment.yaml"]).decode("utf-8"))
     assert deployment["sinks"] == cr["spec"]["sinks"]
-    assert deployment["capabilities"] == cr["spec"]["capabilities"]
+    # The CR's capability LIST is projected as the executor's binding MAP,
+    # keyed by capability id, naming the env vars the pod spec injects.
+    # There is no `capabilities:` key — the executor never read one.
+    assert "capabilities" not in deployment
+    assert deployment["capabilityBindings"] == {
+        "observability.list-services": {
+            "provider": "mcp",
+            "endpoint_env": "CARDINAL_CAP_OBSERVABILITY_LIST_SERVICES_ENDPOINT",
+            "token_env": "CARDINAL_CAP_OBSERVABILITY_LIST_SERVICES_TOKEN",
+        },
+        "observability.query-metrics": {
+            "provider": "mcp",
+            "endpoint_env": "CARDINAL_CAP_OBSERVABILITY_QUERY_METRICS_ENDPOINT",
+            "token_env": "CARDINAL_CAP_OBSERVABILITY_QUERY_METRICS_TOKEN",
+        },
+    }
 
 
 def test_projected_secret_name_matches_job_name():
@@ -263,11 +279,38 @@ def test_pod_spec_has_init_and_main_containers():
 
 
 def test_runtime_image_default_used_when_absent():
+    # Literal on purpose: this is the drift-catcher for the compiled-in
+    # default. It must name a multi-arch published tag (>= v0.1.1) or every
+    # CR without an explicit spec.runtime.image ImagePullBackOffs on the
+    # prod arm64 nodes, and it must be >= v0.1.3 or `provider: mcp` raises
+    # UnknownProviderError at the first tool node. Bump in lockstep with
+    # spike/executor/VERSION.
     cr = _base_cr()
     del cr["spec"]["runtime"]["image"]
     r = reconcile_sentinel(cr)
     main = r.job_or_cronjob["spec"]["template"]["spec"]["containers"][0]
-    assert main["image"] == "ghcr.io/cardinalhq/sentinel-executor:v0.1.0"
+    assert main["image"] == "ghcr.io/cardinalhq/sentinel-executor:v0.1.3"
+
+
+def test_default_executor_image_tag_matches_executor_version_file():
+    """The compiled-in default must name a tag the release workflow publishes.
+
+    `.github/workflows/executor-image.yml` tags `v<spike/executor/VERSION>`
+    and is an explicit no-op when the tag already exists in GHCR. So a
+    default pointing at anything other than the current VERSION is one of
+    two failures: a tag that will never be built (ImagePullBackOff), or a
+    stale published tag whose contents predate the source tree — which is
+    exactly how `provider: mcp` came to default onto the mcp-less v0.1.2.
+    """
+    version_file = (
+        Path(__file__).resolve().parents[3] / "spike" / "executor" / "VERSION"
+    )
+    version = version_file.read_text().strip()
+    assert DEFAULT_EXECUTOR_IMAGE.endswith(f":v{version}"), (
+        f"reconciler.DEFAULT_EXECUTOR_IMAGE is {DEFAULT_EXECUTOR_IMAGE!r} but "
+        f"spike/executor/VERSION is {version!r} — the default names a tag "
+        f"executor-image.yml does not publish from this tree"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -275,20 +318,26 @@ def test_runtime_image_default_used_when_absent():
 # --------------------------------------------------------------------------- #
 
 def test_capability_env_var_names_for_mixed_ids():
+    # `provider` is required by the CRD on every capability entry, and the
+    # projection now refuses to bind an entry without one — so the fixtures
+    # carry it. The env-var naming assertions below are unchanged.
     cr = _base_cr()
     cr["spec"]["capabilities"] = [
         {
             "id": "observability.list-services",
+            "provider": "mcp",
             "endpointSecretRef": "ep",
             "tokenSecretRef": "tok",
         },
         {
             "id": "code.review",
+            "provider": "mcp",
             "endpointSecretRef": "code-ep",
             "tokenSecretRef": "code-tok",
         },
         {
             "id": "some-id.with.multiple-hyphens",
+            "provider": "mcp",
             "endpointSecretRef": "misc-ep",
             "tokenSecretRef": "misc-tok",
         },
@@ -344,6 +393,113 @@ def test_non_dict_input_yields_blocked():
     r = reconcile_sentinel(["not", "a", "dict"])  # type: ignore[arg-type]
     assert r.phase == "Blocked"
     assert r.error is not None
+
+
+# --------------------------------------------------------------------------- #
+# Malformed spec.capabilities the CRD schema cannot reject                     #
+#                                                                              #
+# ``required: [id, provider]`` only checks presence — no minLength on          #
+# provider, no uniqueness on the array, and no way to express the env-var slug #
+# collision. All three CRs below are accepted by the API server, so the        #
+# reconciler must park them as Blocked rather than let a ValueError escape and #
+# spin the Sentinel in a retry loop.                                           #
+# --------------------------------------------------------------------------- #
+
+def _capabilities_blocked(caps: list) -> object:
+    cr = _base_cr()
+    cr["spec"]["capabilities"] = caps
+    return reconcile_sentinel(cr)
+
+
+def test_duplicate_capability_id_blocks_instead_of_raising():
+    """The natural operator mistake: endpoint on one entry, token on another."""
+    r = _capabilities_blocked([
+        {"id": "observability.query-logs", "provider": "mcp",
+         "endpointSecretRef": "cardinal-mcp-endpoint"},
+        {"id": "observability.query-logs", "provider": "mcp",
+         "tokenSecretRef": "cardinal-mcp-token"},
+    ])
+    assert r.phase == "Blocked"
+    assert r.job_or_cronjob is None
+    assert r.projected_secret is None
+    assert "observability.query-logs" in r.error
+    assert "declared more than once" in r.error
+    # The message must make the fix obvious, not just name the symptom.
+    assert "[0]" in r.error and "[1]" in r.error
+    assert "endpointSecretRef" in r.error and "tokenSecretRef" in r.error
+    cond = _only_condition(r, "CapabilitiesBound")
+    assert cond["status"] == "False"
+    assert cond["reason"] == "InvalidCapabilities"
+    assert "observability.query-logs" in cond["message"]
+
+
+def test_blank_provider_blocks_instead_of_raising():
+    r = _capabilities_blocked([
+        {"id": "observability.query-logs", "provider": "   "},
+    ])
+    assert r.phase == "Blocked"
+    assert r.job_or_cronjob is None
+    assert "observability.query-logs" in r.error
+    assert "provider" in r.error
+    cond = _only_condition(r, "CapabilitiesBound")
+    assert cond["status"] == "False"
+    assert "observability.query-logs" in cond["message"]
+
+
+def test_env_slug_collision_blocks_instead_of_raising():
+    """``obs.query-logs`` and ``obs-query.logs`` share CARDINAL_CAP_OBS_QUERY_LOGS_*."""
+    r = _capabilities_blocked([
+        {"id": "obs.query-logs", "provider": "mcp", "tokenSecretRef": "t1"},
+        {"id": "obs-query.logs", "provider": "mcp", "tokenSecretRef": "t2"},
+    ])
+    assert r.phase == "Blocked"
+    assert r.job_or_cronjob is None
+    assert "obs.query-logs" in r.error
+    assert "obs-query.logs" in r.error
+    assert "OBS_QUERY_LOGS" in r.error
+    cond = _only_condition(r, "CapabilitiesBound")
+    assert cond["status"] == "False"
+
+
+def test_non_mapping_capability_entry_blocks_instead_of_raising():
+    r = _capabilities_blocked(["observability.query-logs"])
+    assert r.phase == "Blocked"
+    assert "capabilities[0]" in r.error
+    assert _only_condition(r, "CapabilitiesBound")["status"] == "False"
+
+
+def test_blank_capability_id_blocks_instead_of_raising():
+    r = _capabilities_blocked([{"id": "   ", "provider": "mcp"}])
+    assert r.phase == "Blocked"
+    assert "id" in r.error
+    assert _only_condition(r, "CapabilitiesBound")["status"] == "False"
+
+
+def test_unprojectable_inputs_block_instead_of_raising():
+    """spec.inputs is x-kubernetes-preserve-unknown-fields; a list gets through."""
+    cr = _base_cr()
+    cr["spec"]["inputs"] = ["not", "a", "mapping"]
+    r = reconcile_sentinel(cr)
+    assert r.phase == "Blocked"
+    assert r.job_or_cronjob is None
+    assert _only_condition(r, "SpecInvalid")["status"] == "False"
+
+
+def test_valid_capabilities_still_reconcile():
+    """The guard must not block well-formed capability lists."""
+    r = _capabilities_blocked([
+        {"id": "obs.query-logs", "provider": "mcp",
+         "endpointSecretRef": "ep", "tokenSecretRef": "tok"},
+        {"id": "obs.list-services", "provider": "fixture"},
+    ])
+    assert r.phase == "Reconciling"
+    assert r.job_or_cronjob is not None
+
+
+def _only_condition(result, ctype: str) -> dict:
+    matches = [c for c in result.conditions if c.get("type") == ctype]
+    assert matches, f"no {ctype} condition in {result.conditions}"
+    return matches[0]
 
 
 # --------------------------------------------------------------------------- #

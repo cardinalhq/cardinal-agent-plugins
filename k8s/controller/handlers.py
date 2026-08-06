@@ -220,7 +220,29 @@ def reconcile(spec, meta, status, patch, **_):  # noqa: ARG001 - kopf signature
 
     # First pass: pure reconciler produces the base manifests and validates
     # the CR shape.
-    result = reconcile_sentinel(cr)
+    #
+    # reconcile_sentinel already turns every structural problem it knows about
+    # into a Blocked result, but the projection helpers it calls raise on
+    # malformed input by design. Anything that escapes as ValueError/TypeError
+    # is a defect in the *CR*, not a transient fault: retrying it cannot help,
+    # and an unhandled raise here would make kopf spin the Sentinel forever
+    # with nothing on status. Park it as Blocked with a PermanentError. Only
+    # these two types are caught — kopf.TemporaryError and ApiException pass
+    # straight through so genuinely transient failures still retry.
+    try:
+        result = reconcile_sentinel(cr)
+    except (ValueError, TypeError) as exc:
+        msg = f"spec rejected by the reconciler: {exc}"
+        patch.status["phase"] = "Blocked"
+        patch.status["conditions"] = [{
+            "type": "SpecInvalid",
+            "status": "False",
+            "reason": "InvalidSpec",
+            "message": msg,
+        }]
+        patch.status["observedGeneration"] = meta.get("generation")
+        raise kopf.PermanentError(msg) from exc
+
     if result.phase == "Blocked":
         patch.status["phase"] = "Blocked"
         patch.status["conditions"] = result.conditions
@@ -252,10 +274,28 @@ def reconcile(spec, meta, status, patch, **_):  # noqa: ARG001 - kopf signature
     # reconciler (which was hydrated with empty dir sides).
     import base64
     projected_secret = result.projected_secret
-    inputs_json = project_inputs(spec.get("inputs"), dir_inputs)
-    deployment_yaml = project_deployment(
-        spec.get("sinks"), spec.get("capabilities"), dir_deployment
-    )
+    # This second projection merges the *directory* side in, so it can fail on
+    # shapes the first pass never saw (e.g. a dir-side ``capabilityBindings``
+    # that isn't a mapping). Still an authoring error, still not retryable.
+    try:
+        inputs_json = project_inputs(spec.get("inputs"), dir_inputs)
+        deployment_yaml = project_deployment(
+            spec.get("sinks"), spec.get("capabilities"), dir_deployment
+        )
+    except (ValueError, TypeError) as exc:
+        msg = (
+            f"projecting config from {git['path']} at {git['url']}@{git['ref']} "
+            f"failed: {exc}"
+        )
+        patch.status["phase"] = "Blocked"
+        patch.status["conditions"] = [{
+            "type": "SpecInvalid",
+            "status": "False",
+            "reason": "InvalidProjection",
+            "message": msg,
+        }]
+        patch.status["observedGeneration"] = meta.get("generation")
+        raise kopf.PermanentError(msg) from exc
     projected_secret["data"]["inputs.json"] = base64.b64encode(
         inputs_json.encode("utf-8")
     ).decode("ascii")

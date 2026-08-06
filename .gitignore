@@ -17,3 +17,8 @@ mechanize-out/*/review.md
 k8s/controller/__pycache__/
 k8s/controller/tests/__pycache__/
 k8s/controller/.pytest_cache/
+# Session-local working notes and tool state — never source. Plans and
+# handoffs here reference absolute local paths and live prod runbooks;
+# anything meant to be shared belongs in docs/ proper.
+docs/local-notes/
+.polly/
