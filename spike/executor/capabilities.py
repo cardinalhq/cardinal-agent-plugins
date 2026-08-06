@@ -325,6 +325,38 @@ for _cap in _FIXTURE_CAPABILITIES:
     provider(_cap, "fixture")(_fixture_impl)
 
 
+# --------------------------------------------------------------------------- #
+# Real providers                                                              #
+# --------------------------------------------------------------------------- #
+#
+# Concrete providers live one-per-module under `providers/` and register
+# themselves at import time. Importing them HERE — rather than expecting every
+# entry point to remember an `import providers` line — means the registry is
+# complete for anyone who has `capabilities` at all. `fixture` stays registered
+# above and remains the default for tests; nothing below changes it.
+#
+# Note the deliberate absence of a try/except: a provider module that fails to
+# import must break loudly at startup. Swallowing ImportError here would
+# reproduce the exact failure this package exists to remove — a Sentinel that
+# asked for live telemetry quietly finding no provider by that name.
+
+
+def _import_providers() -> None:
+    import sys
+
+    pkg_dir = Path(__file__).resolve().parent
+    if str(pkg_dir) not in sys.path:
+        # `providers` is a top-level package relative to spike/executor/, the
+        # same sys.path convention executor.py and runtime_serve.py use.
+        sys.path.insert(0, str(pkg_dir))
+    import providers
+
+    providers.import_all()
+
+
+_import_providers()
+
+
 __all__ = [
     "MissingCacheError",
     "resolve",

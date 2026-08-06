@@ -92,14 +92,36 @@ properties:
           additionalProperties: true
 
   capabilityBindings:
+    description: |
+      Concrete provider binding per abstract capability id. Keyed by the
+      capability id exactly as a tool node's `config.toolRef` names it — the
+      executor looks the binding up by that key and FAILS the node if it is
+      absent (see spike/executor/deployment.py::CapabilityBindings).
+
+      Credentials are always referenced indirectly, never inlined:
+        * `endpoint_env` / `token_env` name PROCESS ENV VARS injected into the
+          executor pod by the k8s controller from the CR's
+          `endpointSecretRef` / `tokenSecretRef`
+          (`CARDINAL_CAP_<SLUG>_ENDPOINT` / `_TOKEN`, slug =
+          non-alphanumeric runs -> `_`, upper-cased). Written by
+          k8s/controller/projections.py::capability_bindings.
+        * `credential_ref` remains the local/dev + non-k8s runtime path
+          (`env://VAR`, resolved by spike/executor/secrets.py).
+      A binding may carry both; providers prefer the env-var pair.
     type: object
     additionalProperties:
       type: object
       required: [provider]
       additionalProperties: true
       properties:
-        provider: {type: string}
+        provider: {type: string, minLength: 1}
         credential_ref: {type: string}
+        endpoint_env:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]*$"
+        token_env:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]*$"
         rate_limit:
           type: object
           additionalProperties: true
