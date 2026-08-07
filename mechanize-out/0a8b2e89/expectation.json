@@ -1,0 +1,13 @@
+{
+  "sourceSession": "0a8b2e89",
+  "conclusion": "GitHub reports All Systems Operational (indicator 'none') — no incidents.",
+  "expectFindings": [
+    {
+      "emitNode": "emit-health-status",
+      "type": "service-health-status",
+      "severity": "info",
+      "evidenceNodes": ["classify-status"]
+    }
+  ],
+  "expectNoFindings": []
+}

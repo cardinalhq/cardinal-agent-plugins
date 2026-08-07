@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import askhuman
 import capabilities as capabilities_mod
+import sandbox
 import channels as channels_mod
 import deployment as deployment_mod
 import executor as executor_mod
@@ -307,7 +308,11 @@ def _run_node(
     if kind == "function":
         args = executor_mod.render_deep(config.get("arguments") or {}, env)
         entry = executor_mod.load_function(config["source"], sentinel_dir)
-        return entry(args), "SUCCEEDED"
+        # Enforce the deployment's `functions.<id>.network` policy. Unlisted
+        # nodes default to denied, so adding a function node without touching
+        # deployment.yaml cannot silently grant it the network.
+        with sandbox.function_guard(deployment.functions, node_id):
+            return entry(args), "SUCCEEDED"
 
     if kind == "condition":
         expr = config.get("expression") or ""

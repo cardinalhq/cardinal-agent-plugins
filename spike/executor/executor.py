@@ -53,6 +53,7 @@ from jsonschema import Draft202012Validator
 # Local imports
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capabilities  # noqa: E402
+import sandbox  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -820,7 +821,13 @@ def _run_node(node_id: str, node: dict, env: _Env, run_dir: Path, plan_only: boo
     if kind == "function":
         args = render_deep(config.get("arguments") or {}, env)
         entry = load_function(config["source"], sentinel_dir)
-        return entry(args)
+        # The legacy `execute` path has no deployment.yaml, so there is no way
+        # for a function to be *granted* the network here — which makes deny
+        # the only honest policy. A function body that needs an outbound call
+        # belongs on the `serve` path, where the grant can be declared and
+        # reviewed.
+        with sandbox.network_denied(node_id):
+            return entry(args)
     if kind == "condition":
         expr = config.get("expression") or ""
         return bool(eval_expr(expr, env))

@@ -1,0 +1,73 @@
+apiVersion: mechanize.dev/v1alpha1
+kind: Sentinel
+metadata:
+  name: statuspage-service-health-check
+  version: 0.2.0
+  trial:
+    status: passed
+    ranAt: 2026-08-07T07:12:00Z
+    checks: "T1-T9"
+spec:
+  purpose:
+    summary: >
+      Classify a service's public status-page payload into a health level and
+      emit a health-status finding whose severity follows that level.
+    reusableQuestion: >
+      Is service X reporting healthy on its public status page right now?
+    conclusionType: service-health-assessment
+  inputs:
+    service:
+      type: string
+      required: true
+    statusPayload:
+      type: string
+      required: true
+  capabilities:
+    required: []
+  variationPoints:
+    - path: /spec/inputs/service
+      operations: [bind]
+    - path: /spec/inputs/statusPayload
+      operations: [bind]
+  nodes:
+    classify-status:
+      kind: function
+      dependsOn: []
+      config:
+        runtime: python3.12
+        source: functions/classify-status.py
+        entrypoint: run
+        arguments:
+          payload: "${inputs.statusPayload}"
+      output:
+        schema:
+          type: object
+          required: [indicator, description, level]
+          properties:
+            indicator: { type: string }
+            description: { type: string }
+            level:
+              type: string
+              enum: [operational, degraded, incident, unknown]
+    emit-health-status:
+      kind: emit
+      dependsOn: [classify-status]
+      config:
+        finding:
+          type: service-health-status
+          title: "${inputs.service} health: ${nodes.classify-status.output.description}"
+          severityExpression: >
+            nodes.classify-status.output.level == "operational" ? "info" :
+            (nodes.classify-status.output.level == "incident" ? "critical" : "warning")
+          dedupeKey: "${inputs.service}:${nodes.classify-status.output.indicator}"
+          evidence:
+            - nodeRef: classify-status
+              field: output
+  outputs:
+    finding:
+      value: "${nodes.emit-health-status.output}"
+      required: true
+  execution:
+    concurrency: 1
+    failureMode: fail-fast
+    defaultTimeout: 1m
