@@ -2,65 +2,43 @@ apiVersion: mechanize.dev/v1alpha1
 kind: Sentinel
 metadata:
   name: statuspage-service-health-check
-  version: 0.1.0
+  version: 0.2.0
   trial:
     status: passed
-    ranAt: 2026-08-07T05:38:50Z
+    ranAt: 2026-08-07T07:12:00Z
     checks: "T1-T9"
 spec:
   purpose:
     summary: >
-      Fetch a service's public statuspage-shaped endpoint via an LLM-projecting
-      web fetch, extract the overall-status indicator, and emit a health-status
-      finding whose severity is derived from that indicator.
+      Classify a service's public status-page payload into a health level and
+      emit a health-status finding whose severity follows that level.
     reusableQuestion: >
-      Is service X reporting healthy on its public statuspage endpoint right now?
+      Is service X reporting healthy on its public status page right now?
     conclusionType: service-health-assessment
   inputs:
     service:
       type: string
       required: true
-    statusEndpoint:
+    statusPayload:
       type: string
       required: true
-    summaryPrompt:
-      type: string
-      default: "Extract overall service status and description."
   capabilities:
-    required:
-      - id: observability.fetch-status-summary
-        capabilityType: tool
+    required: []
   variationPoints:
     - path: /spec/inputs/service
       operations: [bind]
-    - path: /spec/inputs/statusEndpoint
+    - path: /spec/inputs/statusPayload
       operations: [bind]
-    - path: /spec/inputs/summaryPrompt/default
-      operations: [replace]
   nodes:
-    fetch-status-summary:
-      kind: tool
-      dependsOn: []
-      config:
-        toolRef: observability.fetch-status-summary
-        arguments:
-          url: "${inputs.statusEndpoint}"
-          prompt: "${inputs.summaryPrompt}"
-      output:
-        schema:
-          type: object
-          required: [text]
-          properties:
-            text: { type: string }
     classify-status:
       kind: function
-      dependsOn: [fetch-status-summary]
+      dependsOn: []
       config:
         runtime: python3.12
         source: functions/classify-status.py
         entrypoint: run
         arguments:
-          response: "${nodes.fetch-status-summary.output}"
+          payload: "${inputs.statusPayload}"
       output:
         schema:
           type: object
@@ -73,7 +51,7 @@ spec:
               enum: [operational, degraded, incident, unknown]
     emit-health-status:
       kind: emit
-      dependsOn: [fetch-status-summary, classify-status]
+      dependsOn: [classify-status]
       config:
         finding:
           type: service-health-status
@@ -85,8 +63,6 @@ spec:
           evidence:
             - nodeRef: classify-status
               field: output
-            - nodeRef: fetch-status-summary
-              field: text
   outputs:
     finding:
       value: "${nodes.emit-health-status.output}"

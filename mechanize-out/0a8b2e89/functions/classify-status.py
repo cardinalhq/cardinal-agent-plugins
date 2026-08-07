@@ -1,10 +1,8 @@
-# Stage 12 iterate-once: body filled in from the stub's own sketch. The
-# transformation is regex extraction of two labeled markdown lines
-# (`**Overall Status:** ...`, `**Indicator:** ...`) plus a fixed map from
-# the statuspage.io indicator vocabulary onto {operational, degraded,
-# incident, unknown}. Deterministic, small, and pattern-like; the only
-# reason CORE.md Stage 7 called for a stub here is that this pattern
-# (markdown-anchor-line extract) isn't enumerated in M1/M2/M3.
+# Parses a status-page summary into {indicator, description, level}.
+#
+# Deterministic, network-free, and therefore hermetically trialable. The
+# outbound fetch that produced `payload` is deliberately NOT in this DAG —
+# see rationale.md "Why the fetch is an input".
 import re
 
 _INDICATOR_TO_LEVEL = {
@@ -17,9 +15,9 @@ _INDICATOR_TO_LEVEL = {
 
 
 def run(inp):
-    text = inp["response"]["text"]
-    indicator = _match_first(text, r'\*\*Indicator:\*\*\s*"?([A-Za-z_-]+)"?')
-    description = _match_first(text, r'\*\*Overall Status:\*\*\s*([^\n]+)')
+    payload = inp["payload"]
+    indicator = _match_first(payload, r'\*\*Indicator:\*\*\s*"?([A-Za-z_-]+)"?')
+    description = _match_first(payload, r'\*\*Overall Status:\*\*\s*([^\n]+)')
     level = _INDICATOR_TO_LEVEL.get(indicator or "", "unknown")
     return {
         "indicator": indicator or "unknown",

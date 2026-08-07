@@ -15,7 +15,7 @@ Structural checks (universal — all Sentinels, all deployment modes):
   drift where nodejs-shaped `.mjs` files were emitted).
 * Every referenced function source file exists next to sentinel.yaml.
 * Every function file AST-parses (no import) and has a top-level `run(...)`.
-* R1–R6 via `common.mechanize.ratification`.
+* R1–R6 via `common.mechanize.ratification`. (R2 is Sentinel-internal only: no capability registry exists.)
 
 If a Phase-1 lint FAILs, exit 1. WARN-only exits 0 with warnings printed. See
 `LintFinding` for the finding shape.
@@ -526,7 +526,10 @@ def lint_structural(sentinel_dir: Path) -> LintResult:
                     )
                 )
 
-    # 9. R1–R6 via the shared ratification module.
+    # 9. R1–R6 via the shared ratification module. R2 checks well-formedness
+    # only — capability inventories are transcript-derived, so there is no
+    # registry to check membership against; whether a binding is servable is
+    # lint_remote R10's deploy-time question.
     rationale_path = sentinel_dir / "rationale.md"
     rationale = rationale_path.read_text() if rationale_path.exists() else ""
     for r in ratification.run_all(sentinel, rationale):

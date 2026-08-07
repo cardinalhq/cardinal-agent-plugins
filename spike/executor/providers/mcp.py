@@ -792,12 +792,11 @@ def call(node_id: str, args: dict[str, Any], ctx: dict[str, Any]) -> Any:
     capability_id: str = ctx["capability_id"]
     binding: dict[str, Any] = ctx.get("binding") or {}
 
-    tool_name = CAPABILITY_TOOLS.get(capability_id)
-    if tool_name is None:
-        raise McpConfigError(
-            f"provider {PROVIDER_ID!r} has no gateway tool mapped for capability "
-            f"{capability_id!r}; mapped: {sorted(CAPABILITY_TOOLS)}"
-        )
+    # Legacy alias map for the four abstract ids that predate transcript-derived
+    # capability inventories. Everything else passes through: the capability id
+    # IS the observed gateway tool name the compiler recorded from the session,
+    # and the gateway validates tool existence at call time.
+    tool_name = CAPABILITY_TOOLS.get(capability_id, capability_id)
 
     arguments = _build_arguments(args, binding, capability_id, node_id, tool_name)
     url = _endpoint_url(binding, capability_id)
@@ -829,11 +828,15 @@ def call(node_id: str, args: dict[str, Any], ctx: dict[str, Any]) -> Any:
         raise
 
 
-# Registered under the same impl for every observability capability the
-# gateway can serve; ``ctx["capability_id"]`` selects the tool name. Mirrors
-# the fixture provider's registration idiom in capabilities.py.
+# Registered as a universal provider: capability inventories are
+# transcript-derived (CORE.md Stage 2.1), so the set of ids cannot be
+# enumerated ahead of time. ``ctx["capability_id"]`` selects the tool name —
+# via CAPABILITY_TOOLS for the four legacy abstract ids, passthrough for
+# everything else. Per-capability registrations are kept for the legacy ids
+# so `registered_providers()` still lists them explicitly.
 for _capability_id in CAPABILITY_TOOLS:
     capabilities_mod.provider(_capability_id, PROVIDER_ID)(call)
+capabilities_mod.universal_provider(PROVIDER_ID)(call)
 
 
 __all__ = [

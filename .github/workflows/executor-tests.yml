@@ -10,7 +10,7 @@ on:
       - 'spike/executor/**'
       - 'common/mechanize/**'
       - 'common/deployment-schema.yaml'
-      - 'common/capabilities-registry.yaml'
+      - 'common/integrations.yaml'
       - 'mechanize-out/**'
       - '.github/workflows/executor-tests.yml'
   push:
@@ -19,7 +19,7 @@ on:
       - 'spike/executor/**'
       - 'common/mechanize/**'
       - 'common/deployment-schema.yaml'
-      - 'common/capabilities-registry.yaml'
+      - 'common/integrations.yaml'
       - 'mechanize-out/**'
       - '.github/workflows/executor-tests.yml'
 

@@ -66,32 +66,23 @@ No M-pattern matches.
 
 ## Stage 4 — DAG synthesis
 
-Three nodes:
-
-- **`fetch-status-summary`** (`kind: tool`, cap `web.fetch-with-summary`) —
-  models WebFetch's actual semantics: `(url, prompt) → {text: <projected
-  markdown>}`. Chosen deliberately over a hypothetical `web.fetch-json`
-  capability because (a) the session's captured `tool_result` is projected
-  markdown, not raw JSON, so a raw-JSON capability would leave the fixture
-  unavailable; (b) `web.fetch-with-summary` is what the source investigation
-  actually exercised.
+Two nodes (v0.2.0; the v0.1.0 tool node was withdrawn — see JC-1):
 
 - **`classify-status`** (`kind: function`) — parses the two anchor lines
-  (`**Overall Status:**` and `**Indicator:**`) out of the summary text and maps
-  the indicator token to a level in `{operational, degraded, incident,
-  unknown}`. §32 says function (deterministic transformation over declared
-  inputs) beats llm here. Body is a **stub** — see below.
+  (`**Overall Status:**` and `**Indicator:**`) out of `${inputs.statusPayload}`
+  and maps the indicator token to a level in `{operational, degraded,
+  incident, unknown}`. §32 says function (deterministic transformation over
+  declared inputs) beats llm here. Network-free, so it trials hermetically.
 
 - **`emit-health-status`** (`kind: emit`) — always fires (no `when:` gate);
   severity is computed from `level` via `severityExpression`
   (`operational→info`, `incident→critical`, else `warning`). `dedupeKey` is
   `${inputs.service}:${nodes.classify-status.output.indicator}` — stable
   across identical runs, changes only when the underlying indicator changes.
-  Evidence is two `{nodeRef, field}` mappings per §14.
+  Evidence is one `{nodeRef, field}` mapping per §14.
 
-**Node-ID choices** (frozen after Round 1):
+**Node-ID choices:**
 
-- `fetch-status-summary` — says what capability and what shape.
 - `classify-status` — says what the function decides.
 - `emit-health-status` — says what side effect and about what.
 
@@ -101,38 +92,71 @@ Not applicable. The session contains no image or document blocks.
 
 ## Judgment calls
 
-**JC-1: capability-ID abstraction.** The needed capability — HTTP GET a
-statuspage-shaped endpoint and return an LLM projection of it — is not in
-CORE.md's known abstract registry (`observability.*`, `code.*`). Mapped to
-the compatible `observability.*` family as `observability.fetch-status-summary`
-because checking service status is an observability-adjacent capability; the
-registry extension is still flagged as **capability-registry-extension-needed**
-since neither the specific ID nor a generic `observability.fetch-with-summary`
-is presently enumerated in CORE.md's registry. Round 1 iteration renamed this
-from the initially-emitted `web.fetch-with-summary`, which failed R2's
-strict-prefix check. Vendor-shape tool names (`WebFetch`) are deliberately
-not used per R2.
+**JC-1: no capability at all (v0.2.0).** This Sentinel declares
+`capabilities.required: []`. The source session's one evidence step was
+Claude Code's built-in `WebFetch` — **not an MCP tool** — and CORE.md Stage 2.1
+is explicit that only MCP-backed tool calls become `kind: tool` nodes. Anything
+else is generated function code, and no capability id is minted for it.
 
-**JC-2: LLM projection kept inside the tool.** The alternative
-(`web.fetch-json` returning raw response bytes + a downstream node that parses
-the JSON deterministically) would produce a cleaner Sentinel, but the source
-session did not capture raw JSON — WebFetch projected before returning. A
-`web.fetch-json`-based design would leave the trial's `fetch-status-summary`
-fixture *unavailable* (T2 FAIL: "do NOT synthesize fixtures"). Choosing
-`web.fetch-with-summary` preserves fixture honesty at the cost of a less
-purely-mechanical downstream classification.
+This took a long detour worth recording, because the detour is the reason
+Stage 2.1 now exists. The compile originally modelled the fetch as a `tool`
+node and invented a capability for it. R2 at the time checked only that an id
+carried an *abstract prefix*, so the honest name `web.fetch-with-summary`
+FAILED ratification and the compile renamed it to
+`observability.fetch-status-summary` to get through — filing an HTTP GET of a
+third party's public status page under the family that means "query our own
+telemetry backend." No registry contained that id and no provider implemented
+it, yet prefix-only R2 passed it and the trial then died with
+`UnknownProviderError`. Three separate fixes came out of that single wrong
+turn: R2 now checks registry membership rather than prefix; CORE.md Stage 2.1
+states the MCP rule the compiler was never given; and the `web.*` registry
+entry was withdrawn, since an outbound call no MCP tool serves is not a
+capability.
 
-**JC-3: `classify-status` body is a stub.** Per CORE.md Stage 7 rules, only
-M1/M2/M3-pattern function nodes get generated bodies; every other `function`
-node emits `raise NotImplementedError(...)` and Stage 10's T3 fails. This
-node is a genuine markdown-parse-and-map (not an M-pattern), so it ships as a
-stub. The stub body includes an implementation sketch operator can lift
-verbatim; expected trial verdict is **T3 FAIL** on this node.
+**Why the fetch is an input.** With the fetch necessarily a `function` node,
+it would have to reach the network — and a network-reaching function cannot
+be trial-executed hermetically, which is the one thing `trial.py` promises.
+Function nodes have no fixture mechanism (`load_function` always runs the real
+body), so there is no way to stub the call. Rather than ship a Sentinel that
+either fails its own trial or quietly dials out during one, the payload is a
+required input and the DAG covers the part that is deterministic: the
+classification.
+
+**The fidelity loss is real and worth stating plainly.** As compiled, this
+Sentinel does not fetch anything, so it is not autonomously schedulable —
+something must hand it a payload. The reusable procedure it captures is
+"classify a status-page payload and emit a graded finding", which is narrower
+than what the session did. The honest fix is not a workaround in this
+artifact; it is function-node fixtures in the trial harness, which would let
+the fetch live in the DAG and still be trialed. That is filed as the gap.
+`inputs.json` carries the payload the session actually captured, verbatim —
+not a synthesized one.
+
+**JC-2: parsing a markdown projection, not JSON.** The endpoint returns JSON
+whose `status.indicator` / `status.description` would parse far more cleanly
+than markdown anchor lines. But the session never captured that JSON — Claude
+Code's `WebFetch` projected the response through an LLM before returning it,
+so the projected markdown is the only payload the session actually observed.
+Parsing what was captured keeps `inputs.json` honest; reaching for the raw
+JSON shape would mean inventing a payload nobody recorded, which is the same
+prohibition as "do NOT synthesize fixtures." The cost is a parser keyed to
+markdown anchors, and therefore to the projection prompt's output format —
+noted in the rubric's reusability item.
+
+**JC-3: `classify-status` body is generated, not a stub.** CORE.md Stage 7
+reserves generated bodies for M1/M2/M3 patterns and stubs everything else.
+This node matched no M-pattern, so it was first emitted as a
+`NotImplementedError` stub and Stage 10 duly failed T3. Stage 12's
+iterate-once then filled it from the sketch in its own stub comment: the
+transformation is a small deterministic regex-and-map, pattern-like even
+though it is not one of the three enumerated patterns. That is the "compiler
+bug with an obvious fix" case Stage 12 describes. Worth flagging as a gap in
+the pattern list rather than a one-off: markdown-anchor extraction is common
+enough to deserve an M-pattern.
 
 ## Function bodies
 
-- `classify-status` — **stub** (see JC-3). Implementation sketch in the file's
-  header comment. Fill in before deploying.
+- `classify-status` — **generated** (see JC-3), deterministic and network-free.
 
 ## Unresolved
 
@@ -147,43 +171,37 @@ verbatim; expected trial verdict is **T3 FAIL** on this node.
   generated inline (warm) and Stage 9b's cold grade was skipped entirely
   per CORE.md Stage 9b's "prefer to skip Stage 9b entirely" guidance when a
   cold-subagent pass is unavailable. `review.md` is intentionally absent.
-- **Trial PASSED (T1–T9)** after three iterations, two of which fixed bugs in
-  the executor rather than in this Sentinel. Full history below.
-- **Trial history.** Stage 12 iterated once to fill the
-  `classify-status` stub (its stub comment carried the full implementation
-  sketch; the transformation is small, deterministic, and pattern-like
-  though not enumerated in M1/M2/M3, so this counts as a "compiler bug with
-  an obvious fix" per Stage 12). T3 then PASSED. Re-run surfaced a deeper
-  gap: **T4 fails because `spike/executor/capabilities.py`'s
-  `_FIXTURE_CAPABILITIES` whitelist enumerates only the 6 concrete abstract
-  capability ids (`observability.list-services|query-metrics|query-logs|
-  error-overview`, `code.grep|read`). The mechanize compiler emits abstract
-  ids that pass R2's prefix check (`observability.*`, `code.*`) but the
-  runtime fixture provider is only wired up for the enumerated subset.**
-  `observability.fetch-status-summary` is a compile-time-declared extension
-  (per JC-1 above) with no matching runtime registration, so the trial's
-  hermetic deployment binds it to `fixture` but the provider registry
-  raises `UnknownProviderError`. T8 cascades from T4. Two real fixes,
-  neither in this Sentinel's scope: (a) extend `_FIXTURE_CAPABILITIES` to
-  cover new abstract capability ids, or (b) change the fixture registry to
-  register-on-declaration rather than register-on-import.
+- **Trial PASSED (T1–T9)** — 2 nodes SUCCEEDED, one finding emitted of type
+  "service-health-status" at severity "info" with dedupeKey "github:none",
+  evidence fully resolved, identical across two runs, T9 confirming the match
+  to the source investigation's conclusion.
 
-  **Both were fixed on branch `fix/executor-trial-gaps`** (option (b) for the
-  registry). A third re-run then surfaced **T6** — `emit-health-status`'s
-  evidence entry `field: output.text` resolved to null, because §14's `field`
-  names a single key *of* the node output, not a dotted path; `output.text`
-  is not a key of `{text: ...}`. That one was a genuine compiler error in
-  this Sentinel, corrected to `field: text`. Final verdict **T1–T9 PASS**:
-  all three nodes SUCCEEDED and one finding was emitted, carrying finding
-  type "service-health-status" at severity "info" with dedupeKey
-  "github:none". Both evidence entries resolved, the two runs were identical,
-  and T9 confirms the finding matches the source investigation's conclusion.
+- **What this compile cost, and what it bought.** Reaching that verdict took
+  five iterations, and four of the five fixed something outside this Sentinel.
+  In order: a stub body filled per Stage 12 (T3); the fixture provider's
+  hardcoded capability whitelist, which rejected any newly-minted id even with
+  the fixture on disk (T4); a nested `?:` in `severityExpression` whose
+  parenthesised branch the executor's rewrite left as a literal `?`, killing
+  the emit node; an evidence `field: output.text` where §14 wants a single
+  output key, not a dotted path (T6) — that one a genuine error in this
+  artifact; and finally the whole tool-node premise, withdrawn under CORE.md
+  Stage 2.1 (JC-1).
 
-  Worth recording that T6 is exactly the check CORE.md says was written after
-  an empty-evidence `critical` finding reached production — and it caught a
-  real (if benign) instance of the same class here.
-- **capability-registry-extension-needed** for `web.fetch-with-summary`
-  (JC-1).
+  Two of those are worth naming as a class. T6 is exactly the check CORE.md
+  says was added after an empty-evidence `critical` finding reached production,
+  and it caught a real instance here. And the ternary bug had been latent since
+  the rewrite was written — no checked-in Sentinel had ever nested one. This
+  compile found it by being the first to try.
+
+- **The fetch is not in the DAG**, so this Sentinel is not autonomously
+  schedulable as compiled. See "Why the fetch is an input" above. The blocking
+  gap is function-node fixtures in the trial harness.
+
+- **`functions.<id>.filesystem` is still unenforced.** `network` is now
+  enforced by `spike/executor/sandbox.py`; `filesystem` remains declared,
+  linted, and ignored at runtime. This Sentinel's one function touches
+  neither, so nothing here depends on it — recorded because a reader of any
+  `deployment.yaml` would reasonably assume otherwise.
 - **Single-branch trial coverage.** The source session exercised only the
   `operational` branch (indicator `none`). The `degraded`/`incident` severity
   mappings in `emit-health-status.severityExpression` are compiler

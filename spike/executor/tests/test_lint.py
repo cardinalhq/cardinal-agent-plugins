@@ -181,10 +181,14 @@ def test_r1_fails_when_defaulted_input_missing_variation_point(tmp_path):
     assert "R1" in _codes(result)
 
 
-def test_r2_fails_on_vendor_capability_id(tmp_path):
+def test_r2_fails_on_duplicate_capability_id(tmp_path):
+    # Vendor-shaped ids are fine now — inventories are transcript-derived, so
+    # there is no vocabulary to police. What R2 still owns is internal
+    # consistency: the same id declared twice is a compile error.
     doc = copy.deepcopy(BASELINE_SENTINEL)
-    doc["spec"]["capabilities"]["required"][0]["id"] = "lakerunner.query-metrics"
-    doc["spec"]["nodes"]["query-metric"]["config"]["toolRef"] = "lakerunner.query-metrics"
+    doc["spec"]["capabilities"]["required"].append(
+        dict(doc["spec"]["capabilities"]["required"][0])
+    )
     d = _write_baseline(tmp_path, doc)
     result = lint_structural(d)
     assert not result.passed

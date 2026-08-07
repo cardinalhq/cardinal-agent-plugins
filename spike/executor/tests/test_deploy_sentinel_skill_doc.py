@@ -136,9 +136,9 @@ def test_skill_template_survives_projection_and_loads(tmp_path):
 
 
 def test_skill_template_runtime_id_is_registered():
-    """Lint rule R15 FAILs any runtime id not in the capabilities registry."""
+    """Lint rule R15 FAILs any runtime id not in the integrations policy."""
     registry = yaml.safe_load(
-        (REPO_ROOT / "common" / "capabilities-registry.yaml").read_text()
+        (REPO_ROOT / "common" / "integrations.yaml").read_text()
     )
     known = {
         r["id"] for r in (registry.get("integrations") or {}).get("runtime") or []

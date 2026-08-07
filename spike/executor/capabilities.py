@@ -230,6 +230,28 @@ def resolve(capability_id: str):
 
 _PROVIDERS: dict[tuple[str, str], Callable[..., Any]] = {}
 
+# Providers that serve ANY capability id. There is no central capability
+# registry — a Sentinel's capability inventory is derived from its source
+# session's transcript (CORE.md Stage 2.1), so the runtime cannot enumerate
+# valid ids ahead of time. A universal provider is one whose implementation
+# genuinely does not depend on the capability id: `fixture` reads
+# fixtures/<node-or-cap>.json whatever the id is, and `mcp` passes
+# unrecognized ids through as gateway tool names (the gateway validates
+# tool existence at call time).
+_UNIVERSAL_PROVIDERS: dict[str, Callable[..., Any]] = {}
+
+
+def universal_provider(provider_id: str):
+    """Register a provider callable that serves every capability id."""
+
+    def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        if provider_id in _UNIVERSAL_PROVIDERS:
+            raise RuntimeError(f"duplicate universal provider {provider_id!r}")
+        _UNIVERSAL_PROVIDERS[provider_id] = fn
+        return fn
+
+    return _decorator
+
 
 class UnknownProviderError(KeyError):
     """Raised when a capability binding names an unregistered provider."""
@@ -255,24 +277,22 @@ def provider(capability_id: str, provider_id: str):
 
 def resolve_provider(capability_id: str, provider_id: str) -> Callable[..., Any]:
     key = (capability_id, provider_id)
-    if key not in _PROVIDERS:
-        # `fixture` resolves for ANY capability, not just the eagerly-registered
-        # ones below. The impl reads `fixtures/<node-or-capability>.json` and
-        # cares nothing for which capability it is standing in for, so a static
-        # whitelist only ever produced false negatives: a Sentinel declaring a
-        # capability outside the enumerated set failed its own trial with
-        # UnknownProviderError even though its fixture file was sitting right
-        # there. The compiler is allowed to mint new abstract capability ids
-        # (mechanize CORE.md's `capability-registry-extension-needed` escape
-        # hatch), so the runtime must not enumerate them ahead of time.
-        if provider_id == "fixture":
-            return _fixture_impl
-        available = sorted(p for c, p in _PROVIDERS if c == capability_id)
-        raise UnknownProviderError(
-            f"no provider {provider_id!r} for capability {capability_id!r}; "
-            f"registered: {available}"
-        )
-    return _PROVIDERS[key]
+    if key in _PROVIDERS:
+        return _PROVIDERS[key]
+    if provider_id in _UNIVERSAL_PROVIDERS:
+        return _UNIVERSAL_PROVIDERS[provider_id]
+    available = sorted(
+        {p for c, p in _PROVIDERS if c == capability_id} | set(_UNIVERSAL_PROVIDERS)
+    )
+    raise UnknownProviderError(
+        f"no provider {provider_id!r} for capability {capability_id!r}; "
+        f"registered: {available}"
+    )
+
+
+def provider_is_resolvable(capability_id: str, provider_id: str) -> bool:
+    """Would resolve_provider succeed? Lint's question, without the exception."""
+    return (capability_id, provider_id) in _PROVIDERS or provider_id in _UNIVERSAL_PROVIDERS
 
 
 def registered_providers() -> list[tuple[str, str]]:
@@ -319,22 +339,11 @@ def _fixture_impl(node_id: str, args: dict[str, Any], ctx: dict[str, Any]) -> An
     )
 
 
-# Eagerly register the fixture provider for the currently-known capability ids
-# so `registered_providers()` enumerates them. This list is NOT the set of
-# capabilities fixtures work for — `resolve_provider` falls back to
-# `_fixture_impl` for any capability asking for the `fixture` provider. Adding
-# an id here is optional and only affects introspection.
-_FIXTURE_CAPABILITIES = [
-    "observability.list-services",
-    "observability.query-metrics",
-    "observability.query-logs",
-    "observability.error-overview",
-    "code.grep",
-    "code.read",
-]
-
-for _cap in _FIXTURE_CAPABILITIES:
-    provider(_cap, "fixture")(_fixture_impl)
+# `fixture` serves every capability id — see _UNIVERSAL_PROVIDERS above. No
+# per-capability list exists to register against: capability inventories are
+# transcript-derived, so any eager enumeration here would be a stale copy of
+# a fact the compiler discovers per-session.
+universal_provider("fixture")(_fixture_impl)
 
 
 # --------------------------------------------------------------------------- #
@@ -374,7 +383,9 @@ __all__ = [
     "resolve",
     "CAPABILITY_BINDINGS",
     "provider",
+    "provider_is_resolvable",
     "resolve_provider",
     "registered_providers",
+    "universal_provider",
     "UnknownProviderError",
 ]

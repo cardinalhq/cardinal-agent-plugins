@@ -20,8 +20,7 @@ import capabilities as capabilities_mod
 NEW_CAP = "observability.fetch-status-summary"  # not in _FIXTURE_CAPABILITIES
 
 
-def test_fixture_resolves_for_a_capability_outside_the_known_list():
-    assert NEW_CAP not in capabilities_mod._FIXTURE_CAPABILITIES
+def test_fixture_resolves_for_any_capability():
     assert capabilities_mod.resolve_provider(NEW_CAP, "fixture") is capabilities_mod._fixture_impl
 
 
@@ -29,10 +28,11 @@ def test_fixture_resolves_for_an_entirely_novel_capability_family():
     assert capabilities_mod.resolve_provider("totally.invented", "fixture") is capabilities_mod._fixture_impl
 
 
-def test_unknown_non_fixture_provider_still_raises():
-    """The fallback is scoped to `fixture` — real providers must stay strict."""
+def test_unknown_provider_still_raises():
+    """Universality is per-provider opt-in — an unimplemented provider id
+    (like the registry-era fictions `lakerunner`, `http-get`) must still fail."""
     with pytest.raises(capabilities_mod.UnknownProviderError):
-        capabilities_mod.resolve_provider(NEW_CAP, "mcp")
+        capabilities_mod.resolve_provider(NEW_CAP, "lakerunner")
 
 
 def test_resolved_fixture_reads_the_node_file(tmp_path):

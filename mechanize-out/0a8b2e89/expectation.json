@@ -6,7 +6,7 @@
       "emitNode": "emit-health-status",
       "type": "service-health-status",
       "severity": "info",
-      "evidenceNodes": ["classify-status", "fetch-status-summary"]
+      "evidenceNodes": ["classify-status"]
     }
   ],
   "expectNoFindings": []

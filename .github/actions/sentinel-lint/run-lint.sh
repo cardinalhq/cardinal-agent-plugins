@@ -22,7 +22,7 @@ set -euo pipefail
 
 EXECUTOR="${LINT_ROOT}/spike/executor/executor.py"
 SCHEMA="${LINT_ROOT}/common/deployment-schema.yaml"
-REGISTRY="${LINT_ROOT}/common/capabilities-registry.yaml"
+REGISTRY="${LINT_ROOT}/common/integrations.yaml"
 EMIT="${GITHUB_ACTION_PATH}/emit-annotations.py"
 
 for required in "${EXECUTOR}" "${SCHEMA}" "${REGISTRY}" "${EMIT}"; do

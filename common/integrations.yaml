@@ -1,0 +1,49 @@
+schemaVersion: mechanize.dev/v1alpha1
+kind: IntegrationsPolicy
+
+# Deployment policy: which runtimes, channels, sinks, and LLM models a
+# SentinelDeployment may bind. This is hand-authored on purpose — every entry
+# encodes an operational decision (may a runtime block on a human? which
+# models are approved?) that is not derivable from code.
+#
+# What this file deliberately is NOT: a capability registry. There is no
+# central list of tool capabilities. A Sentinel's capability inventory is
+# derived from the session transcript it was compiled from (CORE.md Stage
+# 2.1): MCP tools used in the session become tool nodes carrying the observed
+# tool identity; everything else becomes generated function code. Whether a
+# (capability, provider) binding is servable is answered by the runtime's
+# provider registrations (spike/executor/capabilities.py), which cannot drift
+# from the implementations because they ARE the implementations.
+
+# LLM models a deployment may bind in llmBindings.model / defaultParserModel.
+# Approval list, not an availability list — R13/R19 FAIL any model not here.
+llmModels:
+  - claude-haiku-4-5
+  - claude-opus-5
+  - claude-sonnet-5
+  - gemini-flash-2
+
+integrations:
+  runtime:
+    - id: k8s-controller
+      allowsBlockUntilAnswered: true
+    - id: ci-plugin
+      allowsBlockUntilAnswered: false
+      maxWallClockHours: 6
+    - id: daemon                   # Phase 2's long-running service form.
+      allowsBlockUntilAnswered: true
+    - id: manual
+      allowsBlockUntilAnswered: true
+  channel:
+    - id: slack.socket-mode
+    - id: cli-prompt               # Phase 1 stdin/stdout for local dev.
+    - id: test.mock                # In-memory driver for pytest; runtime rejects in remote mode.
+    - id: ticket.jira
+    - id: email
+    - id: pagerduty.incident
+  sink:
+    - id: outcomes-dashboard
+    - id: slack
+    - id: pagerduty
+    - id: jira
+    - id: stdout                   # Phase 1 findings sink.

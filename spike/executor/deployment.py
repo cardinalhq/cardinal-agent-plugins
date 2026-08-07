@@ -14,7 +14,7 @@ strict — see :class:`CapabilityBindings`.
 
 See:
 - common/deployment-schema.yaml (the JSON Schema this validates against)
-- common/capabilities-registry.yaml (the id lookup source for R10/R13/R19)
+- common/integrations.yaml (policy source for R10/R13/R15/R19)
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ DEFAULT_SCHEMA_PATH = (
     Path(__file__).resolve().parent.parent.parent / "common" / "deployment-schema.yaml"
 )
 DEFAULT_REGISTRY_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "common" / "capabilities-registry.yaml"
+    Path(__file__).resolve().parent.parent.parent / "common" / "integrations.yaml"
 )
 
 

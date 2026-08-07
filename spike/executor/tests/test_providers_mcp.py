@@ -178,11 +178,11 @@ def test_capability_to_gateway_tool_mapping_is_exact():
     }
 
 
-def test_fixture_provider_is_still_registered_and_is_the_test_default():
-    registered = set(capabilities_mod.registered_providers())
-    for capability_id in capabilities_mod._FIXTURE_CAPABILITIES:
-        assert (capability_id, "fixture") in registered
+def test_fixture_provider_is_universal_and_is_the_test_default():
+    # No per-capability fixture registrations exist — `fixture` is a universal
+    # provider serving any id (capability inventories are transcript-derived).
     assert capabilities_mod.resolve_provider(CAP_LIST, "fixture") is not mcp.call
+    assert capabilities_mod.resolve_provider("never-seen-before", "fixture") is not mcp.call
 
 
 def test_resolve_provider_returns_the_mcp_impl():
@@ -699,9 +699,20 @@ def test_endpoint_query_string_is_stripped_from_error_messages(monkeypatch, tmp_
     assert "leaky-secret" not in str(excinfo.value)
 
 
-def test_unmapped_capability_raises_config_error(env, tmp_path):
-    with pytest.raises(mcp.McpConfigError, match="no gateway tool mapped"):
-        mcp.call("n1", {"instance": "prod"}, ctx(capability_id="code.grep", tmp_path=tmp_path))
+def test_unmapped_capability_passes_through_as_gateway_tool_name(env, monkeypatch, tmp_path):
+    """Transcript-derived ids ARE gateway tool names — no mapping required.
+
+    The old behavior raised McpConfigError for any id outside CAPABILITY_TOOLS,
+    which made every freshly-compiled Sentinel unrunnable until someone added a
+    mapping. The gateway itself validates tool existence at call time.
+    """
+    rec = install(monkeypatch, FakeResponse(envelope({"structuredContent": {"ok": True}})))
+    out = mcp.call(
+        "n1", {"instance": "prod"},
+        ctx(capability_id="lakerunner__list_log_streams", tmp_path=tmp_path),
+    )
+    assert out == {"ok": True}
+    assert rec.body["params"]["name"] == "lakerunner__list_log_streams"
 
 
 def test_bad_timeout_seconds_raises(env, monkeypatch, tmp_path):

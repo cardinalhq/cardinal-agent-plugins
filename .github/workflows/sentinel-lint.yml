@@ -8,7 +8,7 @@ on:
     paths:
       - 'mechanize-out/**'
       - 'common/deployment-schema.yaml'
-      - 'common/capabilities-registry.yaml'
+      - 'common/integrations.yaml'
       - 'common/mechanize/**'
       - 'spike/executor/lint*.py'
       - '.github/actions/sentinel-lint/**'
@@ -18,7 +18,7 @@ on:
     paths:
       - 'mechanize-out/**'
       - 'common/deployment-schema.yaml'
-      - 'common/capabilities-registry.yaml'
+      - 'common/integrations.yaml'
       - 'common/mechanize/**'
       - 'spike/executor/lint*.py'
       - '.github/actions/sentinel-lint/**'
