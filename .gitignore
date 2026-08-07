@@ -13,6 +13,11 @@ adapters/*/hooks/cardinal_core/
 mechanize-out/*/preview.html
 mechanize-out/*/rubric.md
 mechanize-out/*/review.md
+# Stage 10 trial artifacts (run dirs, sqlite state, report.json). Regenerated
+# by every trial run; a committed report claiming PASSED would go stale the
+# moment the Sentinel changed. The durable record is metadata.trial in
+# sentinel.yaml, stamped by Stage 12.
+mechanize-out/*/trial/
 # k8s controller test caches — pyc + pytest cache aren't source.
 k8s/controller/__pycache__/
 k8s/controller/tests/__pycache__/

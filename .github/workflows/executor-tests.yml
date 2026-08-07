@@ -1,0 +1,95 @@
+name: Executor tests
+
+# The executor is the thing every compiled Sentinel eventually runs on, and
+# until this workflow existed its test suite ran only on whoever's laptop last
+# remembered to. Runs pytest plus the Stage 10 trial harness over every
+# checked-in Sentinel that carries the fixtures a trial needs.
+on:
+  pull_request:
+    paths:
+      - 'spike/executor/**'
+      - 'common/mechanize/**'
+      - 'common/deployment-schema.yaml'
+      - 'common/capabilities-registry.yaml'
+      - 'mechanize-out/**'
+      - '.github/workflows/executor-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'spike/executor/**'
+      - 'common/mechanize/**'
+      - 'common/deployment-schema.yaml'
+      - 'common/capabilities-registry.yaml'
+      - 'mechanize-out/**'
+      - '.github/workflows/executor-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python3 -m pip install --quiet -r spike/executor/requirements.txt
+
+      - name: Run the executor test suite
+        working-directory: spike/executor
+        run: python3 -m pytest tests/ -q
+
+  trial:
+    name: Stage 10 trial over checked-in Sentinels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python3 -m pip install --quiet pyyaml jsonschema
+
+      - name: Trial-execute every Sentinel that ships trial inputs
+        # `--allow-missing-expectation` downgrades Stage 11 to SKIP: CI is
+        # re-running Sentinels that were compiled before Stage 10 existed and
+        # so carry no ground truth. A fresh /mechanize compile does NOT get
+        # that flag. Sentinels without inputs.json are skipped out loud —
+        # a silent skip would read as a pass.
+        run: |
+          set -euo pipefail
+          ran=0
+          skipped=()
+          for dir in mechanize-out/*/; do
+            [ -f "${dir}sentinel.yaml" ] || continue
+            if [ ! -f "${dir}inputs.json" ]; then
+              skipped+=("$dir")
+              continue
+            fi
+            echo "::group::trial ${dir}"
+            python3 common/mechanize/trial.py "$dir" --allow-missing-expectation
+            echo "::endgroup::"
+            ran=$((ran + 1))
+          done
+          echo "trialled ${ran} Sentinel(s)"
+          for d in "${skipped[@]:-}"; do
+            [ -n "$d" ] || continue
+            echo "::warning::${d} has no inputs.json — not trial-executed. It was compiled before Stage 10; recompile to get a trial."
+          done
+          # Trialling nothing is the one outcome that must never be green. An
+          # empty or absent mechanize-out/ leaves the glob unexpanded, every
+          # -f test fails, and this job would otherwise exit 0 having verified
+          # nothing at all — the same silent pass the skip warning above exists
+          # to prevent. If every Sentinel legitimately lacks inputs.json, that
+          # is a real regression in the compiler, not a reason to pass.
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::No Sentinel was trial-executed. Expected at least one directory under mechanize-out/ carrying both sentinel.yaml and inputs.json."
+            exit 1
+          fi

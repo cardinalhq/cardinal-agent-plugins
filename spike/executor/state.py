@@ -353,6 +353,29 @@ class StateStore:
         )
         return int(cur.lastrowid)
 
+    def list_findings(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        """Read findings back, newest-last, with `finding_json` decoded.
+
+        The trial harness (common/mechanize/trial.py) reads a run's findings
+        through this rather than by scraping the stdout sink, so a Sentinel
+        routed to any sink is still inspectable after the run.
+        """
+        if run_id:
+            rows = self._conn.execute(
+                "SELECT * FROM findings WHERE run_id=? ORDER BY id", (run_id,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM findings ORDER BY id").fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            rec = dict(r)
+            try:
+                rec["finding"] = json.loads(rec["finding_json"])
+            except (TypeError, ValueError):
+                rec["finding"] = None
+            out.append(rec)
+        return out
+
 
 __all__ = [
     "ASK_STATE_WAITING",

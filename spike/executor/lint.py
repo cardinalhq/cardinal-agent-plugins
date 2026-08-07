@@ -75,6 +75,7 @@ class LintResult:
 # --------------------------------------------------------------------------- #
 
 _KNOWN_NODE_KINDS = {"tool", "function", "condition", "llm", "emit", "ask_human"}
+_SEVERITIES = ("info", "warning", "critical")
 
 _INPUT_REF_RE = re.compile(r"\binputs\.([A-Za-z_][A-Za-z0-9_]*)")
 _NODE_REF_RE = re.compile(r"\bnodes\.([A-Za-z_][A-Za-z0-9_-]*)")
@@ -89,6 +90,19 @@ def _walk_strings(value: Any):
     elif isinstance(value, list):
         for v in value:
             yield from _walk_strings(v)
+
+
+def _ancestors(nodes: dict[str, Any], start: str) -> set[str]:
+    """Every node that is guaranteed to run before `start` (transitive dependsOn)."""
+    seen: set[str] = set()
+    stack = list((nodes.get(start) or {}).get("dependsOn") or [])
+    while stack:
+        nid = stack.pop()
+        if nid in seen or nid not in nodes:
+            continue
+        seen.add(nid)
+        stack.extend((nodes.get(nid) or {}).get("dependsOn") or [])
+    return seen
 
 
 def lint_structural(sentinel_dir: Path) -> LintResult:
@@ -403,7 +417,116 @@ def lint_structural(sentinel_dir: Path) -> LintResult:
                 )
             )
 
-    # 8. R1–R6 via the shared ratification module.
+    # 8. emit-node evidence shape.
+    #
+    # The runtime resolves evidence as {nodeRef, field, optional} mappings —
+    # the string form `${nodes.<id>.output}` cannot express `optional` or
+    # field selection, so it is not accepted. It used to be skipped silently,
+    # which shipped findings with empty evidence. executor._build_finding now
+    # raises; this is the static catch so CI fails before a deploy does.
+    for nid, node in nodes.items():
+        if not isinstance(node, dict) or node.get("kind") != "emit":
+            continue
+        finding = (node.get("config") or {}).get("finding") or {}
+
+        # Severity: a literal out of range, or both spellings at once, silently
+        # produced an `info` finding before the runtime learned to read
+        # `severity:` at all. Catch both statically.
+        severity = finding.get("severity")
+        if severity is not None and severity not in _SEVERITIES:
+            result.findings.append(
+                LintFinding(
+                    code="FINDING-SEVERITY",
+                    severity="FAIL",
+                    file=rel,
+                    line=None,
+                    message=f"emit node {nid!r} severity {severity!r} is not one of {list(_SEVERITIES)}",
+                    fix=f"set severity to one of {list(_SEVERITIES)}, or use severityExpression",
+                )
+            )
+        if severity is not None and finding.get("severityExpression") is not None:
+            result.findings.append(
+                LintFinding(
+                    code="FINDING-SEVERITY",
+                    severity="FAIL",
+                    file=rel,
+                    line=None,
+                    message=(
+                        f"emit node {nid!r} sets both `severity` and `severityExpression`; "
+                        f"the runtime uses severityExpression and the literal is dead config"
+                    ),
+                    fix="keep whichever one the finding actually needs and delete the other",
+                )
+            )
+
+        evidence = finding.get("evidence")
+        if evidence is None:
+            continue
+        if not isinstance(evidence, list):
+            result.findings.append(
+                LintFinding(
+                    code="EMIT-EVIDENCE",
+                    severity="FAIL",
+                    file=rel,
+                    line=None,
+                    message=f"emit node {nid!r} `evidence` must be a list (got {type(evidence).__name__})",
+                    fix="rewrite evidence as a list of {nodeRef, field} mappings",
+                )
+            )
+            continue
+        for i, entry in enumerate(evidence):
+            if not isinstance(entry, dict) or "nodeRef" not in entry:
+                result.findings.append(
+                    LintFinding(
+                        code="EMIT-EVIDENCE",
+                        severity="FAIL",
+                        file=rel,
+                        line=None,
+                        message=(
+                            f"emit node {nid!r} evidence[{i}] is {entry!r}; the runtime "
+                            f"resolves only {{nodeRef, field, optional}} mappings and will "
+                            f"fail this node"
+                        ),
+                        fix=(
+                            "rewrite as `- nodeRef: <node-id>` + `field: output` "
+                            "(add `optional: true` if the node may not produce)"
+                        ),
+                    )
+                )
+                continue
+            ref = entry.get("nodeRef")
+            if ref not in declared_nodes:
+                result.findings.append(
+                    LintFinding(
+                        code="EMIT-EVIDENCE",
+                        severity="FAIL",
+                        file=rel,
+                        line=None,
+                        message=f"emit node {nid!r} evidence[{i}] references unknown node {ref!r}",
+                        fix=f"point nodeRef at a node declared under spec.nodes, or remove the entry",
+                    )
+                )
+            elif ref not in _ancestors(nodes, nid):
+                # Transitive dependencies count: an emit node that depends on a
+                # reducer which itself depends on the cited node is correctly
+                # ordered. Only an evidence ref with no ordering guarantee at
+                # all resolves to null non-deterministically.
+                result.findings.append(
+                    LintFinding(
+                        code="EMIT-EVIDENCE",
+                        severity="WARN",
+                        file=rel,
+                        line=None,
+                        message=(
+                            f"emit node {nid!r} cites evidence from {ref!r} but neither "
+                            f"depends on it directly nor transitively; the value resolves "
+                            f"to null unless {ref!r} happens to run first"
+                        ),
+                        fix=f"add {ref!r} to {nid}'s dependsOn",
+                    )
+                )
+
+    # 9. R1–R6 via the shared ratification module.
     rationale_path = sentinel_dir / "rationale.md"
     rationale = rationale_path.read_text() if rationale_path.exists() else ""
     for r in ratification.run_all(sentinel, rationale):

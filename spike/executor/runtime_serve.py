@@ -205,6 +205,22 @@ def _run(
             node_states[node_id] = "SKIPPED"
             continue
 
+        # Declared-output-schema validation, matching `executor.execute`.
+        # Without this the two run paths disagree: a node whose output drifted
+        # from its declared schema fails under `execute` and sails through
+        # `serve` — which is the path production actually runs.
+        ok, schema_err = executor_mod._validate_output(node_id, node, output)
+        if not ok:
+            node_states[node_id] = "FAILED"
+            state.audit(
+                "node.failed",
+                {"node": node_id, "error": schema_err, "phase": "schema-validate"},
+                run_id=run_id,
+                node_id=node_id,
+            )
+            exit_code = exit_code or 6
+            continue
+
         node_outputs[node_id] = output
         node_states[node_id] = "SUCCEEDED"
         state.audit(
@@ -343,7 +359,11 @@ def _route_finding(
         state.record_finding(run_id, finding, sink_id="<unrouted>", delivery_status="unrouted")
         state.audit(
             "finding.unrouted",
-            {"emit_node": emit_node_id, "finding_type": finding_type},
+            {
+                "emit_node": emit_node_id,
+                "finding_type": finding_type,
+                "dedupe_hash": finding.get("dedupeHash"),
+            },
             run_id=run_id,
             node_id=emit_node_id,
         )
@@ -371,7 +391,12 @@ def _route_finding(
         state.record_finding(run_id, finding, sink_id=sink_id, delivery_status="delivered")
         state.audit(
             "finding.delivered",
-            {"emit_node": emit_node_id, "sink_id": sink_id, "detail": detail},
+            {
+                "emit_node": emit_node_id,
+                "sink_id": sink_id,
+                "detail": detail,
+                "dedupe_hash": finding.get("dedupeHash"),
+            },
             run_id=run_id,
             node_id=emit_node_id,
         )
@@ -383,7 +408,13 @@ def _route_finding(
             state.record_finding(run_id, finding, sink_id=sink_id, delivery_status="dropped")
         state.audit(
             "finding.sink_failed",
-            {"emit_node": emit_node_id, "sink_id": sink_id, "onExhausted": on_ex, "detail": detail},
+            {
+                "emit_node": emit_node_id,
+                "sink_id": sink_id,
+                "onExhausted": on_ex,
+                "detail": detail,
+                "dedupe_hash": finding.get("dedupeHash"),
+            },
             run_id=run_id,
             node_id=emit_node_id,
         )

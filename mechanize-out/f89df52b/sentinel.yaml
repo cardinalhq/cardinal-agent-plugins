@@ -378,7 +378,8 @@ spec:
               : "warning"
           dedupeKey: "${inputs.instance}:${nodes.pick-resolved-service.output.name}:health"
           evidence:
-            - "${nodes.compute-health-summary.output}"
+            - nodeRef: compute-health-summary
+              field: output
     emit-reconciliation-finding:
       kind: emit
       dependsOn:
@@ -393,9 +394,12 @@ spec:
           severity: info
           dedupeKey: "${inputs.instance}:${nodes.pick-resolved-service.output.name}:reconciliation"
           evidence:
-            - "${nodes.query-error-overview.output}"
-            - "${nodes.count-body-error-terms.output}"
-            - "${nodes.compute-error-count-reconciliation.output}"
+            - nodeRef: query-error-overview
+              field: output
+            - nodeRef: count-body-error-terms
+              field: output
+            - nodeRef: compute-error-count-reconciliation
+              field: output
   outputs:
     healthReport:
       value:
