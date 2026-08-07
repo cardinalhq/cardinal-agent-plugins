@@ -7,7 +7,7 @@ Lints mechanize.dev Sentinels at PR time. Runs the same `python3 spike/executor/
 1. Checks out `cardinalhq/cardinal-agent-plugins` at the pinned `ref` into `.sentinel-lint/` (does not touch your repo's checkout).
 2. Sets up Python 3.12 and installs `pyyaml` + `jsonschema`.
 3. Expands the `paths` glob(s); skips (with a warning) any match that isn't a directory or lacks a `sentinel.yaml`.
-4. Runs `executor.py lint --format=json` against each Sentinel directory using the pinned repo's `common/deployment-schema.yaml` + `common/capabilities-registry.yaml`.
+4. Runs `executor.py lint --format=json` against each Sentinel directory using the pinned repo's `common/deployment-schema.yaml` + `common/integrations.yaml`.
 5. Emits `::error file=...,line=...::CODE: message — fix: ...` for every FAIL finding and `::warning::` for every WARN.
 6. Exits 0 if all Sentinels pass, 1 if any FAIL.
 

@@ -1022,7 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
         dest="registry_path",
         type=Path,
         default=None,
-        help="Path to capabilities-registry.yaml (defaults to <repo>/common/capabilities-registry.yaml).",
+        help="Path to the integrations policy file (defaults to <repo>/common/integrations.yaml).",
     )
     lint_p.add_argument(
         "--schema",

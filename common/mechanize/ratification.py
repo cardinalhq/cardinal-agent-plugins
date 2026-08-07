@@ -15,8 +15,11 @@ returns the six results in order. When invoked as `python3 ratification.py
 Rules:
 - R1  Variation-point completeness  — every templated `${inputs.<name>}` with a
       default is declared in spec.variationPoints[].
-- R2  Capability-ID abstraction     — every capability id uses an abstract
-      prefix from the known registry (observability.*, code.*).
+- R2  Capability well-formedness    — every declared capability is a mapping
+      with a unique, non-empty string id. There is NO capability registry:
+      inventories are transcript-derived (CORE.md Stage 2.1), so the only
+      checkable claims are internal consistency (here) and runtime provider
+      resolvability (deploy-time, lint_remote R10).
 - R3  Function-vs-LLM discipline    — every `kind: llm` node has a rationale
       paragraph explaining why it isn't `kind: function` per §32.
 - R4  Node existence                — every node id cited in rationale.md
@@ -34,22 +37,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 Verdict = Literal["PASS", "FAIL"]
-
-
-# Fallback only. The authority is common/capabilities-registry.yaml, which
-# callers parse and pass in as `registry` — see check_r2. These prefixes are
-# what R2 falls back to when no registry is reachable (ratification is
-# framework-free and must stay usable on a bare dict), and they are strictly
-# weaker: a prefix match proves a naming convention was followed, not that the
-# capability is one any provider implements. That gap is not hypothetical — a
-# Sentinel declaring `observability.fetch-status-summary` passed prefix-only R2
-# and then failed at runtime with UnknownProviderError, because no such
-# capability was ever registered.
-KNOWN_CAPABILITY_PREFIXES: tuple[str, ...] = (
-    "observability.",
-    "code.",
-    "web.",
-)
 
 
 @dataclass(frozen=True)
@@ -160,57 +147,40 @@ def check_r1(sentinel: dict) -> RatificationResult:
     return RatificationResult("R1", "PASS", "all defaulted+referenced inputs declared as variation points")
 
 
-def check_r2(sentinel: dict, registry: dict | None = None) -> RatificationResult:
-    """R2 — capability IDs must be registered in the shared capabilities registry.
+def check_r2(sentinel: dict) -> RatificationResult:
+    """R2 — capability declarations are well-formed and internally unique.
 
-    `registry` is the parsed common/capabilities-registry.yaml. When supplied,
-    R2 checks *membership* — the only question that predicts whether the
-    capability will actually bind at runtime. When it is absent (a caller
-    holding nothing but a parsed Sentinel), R2 degrades to the prefix check and
-    says so in the detail, because a silent downgrade would read as a stronger
-    guarantee than it is.
+    There is NO capability registry to check membership against. A Sentinel's
+    capability inventory is derived from its source session's transcript
+    (CORE.md Stage 2.1): MCP tools used in the session become tool nodes
+    carrying the observed tool identity, and everything else compiles to
+    generated function code with no capability at all. The only compile-time
+    checkable claims are internal: every entry is a mapping with a non-empty
+    string id, and no id is declared twice. Whether a (capability, provider)
+    binding is actually servable is a deploy-time question answered by the
+    runtime's provider registrations (lint_remote R10).
     """
     spec = _get_spec(sentinel)
     caps = (spec.get("capabilities") or {}).get("required") or []
-    declared_ids = [
-        e.get("id") for e in caps if isinstance(e, dict) and isinstance(e.get("id"), str)
-    ]
-
-    known = set((registry or {}).get("capabilities") or {})
-    if known:
-        unregistered = [cid for cid in declared_ids if cid not in known]
-        if unregistered:
-            return RatificationResult(
-                rule="R2",
-                verdict="FAIL",
-                detail=(
-                    f"capability ids absent from the capabilities registry: "
-                    f"{sorted(unregistered)} — add them to "
-                    f"common/capabilities-registry.yaml with their providers, or "
-                    f"map to an existing id"
-                ),
-            )
-        return RatificationResult(
-            "R2", "PASS", f"all {len(declared_ids)} capability id(s) are registered"
-        )
-
-    bad = [
-        cid for cid in declared_ids
-        if not any(cid.startswith(p) for p in KNOWN_CAPABILITY_PREFIXES)
-    ]
-    if bad:
-        return RatificationResult(
-            rule="R2",
-            verdict="FAIL",
-            detail=(
-                f"vendor-shaped capability ids (no registry supplied; allowed "
-                f"prefixes: {list(KNOWN_CAPABILITY_PREFIXES)}): {bad}"
-            ),
-        )
+    problems: list[str] = []
+    seen: set[str] = set()
+    for i, entry in enumerate(caps):
+        if not isinstance(entry, dict):
+            problems.append(f"required[{i}] is not a mapping: {entry!r}")
+            continue
+        cid = entry.get("id")
+        if not isinstance(cid, str) or not cid.strip():
+            problems.append(f"required[{i}] has no non-empty string id")
+            continue
+        if cid in seen:
+            problems.append(f"duplicate capability id {cid!r}")
+        seen.add(cid)
+    if problems:
+        return RatificationResult(rule="R2", verdict="FAIL", detail="; ".join(problems))
     return RatificationResult(
         "R2", "PASS",
-        "all capability ids use abstract prefixes (no registry supplied — "
-        "prefix check only, membership unverified)",
+        f"{len(seen)} capability declaration(s) well-formed and unique "
+        f"(inventory is transcript-derived; no registry exists to check against)",
     )
 
 
@@ -399,18 +369,11 @@ def check_r6(sentinel: dict) -> RatificationResult:
 # Aggregate                                                                    #
 # --------------------------------------------------------------------------- #
 
-def run_all(
-    sentinel: dict, rationale: str = "", registry: dict | None = None
-) -> list[RatificationResult]:
-    """Run R1–R6 in order and return the results list.
-
-    `registry` is the parsed common/capabilities-registry.yaml. Pass it whenever
-    it is reachable: without it R2 can only check naming convention, which does
-    not predict whether a capability binds at runtime.
-    """
+def run_all(sentinel: dict, rationale: str = "") -> list[RatificationResult]:
+    """Run R1–R6 in order and return the results list."""
     return [
         check_r1(sentinel),
-        check_r2(sentinel, registry),
+        check_r2(sentinel),
         check_r3(sentinel, rationale),
         check_r4(sentinel, rationale),
         check_r5(sentinel),
@@ -437,25 +400,6 @@ def format_verdict_block(results: list[RatificationResult]) -> str:
 # CLI entrypoint — the cold Stage 5.5 subagent invokes this                    #
 # --------------------------------------------------------------------------- #
 
-def find_registry_path(start: "Path") -> "Path | None":
-    """Walk up from `start` looking for common/capabilities-registry.yaml.
-
-    Mirrors lint_remote.default_registry_path so the compiler's Stage 5.5 and
-    sentinel-lint resolve the same registry from the same starting point.
-    """
-    from pathlib import Path as _Path
-
-    cur = _Path(start).resolve()
-    for _ in range(10):
-        candidate = cur / "common" / "capabilities-registry.yaml"
-        if candidate.exists():
-            return candidate
-        if cur.parent == cur:
-            break
-        cur = cur.parent
-    return None
-
-
 def _main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(
@@ -478,11 +422,7 @@ def _main(argv: list[str]) -> int:
         if rationale_path.exists():
             rationale = rationale_path.read_text()
     doc = yaml.safe_load(sentinel_path.read_text())
-    registry = None
-    registry_path = find_registry_path(sentinel_path.parent)
-    if registry_path is not None:
-        registry = yaml.safe_load(registry_path.read_text())
-    results = run_all(doc or {}, rationale, registry)
+    results = run_all(doc or {}, rationale)
     print(format_verdict_block(results))
     return 0 if all(r.verdict == "PASS" for r in results) else 1
 

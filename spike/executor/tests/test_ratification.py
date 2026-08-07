@@ -17,8 +17,6 @@ def _sentinel(**spec) -> dict:
     return {"apiVersion": "mechanize.dev/v1alpha1", "kind": "Sentinel", "spec": spec}
 
 
-REGISTRY = {"capabilities": {"observability.query-logs": {"providers": ["mcp"]},
-                             "web.fetch-with-summary": {"providers": ["http-get"]}}}
 
 
 # --------------------------------------------------------------------------- #
@@ -66,42 +64,46 @@ def test_r1_ignores_inputs_without_a_default():
 
 
 # --------------------------------------------------------------------------- #
-# R2 — capability registration                                                 #
+# R2 — capability well-formedness (no registry exists; transcript-derived)     #
 # --------------------------------------------------------------------------- #
 
 
-def _with_cap(cid: str) -> dict:
+def _with_cap(cid) -> dict:
     return _sentinel(capabilities={"required": [{"id": cid, "capabilityType": "tool"}]})
 
 
-def test_r2_fails_an_unregistered_id_even_with_an_abstract_prefix():
-    """The exact false PASS that shipped: prefix-shaped but in no registry.
+def test_r2_passes_any_id_the_compiler_recorded_from_the_session():
+    """Transcript-derived ids are not checked against any vocabulary.
 
-    `observability.fetch-status-summary` passed prefix-only R2, then died at
-    runtime with UnknownProviderError because nothing implemented it.
+    The old registry/prefix checks were wrong in both directions at once:
+    they admitted `observability.fetch-status-summary` (prefix-shaped, but
+    implemented by nothing) and rejected honest observed identities. The
+    inventory now IS the session's tool usage; there is nothing to match
+    it against at compile time.
     """
-    r = rat.check_r2(_with_cap("observability.fetch-status-summary"), REGISTRY)
-    assert r.verdict == "FAIL"
-    assert "registry" in r.detail
+    for cid in ("lakerunner__execute_logs_query", "observability.query-logs", "anything-at-all"):
+        assert rat.check_r2(_with_cap(cid)).verdict == "PASS"
 
 
-def test_r2_passes_a_registered_id_outside_the_fallback_prefixes():
-    assert rat.check_r2(_with_cap("web.fetch-with-summary"), REGISTRY).verdict == "PASS"
+def test_r2_fails_a_duplicate_capability_id():
+    s = _sentinel(capabilities={"required": [{"id": "code.grep"}, {"id": "code.grep"}]})
+    r = rat.check_r2(s)
+    assert r.verdict == "FAIL" and "duplicate" in r.detail
 
 
-def test_r2_fails_a_vendor_shaped_id_against_the_registry():
-    assert rat.check_r2(_with_cap("lakerunner.query"), REGISTRY).verdict == "FAIL"
+def test_r2_fails_an_entry_with_no_id():
+    s = _sentinel(capabilities={"required": [{"capabilityType": "tool"}]})
+    assert rat.check_r2(s).verdict == "FAIL"
 
 
-def test_r2_without_a_registry_degrades_to_prefix_and_says_so():
-    """A silent downgrade would read as a stronger guarantee than it is."""
-    r = rat.check_r2(_with_cap("observability.anything-at-all"), None)
-    assert r.verdict == "PASS"
-    assert "membership unverified" in r.detail
+def test_r2_fails_a_non_mapping_entry():
+    s = _sentinel(capabilities={"required": ["code.grep"]})
+    assert rat.check_r2(s).verdict == "FAIL"
 
 
-def test_r2_without_a_registry_still_rejects_vendor_shapes():
-    assert rat.check_r2(_with_cap("datadog.query"), None).verdict == "FAIL"
+def test_r2_passes_an_empty_inventory():
+    """A Sentinel whose evidence steps all compiled to functions has no capabilities."""
+    assert rat.check_r2(_sentinel(capabilities={"required": []})).verdict == "PASS"
 
 
 # --------------------------------------------------------------------------- #
@@ -232,7 +234,7 @@ def test_r6_passes_when_aligned():
 
 
 def test_run_all_returns_six_results_in_order():
-    results = rat.run_all(_sentinel(nodes={}), "", REGISTRY)
+    results = rat.run_all(_sentinel(nodes={}), "")
     assert [r.rule for r in results] == ["R1", "R2", "R3", "R4", "R5", "R6"]
 
 
@@ -240,34 +242,24 @@ def test_verdict_block_is_revise_when_any_rule_fails():
     results = rat.run_all(
         _sentinel(capabilities={"required": []},
                   nodes={"q": {"kind": "tool", "config": {"toolRef": "code.grep"}}}),
-        "", REGISTRY,
+        "",
     )
     block = rat.format_verdict_block(results)
     assert block.startswith("VERDICT: REVISE")
     assert "fix list" in block
 
 
-def test_find_registry_path_locates_the_real_registry():
-    """The compiler's Stage 5.5 and lint must resolve the same registry file."""
-    from pathlib import Path
-
-    found = rat.find_registry_path(Path(__file__).parent)
-    assert found is not None and found.name == "capabilities-registry.yaml"
-
-
-def test_the_shipped_registry_satisfies_r2_for_every_checked_in_sentinel():
-    """End-to-end: real registry, real Sentinels under mechanize-out/."""
+def test_every_checked_in_sentinel_satisfies_r2():
+    """End-to-end over the real artifacts under mechanize-out/."""
     from pathlib import Path
 
     import yaml
 
-    registry_path = rat.find_registry_path(Path(__file__).parent)
-    registry = yaml.safe_load(registry_path.read_text())
-    root = registry_path.parent.parent
+    root = Path(__file__).resolve().parents[3]
     sentinels = sorted((root / "mechanize-out").glob("*/sentinel.yaml"))
     if not sentinels:
         pytest.skip("no checked-in Sentinels")
     for path in sentinels:
         doc = yaml.safe_load(path.read_text())
-        r = rat.check_r2(doc, registry)
+        r = rat.check_r2(doc)
         assert r.verdict == "PASS", f"{path.parent.name}: {r.detail}"

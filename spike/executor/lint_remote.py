@@ -9,7 +9,7 @@ The `lint_remote` entry-point returns a `LintResult` (imported from lint.py)
 whose findings each carry code, severity, file, line (usually None), message
 and fix — same shape as Phase 1.
 
-The registry path defaults to `<repo-root>/common/capabilities-registry.yaml`
+The policy path defaults to `<repo-root>/common/integrations.yaml`
 resolved by walking up from the sentinel_dir; a caller can override via the
 `registry_path` argument (surfaced as `--registry` on the CLI).
 """
@@ -26,6 +26,7 @@ from jsonschema import Draft202012Validator
 
 # Executor sits next to us; lint.py exports the shared LintFinding/LintResult.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import capabilities as capabilities_mod  # noqa: E402 — R10 provider resolvability
 from lint import LintFinding, LintResult  # noqa: E402
 
 
@@ -60,13 +61,13 @@ _ATTACHMENT_TYPES = frozenset({"image", "pdf", "binary"})
 # --------------------------------------------------------------------------- #
 
 def _find_repo_root(start: Path) -> Path | None:
-    """Walk up from `start` looking for common/capabilities-registry.yaml.
+    """Walk up from `start` looking for common/integrations.yaml.
 
     Returns the parent dir (i.e. repo root) or None if not found.
     """
     cur = start.resolve()
     for _ in range(10):
-        if (cur / "common" / "capabilities-registry.yaml").exists():
+        if (cur / "common" / "integrations.yaml").exists():
             return cur
         if cur.parent == cur:
             break
@@ -75,10 +76,17 @@ def _find_repo_root(start: Path) -> Path | None:
 
 
 def default_registry_path(sentinel_dir: Path) -> Path | None:
+    """Default path of the integrations POLICY file (common/integrations.yaml).
+
+    The parameter keeps its historical `registry` name through the call chain,
+    but there is no capability registry anymore — capability inventories are
+    transcript-derived (CORE.md Stage 2.1). What this file carries is policy:
+    approved LLM models, runtime/channel/sink integrations.
+    """
     root = _find_repo_root(Path(sentinel_dir))
     if root is None:
         return None
-    return root / "common" / "capabilities-registry.yaml"
+    return root / "common" / "integrations.yaml"
 
 
 def default_schema_path(sentinel_dir: Path) -> Path | None:
@@ -89,23 +97,8 @@ def default_schema_path(sentinel_dir: Path) -> Path | None:
 
 
 def _flatten_llm_providers(registry: dict) -> set[str]:
-    """Union of every provider id under capabilities.llm.*"""
-    out: set[str] = set()
-    caps = registry.get("capabilities") or {}
-    for cap_id, cap in caps.items():
-        if not cap_id.startswith("llm."):
-            continue
-        for p in (cap or {}).get("providers") or []:
-            out.add(p)
-    return out
-
-
-def _capability_providers(registry: dict, cap_id: str) -> list[str] | None:
-    caps = registry.get("capabilities") or {}
-    cap = caps.get(cap_id)
-    if cap is None:
-        return None
-    return list((cap.get("providers") or []))
+    """The approved-model allowlist: `llmModels:` in common/integrations.yaml."""
+    return {m for m in registry.get("llmModels") or [] if isinstance(m, str)}
 
 
 def _runtime_flag(registry: dict, runtime_id: str, flag: str) -> Any:
@@ -358,32 +351,31 @@ def _check_r10(
                     ),
                 ))
             continue
-        providers = _capability_providers(registry, cap_id)
-        if providers is None:
+        # There is no capability registry to consult — the question that
+        # predicts a runtime failure is whether the runtime can resolve this
+        # (capability, provider) pair, and the provider registrations in
+        # capabilities.py are that answer. They cannot drift from the
+        # implementations because they ARE the implementations.
+        if not isinstance(provider, str) or not capabilities_mod.provider_is_resolvable(
+            cap_id, provider
+        ):
+            registered = sorted(
+                {p for _, p in capabilities_mod.registered_providers()}
+                | set(capabilities_mod._UNIVERSAL_PROVIDERS)
+            )
             findings.append(LintFinding(
                 code="R10",
                 severity="FAIL",
                 file="deployment.yaml",
                 line=None,
                 message=(
-                    f"capability {cap_id!r} not present in capabilities-registry.yaml"
-                ),
-                fix=f"add capabilities.{cap_id}.providers[] entry to the registry",
-            ))
-            continue
-        if provider not in providers:
-            findings.append(LintFinding(
-                code="R10",
-                severity="FAIL",
-                file="deployment.yaml",
-                line=None,
-                message=(
-                    f"capability {cap_id!r} provider {provider!r} not in "
-                    f"capabilities-registry.yaml (allowed: {providers})"
+                    f"capability {cap_id!r} provider {provider!r} is not "
+                    f"resolvable by the runtime (registered providers: "
+                    f"{registered})"
                 ),
                 fix=(
-                    f"pick one of {providers} or add {provider!r} to "
-                    f"capabilities.{cap_id}.providers"
+                    f"bind to a provider the runtime implements ({registered}), "
+                    f"or implement {provider!r} under spike/executor/providers/"
                 ),
             ))
     return findings
@@ -549,7 +541,7 @@ def _check_r13(sentinel: dict, deployment: dict, registry: dict) -> list[LintFin
                 line=None,
                 message=(
                     f"llm node {nid!r} model {model!r} not in "
-                    f"capabilities-registry.yaml {hint_cap}"
+                    f"integrations.yaml llmModels {hint_cap}"
                 ),
                 fix=(
                     f"pick a provider registered under capabilities.{hint_cap} "
@@ -596,7 +588,7 @@ def _check_r15(sentinel: dict, deployment: dict, registry: dict) -> list[LintFin
             line=None,
             message=(
                 f"runtime {runtime_id!r} not present in "
-                f"capabilities-registry.yaml integrations.runtime[]"
+                f"integrations.yaml integrations.runtime[]"
             ),
             fix=(
                 f"pick a registered runtime id "
@@ -775,7 +767,7 @@ def _check_r19(deployment: dict, registry: dict) -> list[LintFinding]:
             line=None,
             message=(
                 f"runtime.defaultParserModel {default!r} not in "
-                f"capabilities-registry.yaml capabilities.llm.*"
+                f"integrations.yaml llmModels"
             ),
             fix=(
                 f"pick a provider registered under capabilities.llm.* "
@@ -796,7 +788,7 @@ def _check_r19(deployment: dict, registry: dict) -> list[LintFinding]:
                 line=None,
                 message=(
                     f"askHumanBindings.{nid}.parserModel {pm!r} not in "
-                    f"capabilities-registry.yaml capabilities.llm.*"
+                    f"integrations.yaml llmModels"
                 ),
                 fix=(
                     f"pick a provider registered under capabilities.llm.* "
@@ -855,7 +847,7 @@ def lint_remote(
     Gated on `metadata.deployment.mode: remote` (unless `force=True`, useful
     for tests that want to exercise the check bodies without setting the
     mode). Missing deployment.yaml when gated → DEPLOY-MISSING FAIL. Missing
-    registry → REGISTRY-MISSING FAIL. Deployment schema violations →
+    policy file → POLICY-MISSING FAIL. Deployment schema violations →
     DEPLOY-SCHEMA FAIL. Otherwise emits R7-R20 findings.
     """
     result = LintResult()
@@ -889,16 +881,16 @@ def lint_remote(
     sch_path = Path(schema_path) if schema_path else default_schema_path(sentinel_dir)
     if reg_path is None or not reg_path.exists():
         result.findings.append(LintFinding(
-            code="REGISTRY-MISSING",
+            code="POLICY-MISSING",
             severity="FAIL",
-            file=str(reg_path) if reg_path else "common/capabilities-registry.yaml",
+            file=str(reg_path) if reg_path else "common/integrations.yaml",
             line=None,
             message=(
-                "capabilities-registry.yaml not found; pass --registry <path> "
+                "integrations.yaml not found; pass --registry <path> "
                 "or run lint from inside the repo"
             ),
             fix=(
-                "supply --registry pointing at common/capabilities-registry.yaml, "
+                "supply --registry pointing at common/integrations.yaml, "
                 "or invoke lint from the repo checkout"
             ),
         ))
@@ -919,11 +911,11 @@ def lint_remote(
             registry = yaml.safe_load(f) or {}
     except yaml.YAMLError as e:
         result.findings.append(LintFinding(
-            code="REGISTRY-PARSE",
+            code="POLICY-PARSE",
             severity="FAIL",
             file=str(reg_path),
             line=None,
-            message=f"failed to parse capabilities-registry.yaml: {e}",
+            message=f"failed to parse integrations.yaml: {e}",
             fix="fix the YAML syntax in the registry",
         ))
         return result

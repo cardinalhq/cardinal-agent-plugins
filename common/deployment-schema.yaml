@@ -21,7 +21,7 @@ properties:
   runtime:
     description: |
       Integration id — one of `integrations.runtime.*` in
-      capabilities-registry.yaml (k8s-controller | ci-plugin | daemon |
+      integrations.yaml (k8s-controller | ci-plugin | daemon |
       manual).
     type: string
 

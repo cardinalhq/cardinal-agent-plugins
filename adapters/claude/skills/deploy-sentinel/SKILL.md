@@ -77,7 +77,7 @@ Read three files from `SENTINEL_DIR`:
    kind: SentinelDeployment
    # Registered runtime ids: k8s-controller | ci-plugin | daemon | manual.
    # A CR reconciled by the sentinel-controller is k8s-controller; lint rule
-   # R15 FAILs any value not in common/capabilities-registry.yaml.
+   # R15 FAILs any value not in common/integrations.yaml.
    runtime: k8s-controller
 
    # No capabilityBindings — the CR supplies them (4.5), and a CR binding
@@ -175,7 +175,7 @@ Tell the user: "These Secrets must already exist in the target namespace. This s
 
 Emit one entry in `spec.capabilities[]` per required id. Include `endpointSecretRef` / `tokenSecretRef` only for `mcp` entries.
 
-`common/capabilities-registry.yaml` admits `mcp` for all four observability capabilities, so a binding with `provider: mcp` passes remote-mode lint rule R10. (This was a real gap and is now closed — if you are reading an older copy of this skill that says otherwise, trust the registry file.)
+The `mcp` provider serves any capability id — the four legacy `observability.*` ids via its alias map, and transcript-derived ids by passthrough (the id IS the gateway tool name) — so a binding with `provider: mcp` passes remote-mode lint rule R10. There is no capability registry; R10 checks provider resolvability against the runtime's registrations.
 
 ### 4.6 `spec.sinks`
 

@@ -27,7 +27,7 @@ from lint import lint_all  # noqa: E402
 from lint_remote import lint_remote  # noqa: E402
 
 
-REGISTRY_PATH = REPO_ROOT / "common" / "capabilities-registry.yaml"
+REGISTRY_PATH = REPO_ROOT / "common" / "integrations.yaml"
 SCHEMA_PATH = REPO_ROOT / "common" / "deployment-schema.yaml"
 
 
@@ -140,7 +140,10 @@ BASELINE_DEPLOYMENT: dict[str, Any] = {
     },
     "capabilityBindings": {
         "observability.query-metrics": {
-            "provider": "lakerunner",
+            # `mcp` is the one implemented tool provider; the old baseline
+            # bound `lakerunner`, a provider that never existed but that the
+            # (now-deleted) capability registry happily allowed.
+            "provider": "mcp",
             "credential_ref": "k8s-secret://lakerunner-token",
             "side_effect_class": "read-only",
         },
