@@ -171,6 +171,21 @@ For each tool call, assign exactly one:
 
 **Synthetic capability IDs for shell-shaped tool calls.** Many agents expose a general-purpose shell/exec tool. When a tool call is such a shell call, derive a synthetic capability ID from `argv[0]`: `bash.grep`, `bash.kubectl`, `bash.git`, `bash.gh`, `bash.jq`, `bash.find`, `bash.ls`, `bash.cat`, `bash.mv`, `bash.curl`, `bash.python`. Preserve the raw tool name; add the synthetic ID for capability binding. The adapter SKILL.md names which of its tools count as shell-shaped.
 
+### Stage 2.1 — MCP-backed tools become `tool` nodes; everything else becomes `function`
+
+**This is the rule that decides whether a retained action is `kind: tool` or `kind: function`, and it is not a judgment call.**
+
+A `kind: tool` node binds to an abstract capability, and a capability is only real if some provider implements it at runtime. Today that means **MCP**: `spike/executor/providers/mcp.py` maps each abstract capability to the gateway tool that serves it, and `common/capabilities-registry.yaml` is the registered set. A capability outside that set has no implementation, so a `tool` node referencing it cannot run — it fails at the first tool node with `UnknownProviderError`.
+
+So, for each REQUIRED/SUPPORTING action:
+
+1. **Was it an MCP tool call?** In most agents MCP tools carry a distinguishing prefix (in Claude Code, `mcp__<server>__<tool>`). If yes, map it to the abstract capability that covers it and emit a `kind: tool` node. If the capability is genuinely new, add it to `common/capabilities-registry.yaml` **together with the provider that implements it** — a registry entry with no implementation is a promise the runtime cannot keep.
+2. **Was it anything else** — a built-in agent tool (web fetch, file read, HTTP call), a shell call, a bespoke API poke? **Emit a `kind: function` node and generate the code.** Do NOT invent a capability ID for it. Do NOT add it to the registry. The Sentinel ships the implementation next to `sentinel.yaml` exactly as it does for every other function node, and `deployment.yaml` grants `network: enabled` for that node when it needs to reach out.
+
+**Do NOT invent a capability to model a non-MCP tool.** This is the failure this rule exists to prevent: a session that used a built-in web-fetch tool compiled to a `tool` node with a freshly-minted capability id, which no provider implemented and no registry contained. It passed the compiler's own checks and then died at runtime. Generated function code has none of that problem — there is nothing to register, nothing to bind, and nothing to keep in sync.
+
+**Consequence for the trial (Stage 10).** Tool nodes are stubbed from `fixtures/<node-id>.json`, so they stay hermetic for free. A function node that reaches the network does not, and the trial runs functions with `network: disabled`. If a generated function's only job is the outbound call, either split it — one function performing the call, a second doing the deterministic parse the conclusion actually rests on — and trial the parse against the captured payload, or state plainly in the rationale that the fetch is untrialable and which check that weakens. Never let a network-reaching function run live during a trial.
+
 ### Stage 2.5 — Code-reading compression policy
 
 Many investigations include a sub-pattern:
