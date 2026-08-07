@@ -44,22 +44,27 @@ KIND = "Sentinel"
 #     first tool node of a CR that binds `provider: mcp` — which is what
 #     every live-telemetry Sentinel binds.
 # Two further floors start at v0.1.4, both reachable from a valid Sentinel:
-#   * `provider: fixture` bound to a capability id outside the six in
-#     capabilities._FIXTURE_CAPABILITIES raises UnknownProviderError on
-#     v0.1.3 and below, even with the fixture file present.
+#   * `provider: fixture` bound to a capability id the runtime did not
+#     enumerate raised UnknownProviderError on v0.1.3 and below, even with the
+#     fixture file present.
 #   * a nested `?:` in a `severityExpression` whose branch is parenthesised
 #     (`c1 ? x : (c2 ? y : z)`) fails the emit node on v0.1.3 and below.
-# v0.1.5 changes function-node BEHAVIOUR, not just capability:
-#   * `functions.<id>.network` is enforced (spike/executor/sandbox.py). Through
-#     v0.1.4 it was declared and ignored, so a function body could reach the
-#     network whatever the deployment said. From v0.1.5 a function whose policy
-#     is not `enabled` — including one with no `functions:` entry at all, which
-#     defaults to denied — raises NetworkAccessDenied instead. Any Sentinel
-#     relying on a function body's outbound call must add
-#     `functions.<id>.network: enabled` before moving to v0.1.5.
+# v0.2.0 is BREAKING twice over — read before pinning:
+#   * `functions.<id>.network` is now enforced (spike/executor/sandbox.py).
+#     Through v0.1.4 it was declared and ignored, so a function body reached
+#     the network whatever the deployment said. A function whose policy is not
+#     `enabled` — including one with no `functions:` entry, which defaults to
+#     denied — now raises NetworkAccessDenied. Any Sentinel relying on a
+#     function body's outbound call must declare the grant first.
+#   * the capability registry is gone. Capability ids are transcript-derived,
+#     `fixture` and `mcp` serve any id, and remote lint R10 now asks whether
+#     the runtime can resolve (capability, provider) rather than whether a
+#     YAML list blessed it. Deployments binding providers nobody implemented
+#     (`lakerunner`, `prometheus`, `github-checkout`) now FAIL lint where they
+#     previously passed. Remote lint also reads common/integrations.yaml.
 # Bump in lockstep with spike/executor/VERSION; the parity is pinned by
 # tests/test_reconciler.py and spike/executor/tests/test_release_versions.py.
-DEFAULT_EXECUTOR_IMAGE = "ghcr.io/cardinalhq/sentinel-executor:v0.1.5"
+DEFAULT_EXECUTOR_IMAGE = "ghcr.io/cardinalhq/sentinel-executor:v0.2.0"
 GIT_INIT_IMAGE = "alpine/git:latest"
 SENTINEL_DIR = "/sentinel"
 CONFIG_DIR = "/config"

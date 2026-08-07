@@ -289,7 +289,7 @@ def test_runtime_image_default_used_when_absent():
     del cr["spec"]["runtime"]["image"]
     r = reconcile_sentinel(cr)
     main = r.job_or_cronjob["spec"]["template"]["spec"]["containers"][0]
-    assert main["image"] == "ghcr.io/cardinalhq/sentinel-executor:v0.1.5"
+    assert main["image"] == "ghcr.io/cardinalhq/sentinel-executor:v0.2.0"
 
 
 def test_default_executor_image_tag_matches_executor_version_file():
