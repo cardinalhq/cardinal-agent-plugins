@@ -36,13 +36,33 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _debug_capture  # noqa: E402
 import _otel_settings  # noqa: E402
 import _plan_cache  # noqa: E402
 import _plugin_version  # noqa: E402
 from cardinal_core.bashclass import classify_bash_command  # noqa: E402
 from cardinal_core.otlp import emit_records, kv, parse_ts_ns  # noqa: E402
 
+# trace_emit / cardinal_core.traces (Phase 1 execution-graph emission) are
+# imported LAZILY inside _emit_execution_graph, not at module scope: they
+# pull in cardinal_core.envelope, which uses enum.StrEnum (Python 3.11+).
+# This hook's existing turn-usage/plan-usage emission must keep working
+# on whatever python3 the host has, even 3.9/3.10 — a module-scope import
+# failure here would crash the ENTIRE hook (including the unrelated,
+# always-on emission above) rather than just the opt-in execution-graph
+# path. Deferring the import lets the surrounding try/except in
+# _emit_execution_graph swallow an old-Python ImportError the same way it
+# swallows every other failure in that path.
+
 HOOK_TIMEOUT_SEC = 2.0
+
+# Phase 1 execution-graph emission (docs/local-notes/plans/
+# agent-execution-graph.md; wire shape is docs/canonical-model.md §14) is
+# opt-in per session: lakerunner's OTLP trace ingest isn't rolled out
+# everywhere yet, so a bare install must not start POSTing to /v1/traces
+# until an operator flips this flag.
+EMIT_EXECUTION_GRAPH_ENV = "CARDINAL_EMIT_EXECUTION_GRAPH"
+DEBUG_ENV = "CARDINAL_DEBUG"
 
 # Emission bounds (docs/specs/subagent-telemetry-enrichment.md §Field 2).
 # Long turns are chunked into POSTs of ≤BATCH_MAX_RECORDS logRecords
@@ -245,12 +265,63 @@ def _build_records(
     ]
 
 
+def _emit_execution_graph(
+    transcript_path: Path,
+    session_id: str,
+    settings_env: dict,
+) -> None:
+    """Phase 1 execution-graph emission (docs/local-notes/plans/
+    agent-execution-graph.md; wire shape docs/canonical-model.md §14):
+    walk the transcript via trace_emit and POST the resulting Envelope
+    records as OTLP spans to the SAME ingest connection the
+    turn-usage/plan-usage OTLP emission above already uses — there is no
+    separate execution-graph endpoint or connection discovery; envelopes
+    ride the OTLP traces signal (`/v1/traces`) at the same endpoint the
+    plugin already uses for logs (`/v1/logs`).
+
+    Best-effort end-to-end: any failure here (transcript walk, connection
+    lookup, or the POST itself) is swallowed and, at most, logged to
+    stderr under CARDINAL_DEBUG=1 — this must never surface as a hook
+    failure or disturb the turn-usage/plan-usage emission above it.
+    """
+    try:
+        connection = _otel_settings.ingest_connection(settings_env)
+        if connection is None:
+            return
+        import trace_emit  # noqa: E402 (lazy — see import-site comment above)
+        from cardinal_core.traces import emit_envelope_spans, trace_resource_attrs  # noqa: E402
+
+        resource = _otel_settings.resource_attrs(settings_env)
+        org_id = resource.get("cardinal.org") or "unknown"
+        envelopes = list(
+            trace_emit.emit_from_transcript(
+                transcript_path, session_id=session_id, org_id=org_id, adapter="claude",
+            )
+        )
+        if not envelopes:
+            return
+        trace_resource = trace_resource_attrs(
+            service_name="claude-code",
+            adapter="claude",
+            plugin_version=_plugin_version.plugin_version(),
+            org_id=org_id,
+            session_id=session_id,
+        )
+        emit_envelope_spans(envelopes, connection, trace_resource, timeout=HOOK_TIMEOUT_SEC)
+    except Exception as exc:  # noqa: BLE001 - telemetry must not break the agent loop
+        if os.environ.get(DEBUG_ENV) == "1":
+            print(f"cardinal: execution-graph emit failed: {exc!r}", file=sys.stderr)
+
+
 def main() -> None:
     raw = sys.stdin.read()
     try:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         _silent_exit()
+
+    # Capture FIRST, before any processing below.
+    _debug_capture.dump_if_enabled("Stop", payload)
 
     session_id = (
         payload.get("session_id")
@@ -267,52 +338,59 @@ def main() -> None:
 
     settings_env = _otel_settings.load_otel_settings()
     connection = _otel_settings.ingest_connection(settings_env)
-    if connection is None:
-        _silent_exit()
 
-    current_turn, user_turn_seq = _walk_current_turn(transcript_path)
-    if not current_turn:
-        _silent_exit()
+    # Existing turn-usage/plan-usage OTLP emission. Guard clauses below
+    # SKIP this block (rather than exit the process) when a precondition
+    # is unmet, so the execution-graph emission at the tail still gets a
+    # chance to run even on a Stop firing this block has nothing to do
+    # (e.g. no assistant records this turn) — see _emit_execution_graph.
+    if connection is not None:
+        current_turn, user_turn_seq = _walk_current_turn(transcript_path)
+        if current_turn:
+            now_ns = time.time_ns()
+            payloads = _build_records(current_turn, session_id, now_ns, user_turn_seq)
+            if payloads:
+                resource = _otel_settings.resource_attrs(settings_env)
 
-    now_ns = time.time_ns()
-    payloads = _build_records(current_turn, session_id, now_ns, user_turn_seq)
-    if not payloads:
-        _silent_exit()
+                # Per-record timeUnixNano: lakerunner's `agent_session_events`
+                # PK is (organization_id, session_id, chq_tsns), and chq_tsns
+                # server-side is sourced from `timeUnixNano`. If every record
+                # in this firing shared one timestamp, only ONE row per
+                # firing would survive the ON CONFLICT DO NOTHING. Offsetting
+                # by GLOBAL index (1 ns per record) is enough, and the index
+                # runs CONTINUOUSLY across the ≤256-record batches — a
+                # per-batch restart would collide chq_tsns between batches of
+                # the same firing. Total spread ≤ MAX_RECORDS_PER_FIRING = 4096 ns.
+                log_records = [
+                    {
+                        "timeUnixNano": str(now_ns + i),
+                        "observedTimeUnixNano": str(now_ns + i),
+                        "severityNumber": 9,
+                        "severityText": "INFO",
+                        "body": {"stringValue": p["event_name"]},
+                        "attributes": p["attributes"],
+                    }
+                    for i, p in enumerate(payloads)
+                ]
 
-    resource = _otel_settings.resource_attrs(settings_env)
+                # Chunked emission (spec §Field 2): one POST per
+                # ≤BATCH_MAX_RECORDS slice, in order. Each POST is
+                # independently best-effort — a failed batch drops only its
+                # own slice, never the ones after it.
+                for start in range(0, len(log_records), BATCH_MAX_RECORDS):
+                    emit_records(
+                        log_records[start:start + BATCH_MAX_RECORDS],
+                        connection,
+                        resource,
+                        scope_name="cardinal-claude-plugin",
+                        scope_version=_plugin_version.plugin_version(),
+                        timeout=HOOK_TIMEOUT_SEC,
+                    )
 
-    # Per-record timeUnixNano: lakerunner's `agent_session_events` PK is
-    # (organization_id, session_id, chq_tsns), and chq_tsns server-side is
-    # sourced from `timeUnixNano`. If every record in this firing shared
-    # one timestamp, only ONE row per firing would survive the ON CONFLICT
-    # DO NOTHING. Offsetting by GLOBAL index (1 ns per record) is enough,
-    # and the index runs CONTINUOUSLY across the ≤256-record batches — a
-    # per-batch restart would collide chq_tsns between batches of the
-    # same firing. Total spread ≤ MAX_RECORDS_PER_FIRING = 4096 ns.
-    log_records = [
-        {
-            "timeUnixNano": str(now_ns + i),
-            "observedTimeUnixNano": str(now_ns + i),
-            "severityNumber": 9,
-            "severityText": "INFO",
-            "body": {"stringValue": p["event_name"]},
-            "attributes": p["attributes"],
-        }
-        for i, p in enumerate(payloads)
-    ]
-
-    # Chunked emission (spec §Field 2): one POST per ≤BATCH_MAX_RECORDS
-    # slice, in order. Each POST is independently best-effort — a failed
-    # batch drops only its own slice, never the ones after it.
-    for start in range(0, len(log_records), BATCH_MAX_RECORDS):
-        emit_records(
-            log_records[start:start + BATCH_MAX_RECORDS],
-            connection,
-            resource,
-            scope_name="cardinal-claude-plugin",
-            scope_version=_plugin_version.plugin_version(),
-            timeout=HOOK_TIMEOUT_SEC,
-        )
+    # Phase 1 execution-graph emission — strictly AFTER the block above,
+    # opt-in via CARDINAL_EMIT_EXECUTION_GRAPH=1 (default off).
+    if os.environ.get(EMIT_EXECUTION_GRAPH_ENV) == "1":
+        _emit_execution_graph(transcript_path, session_id, settings_env)
 
     _silent_exit()
 

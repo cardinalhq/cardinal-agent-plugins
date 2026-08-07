@@ -192,15 +192,27 @@
                       }
                     },
                     {
-                      "key": "tool_parameters",
+                      "key": "bash_class",
                       "value": {
-                        "stringValue": "{\"full_command\":\"ls -la && rm -rf build\",\"bash_command\":\"ls\"}"
+                        "stringValue": "file-write"
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "command_hash",
                       "value": {
-                        "stringValue": "{\"command\":\"ls -la && rm -rf build\"}"
+                        "stringValue": "86365f509a82cd5e4785d728871c9db2ef612b476d0755838d31baf9ef85d1bc"
+                      }
+                    },
+                    {
+                      "key": "command_length",
+                      "value": {
+                        "intValue": "22"
+                      }
+                    },
+                    {
+                      "key": "bash_multi",
+                      "value": {
+                        "boolValue": true
                       }
                     }
                   ]
@@ -360,15 +372,21 @@
                       }
                     },
                     {
-                      "key": "tool_parameters",
+                      "key": "bash_class",
                       "value": {
-                        "stringValue": "{\"full_command\":\"git status\",\"bash_command\":\"git\"}"
+                        "stringValue": "git-read"
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "command_hash",
                       "value": {
-                        "stringValue": "{\"command\":\"git status\"}"
+                        "stringValue": "e62b04aadf39df1a47b771265e4ae5c452df3f1903d5c263ab00f088e86102f6"
+                      }
+                    },
+                    {
+                      "key": "command_length",
+                      "value": {
+                        "intValue": "10"
                       }
                     }
                   ]
@@ -534,15 +552,27 @@
                       }
                     },
                     {
-                      "key": "tool_parameters",
+                      "key": "mcp_server_name",
                       "value": {
-                        "stringValue": "{\"mcp_server_name\":\"lakerunner\",\"mcp_tool_name\":\"list_services\"}"
+                        "stringValue": "lakerunner"
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "mcp_tool_name",
                       "value": {
-                        "stringValue": "{\"instance\":\"prod\"}"
+                        "stringValue": "list_services"
+                      }
+                    },
+                    {
+                      "key": "args_hash",
+                      "value": {
+                        "stringValue": "ffe112c78dbe19540d1020dda42b4fb68bece538f8182aa2598ccce9c4be30bf"
+                      }
+                    },
+                    {
+                      "key": "args_length",
+                      "value": {
+                        "intValue": "19"
                       }
                     }
                   ]
@@ -702,9 +732,15 @@
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "args_hash",
                       "value": {
-                        "stringValue": "{\"path\":\"src/main.py\"}"
+                        "stringValue": "aa505d5f066506832b63733af59739bf55ca071f61cc5a8c5795e701918e3cd2"
+                      }
+                    },
+                    {
+                      "key": "args_length",
+                      "value": {
+                        "intValue": "22"
                       }
                     }
                   ]
@@ -819,7 +855,7 @@
                     {
                       "key": "target",
                       "value": {
-                        "stringValue": "/etc/hosts"
+                        "stringValue": "outside-cwd:4a666ea3a3b04a24"
                       }
                     }
                   ]
@@ -864,9 +900,15 @@
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "args_hash",
                       "value": {
-                        "stringValue": "{\"file_path\":\"/etc/hosts\"}"
+                        "stringValue": "617090dbd72b8a5752fe40293c36fe9107129b38e1308fd0edf46968265e2849"
+                      }
+                    },
+                    {
+                      "key": "args_length",
+                      "value": {
+                        "intValue": "26"
                       }
                     }
                   ]
@@ -1026,9 +1068,15 @@
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "args_hash",
                       "value": {
-                        "stringValue": "{\"file_path\":\"out.txt\"}"
+                        "stringValue": "7e7866e7ace73d7ca6d67e491bfbf4fc10a3578b623067a34872981327d83668"
+                      }
+                    },
+                    {
+                      "key": "args_length",
+                      "value": {
+                        "intValue": "23"
                       }
                     }
                   ]

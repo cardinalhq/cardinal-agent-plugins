@@ -37,6 +37,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _debug_capture  # noqa: E402
+
 FIRE_RE = re.compile(r"^### (?:⚠️|\U0001f41b) `", re.MULTILINE)
 CHECK_PR_TIMEOUT_SEC = 45
 GIT_TIMEOUT_SEC = 3
@@ -110,6 +113,12 @@ def _run_check_pr(invariant_dir: Path, diff_text: str) -> str:
 
 def run() -> None:
     payload = json.loads(sys.stdin.read() or "{}")
+
+    # Capture FIRST, before any processing below — this hook is sync and
+    # on the tool-critical path, but the dump is a no-op unless
+    # CARDINAL_CLAUDE_DEBUG_PAYLOADS=1 (never set in prod).
+    _debug_capture.dump_if_enabled("PreToolUse", payload)
+
     tool_name = payload.get("tool_name")
     tool_input = payload.get("tool_input") or {}
     file_path = tool_input.get("file_path")

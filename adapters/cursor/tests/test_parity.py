@@ -606,6 +606,128 @@ class ThoughtResponseEmitTests(unittest.TestCase):
         self.assertEqual(captured, [])
 
 
+class ToolResultRedactionTests(unittest.TestCase):
+    """Regression tests for docs/privacy-redaction.md §7: postToolUse's
+    tool_result event used to serialize `tool_input` as raw JSON of the
+    full tool-call arguments (the whole Bash command string, or a file
+    tool's full path/content payload). It must now go through the same
+    redact_command/hash_field discipline cardinal.turn_tool already
+    uses."""
+
+    def setUp(self) -> None:
+        self.home = _CursorHome()
+        self.hook = _load_module("cursor_telemetry_tool_result", HOOK_SCRIPT)
+
+    def tearDown(self) -> None:
+        self.home.close()
+
+    def _post_tool_use(self, payload: dict) -> list[dict]:
+        captured: list = []
+        with mock.patch.object(self.hook, "emit_records",
+                               side_effect=lambda records, payload=None: captured.append(records)):
+            self.hook.handle_post_tool_use(payload)
+        self.assertEqual(len(captured), 1)
+        return captured[0]
+
+    def test_bash_tool_result_never_carries_command_text(self) -> None:
+        cmd = "curl -H 'Authorization: Bearer supersecrettoken1234567890' https://internal.example.com/api"
+        records = self._post_tool_use({
+            "conversation_id": "conv-redact-1",
+            "generation_id": "gen-1",
+            "tool_name": "run_terminal_cmd",
+            "tool_input": {"command": cmd},
+            "tool_output": {"exit_code": 0},
+        })
+        result = next(r for r in records if r["body"]["stringValue"] == "tool_result")
+        attrs = {a["key"]: list(a["value"].values())[0] for a in result["attributes"]}
+        self.assertEqual(attrs["tool_name"], "Bash")
+        self.assertEqual(attrs["bash_class"], "network")
+        self.assertIn("command_hash", attrs)
+        self.assertNotIn("tool_input", attrs)
+        self.assertNotIn("tool_parameters", attrs)
+
+        secret_event = next(
+            (r for r in records if r["body"]["stringValue"] == "cardinal.secret_detected"), None
+        )
+        self.assertIsNotNone(secret_event)
+        secret_attrs = {a["key"]: list(a["value"].values())[0] for a in secret_event["attributes"]}
+        self.assertIn("BEARER_TOKEN", secret_attrs["secret_patterns"])
+
+        raw = json.dumps(records)
+        for fragment in (cmd, "supersecrettoken1234567890"):
+            self.assertNotIn(fragment, raw)
+
+    def test_edit_tool_result_never_carries_file_content(self) -> None:
+        content = "API_KEY = 'sk-should-not-appear-verbatim'"
+        records = self._post_tool_use({
+            "conversation_id": "conv-redact-2",
+            "generation_id": "gen-2",
+            "tool_name": "edit_file",
+            "tool_input": {"path": "secret.py", "content": content},
+            "tool_output": {"status": "ok"},
+        })
+        result = next(r for r in records if r["body"]["stringValue"] == "tool_result")
+        attrs = {a["key"]: list(a["value"].values())[0] for a in result["attributes"]}
+        self.assertIn("args_hash", attrs)
+        self.assertIn("args_length", attrs)
+        self.assertNotIn("tool_input", attrs)
+        raw = json.dumps(records)
+        self.assertNotIn(content, raw)
+        self.assertNotIn("sk-should-not-appear-verbatim", raw)
+
+
+class GitStateCredentialScrubTests(unittest.TestCase):
+    """Regression tests for docs/privacy-redaction.md §7: `git remote
+    get-url origin` can return a URL with embedded credentials. Applies
+    to Cursor's beforeSubmitPrompt git_state emission the same way it
+    applies to Claude/Codex/Gemini."""
+
+    def setUp(self) -> None:
+        self.home = _CursorHome()
+        self.hook = _load_module("cursor_telemetry_git_creds", HOOK_SCRIPT)
+        self.repo = self.home.tmp / "repo"
+        self.repo.mkdir()
+        env = {**os.environ, "HOME": str(self.home.tmp), "GIT_CONFIG_NOSYSTEM": "1"}
+
+        def _git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=self.repo, env=env, check=True, capture_output=True)
+
+        _git("init", "-q", "-b", "feat/creds-test")
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init")
+
+    def tearDown(self) -> None:
+        self.home.close()
+
+    def _before_submit(self, remote_url: str) -> dict:
+        subprocess.run(["git", "remote", "add", "origin", remote_url],
+                       cwd=self.repo, check=True, capture_output=True)
+        captured: list = []
+        with mock.patch.object(self.hook, "emit_records",
+                               side_effect=lambda records, payload=None: captured.append(records)):
+            self.hook.handle_before_submit_prompt({
+                "conversation_id": "conv-creds-1",
+                "workspace_roots": [str(self.repo)],
+                "prompt": "hi",
+            })
+        self.assertEqual(len(captured), 1)
+        (rec,) = captured[0]
+        return {a["key"]: list(a["value"].values())[0] for a in rec["attributes"]}
+
+    def test_strips_origin_url_credentials(self) -> None:
+        token = "ghp_" + "s" * 36
+        attrs = self._before_submit(f"https://x-access-token:{token}@github.com/cardinalhq/private-repo.git")
+        self.assertEqual(attrs["cardinal_remote_url"], "https://github.com/cardinalhq/private-repo.git")
+        self.assertEqual(attrs["cardinal_remote_url_credential_scrubbed"], True)
+        self.assertEqual(attrs["cardinal_repo"], "cardinalhq/private-repo")
+        self.assertNotIn(token, json.dumps(attrs))
+        self.assertNotIn("x-access-token", json.dumps(attrs))
+
+    def test_clean_origin_url_not_flagged(self) -> None:
+        attrs = self._before_submit("https://github.com/cardinalhq/public-repo.git")
+        self.assertEqual(attrs["cardinal_remote_url"], "https://github.com/cardinalhq/public-repo.git")
+        self.assertEqual(attrs["cardinal_remote_url_credential_scrubbed"], False)
+
+
 class SubagentTests(unittest.TestCase):
     """Cursor's documented subagentStop payload keys become subagent_usage."""
 

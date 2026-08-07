@@ -39,6 +39,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plugin_version  # noqa: E402
 from cardinal_core import limits, otlp, session  # noqa: E402
+from cardinal_core import redaction  # noqa: E402
 from cardinal_core.bashclass import classify_bash_command  # noqa: E402,F401
 from cardinal_core.initiative import (  # noqa: E402,F401
     canonical_repo,
@@ -49,6 +50,7 @@ from cardinal_core.initiative import (  # noqa: E402,F401
     strip_worktree_noise,
 )
 from cardinal_core.paths import AgentPaths  # noqa: E402
+from cardinal_core.paths import dump_debug_payload as _core_dump_debug_payload  # noqa: E402
 
 PLUGIN_VERSION = _plugin_version.plugin_version()
 SCOPE_NAME = "cardinal-cursor-plugin"
@@ -189,15 +191,12 @@ def read_plan_stamp() -> dict[str, Any]:
 
 def dump_debug_payload(event: str, payload: dict[str, Any]) -> None:
     """Env-gated raw hook-payload dump. No-op unless
-    CARDINAL_CURSOR_DEBUG_PAYLOADS=1."""
+    CARDINAL_CURSOR_DEBUG_PAYLOADS=1. The write itself is the shared
+    core.paths.dump_debug_payload primitive; this wrapper is just the
+    env-var gate, which differs per adapter."""
     if os.environ.get(DEBUG_PAYLOADS_ENV) != "1":
         return
-    try:
-        PATHS.debug_dir.mkdir(parents=True, exist_ok=True)
-        path = PATHS.debug_dir / f"{event}-{time.time_ns()}.json"
-        path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
-    except (OSError, TypeError, ValueError):
-        pass
+    _core_dump_debug_payload(event, payload, PATHS.debug_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +355,12 @@ def handle_before_submit_prompt(payload: dict[str, Any]) -> None:
     head_sha = git(["rev-parse", "HEAD"], cwd)
     if head_sha:
         branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-        remote_url = git(["remote", "get-url", "origin"], cwd)
+        # PRIVACY (docs/privacy-redaction.md §3, §7): origin URLs can embed
+        # live credentials — strip userinfo BEFORE canonical_repo() too,
+        # since that regex has no userinfo awareness.
+        raw_remote_url = git(["remote", "get-url", "origin"], cwd)
+        remote_url = redaction.strip_url_userinfo(raw_remote_url) if raw_remote_url else None
+        credential_scrubbed = bool(raw_remote_url and remote_url != raw_remote_url)
         repo = canonical_repo(remote_url)
         initiative_name, initiative_type = resolve_initiative(branch)
         attrs: dict[str, Any] = {
@@ -366,6 +370,7 @@ def handle_before_submit_prompt(payload: dict[str, Any]) -> None:
             "cardinal_branch": branch,
             "cardinal_repo": repo,
             "cardinal_remote_url": remote_url,
+            "cardinal_remote_url_credential_scrubbed": credential_scrubbed,
             "cardinal_initiative_name": initiative_name,
             "cardinal_initiative_type": initiative_type,
             "cardinal_command": detect_command(payload.get("prompt") or payload.get("message")),
@@ -415,6 +420,11 @@ def handle_post_tool_use(payload: dict[str, Any]) -> None:
         v = tool_input.get(key)
         if isinstance(v, str) and v:
             target = v
+    # PRIVACY (docs/privacy-redaction.md §3 attributes.file_path): verbatim
+    # only when the path resolves inside this session's cwd; hashed
+    # placeholder otherwise.
+    if target is not None:
+        target = redaction.redact_file_path(target, cwd_from_payload(payload))
 
     plan_stamp = read_plan_stamp()
     now_ns = time.time_ns()
@@ -444,14 +454,47 @@ def handle_post_tool_use(payload: dict[str, Any]) -> None:
                 turn_tool_attrs["bash_multi"] = True
     records.append(log_record("cardinal.turn_tool", turn_tool_attrs, now_ns))
 
+    # PRIVACY REGRESSION FIX (docs/privacy-redaction.md §7): this event
+    # used to serialize `tool_input` as raw JSON of the full tool-call
+    # arguments — for a shell tool the entire command string, for a
+    # file tool the full path/content payload. Route through the same
+    # redact_command/hash_field discipline cardinal.turn_tool already
+    # uses, so the two events can't diverge (spec §7 "must fix").
     tool_result_attrs: dict[str, Any] = {
         "session_id": conv_id,
         "agent_runtime": "cursor",
         "tool_name": display_name,
         "success": output_success(tool_output),
-        "tool_input": json.dumps(tool_input, separators=(",", ":")) if tool_input else None,
     }
+    if display_name == "mcp_tool":
+        tool_result_attrs["mcp_server_name"] = extra.get("mcp_server_name")
+        tool_result_attrs["mcp_tool_name"] = extra.get("mcp_tool_name")
+
+    arg_redaction = redaction.redact_tool_args(display_name, tool_input)
+    arg_patterns = arg_redaction.pop("secret_patterns", [])
+    tool_result_attrs.update(arg_redaction)
+
+    out_redaction = redaction.redact_tool_output(tool_output)
+    out_patterns = out_redaction.pop("secret_patterns", [])
+    tool_result_attrs.update(out_redaction)
+
     records.append(log_record("tool_result", tool_result_attrs, now_ns + 1))
+
+    # Spec §3 "Secrets": human-auditable signal a known pattern was found
+    # and scrubbed — never the matched text itself.
+    detected: dict[str, list[str]] = {}
+    if arg_patterns:
+        detected["tool_input"] = arg_patterns
+    if out_patterns:
+        detected["tool_output"] = out_patterns
+    if detected:
+        records.append(log_record("cardinal.secret_detected", {
+            "session_id": conv_id,
+            "agent_runtime": "cursor",
+            "event": "tool_result",
+            "fields": ",".join(sorted(detected)),
+            "secret_patterns": ",".join(sorted({p for ps in detected.values() for p in ps})),
+        }, now_ns + 1))
 
     emit_records(records, payload)
     state["tool_seq"] += 1
