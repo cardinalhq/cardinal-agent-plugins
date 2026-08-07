@@ -192,7 +192,7 @@ If `deployment.yaml` already listed `findingsRouting` entries, report which sink
 
 ### 4.7 `spec.runtime.image`
 
-Ask: "Executor image?" Default: `ghcr.io/cardinalhq/sentinel-executor:v0.1.4` — the current release. `v0.1.3` was the first tag both multi-arch (amd64 + arm64) **and** carrying the `mcp` provider; `v0.1.4` adds two fixes a valid Sentinel can hit — `provider: fixture` against a capability id outside the built-in six, and a nested `?:` in a `severityExpression` with a parenthesised branch. Both fail the run on `v0.1.3`.
+Ask: "Executor image?" Default: `ghcr.io/cardinalhq/sentinel-executor:v0.1.5` — the current release. `v0.1.3` was the first tag both multi-arch (amd64 + arm64) **and** carrying the `mcp` provider. `v0.1.4` added two fixes a valid Sentinel can hit — `provider: fixture` against a capability id outside the built-in six, and a nested `?:` in a `severityExpression` with a parenthesised branch; both fail the run on `v0.1.3`. **`v0.1.5` enforces `functions.<id>.network`**, which through `v0.1.4` was declared and ignored: a function node whose policy is not `enabled` — including one with no `functions:` entry, which defaults to denied — now raises `NetworkAccessDenied` rather than silently reaching the network. If a Sentinel's function body makes an outbound call, declare `functions.<id>.network: enabled` before pinning `v0.1.5`.
 
 Two warnings worth giving unprompted:
 

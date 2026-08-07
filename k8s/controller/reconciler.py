@@ -49,9 +49,17 @@ KIND = "Sentinel"
 #     v0.1.3 and below, even with the fixture file present.
 #   * a nested `?:` in a `severityExpression` whose branch is parenthesised
 #     (`c1 ? x : (c2 ? y : z)`) fails the emit node on v0.1.3 and below.
+# v0.1.5 changes function-node BEHAVIOUR, not just capability:
+#   * `functions.<id>.network` is enforced (spike/executor/sandbox.py). Through
+#     v0.1.4 it was declared and ignored, so a function body could reach the
+#     network whatever the deployment said. From v0.1.5 a function whose policy
+#     is not `enabled` — including one with no `functions:` entry at all, which
+#     defaults to denied — raises NetworkAccessDenied instead. Any Sentinel
+#     relying on a function body's outbound call must add
+#     `functions.<id>.network: enabled` before moving to v0.1.5.
 # Bump in lockstep with spike/executor/VERSION; the parity is pinned by
 # tests/test_reconciler.py and spike/executor/tests/test_release_versions.py.
-DEFAULT_EXECUTOR_IMAGE = "ghcr.io/cardinalhq/sentinel-executor:v0.1.4"
+DEFAULT_EXECUTOR_IMAGE = "ghcr.io/cardinalhq/sentinel-executor:v0.1.5"
 GIT_INIT_IMAGE = "alpine/git:latest"
 SENTINEL_DIR = "/sentinel"
 CONFIG_DIR = "/config"
