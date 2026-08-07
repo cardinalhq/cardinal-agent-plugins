@@ -256,6 +256,17 @@ def provider(capability_id: str, provider_id: str):
 def resolve_provider(capability_id: str, provider_id: str) -> Callable[..., Any]:
     key = (capability_id, provider_id)
     if key not in _PROVIDERS:
+        # `fixture` resolves for ANY capability, not just the eagerly-registered
+        # ones below. The impl reads `fixtures/<node-or-capability>.json` and
+        # cares nothing for which capability it is standing in for, so a static
+        # whitelist only ever produced false negatives: a Sentinel declaring a
+        # capability outside the enumerated set failed its own trial with
+        # UnknownProviderError even though its fixture file was sitting right
+        # there. The compiler is allowed to mint new abstract capability ids
+        # (mechanize CORE.md's `capability-registry-extension-needed` escape
+        # hatch), so the runtime must not enumerate them ahead of time.
+        if provider_id == "fixture":
+            return _fixture_impl
         available = sorted(p for c, p in _PROVIDERS if c == capability_id)
         raise UnknownProviderError(
             f"no provider {provider_id!r} for capability {capability_id!r}; "
@@ -308,10 +319,11 @@ def _fixture_impl(node_id: str, args: dict[str, Any], ctx: dict[str, Any]) -> An
     )
 
 
-# Register the fixture provider for every currently-known capability id so
-# tests can pin any capability to a fixture without extra ceremony. The
-# same fn instance is registered under each capability — capability_id in
-# the ctx tells it which fixture file to read.
+# Eagerly register the fixture provider for the currently-known capability ids
+# so `registered_providers()` enumerates them. This list is NOT the set of
+# capabilities fixtures work for — `resolve_provider` falls back to
+# `_fixture_impl` for any capability asking for the `fixture` provider. Adding
+# an id here is optional and only affects introspection.
 _FIXTURE_CAPABILITIES = [
     "observability.list-services",
     "observability.query-metrics",
