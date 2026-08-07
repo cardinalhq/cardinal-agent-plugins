@@ -43,9 +43,15 @@ KIND = "Sentinel"
 #     ships in v0.1.3. Any tag below that raises UnknownProviderError at the
 #     first tool node of a CR that binds `provider: mcp` — which is what
 #     every live-telemetry Sentinel binds.
+# Two further floors start at v0.1.4, both reachable from a valid Sentinel:
+#   * `provider: fixture` bound to a capability id outside the six in
+#     capabilities._FIXTURE_CAPABILITIES raises UnknownProviderError on
+#     v0.1.3 and below, even with the fixture file present.
+#   * a nested `?:` in a `severityExpression` whose branch is parenthesised
+#     (`c1 ? x : (c2 ? y : z)`) fails the emit node on v0.1.3 and below.
 # Bump in lockstep with spike/executor/VERSION; the parity is pinned by
 # tests/test_reconciler.py and spike/executor/tests/test_release_versions.py.
-DEFAULT_EXECUTOR_IMAGE = "ghcr.io/cardinalhq/sentinel-executor:v0.1.3"
+DEFAULT_EXECUTOR_IMAGE = "ghcr.io/cardinalhq/sentinel-executor:v0.1.4"
 GIT_INIT_IMAGE = "alpine/git:latest"
 SENTINEL_DIR = "/sentinel"
 CONFIG_DIR = "/config"
