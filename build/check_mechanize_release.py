@@ -59,6 +59,27 @@ def git_diff_names(base: str, head: str) -> list[str]:
     return [line for line in out.stdout.splitlines() if line]
 
 
+def merge_base(base: str, head: str) -> str:
+    """Resolve the merge-base of `base` and `head` — the divergence point.
+
+    Using the merge-base (not `base` directly) for version lookups makes the
+    gate robust to a race where the PR merges into `base` (e.g. origin/main)
+    between the workflow's queue-time and its start-time. When that happens,
+    `base` has already advanced to include the PR's own bump, so a naive
+    `git show base:plugin.json` sees the new version on both sides and
+    wrongly concludes "no bump happened". The merge-base is the commit the
+    PR was branched off, which is what "did this PR bump the version?"
+    logically asks. Documented occurrence: run 31128505323 (2026-08-06)
+    where PR #66's CI was delayed by a GitHub Actions outage; the PR
+    merged first, then the queued CI wrongly false-failed the gate.
+    """
+    out = subprocess.run(
+        ["git", "merge-base", base, head],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    )
+    return out.stdout.strip()
+
+
 def touches_shared(changed: list[str]) -> bool:
     return any(
         f == p or f.startswith(p) for f in changed for p in SHARED_MECHANIZE_PATHS
@@ -98,7 +119,15 @@ def main() -> int:
     parser.add_argument("--head", default="HEAD", help="git ref for the proposed change (default: HEAD)")
     args = parser.parse_args()
 
-    changed = git_diff_names(args.base, args.head)
+    # Resolve the divergence point once — used for both the file-list diff
+    # and the version comparison so both sides observe the same base commit.
+    # The git_diff_names three-dot form already implies merge-base for the
+    # file list; using an explicit merge-base ref for `version_at` extends
+    # the same semantics to the version lookup. Without this, an in-flight
+    # merge to `args.base` between queue and run makes the gate false-fail
+    # (see merge_base() docstring for the concrete incident).
+    mb = merge_base(args.base, args.head)
+    changed = git_diff_names(mb, args.head)
     affected = affected_adapters(changed)
 
     if not affected:
@@ -110,7 +139,7 @@ def main() -> int:
     failures: list[str] = []
     for adapter in sorted(affected):
         plugin_json = PLUGIN_JSONS[adapter]
-        base_v = version_at(args.base, plugin_json)
+        base_v = version_at(mb, plugin_json)
         head_v = version_at(args.head, plugin_json)
         if head_v is None:
             failures.append(f"{adapter}: {plugin_json} unreadable at head ref")
