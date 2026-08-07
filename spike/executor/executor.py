@@ -306,13 +306,44 @@ def eval_expr(expr: str, env: _Env) -> Any:
     return _eval_ast(tree, env)
 
 
+def _strip_enclosing_parens(src: str) -> str:
+    """Drop paren layers that wrap the WHOLE expression: `(a ? b : c)` -> `a ? b : c`.
+
+    Only strips when the opening paren's match is the final character, so
+    `(a) ? (b) : (c)` and `(a + b) * c` come back untouched. Callers re-wrap
+    what they return, so dropping a redundant layer never changes precedence.
+    """
+    s = src.strip()
+    while s.startswith("(") and s.endswith(")"):
+        depth = 0
+        match_idx = -1
+        for i, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    match_idx = i
+                    break
+        if match_idx != len(s) - 1:
+            break
+        s = s[1:-1].strip()
+    return s
+
+
 def _rewrite_ternary(src: str) -> str:
     """Rewrite `cond ? a : b` (recursively) to `a if cond else b`.
 
     Handles the paren-wrapped and one-line forms actually used in v2's YAML.
     Approach: find the outermost top-level `?` and its matching `:` skipping
     nested `?:` in string/paren context.
+
+    The recursion strips enclosing parens off each branch first: a nested
+    ternary written as `c1 ? x : (c2 ? y : z)` sits entirely at paren depth 1,
+    so a depth-0 scan would find no `?` and hand the branch back with a literal
+    `?` for Python to choke on.
     """
+    src = _strip_enclosing_parens(src)
     depth = 0
     q_idx = -1
     for i, ch in enumerate(src):

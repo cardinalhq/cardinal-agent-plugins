@@ -1,0 +1,5 @@
+{
+  "service": "github",
+  "statusEndpoint": "https://www.githubstatus.com/api/v2/status.json",
+  "summaryPrompt": "Extract overall GitHub service status and description."
+}
