@@ -28,7 +28,7 @@ spec:
       default: "Extract overall service status and description."
   capabilities:
     required:
-      - id: observability.fetch-status-summary
+      - id: web.fetch-with-summary
         capabilityType: tool
   variationPoints:
     - path: /spec/inputs/service
@@ -42,7 +42,7 @@ spec:
       kind: tool
       dependsOn: []
       config:
-        toolRef: observability.fetch-status-summary
+        toolRef: web.fetch-with-summary
         arguments:
           url: "${inputs.statusEndpoint}"
           prompt: "${inputs.summaryPrompt}"

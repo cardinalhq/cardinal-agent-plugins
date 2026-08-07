@@ -36,12 +36,19 @@ from typing import Any, Literal
 Verdict = Literal["PASS", "FAIL"]
 
 
-# Known abstract capability prefixes (CORE.md §"Known capability registry").
-# Update by editing this list; the ratification module and lint CLI both pull
-# from it. Adding a new abstract capability = a one-line PR here.
+# Fallback only. The authority is common/capabilities-registry.yaml, which
+# callers parse and pass in as `registry` — see check_r2. These prefixes are
+# what R2 falls back to when no registry is reachable (ratification is
+# framework-free and must stay usable on a bare dict), and they are strictly
+# weaker: a prefix match proves a naming convention was followed, not that the
+# capability is one any provider implements. That gap is not hypothetical — a
+# Sentinel declaring `observability.fetch-status-summary` passed prefix-only R2
+# and then failed at runtime with UnknownProviderError, because no such
+# capability was ever registered.
 KNOWN_CAPABILITY_PREFIXES: tuple[str, ...] = (
     "observability.",
     "code.",
+    "web.",
 )
 
 
@@ -74,10 +81,18 @@ def _walk_strings(value: Any):
 
 
 def _collect_input_refs(value: Any) -> set[str]:
+    """Input names referenced from inside `${...}` interpolations.
+
+    Scoped to interpolations on purpose. Matching bare `inputs.foo` anywhere in
+    any string also matched prose — an `llm` node's `task:` or an `ask_human`
+    node's `question:` that merely *names* an input in a sentence would make R1
+    demand a variation point for it.
+    """
     refs: set[str] = set()
     for s in _walk_strings(value):
-        for m in _INPUT_REF_RE.finditer(s):
-            refs.add(m.group(1))
+        for interp in _INTERPOLATION_RE.finditer(s):
+            for m in _INPUT_REF_RE.finditer(interp.group(1)):
+                refs.add(m.group(1))
     return refs
 
 
@@ -145,29 +160,58 @@ def check_r1(sentinel: dict) -> RatificationResult:
     return RatificationResult("R1", "PASS", "all defaulted+referenced inputs declared as variation points")
 
 
-def check_r2(sentinel: dict) -> RatificationResult:
-    """R2 — capability IDs must use an abstract prefix from the registry."""
+def check_r2(sentinel: dict, registry: dict | None = None) -> RatificationResult:
+    """R2 — capability IDs must be registered in the shared capabilities registry.
+
+    `registry` is the parsed common/capabilities-registry.yaml. When supplied,
+    R2 checks *membership* — the only question that predicts whether the
+    capability will actually bind at runtime. When it is absent (a caller
+    holding nothing but a parsed Sentinel), R2 degrades to the prefix check and
+    says so in the detail, because a silent downgrade would read as a stronger
+    guarantee than it is.
+    """
     spec = _get_spec(sentinel)
     caps = (spec.get("capabilities") or {}).get("required") or []
-    bad: list[str] = []
-    for entry in caps:
-        if not isinstance(entry, dict):
-            continue
-        cid = entry.get("id")
-        if not isinstance(cid, str):
-            continue
-        if not any(cid.startswith(p) for p in KNOWN_CAPABILITY_PREFIXES):
-            bad.append(cid)
+    declared_ids = [
+        e.get("id") for e in caps if isinstance(e, dict) and isinstance(e.get("id"), str)
+    ]
+
+    known = set((registry or {}).get("capabilities") or {})
+    if known:
+        unregistered = [cid for cid in declared_ids if cid not in known]
+        if unregistered:
+            return RatificationResult(
+                rule="R2",
+                verdict="FAIL",
+                detail=(
+                    f"capability ids absent from the capabilities registry: "
+                    f"{sorted(unregistered)} — add them to "
+                    f"common/capabilities-registry.yaml with their providers, or "
+                    f"map to an existing id"
+                ),
+            )
+        return RatificationResult(
+            "R2", "PASS", f"all {len(declared_ids)} capability id(s) are registered"
+        )
+
+    bad = [
+        cid for cid in declared_ids
+        if not any(cid.startswith(p) for p in KNOWN_CAPABILITY_PREFIXES)
+    ]
     if bad:
         return RatificationResult(
             rule="R2",
             verdict="FAIL",
             detail=(
-                f"vendor-shaped capability ids (allowed prefixes: "
-                f"{list(KNOWN_CAPABILITY_PREFIXES)}): {bad}"
+                f"vendor-shaped capability ids (no registry supplied; allowed "
+                f"prefixes: {list(KNOWN_CAPABILITY_PREFIXES)}): {bad}"
             ),
         )
-    return RatificationResult("R2", "PASS", "all capability ids use abstract prefixes")
+    return RatificationResult(
+        "R2", "PASS",
+        "all capability ids use abstract prefixes (no registry supplied — "
+        "prefix check only, membership unverified)",
+    )
 
 
 def check_r3(sentinel: dict, rationale: str = "") -> RatificationResult:
@@ -188,14 +232,23 @@ def check_r3(sentinel: dict, rationale: str = "") -> RatificationResult:
     missing: list[str] = []
     lower = rationale.lower()
     for nid in llm_ids:
-        # Cheap heuristic: node id is mentioned, and one of {function, §32, deterministic}
-        # appears within ~400 chars of it.
-        idx = lower.find(nid.lower())
-        if idx < 0:
-            missing.append(nid)
-            continue
-        window = lower[max(0, idx - 200) : idx + 400]
-        if not any(kw in window for kw in ("function", "§32", "deterministic")):
+        # Node id is mentioned, and one of {function, §32, deterministic}
+        # appears within ~400 chars of SOME mention. Checking every occurrence
+        # rather than only the first matters: node ids routinely appear first
+        # in a classification table and are justified in a later paragraph, so
+        # a first-occurrence-only check failed nodes that were properly argued.
+        needle = nid.lower()
+        found_any = False
+        justified = False
+        start = lower.find(needle)
+        while start >= 0:
+            found_any = True
+            window = lower[max(0, start - 200) : start + 400]
+            if any(kw in window for kw in ("function", "§32", "deterministic")):
+                justified = True
+                break
+            start = lower.find(needle, start + 1)
+        if not (found_any and justified):
             missing.append(nid)
     if missing:
         return RatificationResult(
@@ -206,11 +259,46 @@ def check_r3(sentinel: dict, rationale: str = "") -> RatificationResult:
     return RatificationResult("R3", "PASS", f"all llm nodes justified in rationale: {llm_ids}")
 
 
+def _declared_non_node_identifiers(sentinel: dict) -> set[str]:
+    """Kebab-shaped identifiers the Sentinel itself declares that are NOT node ids.
+
+    R4 guesses which backticked tokens in prose are node citations. Without
+    this exclusion set it flagged a finding *type* (`service-health-status`)
+    as a hallucinated node, because the type is kebab-case and the surrounding
+    sentence mentioned nodes. Every name here is one the Sentinel declares
+    elsewhere, so citing it in the rationale is correct, not a hallucination.
+    """
+    out: set[str] = set()
+    spec = _get_spec(sentinel)
+    out.update(str(k) for k in (spec.get("inputs") or {}))
+    for entry in (spec.get("capabilities") or {}).get("required") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            out.add(entry["id"])
+            # Capability ids carry a dotted prefix; the tail alone is what
+            # tends to appear in prose.
+            out.add(entry["id"].split(".", 1)[-1])
+    for node in _get_nodes(sentinel).values():
+        if not isinstance(node, dict):
+            continue
+        cfg = node.get("config") or {}
+        if isinstance(cfg.get("toolRef"), str):
+            out.add(cfg["toolRef"])
+            out.add(cfg["toolRef"].split(".", 1)[-1])
+        finding = cfg.get("finding") or {}
+        if isinstance(finding, dict) and isinstance(finding.get("type"), str):
+            out.add(finding["type"])
+    purpose = spec.get("purpose") or {}
+    if isinstance(purpose, dict) and isinstance(purpose.get("conclusionType"), str):
+        out.add(purpose["conclusionType"])
+    return out
+
+
 def check_r4(sentinel: dict, rationale: str = "") -> RatificationResult:
     """R4 — every node id cited in rationale.md exists in sentinel.yaml."""
     if not rationale:
         return RatificationResult("R4", "PASS", "no rationale supplied; nothing to cross-check")
     nodes = set(_get_nodes(sentinel).keys())
+    not_nodes = _declared_non_node_identifiers(sentinel)
     # Extract candidate node-id-shaped tokens from rationale: dashed identifiers
     # inside backticks (`foo-bar`). Only flag when the citation appears near
     # the word "node" to reduce false positives against arbitrary backticked
@@ -222,6 +310,10 @@ def check_r4(sentinel: dict, rationale: str = "") -> RatificationResult:
         if cand in seen:
             continue
         if cand in nodes:
+            continue
+        # Names the Sentinel declares elsewhere (finding types, capability ids,
+        # input names) are legitimate citations, not hallucinated node ids.
+        if cand in not_nodes:
             continue
         # Skip tokens that couldn't be node ids: containing dots/slashes, upper-case,
         # or lacking a dash (Sentinel node ids are kebab-case).
@@ -307,11 +399,18 @@ def check_r6(sentinel: dict) -> RatificationResult:
 # Aggregate                                                                    #
 # --------------------------------------------------------------------------- #
 
-def run_all(sentinel: dict, rationale: str = "") -> list[RatificationResult]:
-    """Run R1–R6 in order and return the results list."""
+def run_all(
+    sentinel: dict, rationale: str = "", registry: dict | None = None
+) -> list[RatificationResult]:
+    """Run R1–R6 in order and return the results list.
+
+    `registry` is the parsed common/capabilities-registry.yaml. Pass it whenever
+    it is reachable: without it R2 can only check naming convention, which does
+    not predict whether a capability binds at runtime.
+    """
     return [
         check_r1(sentinel),
-        check_r2(sentinel),
+        check_r2(sentinel, registry),
         check_r3(sentinel, rationale),
         check_r4(sentinel, rationale),
         check_r5(sentinel),
@@ -338,6 +437,25 @@ def format_verdict_block(results: list[RatificationResult]) -> str:
 # CLI entrypoint — the cold Stage 5.5 subagent invokes this                    #
 # --------------------------------------------------------------------------- #
 
+def find_registry_path(start: "Path") -> "Path | None":
+    """Walk up from `start` looking for common/capabilities-registry.yaml.
+
+    Mirrors lint_remote.default_registry_path so the compiler's Stage 5.5 and
+    sentinel-lint resolve the same registry from the same starting point.
+    """
+    from pathlib import Path as _Path
+
+    cur = _Path(start).resolve()
+    for _ in range(10):
+        candidate = cur / "common" / "capabilities-registry.yaml"
+        if candidate.exists():
+            return candidate
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return None
+
+
 def _main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(
@@ -360,7 +478,11 @@ def _main(argv: list[str]) -> int:
         if rationale_path.exists():
             rationale = rationale_path.read_text()
     doc = yaml.safe_load(sentinel_path.read_text())
-    results = run_all(doc or {}, rationale)
+    registry = None
+    registry_path = find_registry_path(sentinel_path.parent)
+    if registry_path is not None:
+        registry = yaml.safe_load(registry_path.read_text())
+    results = run_all(doc or {}, rationale, registry)
     print(format_verdict_block(results))
     return 0 if all(r.verdict == "PASS" for r in results) else 1
 

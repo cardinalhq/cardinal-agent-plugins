@@ -319,19 +319,38 @@ def _fixture_impl(node_id: str, args: dict[str, Any], ctx: dict[str, Any]) -> An
     )
 
 
-# Eagerly register the fixture provider for the currently-known capability ids
-# so `registered_providers()` enumerates them. This list is NOT the set of
-# capabilities fixtures work for — `resolve_provider` falls back to
-# `_fixture_impl` for any capability asking for the `fixture` provider. Adding
-# an id here is optional and only affects introspection.
-_FIXTURE_CAPABILITIES = [
-    "observability.list-services",
-    "observability.query-metrics",
-    "observability.query-logs",
-    "observability.error-overview",
-    "code.grep",
-    "code.read",
-]
+# Eagerly register the fixture provider for every capability the shared
+# registry declares, so `registered_providers()` enumerates them. This list is
+# NOT the set of capabilities fixtures work for — `resolve_provider` falls back
+# to `_fixture_impl` for any capability asking for the `fixture` provider.
+#
+# Read from common/capabilities-registry.yaml rather than hand-maintained: the
+# hardcoded copy went stale the moment the compiler was allowed to mint new
+# abstract capability ids, and a second stale copy of the same list is exactly
+# how the compile-time and runtime views of "what capabilities exist" drifted
+# apart in the first place.
+def _registry_capabilities() -> list[str]:
+    # capabilities.py sits at <root>/spike/executor/, and the Dockerfile copies
+    # `spike/executor/` and `common/` under the same root, so parents[2] is the
+    # registry's parent in both the repo and the image.
+    registry = Path(__file__).resolve().parents[2] / "common" / "capabilities-registry.yaml"
+    if not registry.exists():
+        return []
+    try:
+        import yaml  # noqa: PLC0415
+
+        doc = yaml.safe_load(registry.read_text())
+    except Exception:  # noqa: BLE001 — introspection only; never break import
+        return []
+    if not isinstance(doc, dict):
+        return []
+    caps = doc.get("capabilities") or {}
+    # llm.* are model capabilities, not tool capabilities; they never bind to
+    # a fixture tool provider.
+    return sorted(c for c in caps if isinstance(c, str) and not c.startswith("llm."))
+
+
+_FIXTURE_CAPABILITIES = _registry_capabilities()
 
 for _cap in _FIXTURE_CAPABILITIES:
     provider(_cap, "fixture")(_fixture_impl)

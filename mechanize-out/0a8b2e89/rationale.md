@@ -102,16 +102,21 @@ Not applicable. The session contains no image or document blocks.
 ## Judgment calls
 
 **JC-1: capability-ID abstraction.** The needed capability — HTTP GET a
-statuspage-shaped endpoint and return an LLM projection of it — is not in
-CORE.md's known abstract registry (`observability.*`, `code.*`). Mapped to
-the compatible `observability.*` family as `observability.fetch-status-summary`
-because checking service status is an observability-adjacent capability; the
-registry extension is still flagged as **capability-registry-extension-needed**
-since neither the specific ID nor a generic `observability.fetch-with-summary`
-is presently enumerated in CORE.md's registry. Round 1 iteration renamed this
-from the initially-emitted `web.fetch-with-summary`, which failed R2's
-strict-prefix check. Vendor-shape tool names (`WebFetch`) are deliberately
-not used per R2.
+statuspage-shaped endpoint and return an LLM projection of it — is
+`web.fetch-with-summary`, now a registered entry in
+`common/capabilities-registry.yaml` with provider `http-get`. Vendor-shape
+tool names (`WebFetch`) are deliberately not used per R2.
+
+This ID took a detour worth recording. R2 originally checked only that a
+capability id carried an *abstract prefix* (`observability.`, `code.`), so
+the honest name `web.fetch-with-summary` FAILED ratification and the compile
+renamed it to `observability.fetch-status-summary` to get through — filing an
+HTTP fetch of a third party's public status page under the family that means
+"query our telemetry backend." That id was in no registry and no provider
+implemented it, yet prefix-only R2 passed it; the trial then failed T4 with
+`UnknownProviderError`. R2 now checks registry *membership*, which both
+admits the honest name and rejects unregistered ones, so the detour is not
+reproducible.
 
 **JC-2: LLM projection kept inside the tool.** The alternative
 (`web.fetch-json` returning raw response bytes + a downstream node that parses

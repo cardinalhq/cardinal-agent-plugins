@@ -19,6 +19,21 @@ capabilities:
   code.read:
     providers: [github-checkout, gitlab-checkout]
 
+  # HTTP fetches against a public endpoint. `-with-summary` returns an LLM
+  # projection of the response rather than the raw body, which is what a
+  # status-page check actually consumes. Distinct from observability.*: those
+  # query a telemetry backend for this org's own signals, this one reads a
+  # third party's public status.
+  #
+  # NOTE: `http-get` is not implemented — no spike/executor/providers/http_get.py
+  # exists, so this capability is runnable only under `provider: fixture` today.
+  # It is listed because `providers:` declares which bindings are ALLOWED, not
+  # which are built (the llm.* entries below name models, never modules). A
+  # live binding needs the provider written first; reaching arbitrary URLs is a
+  # security surface that wants its own review (SSRF, redirects, timeouts).
+  web.fetch-with-summary:
+    providers: [http-get]
+
   # LLM capabilities live under capabilities.llm.<subclass>.
   # R10 and R13 look them up the same way as tool capabilities.
   llm.analytical-small:

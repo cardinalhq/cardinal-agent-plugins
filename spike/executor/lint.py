@@ -105,7 +105,29 @@ def _ancestors(nodes: dict[str, Any], start: str) -> set[str]:
     return seen
 
 
-def lint_structural(sentinel_dir: Path) -> LintResult:
+def _load_ratification_registry(
+    sentinel_dir: Path, registry_path: Path | None
+) -> dict | None:
+    """Parse the capabilities registry for R2, or None if unreachable.
+
+    Resolution order: an explicit `--registry` path, else the nearest
+    common/capabilities-registry.yaml walking up from the Sentinel directory.
+    A missing or unparseable registry is not a lint failure here — R2 degrades
+    to its prefix check and says so — because `lint_structural` must keep
+    working on a Sentinel directory checked out on its own.
+    """
+    path = registry_path or ratification.find_registry_path(sentinel_dir)
+    if path is None or not Path(path).exists():
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def lint_structural(sentinel_dir: Path, registry_path: Path | None = None) -> LintResult:
     """Run all Phase 1 checks against `sentinel_dir/sentinel.yaml`.
 
     The Sentinel-directory convention: `sentinel.yaml` sits at the root;
@@ -526,10 +548,14 @@ def lint_structural(sentinel_dir: Path) -> LintResult:
                     )
                 )
 
-    # 9. R1–R6 via the shared ratification module.
+    # 9. R1–R6 via the shared ratification module. The registry is passed so R2
+    # checks membership rather than naming convention — a prefix match does not
+    # predict whether the capability binds at runtime, and an unregistered id
+    # once passed prefix-only R2 and died with UnknownProviderError in the pod.
     rationale_path = sentinel_dir / "rationale.md"
     rationale = rationale_path.read_text() if rationale_path.exists() else ""
-    for r in ratification.run_all(sentinel, rationale):
+    ratification_registry = _load_ratification_registry(sentinel_dir, registry_path)
+    for r in ratification.run_all(sentinel, rationale, ratification_registry):
         if r.verdict == "PASS":
             continue
         result.findings.append(
@@ -615,7 +641,7 @@ def lint_all(
     result = LintResult()
 
     if check_mode in ("structural", "all"):
-        structural = lint_structural(sentinel_dir)
+        structural = lint_structural(sentinel_dir, registry_path=registry_path)
         result.findings.extend(structural.findings)
         # If we couldn't even parse the manifest, remote checks are moot.
         blocking = {"STRUCT-MISSING", "STRUCT-YAML", "STRUCT-SHAPE",
