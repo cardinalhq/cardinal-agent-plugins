@@ -33,6 +33,7 @@ class StubMaestro:
         self.lakerunner_reason = None      # e.g. "operator_not_phoned_home"
         self.lakerunner_status = 409       # HTTP status paired with lakerunner_reason
         self.workloads_empty = False       # if true, GET /workloads returns []
+        self.delete_site_reason = None     # e.g. "workloads_exist", "license_claims_exist"
         self.last_create_body = None
         self.last_lakerunner_body = None
         self._server = None
@@ -147,6 +148,15 @@ class StubMaestro:
                     self._send(404, {"error": "not_found"})
 
             def do_DELETE(self):
+                if outer.delete_site_reason == "workloads_exist":
+                    self._send(400, {
+                        "error": "workloads_exist",
+                        "workloadCount": 2, "presentCount": 1, "removedCount": 1,
+                    })
+                    return
+                if outer.delete_site_reason == "license_claims_exist":
+                    self._send(400, {"error": "license_claims_exist", "claimCount": 1})
+                    return
                 self._send(204, {})
 
         self._server = http.server.HTTPServer(("127.0.0.1", 0), H)
@@ -402,6 +412,25 @@ class InstallSiteTests(unittest.TestCase):
         res, out = run(self.home, ["connect-info", "--org", "org-1", "--site", "site-new"])
         self.assertNotEqual(res.returncode, 0)
         self.assertEqual(out["error"], "no_lakerunner")
+
+    def test_delete_site_maps_workloads_exist(self):
+        # Site with attached workloads must return a specific hint counting
+        # the workloads instead of the generic "Unexpected API error (400)".
+        self.stub.delete_site_reason = "workloads_exist"
+        res, out = run(self.home, ["delete-site", "--org", "org-1", "--site", "site-new"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(out["error"], "workloads_exist")
+        self.assertIn("workload", out["hint"])
+
+    def test_delete_site_maps_license_claims_exist(self):
+        # Leaked license claim on a self_managed site: the plugin's act scope
+        # can't reach license installations, so the hint must point users at
+        # the Cardinal UI's Deployments page rather than silently 400'ing.
+        self.stub.delete_site_reason = "license_claims_exist"
+        res, out = run(self.home, ["delete-site", "--org", "org-1", "--site", "site-new"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(out["error"], "license_claims_exist")
+        self.assertIn("Deployments", out["hint"])
 
     def test_add_lakerunner_maps_all_slots_used(self):
         # Trial-org slot quota is exhausted server-side. Must surface a
