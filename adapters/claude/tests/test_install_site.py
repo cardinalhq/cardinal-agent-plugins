@@ -31,6 +31,8 @@ class StubMaestro:
         self.site_name_taken = False
         self.license_decision = "license"  # or "contact_sales" / 403
         self.lakerunner_reason = None      # e.g. "operator_not_phoned_home"
+        self.lakerunner_status = 409       # HTTP status paired with lakerunner_reason
+        self.workloads_empty = False       # if true, GET /workloads returns []
         self.last_create_body = None
         self.last_lakerunner_body = None
         self._server = None
@@ -85,7 +87,19 @@ class StubMaestro:
                                      "agentVersion": "v1.0.0" if outer.phoned_home else None,
                                      "lastPhonedHomeAt": None})
                 elif p.endswith("/workloads"):
-                    self._send(200, {"workloads": [{"workloadId": "wl-1", "kind": "lakerunner"}]})
+                    # Real shape: each row wraps {"workload": {...}, "status": {...}}.
+                    # See conductor/packages/maestro/src/routes/site-workloads.ts →
+                    # toWorkloadSummary. The connect-info gate keys off
+                    # workload.kind, so the stub has to match that shape.
+                    if outer.workloads_empty:
+                        self._send(200, {"workloads": []})
+                    else:
+                        self._send(200, {"workloads": [{
+                            "workload": {"workloadId": "wl-1", "kind": "lakerunner",
+                                         "name": "poc", "desiredState": "present",
+                                         "generation": 1},
+                            "status": None,
+                        }]})
                 elif p.endswith("/workloads/maestro/credentials"):
                     self._send(200, {
                         "email": "owner@example.com",
@@ -121,7 +135,8 @@ class StubMaestro:
                                          "license": {"id": "lic-1", "isTrial": True}})
                 elif p.endswith("/workloads/lakerunner"):
                     if outer.lakerunner_reason:
-                        self._send(409, {"reason": outer.lakerunner_reason})
+                        self._send(outer.lakerunner_status,
+                                   {"reason": outer.lakerunner_reason})
                         return
                     outer.last_lakerunner_body = body
                     self._send(201, {"workload": {"workloadId": "wl-1"},
@@ -376,6 +391,29 @@ class InstallSiteTests(unittest.TestCase):
         self.assertEqual(out["login_email"], "owner@example.com")
         self.assertIn("port-forward -n cardinal svc/maestro-maestro 4200:4200", out["port_forward"])
         self.assertIn("get secret maestro-owner-password", out["read_password"])
+
+    def test_connect_info_before_lakerunner_gates_on_workloads(self):
+        # The credentials endpoint returns a happy JSON with a real-looking
+        # port-forward command even when no lakerunner is installed. Left
+        # ungated, a user running connect-info out of order gets a "success"
+        # that silently fails at kubectl. connect-info must refuse before it
+        # hits the credentials endpoint.
+        self.stub.workloads_empty = True
+        res, out = run(self.home, ["connect-info", "--org", "org-1", "--site", "site-new"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(out["error"], "no_lakerunner")
+
+    def test_add_lakerunner_maps_all_slots_used(self):
+        # Trial-org slot quota is exhausted server-side. Must surface a
+        # specific hint pointing at the UI's delete path — the generic
+        # "Unexpected API error (409)" is a UX cliff.
+        self.stub.lakerunner_reason = "all_slots_used"
+        self.stub.lakerunner_status = 409
+        res, out = run(self.home, ["add-lakerunner", "--org", "org-1", "--site", "site-new",
+                                   "--name", "lr", "--namespace", "cardinal"])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(out["error"], "all_slots_used")
+        self.assertIn("consumed all", out["hint"])
 
 
 if __name__ == "__main__":
