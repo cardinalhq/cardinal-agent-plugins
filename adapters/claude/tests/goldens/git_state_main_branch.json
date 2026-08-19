@@ -102,6 +102,12 @@
                       }
                     },
                     {
+                      "key": "cardinal.remote_url_credential_scrubbed",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
                       "key": "cardinal.initiative.type",
                       "value": {
                         "stringValue": "research"

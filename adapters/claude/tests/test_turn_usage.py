@@ -10,6 +10,7 @@ Run with: python3 -m unittest tests.test_turn_usage -v
 
 import json
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -25,11 +26,21 @@ HOOK = (
 
 class _OTLPStub(BaseHTTPRequestHandler):
     received: list[dict] = []
+    # Phase 1 execution-graph POSTs (OTLP/HTTP JSON resourceSpans to
+    # /v1/traces — docs/canonical-model.md §14) land on this same stub
+    # server, at the same host:port as /v1/logs: envelopes ride the SAME
+    # ingest connection as the turn-usage/plan-usage OTLP emission, no
+    # separate endpoint discovery. Kept separate from `received` (which
+    # assumes /v1/logs bodies) purely for readability in assertions below.
+    trace_requests: list[dict] = []
     delay_s: float = 0.0
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        type(self).received.append(json.loads(body))
+        if self.path == "/v1/traces":
+            type(self).trace_requests.append(json.loads(body))
+        else:
+            type(self).received.append(json.loads(body))
         if type(self).delay_s > 0:
             time.sleep(type(self).delay_s)
         self.send_response(200)
@@ -37,6 +48,21 @@ class _OTLPStub(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+
+def _spans_of(trace_request: dict) -> list[dict]:
+    return trace_request["resourceSpans"][0]["scopeSpans"][0]["spans"]
+
+
+def _resource_attrs_of(trace_request: dict) -> dict:
+    out = {}
+    for kv in trace_request["resourceSpans"][0]["resource"]["attributes"]:
+        v = kv["value"]
+        if "stringValue" in v:
+            out[kv["key"]] = v["stringValue"]
+        elif "intValue" in v:
+            out[kv["key"]] = int(v["intValue"])
+    return out
 
 
 def _log_records(event_body: dict) -> list[dict]:
@@ -99,6 +125,7 @@ def _tool_use_block(name: str, input_: dict, block_id: str = "tu1") -> dict:
 class TurnUsageHookTest(unittest.TestCase):
     def setUp(self):
         _OTLPStub.received = []
+        _OTLPStub.trace_requests = []
         _OTLPStub.delay_s = 0.0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -125,11 +152,15 @@ class TurnUsageHookTest(unittest.TestCase):
         path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
         return path
 
-    def _run_hook(self, payload: dict, expect_rc: int = 0) -> subprocess.CompletedProcess:
+    def _run_hook(
+        self, payload: dict, expect_rc: int = 0, extra_env: dict | None = None,
+    ) -> subprocess.CompletedProcess:
+        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        env.update(extra_env or {})
         proc = subprocess.run(
             ["python3", str(HOOK)],
             input=json.dumps(payload).encode(),
-            env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+            env=env,
             capture_output=True,
             timeout=10,
         )
@@ -605,6 +636,153 @@ class TurnUsageHookTest(unittest.TestCase):
         # sync so server-side chq_tsns derivation can use either).
         observed = [int(r["observedTimeUnixNano"]) for r in log_records]
         self.assertEqual(observed, ts_values)
+
+
+def _span_attrs(span: dict) -> dict:
+    out = {}
+    for kv in span["attributes"]:
+        v = kv["value"]
+        if "stringValue" in v:
+            out[kv["key"]] = v["stringValue"]
+        elif "intValue" in v:
+            out[kv["key"]] = int(v["intValue"])
+        elif "doubleValue" in v:
+            out[kv["key"]] = v["doubleValue"]
+        elif "boolValue" in v:
+            out[kv["key"]] = v["boolValue"]
+    return out
+
+
+class ExecutionGraphWiringTest(unittest.TestCase):
+    """Phase 1 execution-graph emission (docs/local-notes/plans/
+    agent-execution-graph.md; wire shape docs/canonical-model.md §14):
+    CARDINAL_EMIT_EXECUTION_GRAPH gates a second, independent POST (OTLP
+    resourceSpans to /v1/traces) from the same Stop firing that already
+    emits cardinal.turn_usage/cardinal.turn_tool to /v1/logs. It must
+    default OFF and must never disturb the existing OTLP emission. There
+    is no separate execution-graph endpoint or connection discovery —
+    both POSTs share the same ingest connection built from
+    OTEL_EXPORTER_OTLP_ENDPOINT, just a different OTLP signal path."""
+
+    def setUp(self):
+        _OTLPStub.received = []
+        _OTLPStub.trace_requests = []
+        _OTLPStub.delay_s = 0.0
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        claude_dir = self.home / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(json.dumps({
+            "env": {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{self.server.server_port}",
+                "OTEL_EXPORTER_OTLP_HEADERS": "x-cardinalhq-api-key=test-key",
+                "OTEL_RESOURCE_ATTRIBUTES": "user.email=t@example.com,cardinal.org=acme",
+            }
+        }))
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.tmp.cleanup()
+
+    def _write_transcript(self, session_id: str) -> Path:
+        proj = self.home / "proj"
+        proj.mkdir(exist_ok=True)
+        path = proj / f"{session_id}.jsonl"
+        records = [
+            _user_text_msg("investigate the flaky test"),
+            _assistant_msg(
+                {"input_tokens": 10, "output_tokens": 5},
+                content=[_tool_use_block("Read", {"file_path": "a.ts"}, "t1")],
+            ),
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        return path
+
+    def _run_hook(self, payload: dict, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        env.update(extra_env or {})
+        proc = subprocess.run(
+            # sys.executable, not the other tests' bare "python3": these
+            # tests specifically exercise the lazy trace_emit/cardinal_core
+            # .envelope import, which needs Python 3.11+ (enum.StrEnum;
+            # core/pyproject.toml already declares requires-python = ">=3.11").
+            # The system "python3" resolved off a bare /usr/bin:/bin PATH
+            # may be older than that floor on some machines — using the
+            # interpreter actually running this test suite keeps the test
+            # meaningful regardless of what "python3" happens to resolve to.
+            [sys.executable, str(HOOK)],
+            input=json.dumps(payload).encode(),
+            env=env,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        return proc
+
+    def test_default_off_no_spans_posted(self):
+        path = self._write_transcript("sess-eg-1")
+        self._run_hook({"session_id": "sess-eg-1", "transcript_path": str(path)})
+        # Existing OTLP path still fires...
+        self.assertEqual(len(_OTLPStub.received), 1)
+        # ...but nothing landed at /v1/traces without the opt-in flag.
+        self.assertEqual(_OTLPStub.trace_requests, [])
+
+    def test_flag_enabled_emits_spans_without_disturbing_otlp_logs(self):
+        path = self._write_transcript("sess-eg-2")
+        self._run_hook(
+            {"session_id": "sess-eg-2", "transcript_path": str(path)},
+            extra_env={"CARDINAL_EMIT_EXECUTION_GRAPH": "1"},
+        )
+        # turn-usage/plan-usage OTLP emission is unaffected.
+        self.assertEqual(len(_OTLPStub.received), 1)
+        by_event = _records_by_event(_OTLPStub.received[0])
+        self.assertIn("cardinal.turn_usage", by_event)
+
+        # And the execution-graph spans landed too, at the SAME OTLP
+        # endpoint (no separate execution-graph connection discovery —
+        # /v1/traces vs /v1/logs is the only difference).
+        self.assertGreaterEqual(len(_OTLPStub.trace_requests), 1)
+        spans = [s for req in _OTLPStub.trace_requests for s in _spans_of(req)]
+        self.assertGreater(len(spans), 0)
+
+        for span in spans:
+            self.assertIn("traceId", span)
+            self.assertEqual(len(bytes.fromhex(span["traceId"])), 16)
+            self.assertIn("spanId", span)
+            self.assertEqual(len(bytes.fromhex(span["spanId"])), 8)
+            attrs = _span_attrs(span)
+            self.assertIn("cardinal.envelope.record_id", attrs)
+
+        resource_attrs = _resource_attrs_of(_OTLPStub.trace_requests[0])
+        self.assertEqual(resource_attrs.get("cardinal.org.id"), "acme")
+        self.assertEqual(resource_attrs.get("cardinal.session.id"), "sess-eg-2")
+        self.assertEqual(resource_attrs.get("service.name"), "claude-code")
+
+    def test_no_assistant_records_does_not_block_execution_graph(self):
+        # A Stop firing with nothing new for turn-usage (no assistant
+        # records this "current turn") must still let the execution-graph
+        # walk run — trace_emit walks the WHOLE transcript, not just the
+        # current-turn slice, so a prior turn's history is still there to
+        # emit even when this particular Stop has nothing incremental.
+        proj = self.home / "proj"
+        proj.mkdir(exist_ok=True)
+        path = proj / "sess-eg-4.jsonl"
+        records = [
+            _user_text_msg("first"),
+            _assistant_msg({"input_tokens": 1, "output_tokens": 1}),
+            _user_text_msg("second, nothing follows yet"),
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        self._run_hook(
+            {"session_id": "sess-eg-4", "transcript_path": str(path)},
+            extra_env={"CARDINAL_EMIT_EXECUTION_GRAPH": "1"},
+        )
+        # No current-turn assistant records -> no turn-usage OTLP POST...
+        self.assertEqual(len(_OTLPStub.received), 0)
+        # ...but the execution-graph walk (whole-transcript) still ran.
+        self.assertGreaterEqual(len(_OTLPStub.trace_requests), 1)
 
 
 if __name__ == "__main__":

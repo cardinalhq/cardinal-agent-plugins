@@ -176,9 +176,27 @@
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "args_hash",
                       "value": {
-                        "stringValue": "{\"path\":\"src/main.py\"}"
+                        "stringValue": "aa505d5f066506832b63733af59739bf55ca071f61cc5a8c5795e701918e3cd2"
+                      }
+                    },
+                    {
+                      "key": "args_length",
+                      "value": {
+                        "intValue": "22"
+                      }
+                    },
+                    {
+                      "key": "output_hash",
+                      "value": {
+                        "stringValue": "d34fc9a9ee4dab1dd6084af701200d1029f2496eacc95b412a2d87f1c6472030"
+                      }
+                    },
+                    {
+                      "key": "output_length",
+                      "value": {
+                        "intValue": "23"
                       }
                     }
                   ]

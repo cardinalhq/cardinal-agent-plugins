@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _debug_capture  # noqa: E402
 from cardinal_core.limits import gate_output  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
 
@@ -36,6 +37,11 @@ def main() -> None:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+
+    # Capture FIRST — this hook is sync/turn-critical, but the dump is a
+    # no-op unless CARDINAL_CLAUDE_DEBUG_PAYLOADS=1 (never set in prod).
+    _debug_capture.dump_if_enabled("UserPromptSubmit", payload)
+
     session_id = (
         payload.get("session_id")
         or os.environ.get("CLAUDE_CODE_SESSION_ID")

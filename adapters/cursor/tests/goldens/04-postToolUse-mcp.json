@@ -180,9 +180,39 @@
                       }
                     },
                     {
-                      "key": "tool_input",
+                      "key": "mcp_server_name",
                       "value": {
-                        "stringValue": "{\"instance\":\"prod\"}"
+                        "stringValue": "cardinal"
+                      }
+                    },
+                    {
+                      "key": "mcp_tool_name",
+                      "value": {
+                        "stringValue": "lakerunner__list_services"
+                      }
+                    },
+                    {
+                      "key": "args_hash",
+                      "value": {
+                        "stringValue": "ffe112c78dbe19540d1020dda42b4fb68bece538f8182aa2598ccce9c4be30bf"
+                      }
+                    },
+                    {
+                      "key": "args_length",
+                      "value": {
+                        "intValue": "19"
+                      }
+                    },
+                    {
+                      "key": "output_hash",
+                      "value": {
+                        "stringValue": "187fb989cae06cf9f0f465565b49b07c2562c88ee0ee96d8b2385f0ceaf354d5"
+                      }
+                    },
+                    {
+                      "key": "output_length",
+                      "value": {
+                        "intValue": "21"
                       }
                     }
                   ]

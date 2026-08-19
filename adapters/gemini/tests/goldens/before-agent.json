@@ -124,6 +124,12 @@
                       }
                     },
                     {
+                      "key": "cardinal_remote_url_credential_scrubbed",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
                       "key": "cardinal_initiative_name",
                       "value": {
                         "stringValue": "outcomes-observability"
@@ -242,6 +248,12 @@
                       "key": "cardinal_remote_url",
                       "value": {
                         "stringValue": "git@github.com:cardinalhq/fixture-repo.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal_remote_url_credential_scrubbed",
+                      "value": {
+                        "boolValue": false
                       }
                     },
                     {
@@ -369,6 +381,12 @@
                       "key": "cardinal_remote_url",
                       "value": {
                         "stringValue": "git@github.com:cardinalhq/fixture-repo.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal_remote_url_credential_scrubbed",
+                      "value": {
+                        "boolValue": false
                       }
                     },
                     {

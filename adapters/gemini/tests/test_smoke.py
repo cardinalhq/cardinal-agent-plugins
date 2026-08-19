@@ -185,5 +185,123 @@ class CoreFunctionTests(unittest.TestCase):
         )
 
 
+class PrivacyRedactionTests(unittest.TestCase):
+    """Regression tests for docs/privacy-redaction.md §7: AfterTool's
+    tool_result event used to serialize `tool_input`/`tool_parameters` as
+    raw JSON of the full tool-call arguments (the whole shell command
+    string, or a file-write tool's full content payload). Connects a real
+    StubIngest so the actual POSTed OTLP records can be inspected, not
+    just the hook's exit code."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        _ensure_vendored()
+        sys.path.insert(0, str(MONOREPO_ROOT / "core" / "tests"))
+        from harness import StubIngest  # noqa: PLC0415
+        cls.StubIngest = StubIngest
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        self.stub = self.StubIngest().start()
+        gemini_dir = self.home / ".gemini"
+        gemini_dir.mkdir(parents=True, exist_ok=True)
+        (gemini_dir / "cardinal.json").write_text(json.dumps({
+            "schema_version": 1,
+            "ingest_endpoint": self.stub.endpoint,
+            "deployment_environment": "test",
+            "user_email": "t@t",
+            "org_slug": "test-org",
+        }))
+        (gemini_dir / "cardinal-secrets.json").write_text(json.dumps({
+            "ingest_api_key": "test-key",
+        }))
+
+    def tearDown(self) -> None:
+        self.stub.stop()
+        self._tmp.cleanup()
+
+    def _records_named(self, name: str) -> list[dict]:
+        out = []
+        for batch in self.stub.log_batches:
+            for rl in batch.get("resourceLogs", []):
+                for sl in rl.get("scopeLogs", []):
+                    for rec in sl.get("logRecords", []):
+                        attrs = {a["key"]: list(a["value"].values())[0] for a in rec["attributes"]}
+                        if attrs.get("event_name") == name:
+                            out.append(attrs)
+        return out
+
+    def test_bash_tool_result_never_carries_command_text(self) -> None:
+        cmd = "curl -H 'Authorization: Bearer supersecrettoken1234567890' https://internal.example.com/api"
+        payload = {
+            "session_id": "s-privacy-1",
+            "tool_name": "run_shell_command",
+            "tool_input": {"command": cmd},
+            "success": True,
+        }
+        result = run_hook("AfterTool", payload, self.home)
+        self.assertEqual(result.returncode, 0, msg=result.stderr.decode())
+
+        (tool_result,) = self._records_named("tool_result")
+        self.assertEqual(tool_result["tool_name"], "Bash")
+        self.assertEqual(tool_result["bash_class"], "network")
+        self.assertIn("command_hash", tool_result)
+        self.assertNotIn("tool_input", tool_result)
+        self.assertNotIn("tool_parameters", tool_result)
+
+        (secret_event,) = self._records_named("cardinal.secret_detected")
+        self.assertIn("BEARER_TOKEN", secret_event["secret_patterns"])
+
+        raw = json.dumps(self.stub.log_batches)
+        for fragment in (cmd, "supersecrettoken1234567890"):
+            self.assertNotIn(fragment, raw)
+
+    def test_write_file_tool_result_never_carries_content(self) -> None:
+        content = "DATABASE_PASSWORD=hunter2\nrest of the file"
+        payload = {
+            "session_id": "s-privacy-2",
+            "tool_name": "write_file",
+            "tool_input": {"file_path": "config.py", "content": content},
+            "success": True,
+        }
+        result = run_hook("AfterTool", payload, self.home)
+        self.assertEqual(result.returncode, 0, msg=result.stderr.decode())
+
+        (tool_result,) = self._records_named("tool_result")
+        self.assertIn("args_hash", tool_result)
+        self.assertIn("args_length", tool_result)
+        self.assertNotIn("tool_input", tool_result)
+
+        raw = json.dumps(self.stub.log_batches)
+        self.assertNotIn(content, raw)
+        self.assertNotIn("hunter2", raw)
+
+    def test_git_state_strips_origin_url_credentials(self) -> None:
+        repo = self.home / "repo"
+        repo.mkdir()
+        env = {**os.environ, "HOME": str(self.home), "GIT_CONFIG_NOSYSTEM": "1"}
+
+        def _git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+
+        _git("init", "-q", "-b", "feat/creds-test")
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init")
+        token = "ghp_" + "s" * 36
+        _git("remote", "add", "origin", f"https://x-access-token:{token}@github.com/cardinalhq/private-repo.git")
+
+        payload = {"session_id": "s-privacy-3", "cwd": str(repo), "prompt": "hi"}
+        result = run_hook("BeforeAgent", payload, self.home)
+        self.assertEqual(result.returncode, 0, msg=result.stderr.decode())
+
+        (git_state,) = self._records_named("cardinal.git_state")
+        self.assertEqual(git_state["cardinal_remote_url"], "https://github.com/cardinalhq/private-repo.git")
+        self.assertEqual(git_state["cardinal_remote_url_credential_scrubbed"], True)
+        self.assertEqual(git_state["cardinal_repo"], "cardinalhq/private-repo")
+        raw = json.dumps(self.stub.log_batches)
+        self.assertNotIn(token, raw)
+        self.assertNotIn("x-access-token", raw)
+
+
 if __name__ == "__main__":
     unittest.main()

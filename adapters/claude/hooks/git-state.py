@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _debug_capture  # noqa: E402
 import _otel_settings  # noqa: E402
 import _plan_cache  # noqa: E402
 import _plugin_version  # noqa: E402
@@ -49,6 +50,7 @@ from cardinal_core.initiative import PREFIX_TO_TYPE, strip_worktree_noise  # noq
 from cardinal_core.limits import maybe_refresh_verdict  # noqa: E402
 from cardinal_core.otlp import emit_records, kv, log_record  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
+from cardinal_core.redaction import strip_url_userinfo  # noqa: E402
 
 HOOK_TIMEOUT_SEC = 2.0
 
@@ -81,6 +83,10 @@ def main() -> None:
     except json.JSONDecodeError:
         _silent_exit()
 
+    # Capture FIRST, before any redaction/processing below — even a hook
+    # that errors later still leaves a fixture-shape dump behind.
+    _debug_capture.dump_if_enabled("UserPromptSubmit", payload)
+
     # settings.json wins over env, because Claude Code strips OTEL_* and
     # CLAUDE_PROJECT_DIR from hook subprocess envs in practice.
     settings_env = _otel_settings.load_otel_settings()
@@ -111,7 +117,14 @@ def main() -> None:
         # Not a git repo (or git not installed). Nothing useful to send.
         _silent_exit()
     branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-    remote_url = git(["remote", "get-url", "origin"], cwd)
+    # PRIVACY (docs/privacy-redaction.md §3, §7): origin URLs can embed
+    # live credentials (`https://x-access-token:TOKEN@host/...`, common
+    # on CI-cloned or PAT-authenticated checkouts). Strip userinfo BEFORE
+    # canonical_repo() too — REMOTE_URL_RE has no userinfo awareness and
+    # would otherwise fold the credential into the `repo` attribute.
+    raw_remote_url = git(["remote", "get-url", "origin"], cwd)
+    remote_url = strip_url_userinfo(raw_remote_url) if raw_remote_url else None
+    credential_scrubbed = bool(raw_remote_url and remote_url != raw_remote_url)
     repo = canonical_repo(remote_url) if remote_url else None
 
     initiative_name, initiative_type = resolve_initiative(branch)
@@ -133,6 +146,10 @@ def main() -> None:
             "cardinal.branch": branch,
             "cardinal.repo": repo,
             "cardinal.remote_url": remote_url,
+            # Visible-without-recoverable signal (spec §7): ops can see a
+            # credential was stripped from this session's origin URL
+            # without the credential itself ever leaving the machine.
+            "cardinal.remote_url_credential_scrubbed": credential_scrubbed,
             "cardinal.initiative.name": initiative_name,
             # type is ALWAYS emitted — resolve_initiative guarantees a
             # non-null value from the closed enum, so the lakerunner
