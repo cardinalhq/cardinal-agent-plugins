@@ -721,6 +721,99 @@ class TelemetryHookTests(unittest.TestCase):
         self.assertEqual(resource_attrs["service.name"], "codex")
         self.assertEqual(resource_attrs["agent.runtime"], "codex")
 
+    def test_current_custom_tool_calls_are_unwrapped_and_counted(self):
+        session_id = "sess-custom-tools-1"
+        transcript = self.home / "custom-tools.jsonl"
+        command = {"cmd": "git status", "workdir": "/workspace"}
+        patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-a\n+b\n*** End Patch"
+        rows = [
+            {"timestamp": "2026-08-24T00:00:00Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "repair it"}},
+            {"timestamp": "2026-08-24T00:00:01Z", "type": "response_item",
+             "payload": {
+                 "type": "custom_tool_call", "name": "exec",
+                 "call_id": "call-custom-1", "id": "item-custom-1",
+                 "input": (
+                     f"const r = await tools.exec_command({json.dumps(command)}); "
+                     "text(r.output);"
+                 ),
+             }},
+            {"timestamp": "2026-08-24T00:00:02Z", "type": "response_item",
+             "payload": {
+                 "type": "custom_tool_call_output", "call_id": "call-custom-1",
+                 "output": [{"type": "text", "text": "working tree clean"}],
+             }},
+            {"timestamp": "2026-08-24T00:00:03Z", "type": "response_item",
+             "payload": {
+                 "type": "custom_tool_call", "name": "exec",
+                 "call_id": "call-custom-2", "id": "item-custom-2",
+                 "input": f"text(await tools.apply_patch({json.dumps(patch)}));",
+             }},
+            {"timestamp": "2026-08-24T00:00:04Z", "type": "response_item",
+             "payload": {
+                 "type": "custom_tool_call_output", "call_id": "call-custom-2",
+                 "output": [{"type": "text", "text": "Done!"}],
+             }},
+        ]
+        transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        result = run_hook(
+            ["--event", "Stop"], self.home,
+            {"session_id": session_id, "transcript_path": str(transcript)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.stub.log_batches), 1)
+        batch = self.stub.log_batches[0]
+        tools = records_named(batch, "cardinal.turn_tool")
+        self.assertEqual([tool["tool_name"] for tool in tools], ["Bash", "Edit"])
+        self.assertEqual(tools[1]["target"], "src/app.py")
+        results = records_named(batch, "tool_result")
+        self.assertEqual([record["tool_name"] for record in results], ["Bash", "Edit"])
+        self.assertEqual(json.loads(results[0]["tool_input"]), command)
+        progress = read_json(
+            self.home / ".codex" / "cardinal" / "telemetry" / f"{session_id}.json"
+        )
+        self.assertEqual(progress["tool_seq"], 2)
+
+    def test_compound_custom_exec_is_one_privacy_safe_tool_event(self):
+        session_id = "sess-custom-tools-2"
+        transcript = self.home / "compound-custom-tool.jsonl"
+        secret = "do-not-emit-this-command"
+        source = (
+            "// tools.fake_in_comment({})\n"
+            "const example = 'tools.fake_in_string({})';\n"
+            "const values = await Promise.all(["
+            f"tools.exec_command({json.dumps({'cmd': secret})}),"
+            "tools.view_image({\"path\":\"/tmp/example.png\"})]);\n"
+            "text(values.length);"
+        )
+        rows = [
+            {"timestamp": "2026-08-24T00:00:00Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "inspect"}},
+            {"timestamp": "2026-08-24T00:00:01Z", "type": "response_item",
+             "payload": {"type": "custom_tool_call", "name": "exec",
+                         "call_id": "compound-1", "input": source}},
+            {"timestamp": "2026-08-24T00:00:02Z", "type": "response_item",
+             "payload": {"type": "custom_tool_call_output", "call_id": "compound-1",
+                         "output": [{"type": "text", "text": "2"}]}},
+        ]
+        transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        result = run_hook(
+            ["--event", "Stop"], self.home,
+            {"session_id": session_id, "transcript_path": str(transcript)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        batch = self.stub.log_batches[0]
+        (tool,) = records_named(batch, "cardinal.turn_tool")
+        self.assertEqual(tool["tool_name"], "exec")
+        (tool_result,) = records_named(batch, "tool_result")
+        self.assertEqual(
+            json.loads(tool_result["tool_input"]),
+            {"tools": ["exec_command", "view_image"]},
+        )
+        self.assertNotIn(secret, json.dumps(batch))
+
 
 class ParityHookTests(unittest.TestCase):
     """Behavioural parity from source 0.4.0: plan throttling, turn_seq
@@ -945,6 +1038,41 @@ class ParityHookTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "")
+
+    def test_user_prompt_emits_research_context_without_a_commit(self):
+        outside = self.home / "outside-git"
+        outside.mkdir()
+        result = run_hook(
+            ["--event", "UserPromptSubmit"], self.home,
+            {"session_id": "sess-context-1", "cwd": str(outside), "prompt": "hello"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = records_named(self.stub.log_batches[-1], "cardinal.git_state")[0]
+        self.assertEqual(context["cardinal_cwd"], str(outside))
+        self.assertEqual(context["cardinal_initiative_type"], "research")
+        self.assertNotIn("cardinal_branch", context)
+        self.assertNotIn("cardinal_head_sha", context)
+
+        unborn = self.home / "unborn-repo"
+        unborn.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=unborn,
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:cardinalhq/example.git"],
+            cwd=unborn, check=True, capture_output=True,
+        )
+        result = run_hook(
+            ["--event", "UserPromptSubmit"], self.home,
+            {"session_id": "sess-context-2", "cwd": str(unborn), "prompt": "hello"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = records_named(self.stub.log_batches[-1], "cardinal.git_state")[0]
+        self.assertEqual(context["cardinal_branch"], "main")
+        self.assertEqual(context["cardinal_repo"], "cardinalhq/example")
+        self.assertEqual(context["cardinal_initiative_type"], "research")
+        self.assertNotIn("cardinal_head_sha", context)
 
 
 class EnrichmentHookTests(unittest.TestCase):
