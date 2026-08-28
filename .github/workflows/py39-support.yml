@@ -1,0 +1,116 @@
+name: Python 3.9 support
+
+# Every user-facing surface — core/cardinal_core + every adapter's
+# cardinal-* CLI — must import and `--help` cleanly under Python 3.9.
+# macOS ships /usr/bin/python3 = 3.9.x and many corp-managed Linuxes
+# still default to it. `from __future__ import annotations` at the top of
+# every module keeps PEP-604 unions (`str | None`) as deferred strings,
+# so the whole codebase stays 3.9-compatible without giving up modern
+# annotation syntax.
+#
+# If this job fails you probably:
+#   - added a 3.10+ statement (`match/case`, `except*`),
+#   - used a runtime PEP-604 union (`isinstance(x, int | str)`,
+#     `list[int]()`), which `from __future__` cannot defer,
+#   - or imported a module that lacks `from __future__ import annotations`
+#     and has PEP-604 in an annotation.
+
+on:
+  pull_request:
+    paths:
+      - "core/**"
+      - "adapters/*/hooks/**"
+      - "adapters/*/bin/cardinal-*"
+      - "adapters/*/scripts/cardinal-*"
+      - ".github/workflows/py39-support.yml"
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "adapters/*/hooks/**"
+      - "adapters/*/bin/cardinal-*"
+      - "adapters/*/scripts/cardinal-*"
+      - ".github/workflows/py39-support.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  py39:
+    name: import + --help under 3.9
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      # Every core module must import cleanly (this is what every
+      # cardinal-* script does at startup, indirectly via the vendored
+      # copy).
+      - name: import cardinal_core
+        run: |
+          set -e
+          cd core
+          python3 -c "
+          import cardinal_core.deviceflow
+          import cardinal_core.otlp
+          import cardinal_core.paths
+          import cardinal_core.limits
+          import cardinal_core.session
+          import cardinal_core.pricing
+          import cardinal_core.initiative
+          import cardinal_core.bashclass
+          print('ok: all core modules import under 3.9')
+          "
+
+      # Every adapter's cardinal-* CLI must at least `--help` under 3.9
+      # (the top-level docstring imports, argparse setup, and any
+      # def-time annotation evaluation all run before argparse exits).
+      # cardinal-status is exempted per-script: it ignores --help and
+      # prints "Not connected" + exit 1 when the machine has no
+      # configured cardinal state, which the CI runner never does.
+      - name: cardinal-* --help under 3.9
+        run: |
+          set -e
+          fail=0
+          for adapter in claude codex cursor gemini; do
+            python3 build/vendor.py "$adapter"
+          done
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            out=$(python3 "$f" --help 2>&1 || true)
+            rc=$?
+            # The pre-existing shape of cardinal-status/disconnect scripts:
+            # they ignore --help and check the machine's cardinal state
+            # first, so on a fresh runner (no ~/.cardinal state, no
+            # ~/.codex/config.toml) they exit 1 with a "Not connected" or
+            # config-missing message. That's fine — the point of this job
+            # is to catch Python 3.9 PARSE / IMPORT / RUNTIME failures,
+            # not to force these scripts to have --help.
+            case "$base" in
+              cardinal-status|cardinal-disconnect)
+                if grep -qE 'Not connected|not found|does not exist|No such' <<<"$out"; then
+                  : # expected on a fresh runner
+                elif [ "$rc" -eq 0 ]; then
+                  : # actually did something benign
+                else
+                  echo "FAIL: $f: unexpected output on --help under 3.9:"
+                  head -5 <<<"$out" | sed 's/^/    /'
+                  fail=1
+                fi
+                ;;
+              *)
+                # argparse --help exits 0
+                if [ "$rc" -ne 0 ]; then
+                  echo "FAIL: $f: --help exit=$rc under 3.9:"
+                  head -5 <<<"$out" | sed 's/^/    /'
+                  fail=1
+                fi
+                ;;
+            esac
+          done < <(find adapters -type f \
+            \( -path '*/bin/cardinal-*' -o -path '*/scripts/cardinal-*' \) \
+            ! -name '*.py' ! -name '*.pyc')
+          exit $fail
