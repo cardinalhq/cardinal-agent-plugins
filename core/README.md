@@ -17,5 +17,6 @@ cd core && python3 -m unittest discover tests -v
 ```
 
 `cardinal_core.semantic_dag` is consumed by thin Codex and Claude entrypoints.
-Each adapter supplies its state directory, session environment keys, viewer
-asset path, and default port; graph semantics and CLI behavior stay identical.
+Each adapter supplies its runtime identity, session environment keys, and
+viewer asset path. Codex and Claude intentionally share one Cardinal state
+directory and viewer port; graph semantics and CLI behavior stay identical.

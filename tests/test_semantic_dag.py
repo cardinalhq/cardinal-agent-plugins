@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +21,9 @@ PROMPT_HOOKS = {
     "codex": ROOT / "adapters/codex/skills/semantic-dag/scripts/hooks/prompt_hook.py",
     "claude": ROOT / "adapters/claude/skills/semantic-dag/hooks/prompt_hook.py",
 }
+CODEX_SESSION_BRIDGE = (
+    ROOT / "adapters/codex/skills/semantic-dag/scripts/session_bridge.py"
+)
 SKILLS = {
     "codex": ROOT / "adapters/codex/skills/semantic-dag/SKILL.md",
     "claude": ROOT / "adapters/claude/skills/semantic-dag/SKILL.md",
@@ -30,7 +35,7 @@ def _without_volatile(value):
         return {
             key: _without_volatile(item)
             for key, item in value.items()
-            if key not in {"created", "updated", "ts", "session_started", "cwd"}
+            if key not in {"created", "updated", "ts", "session_started", "cwd", "runtime"}
         }
     if isinstance(value, list):
         return [_without_volatile(item) for item in value]
@@ -45,6 +50,51 @@ class SemanticDagAdapterTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_viewer_session_status_reflects_dag_state_and_recency(self) -> None:
+        server_path = (
+            ROOT
+            / "adapters/codex/skills/semantic-dag/scripts/viewer/server.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "semantic_dag_viewer_server_test", server_path
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        active = {
+            "nodes": {"work": {"status": "active"}},
+            "active_by_agent": {"root": "work"},
+        }
+        self.assertEqual(module._session_status(active, 950, now=1000), "active")
+        self.assertEqual(module._session_status(active, 800, now=1000), "stale")
+        self.assertEqual(
+            module._session_status(
+                {"nodes": {"work": {"status": "paused"}}}, 950, now=1000
+            ),
+            "paused",
+        )
+        self.assertEqual(
+            module._session_status(
+                {"finished": True, "nodes": {"work": {"status": "error"}}},
+                950,
+                now=1000,
+            ),
+            "error",
+        )
+        self.assertEqual(
+            module._session_status({"finished": True, "nodes": {}}, 950, now=1000),
+            "completed",
+        )
+        self.assertEqual(
+            module._session_status(
+                {"nodes": {"work": {"status": "done"}}}, 950, now=1000
+            ),
+            "completed",
+        )
+        self.assertEqual(module._session_status({"nodes": {}}, 950, now=1000), "pending")
+
     def emit(self, runtime: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.update(
@@ -52,6 +102,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 "SEMANTIC_DAG_STATE_DIR": str(self.root / runtime),
                 "SEMANTIC_DAG_NO_SERVER": "1",
                 "SEMANTIC_DAG_NO_OPEN": "1",
+                "SEMANTIC_DAG_NO_SESSION_BRIDGE": "1",
             }
         )
         return subprocess.run(
@@ -86,7 +137,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
         )
         self.emit(
             runtime,
-            "start", "Inspect parity", "--agent", "scout", "--parent", "goal",
+            "start", "Inspect parity", "--agent", "scout", "--agent-label", "Parity Scout", "--parent", "goal",
             *common,
         )
         self.emit(
@@ -108,6 +159,11 @@ class SemanticDagAdapterTests(unittest.TestCase):
         )
         self.assertEqual(codex["active_by_agent"], {"root": "goal", "scout": "scout::proof"})
         self.assertEqual(codex["nodes"]["scout::proof"]["agent"], "scout")
+        self.assertEqual(codex["runtime"], "codex")
+        self.assertEqual(claude["runtime"], "claude")
+        self.assertEqual(codex["agents"]["scout"]["label"], "Parity Scout")
+        self.assertEqual(codex["agents"]["scout"]["task"], "Inspect parity")
+        self.assertEqual(codex["agents"]["scout"]["parent_agent"], "root")
         self.assertIn(
             {"from": "goal", "to": "scout::proof", "relationship": "decomposes_into"},
             codex["edges"],
@@ -121,14 +177,49 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 self.assertNotIn("def _apply(", source)
                 self.assertNotIn("def emit(", source)
 
+    def test_codex_and_claude_share_one_viewer_server(self) -> None:
+        sources = {runtime: emitter.read_text() for runtime, emitter in EMITTERS.items()}
+        for runtime, source in sources.items():
+            with self.subTest(runtime=runtime):
+                self.assertIn('default_state_dir="~/.cardinal/state/semantic-dag"', source)
+                self.assertIn("default_port=8766", source)
+                self.assertIn(
+                    '~/.cardinal/state/semantic-dag',
+                    PROMPT_HOOKS[runtime].read_text(),
+                )
+
+        codex_viewer = ROOT / "adapters/codex/skills/semantic-dag/scripts/viewer"
+        claude_viewer = ROOT / "adapters/claude/skills/semantic-dag/viewer"
+        self.assertEqual(
+            (codex_viewer / "server.py").read_bytes(),
+            (claude_viewer / "server.py").read_bytes(),
+        )
+        self.assertEqual(
+            (codex_viewer / "index.html").read_bytes(),
+            (claude_viewer / "index.html").read_bytes(),
+        )
+        self.assertEqual(
+            (codex_viewer / "assets/cardinal-bird.png").read_bytes(),
+            (claude_viewer / "assets/cardinal-bird.png").read_bytes(),
+        )
+        server = (codex_viewer / "server.py").read_text()
+        viewer = (codex_viewer / "index.html").read_text()
+        self.assertIn('path == "/sessions"', server)
+        self.assertIn('path == "/assets/cardinal-bird.png"', server)
+        self.assertIn('src="/assets/cardinal-bird.png"', viewer)
+        self.assertIn('id="session-nav"', viewer)
+        self.assertIn('id="agent-team"', viewer)
+        self.assertIn('id="workflow-label"', viewer)
+        self.assertIn("runtime-crown", viewer)
+
     def test_claude_viewer_restores_all_active_agents(self) -> None:
         source = (
             ROOT / "adapters/claude/skills/semantic-dag/viewer/index.html"
         ).read_text()
-        self.assertIn("d.active_by_agent", source)
-        self.assertIn("Object.values(activeByAgent)", source)
+        self.assertIn("dag.active_by_agent", source)
+        self.assertIn("Object.values(state.activeByAgent)", source)
 
-    def test_both_adapters_register_post_tool_file_attribution(self) -> None:
+    def test_structured_file_attribution_paths_are_installed(self) -> None:
         claude_hooks = json.loads(
             (ROOT / "adapters/claude/hooks/hooks.json").read_text()
         )["hooks"]
@@ -143,6 +234,176 @@ class SemanticDagAdapterTests(unittest.TestCase):
         codex_connect = (ROOT / "adapters/codex/scripts/cardinal-connect").read_text()
         self.assertIn('hooks.setdefault("PostToolUse", [])', codex_connect)
         self.assertIn('managed_semantic_hook_group("tool", "*"', codex_connect)
+        self.assertIn("SEMANTIC_SESSION_BRIDGE", codex_connect)
+
+        codex_emitter = EMITTERS["codex"].read_text()
+        self.assertIn("session_bridge.py", codex_emitter)
+        self.assertIn("_ensure_session_bridge(arguments)", codex_emitter)
+
+    def test_codex_emitter_restarts_bridge_on_later_turn_reset(self) -> None:
+        spec = importlib.util.spec_from_file_location("codex_emitter_test", EMITTERS["codex"])
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with (
+            mock.patch.dict(os.environ, {"CODEX_SESSION_ID": "session"}, clear=False),
+            mock.patch.object(module, "_bridge_running", return_value=False),
+            mock.patch.object(module.subprocess, "run") as run,
+        ):
+            module._ensure_session_bridge(["reset", "Later turn"])
+        run.assert_called_once()
+        self.assertIn("session_bridge.py", str(run.call_args.args[0]))
+
+    def test_codex_session_bridge_materializes_completed_file_events(self) -> None:
+        state = self.root / "bridge-state"
+        transcript = self.root / "rollout-session.jsonl"
+        read_path = ROOT / "README.md"
+        updated_path = ROOT / "tests/test_semantic_dag.py"
+        records = [
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CommandExecution",
+                        "status": "completed",
+                        "cwd": ROOT.as_uri(),
+                        "parsed_cmd": [
+                            {"type": "read", "path": str(read_path)},
+                            {"type": "search", "path": "README.md"},
+                        ],
+                    },
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CommandExecution",
+                        "status": "failed",
+                        "cwd": ROOT.as_uri(),
+                        "parsed_cmd": [{"type": "read", "path": str(updated_path)}],
+                    },
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "FileChange",
+                        "cwd": ROOT.as_uri(),
+                        "changes": {
+                            str(updated_path): {
+                                "type": "update",
+                                "unified_diff": "@@",
+                                "move_path": None,
+                            }
+                        },
+                    },
+                },
+            },
+        ]
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SEMANTIC_DAG_STATE_DIR": str(state),
+                "SEMANTIC_DAG_NO_SERVER": "1",
+                "SEMANTIC_DAG_NO_OPEN": "1",
+                "SEMANTIC_DAG_NO_SESSION_BRIDGE": "1",
+                "CODEX_SESSION_LOG": str(transcript),
+            }
+        )
+        common = ["--thread", "session"]
+        subprocess.run(
+            [sys.executable, str(EMITTERS["codex"]), "start", "Bridge test", *common],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(EMITTERS["codex"]),
+                "add",
+                "first",
+                "WORK",
+                "Capture structured files",
+                "--root",
+                *common,
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+        )
+        subprocess.run(
+            [sys.executable, str(EMITTERS["codex"]), "activate", "first", *common],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+        )
+        first_activation = json.loads(
+            (state / "threads/session/events.jsonl").read_text().splitlines()[-1]
+        )["ts"]
+        subprocess.run(
+            [
+                sys.executable,
+                str(EMITTERS["codex"]),
+                "add",
+                "second",
+                "WORK",
+                "Continue later work",
+                "--root",
+                *common,
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+        )
+        subprocess.run(
+            [sys.executable, str(EMITTERS["codex"]), "activate", "second", *common],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+        )
+        second_activation = json.loads(
+            (state / "threads/session/events.jsonl").read_text().splitlines()[-1]
+        )["ts"]
+        completed_at_ms = ((first_activation + second_activation) / 2) * 1000
+        records[0]["payload"]["completed_at_ms"] = completed_at_ms
+        records[2]["payload"]["completed_at_ms"] = completed_at_ms
+        transcript.write_text("".join(json.dumps(item) + "\n" for item in records))
+        binding = state / "bindings/session.json"
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        binding.write_text(json.dumps({"thread": "session", "agent": "root"}))
+
+        subprocess.run(
+            [
+                sys.executable,
+                str(CODEX_SESSION_BRIDGE),
+                "run",
+                "--session",
+                "session",
+                "--once",
+                "--from-start",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+        )
+        dag = json.loads((state / "threads/session/dag.json").read_text())
+        self.assertEqual(dag["nodes"]["first"]["files"]["read"], ["README.md"])
+        self.assertEqual(
+            dag["nodes"]["first"]["files"]["updated"],
+            ["tests/test_semantic_dag.py"],
+        )
+        self.assertEqual(
+            dag["nodes"]["second"]["files"], {"read": [], "updated": []}
+        )
 
     def test_watch_prompts_use_compact_bounded_protocol(self) -> None:
         for runtime, prompt_hook in PROMPT_HOOKS.items():
@@ -184,6 +445,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 context = payload["hookSpecificOutput"]["additionalContext"]
                 self.assertNotIn("Read and follow the semantic-dag skill", context)
                 self.assertIn("1–3 important non-obvious terms", context)
+                self.assertNotIn("file metadata", context)
                 self.assertIn("Consult the full skill", context)
                 self.assertLess(len(context.split()), 220)
 
@@ -193,6 +455,8 @@ class SemanticDagAdapterTests(unittest.TestCase):
                     skill,
                 )
                 self.assertIn("do not add more than three new terms", skill)
+                self.assertNotIn("python3 <emit> file ", skill)
+                self.assertNotIn("Record every materially read", skill)
 
 
 if __name__ == "__main__":
