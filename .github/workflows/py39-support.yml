@@ -62,6 +62,7 @@ jobs:
           import cardinal_core.pricing
           import cardinal_core.initiative
           import cardinal_core.bashclass
+          import cardinal_core.file_events
           print('ok: all core modules import under 3.9')
           "
 
