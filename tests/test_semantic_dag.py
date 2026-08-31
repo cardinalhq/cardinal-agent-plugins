@@ -15,6 +15,10 @@ EMITTERS = {
     "codex": ROOT / "adapters/codex/skills/semantic-dag/scripts/emit.py",
     "claude": ROOT / "adapters/claude/skills/semantic-dag/emit.py",
 }
+CODEX_PROMPT_HOOK = (
+    ROOT / "adapters/codex/skills/semantic-dag/scripts/hooks/prompt_hook.py"
+)
+CODEX_SKILL = ROOT / "adapters/codex/skills/semantic-dag/SKILL.md"
 
 
 def _without_volatile(value):
@@ -94,6 +98,10 @@ class SemanticDagAdapterTests(unittest.TestCase):
         codex = self.exercise("codex")
         claude = self.exercise("claude")
         self.assertEqual(_without_volatile(codex), _without_volatile(claude))
+        self.assertEqual(
+            codex["glossary"],
+            {"adapter": "A thin runtime-specific entrypoint."},
+        )
         self.assertEqual(codex["active_by_agent"], {"root": "goal", "scout": "scout::proof"})
         self.assertEqual(codex["nodes"]["scout::proof"]["agent"], "scout")
         self.assertIn(
@@ -131,6 +139,46 @@ class SemanticDagAdapterTests(unittest.TestCase):
         codex_connect = (ROOT / "adapters/codex/scripts/cardinal-connect").read_text()
         self.assertIn('hooks.setdefault("PostToolUse", [])', codex_connect)
         self.assertIn('managed_semantic_hook_group("tool", "*"', codex_connect)
+
+    def test_codex_watch_prompt_uses_compact_bounded_protocol(self) -> None:
+        state = self.root / "watch-state"
+        thread_dir = state / "threads" / "shared"
+        binding_dir = state / "bindings"
+        thread_dir.mkdir(parents=True)
+        binding_dir.mkdir(parents=True)
+        (binding_dir / "session.json").write_text(json.dumps({"thread": "shared"}))
+        (thread_dir / "dag.json").write_text(json.dumps({
+            "thread": "shared",
+            "topic": "Previous turn",
+            "nodes": {},
+            "edges": [],
+            "active": None,
+            "active_by_agent": {},
+            "agents": {},
+            "glossary": {},
+            "watch_mode": True,
+        }))
+        environment = os.environ.copy()
+        environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
+        result = subprocess.run(
+            [sys.executable, str(CODEX_PROMPT_HOOK)],
+            cwd=ROOT,
+            env=environment,
+            input=json.dumps({"session_id": "session", "prompt": "Continue analysis"}),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("Read and follow the semantic-dag skill", context)
+        self.assertIn("1–3 important non-obvious terms", context)
+        self.assertIn("Consult the full skill", context)
+        self.assertLess(len(context.split()), 220)
+
+        skill = CODEX_SKILL.read_text()
+        self.assertIn("Populate the glossary on every substantive turn", skill)
+        self.assertIn("do not add more than three new terms", skill)
 
 
 if __name__ == "__main__":
