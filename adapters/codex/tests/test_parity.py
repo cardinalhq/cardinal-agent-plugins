@@ -363,6 +363,10 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("Stop", hooks["hooks"])
         self.assertIn("SubagentStop", hooks["hooks"])
         self.assertIn("cardinal-codex-plugin", json.dumps(hooks))
+        hook_text = json.dumps(hooks)
+        self.assertIn("--semantic-dag-prompt", hook_text)
+        self.assertIn("--semantic-dag-tool", hook_text)
+        self.assertIn("PreToolUse", hooks["hooks"])
 
     def test_already_connected_guard_without_rotate(self):
         first = run_script(CONNECT, ["--host", self.stub.url()], self.home)

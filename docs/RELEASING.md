@@ -56,8 +56,8 @@ Trusted publishing via OIDC — no long-lived token. Tag-driven.
 
 ```bash
 # Core (publish first if both are moving — omnigent depends on it)
-git tag core-v0.3.1
-git push origin core-v0.3.1
+git tag core-v0.4.0
+git push origin core-v0.4.0
 
 # Omnigent
 git tag omnigent-v0.2.1

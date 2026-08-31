@@ -5,9 +5,9 @@ Source of truth for Cardinal's agent plugins and their shared core.
 One contract, written once, shipped to every agent runtime:
 
 ```
-core/cardinal_core/     the contract — OTLP emission, initiative
-                        resolution, Bash classification, spend-limits
-                        delivery, device-code consent, session counters
+core/cardinal_core/     shared runtime — OTLP emission, initiative
+                        resolution, spend limits, device consent,
+                        session counters, typed Semantic DAG emission
 adapters/               per-agent surfaces (codex, gemini, cursor,
                         claude; omnigent later)
 build/vendor.py         copies core into each plugin artifact so shipped
@@ -17,7 +17,7 @@ docs/specs/             the extraction spec and migration plan
 
 ## Status
 
-P0–P4 code-complete: core extracted (37 unit tests) and all four adapters
+P0–P4 code-complete: core extracted (52 unit tests) and all four adapters
 migrated with byte-equal golden parity against their shipped plugins
 (~226 adapter tests + a cross-adapter contract test in `tests/`). See
 `docs/specs/agent-core.md` for the plan and

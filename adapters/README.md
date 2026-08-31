@@ -20,3 +20,7 @@ release. CORE_GAPS reconciliation plan: `../docs/specs/core-gaps-followup.md`.
 Layout convention per adapter: `hooks/`, `scripts/`, `tests/goldens/`,
 plus each ecosystem's manifest files. `build/vendor.py` copies
 `cardinal_core/` into `hooks/` at build time.
+
+Codex and Claude also ship `skills/semantic-dag/`. Their `emit.py` entrypoints
+contain runtime configuration only and delegate graph behavior to
+`cardinal_core.semantic_dag`, preventing the two live viewers from drifting.
