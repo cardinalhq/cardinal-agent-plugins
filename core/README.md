@@ -1,6 +1,7 @@
 # cardinal-agent-core
 
-The Cardinal agent-telemetry contract, written once. See
+The shared Cardinal agent runtime, written once. It owns both the telemetry
+contract and the typed Semantic DAG event engine. See
 `../docs/specs/agent-core.md` for the extraction spec and
 `../README.md` for the monorepo layout.
 
@@ -14,3 +15,7 @@ Ships two ways:
 ```bash
 cd core && python3 -m unittest discover tests -v
 ```
+
+`cardinal_core.semantic_dag` is consumed by thin Codex and Claude entrypoints.
+Each adapter supplies its state directory, session environment keys, viewer
+asset path, and default port; graph semantics and CLI behavior stay identical.
