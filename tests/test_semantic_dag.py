@@ -208,8 +208,12 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertIn('path == "/assets/cardinal-bird.png"', server)
         self.assertIn('src="/assets/cardinal-bird.png"', viewer)
         self.assertIn('id="session-nav"', viewer)
-        self.assertIn('id="agent-team"', viewer)
-        self.assertIn('id="workflow-label"', viewer)
+        self.assertIn('id="workflow-tab"', viewer)
+        self.assertIn('id="agents-tab"', viewer)
+        self.assertIn('id="agent-workflows"', viewer)
+        self.assertIn('id="agents-view"', viewer)
+        self.assertIn("(node.agent||'root')===agent.id", viewer)
+        self.assertIn("agent.parent_agent", viewer)
         self.assertIn("runtime-crown", viewer)
 
     def test_claude_viewer_restores_all_active_agents(self) -> None:
