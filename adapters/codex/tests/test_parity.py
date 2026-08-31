@@ -367,6 +367,45 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("--semantic-dag-prompt", hook_text)
         self.assertIn("--semantic-dag-tool", hook_text)
         self.assertIn("PreToolUse", hooks["hooks"])
+        self.assertIn("PostToolUse", hooks["hooks"])
+
+    def test_repair_hooks_replaces_legacy_semantic_dag_paths_without_auth(self):
+        legacy_root = self.home / ".codex" / "skills" / "semantic-dag"
+        self.hooks.parent.mkdir(parents=True, exist_ok=True)
+        self.hooks.write_text(json.dumps({
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": f"python3 {legacy_root}/scripts/hooks/prompt_hook.py",
+                    }],
+                }],
+                "PreToolUse": [{
+                    "matcher": ".*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": f"python3 {legacy_root}/scripts/hooks/tool_hook.py",
+                    }],
+                }],
+            }
+        }))
+        self.state.write_text(json.dumps({"plugin_version": "0.0.0"}))
+
+        result = run_script(CONNECT, ["--repair-hooks"], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.stub.token_calls, 0)
+        self.assertEqual(self.stub.last_scopes, [])
+
+        hook_text = self.hooks.read_text()
+        self.assertNotIn(str(legacy_root), hook_text)
+        hooks = read_json(self.hooks)["hooks"]
+        self.assertIn("PreToolUse", hooks)
+        self.assertIn("PostToolUse", hooks)
+        self.assertIn("--semantic-dag-prompt", hook_text)
+        self.assertIn("--semantic-dag-tool", hook_text)
+        self.assertTrue((self.home / ".codex" / "cardinal" / "cardinal-codex-telemetry.py").is_file())
+        manifest = read_json(ROOT / ".codex-plugin" / "plugin.json")
+        self.assertEqual(read_json(self.state)["plugin_version"], manifest["version"])
 
     def test_already_connected_guard_without_rotate(self):
         first = run_script(CONNECT, ["--host", self.stub.url()], self.home)
@@ -494,12 +533,12 @@ class StatusAndDisconnectTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
-    """Regression: plugin version bumps must not dangle the hooks.json command.
+    """Stable launchers prefer a connected checkout and survive cache churn.
 
     Codex caches plugins under a versioned dir; on upgrade the old dir is
     removed. Fixed by writing a stable launcher at ~/.codex/cardinal/ and
-    pointing hooks.json there. The launcher resolves the newest installed
-    hook at invocation time.
+    pointing hooks.json there. A connected development checkout remains the
+    source of truth; the newest installed cache is the fallback.
     """
 
     def setUp(self):
@@ -549,7 +588,28 @@ class LauncherTests(unittest.TestCase):
         hook.chmod(0o755)
         return hook
 
+    def _disable_connected_fallback(self) -> None:
+        assignment = f"FALLBACK_PLUGIN_ROOT = Path({str(ROOT)!r})"
+        body = self.launcher.read_text()
+        self.assertIn(assignment, body)
+        missing = self.home / "missing-plugin-root"
+        self.launcher.write_text(body.replace(
+            assignment,
+            f"FALLBACK_PLUGIN_ROOT = Path({str(missing)!r})",
+        ))
+
+    def test_launcher_prefers_connected_workspace_root(self):
+        self._install_fake_cached_version("99.0.0", "cached")
+        result = subprocess.run(
+            [sys.executable, str(self.launcher), "--event", "SessionStart"],
+            env={**os.environ, "HOME": str(self.home)},
+            capture_output=True, text=True, timeout=10, input="{}",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("cached", result.stdout)
+
     def test_launcher_picks_newest_semver_from_cache(self):
+        self._disable_connected_fallback()
         self._install_fake_cached_version("0.5.2", "old")
         self._install_fake_cached_version("0.10.0", "newest")
         self._install_fake_cached_version("0.6.0", "middle")
@@ -578,6 +638,7 @@ class LauncherTests(unittest.TestCase):
 
     def test_launcher_survives_plugin_version_bump(self):
         """The specific dangling-path scenario from the bug report."""
+        self._disable_connected_fallback()
         old_hook = self._install_fake_cached_version("0.5.2", "old-hook-body")
 
         # Confirm launcher resolves to it initially.

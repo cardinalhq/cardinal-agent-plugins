@@ -116,6 +116,22 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertIn("d.active_by_agent", source)
         self.assertIn("Object.values(activeByAgent)", source)
 
+    def test_both_adapters_register_post_tool_file_attribution(self) -> None:
+        claude_hooks = json.loads(
+            (ROOT / "adapters/claude/hooks/hooks.json").read_text()
+        )["hooks"]
+        post_commands = [
+            hook["command"]
+            for group in claude_hooks["PostToolUse"]
+            for hook in group.get("hooks", [])
+            if isinstance(hook, dict) and "command" in hook
+        ]
+        self.assertTrue(any("semantic-dag/hooks/tool_hook.py" in item for item in post_commands))
+
+        codex_connect = (ROOT / "adapters/codex/scripts/cardinal-connect").read_text()
+        self.assertIn('hooks.setdefault("PostToolUse", [])', codex_connect)
+        self.assertIn('managed_semantic_hook_group("tool", "*"', codex_connect)
+
 
 if __name__ == "__main__":
     unittest.main()
