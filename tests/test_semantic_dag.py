@@ -147,6 +147,23 @@ class SemanticDagAdapterTests(unittest.TestCase):
         }
         self.assertEqual(module._session_status(active, 950, now=1000), "active")
         self.assertEqual(module._session_status(active, 800, now=1000), "stale")
+        contradictory = {
+            "finished": True,
+            "nodes": {"work": {"status": "active"}},
+            "active_by_agent": {"root": "work"},
+            "agents": {"root": {"status": "completed"}},
+        }
+        self.assertEqual(
+            module._session_status(contradictory, 950, now=1000), "active"
+        )
+        self.assertEqual(
+            module._session_status(
+                {"nodes": {}, "agents": {"scout": {"status": "active"}}},
+                950,
+                now=1000,
+            ),
+            "active",
+        )
         self.assertEqual(
             module._session_status(
                 {"nodes": {"work": {"status": "paused"}}}, 950, now=1000
@@ -241,7 +258,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
             )
             current_info = wait_for_server()
             self.assertEqual(current_info["service"], "cardinal-semantic-dag")
-            self.assertEqual(current_info["plugin_build"], "0.21.11")
+            self.assertEqual(current_info["plugin_build"], "0.21.12")
             self.assertEqual(
                 current_info["version"],
                 hashlib.sha1((source_viewer / "index.html").read_bytes()).hexdigest()[:12],
@@ -483,6 +500,26 @@ class SemanticDagAdapterTests(unittest.TestCase):
         dag = json.loads((self.root / "claude/threads/outcome/dag.json").read_text())
         self.assertEqual(dag["turns"][-1]["outcome"], "meaningful outcome")
 
+    def test_reactivating_work_reopens_a_finished_session(self) -> None:
+        for runtime in EMITTERS:
+            with self.subTest(runtime=runtime):
+                thread = ("--thread", "resumed")
+                self.emit(runtime, "start", "task", *thread)
+                self.emit(runtime, "add", "a", "WORK", "do a", *thread)
+                self.emit(runtime, "activate", "a", *thread)
+                self.emit(runtime, "finish", "premature outcome", *thread)
+                self.emit(runtime, "activate", "a", *thread)
+                dag = json.loads(
+                    (self.root / runtime / "threads/resumed/dag.json").read_text()
+                )
+                self.assertFalse(dag["finished"])
+                self.assertEqual(dag["summary"], "")
+                self.assertEqual(dag["active_by_agent"], {"root": "a"})
+                self.assertEqual(dag["nodes"]["a"]["status"], "active")
+                self.assertEqual(dag["agents"]["root"]["status"], "active")
+                self.assertIsNone(dag["turns"][-1]["ended"])
+                self.assertEqual(dag["turns"][-1]["outcome"], "")
+
     def test_codex_and_claude_materialize_the_same_graph(self) -> None:
         codex = self.exercise("codex")
         claude = self.exercise("claude")
@@ -561,6 +598,12 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertIn("animation:active-card-pulse 1.65s", viewer)
         self.assertIn("transform:scale(1.035)", viewer)
         self.assertIn("animation:active-halo-pulse 1.65s", viewer)
+        self.assertIn("function dismissAgentCard", viewer)
+        self.assertIn("function restoreAgentCard", viewer)
+        self.assertIn("workflow-dismiss", viewer)
+        self.assertIn("hidden · click to restore", viewer)
+        self.assertIn("function enterAgentFullscreen", viewer)
+        self.assertIn("else if(state.fullscreenCard)exitAgentFullscreen()", viewer)
 
     def test_claude_viewer_restores_all_active_agents(self) -> None:
         source = (VIEWER / "index.html").read_text()
