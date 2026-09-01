@@ -6,6 +6,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,6 +21,10 @@ EMITTERS = {
 PROMPT_HOOKS = {
     "codex": ROOT / "adapters/codex/skills/semantic-dag/scripts/hooks/prompt_hook.py",
     "claude": ROOT / "adapters/claude/skills/semantic-dag/hooks/prompt_hook.py",
+}
+TOOL_HOOKS = {
+    "codex": ROOT / "adapters/codex/skills/semantic-dag/scripts/hooks/tool_hook.py",
+    "claude": ROOT / "adapters/claude/skills/semantic-dag/hooks/tool_hook.py",
 }
 CODEX_SESSION_BRIDGE = (
     ROOT / "adapters/codex/skills/semantic-dag/scripts/session_bridge.py"
@@ -180,6 +185,15 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertEqual(dag["nodes"]["hyp2"]["turn"], 2)
         self.assertEqual(dag["nodes"]["work1"]["status"], "completed")
 
+    def test_topic_rename_persists_on_session_and_current_turn(self) -> None:
+        for runtime in EMITTERS:
+            with self.subTest(runtime=runtime):
+                self.emit(runtime, "start", "Original title", "--thread", "shared")
+                self.emit(runtime, "topic", "Renamed session", "--thread", "shared")
+                dag = self.dag(runtime)
+                self.assertEqual(dag["topic"], "Renamed session")
+                self.assertEqual(dag["turns"][-1]["topic"], "Renamed session")
+
     def test_load_dag_reconciles_turn_pointer_with_turns_list(self) -> None:
         """A stale/corrupt state file must not leave `turn` past `max(turns.n)`."""
         thread_dir = self.root / "claude" / "threads" / "recover"
@@ -232,6 +246,44 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertFalse((bindings_dir / "sess-drop.json").exists(), "binding for drop remained")
         self.assertTrue((bindings_dir / "sess-keep.json").exists(), "binding for keep was removed")
         self.assertFalse(pointer.exists(), "current-cwd pointer was not cleared")
+
+    def test_viewer_rename_validates_and_uses_the_event_emitter(self) -> None:
+        server_path = (
+            ROOT
+            / "adapters/codex/skills/semantic-dag/scripts/viewer/server.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "semantic_dag_viewer_rename_test", server_path
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
+            title = module._rename_thread("shared", "  Clear   session title  ")
+
+        self.assertEqual(title, "Clear session title")
+        run.assert_called_once_with(
+            [
+                sys.executable,
+                str(module.EMIT),
+                "topic",
+                "Clear session title",
+                "--thread",
+                "shared",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        for value in ("", "   ", None, "x" * 161):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    module._rename_thread("shared", value)
 
     def test_finish_with_empty_summary_preserves_prior_outcome(self) -> None:
         thread = ("--thread", "outcome")
@@ -305,6 +357,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
         server = (codex_viewer / "server.py").read_text()
         viewer = (codex_viewer / "index.html").read_text()
         self.assertIn('path == "/sessions"', server)
+        self.assertIn('suffix == "rename"', server)
         self.assertIn('path == "/assets/cardinal-bird.png"', server)
         self.assertIn('src="/assets/cardinal-bird.png"', viewer)
         self.assertIn('id="session-nav"', viewer)
@@ -314,6 +367,11 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertIn('id="agents-view"', viewer)
         self.assertIn("(node.agent||'root')===agentId", viewer)
         self.assertIn("agent.parent_agent", viewer)
+        self.assertIn("function agentNarration", viewer)
+        self.assertIn("workflow-agent-live", viewer)
+        self.assertIn('id="topic-edit"', viewer)
+        self.assertIn("session-rename", viewer)
+        self.assertIn("function saveSessionRename", viewer)
         self.assertIn("runtime-crown", viewer)
         self.assertIn("turn-panel", viewer)
         self.assertIn("state.turns", viewer)
@@ -511,6 +569,205 @@ class SemanticDagAdapterTests(unittest.TestCase):
             dag["nodes"]["second"]["files"], {"read": [], "updated": []}
         )
 
+    def test_codex_session_bridge_bootstraps_and_narrates_subagent_work(self) -> None:
+        state = self.root / "subagent-bridge-state"
+        transcript = self.root / "rollout-child.jsonl"
+        commentary = "The live tail fix is implemented and focused tests are passing."
+        records = [
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "msg-progress-1",
+                        "phase": "commentary",
+                        "content": [{"type": "Text", "text": commentary}],
+                    },
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "msg-progress-1",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": commentary}],
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "msg-final-1",
+                        "phase": "final",
+                        "content": [{"type": "Text", "text": "Completed result."}],
+                    },
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "msg-final-1",
+                    "role": "assistant",
+                    "phase": "final",
+                    "content": [{"type": "output_text", "text": "Completed result."}],
+                },
+            },
+        ]
+        transcript.write_text("".join(json.dumps(item) + "\n" for item in records))
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SEMANTIC_DAG_STATE_DIR": str(state),
+                "SEMANTIC_DAG_NO_SERVER": "1",
+                "SEMANTIC_DAG_NO_OPEN": "1",
+                "SEMANTIC_DAG_NO_SESSION_BRIDGE": "1",
+                "CODEX_SESSION_LOG": str(transcript),
+            }
+        )
+        common = ["--thread", "session"]
+        subprocess.run(
+            [sys.executable, str(EMITTERS["codex"]), "start", "Bridge test", *common],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(EMITTERS["codex"]),
+                "add",
+                "logs-gap",
+                "WORK",
+                "Remove logs right gap",
+                "--root",
+                *common,
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(EMITTERS["codex"]),
+                "begin",
+                "Fix logs right edge",
+                "--agent",
+                "logs_gap",
+                "--agent-label",
+                "Logs gap fix",
+                "--parent",
+                "logs-gap",
+                *common,
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        binding = state / "bindings/child.json"
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        binding.write_text(json.dumps({"thread": "session", "agent": "logs_gap"}))
+
+        command = [
+            sys.executable,
+            str(CODEX_SESSION_BRIDGE),
+            "run",
+            "--session",
+            "child",
+            "--once",
+            "--from-start",
+        ]
+        subprocess.run(command, cwd=ROOT, env=environment, check=True)
+        # Replaying the same structured pair must not duplicate narration.
+        subprocess.run(command, cwd=ROOT, env=environment, check=True)
+
+        dag = json.loads((state / "threads/session/dag.json").read_text())
+        node = dag["nodes"]["logs_gap::__activity"]
+        self.assertTrue(node["provisional"])
+        self.assertEqual(node["type"], "WORK")
+        self.assertEqual(node["label"], "Fix logs right edge")
+        self.assertEqual(node["status"], "completed")
+        self.assertNotIn("logs_gap", dag["active_by_agent"])
+        self.assertEqual(dag["agents"]["logs_gap"]["status"], "completed")
+        self.assertEqual(dag["agents"]["logs_gap"]["summary"], "Completed result.")
+        self.assertTrue(
+            any(
+                edge["from"] == "logs-gap"
+                and edge["to"] == node["id"]
+                and edge["relationship"] == "decomposes_into"
+                for edge in dag["edges"]
+            )
+        )
+        native_notes = [
+            note for note in node["notes"] if note.get("source") == "codex-session"
+        ]
+        self.assertEqual(
+            native_notes,
+            [{
+                "text": commentary,
+                "ts": native_notes[0]["ts"],
+                "source": "codex-session",
+                "source_id": "msg-progress-1",
+            }],
+        )
+        self.assertNotIn("Completed result.", [note["text"] for note in node["notes"]])
+
+    def test_codex_session_bridge_suppresses_recent_explicit_note_duplicate(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "codex_session_bridge_dedup_test", CODEX_SESSION_BRIDGE
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(
+            os.environ,
+            {"SEMANTIC_DAG_STATE_DIR": str(self.root / "dedup-state")},
+            clear=False,
+        ):
+            spec.loader.exec_module(module)
+
+        now = time.time()
+        dag = {
+            "nodes": {
+                "child::work": {
+                    "notes": [
+                        {"text": "Same progress update.", "ts": now},
+                        {
+                            "text": "Native update.",
+                            "ts": now,
+                            "source_id": "msg-native-1",
+                        },
+                    ]
+                }
+            }
+        }
+        self.assertTrue(
+            module._note_is_duplicate(
+                dag, "child::work", None, "Same progress update."
+            )
+        )
+        self.assertTrue(
+            module._note_is_duplicate(
+                dag, "child::work", "msg-native-1", "Native update."
+            )
+        )
+        dag["nodes"]["child::work"]["notes"][0]["ts"] = now - 30
+        self.assertFalse(
+            module._note_is_duplicate(
+                dag, "child::work", None, "Same progress update."
+            )
+        )
+
     def test_watch_prompts_use_compact_bounded_protocol(self) -> None:
         for runtime, prompt_hook in PROMPT_HOOKS.items():
             with self.subTest(runtime=runtime):
@@ -553,6 +810,9 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 self.assertIn("1–3 important non-obvious terms", context)
                 self.assertNotIn("file metadata", context)
                 self.assertIn("Consult the full skill", context)
+                if runtime == "codex":
+                    self.assertIn("mirrored onto the active node automatically", context)
+                    self.assertNotIn("mirror the same sentence", context)
                 self.assertLess(len(context.split()), 220)
 
                 skill = SKILLS[runtime].read_text()
@@ -563,6 +823,202 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 self.assertIn("do not add more than three new terms", skill)
                 self.assertNotIn("python3 <emit> file ", skill)
                 self.assertNotIn("Record every materially read", skill)
+
+
+    def _seed_watch_state(self, runtime: str, prompt: str, dag_overrides: dict | None = None):
+        state = self.root / f"turn-cover-{runtime}"
+        thread_dir = state / "threads" / "shared"
+        binding_dir = state / "bindings"
+        thread_dir.mkdir(parents=True)
+        binding_dir.mkdir(parents=True)
+        (binding_dir / "session.json").write_text(json.dumps({"thread": "shared"}))
+        dag = {
+            "thread": "shared",
+            "runtime": runtime,
+            "topic": "Prior turn",
+            "nodes": {},
+            "edges": [],
+            "active": None,
+            "active_by_agent": {},
+            "agents": {
+                "root": {"id": "root", "label": "Root", "status": "active"}
+            },
+            "glossary": {},
+            "watch_mode": True,
+            "turn": 1,
+            "turns": [{"n": 1, "topic": "Prior turn", "started": 0, "ended": None, "outcome": ""}],
+        }
+        if dag_overrides:
+            dag.update(dag_overrides)
+        (thread_dir / "dag.json").write_text(json.dumps(dag))
+        environment = os.environ.copy()
+        environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
+        environment["SEMANTIC_DAG_NO_SERVER"] = "1"
+        environment["SEMANTIC_DAG_NO_OPEN"] = "1"
+        subprocess.run(
+            [sys.executable, str(PROMPT_HOOKS[runtime])],
+            cwd=ROOT,
+            env=environment,
+            input=json.dumps({"session_id": "session", "prompt": prompt}),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return state, environment
+
+    def test_prompt_hook_seeds_active_goal_node_per_turn(self) -> None:
+        for runtime in PROMPT_HOOKS:
+            with self.subTest(runtime=runtime):
+                state, _ = self._seed_watch_state(runtime, "diagnose latency spike in ingest")
+                dag = json.loads((state / "threads" / "shared" / "dag.json").read_text())
+                self.assertEqual(dag["turn"], 2)
+                self.assertIn("turn-2-goal", dag["nodes"])
+                goal = dag["nodes"]["turn-2-goal"]
+                self.assertEqual(goal["type"], "GOAL")
+                self.assertEqual(goal["status"], "active")
+                self.assertEqual(goal["turn"], 2)
+                self.assertEqual(dag["active_by_agent"].get("root"), "turn-2-goal")
+                self.assertIn("diagnose", goal["label"].lower())
+
+    def test_prompt_hook_goal_label_falls_back_when_prompt_is_thin(self) -> None:
+        for runtime in PROMPT_HOOKS:
+            with self.subTest(runtime=runtime):
+                state, _ = self._seed_watch_state(runtime, "hi")
+                dag = json.loads((state / "threads" / "shared" / "dag.json").read_text())
+                self.assertIn("turn-2-goal", dag["nodes"])
+                self.assertEqual(dag["nodes"]["turn-2-goal"]["label"], "Handle user request")
+
+    def test_prompt_hook_goal_label_rejects_generic_phase(self) -> None:
+        for runtime in PROMPT_HOOKS:
+            with self.subTest(runtime=runtime):
+                state, _ = self._seed_watch_state(runtime, "start phase 5 now")
+                dag = json.loads((state / "threads" / "shared" / "dag.json").read_text())
+                self.assertEqual(dag["nodes"]["turn-2-goal"]["label"], "Handle user request")
+
+    def test_tool_hook_creates_work_node_and_attaches_tool_when_no_active(self) -> None:
+        for runtime in TOOL_HOOKS:
+            with self.subTest(runtime=runtime):
+                state, environment = self._seed_watch_state(runtime, "look up recent invoice")
+                # Simulate the model completing the goal so no node is active.
+                dag_path = state / "threads" / "shared" / "dag.json"
+                dag = json.loads(dag_path.read_text())
+                dag["nodes"]["turn-2-goal"]["status"] = "completed"
+                dag["active_by_agent"] = {}
+                dag["active"] = None
+                dag_path.write_text(json.dumps(dag))
+                subprocess.run(
+                    [sys.executable, str(TOOL_HOOKS[runtime])],
+                    cwd=ROOT,
+                    env=environment,
+                    input=json.dumps({
+                        "session_id": "session",
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Bash",
+                        "tool_input": {"cmd": "ls Downloads"},
+                    }),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                # Allow the async tool spawn to settle.
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    dag = json.loads(dag_path.read_text())
+                    node = dag["nodes"].get("turn-2-work")
+                    if node and node.get("tool"):
+                        break
+                    time.sleep(0.05)
+                self.assertIn("turn-2-work", dag["nodes"])
+                work = dag["nodes"]["turn-2-work"]
+                self.assertEqual(work["type"], "WORK")
+                self.assertEqual(work["status"], "active")
+                self.assertEqual(dag["active_by_agent"].get("root"), "turn-2-work")
+                self.assertTrue(any(
+                    edge["from"] == "turn-2-goal" and edge["to"] == "turn-2-work"
+                    for edge in dag["edges"]
+                ))
+                self.assertEqual(work["tool"]["name"], "Bash")
+
+    def test_tool_hook_preserves_subagent_parent_when_synthesizing_work(self) -> None:
+        for runtime in TOOL_HOOKS:
+            with self.subTest(runtime=runtime):
+                state, environment = self._seed_watch_state(
+                    runtime, "investigate delegated query gap"
+                )
+                dag_path = state / "threads" / "shared" / "dag.json"
+                dag = json.loads(dag_path.read_text())
+                dag["agents"]["query_scout"] = {
+                    "id": "query_scout",
+                    "label": "Query scout",
+                    "status": "active",
+                    "parent": "turn-2-goal",
+                    "parent_agent": "root",
+                }
+                dag_path.write_text(json.dumps(dag))
+                (state / "bindings" / "session.json").write_text(json.dumps({
+                    "thread": "shared",
+                    "agent": "query_scout",
+                }))
+
+                subprocess.run(
+                    [sys.executable, str(TOOL_HOOKS[runtime])],
+                    cwd=ROOT,
+                    env=environment,
+                    input=json.dumps({
+                        "session_id": "session",
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Read",
+                        "tool_input": {"file_path": "query.go"},
+                    }),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
+                work_id = "query_scout::turn-2-work"
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    dag = json.loads(dag_path.read_text())
+                    node = dag["nodes"].get(work_id)
+                    if node and node.get("tool"):
+                        break
+                    time.sleep(0.05)
+                self.assertIn(work_id, dag["nodes"])
+                self.assertEqual(dag["active_by_agent"]["query_scout"], work_id)
+                self.assertTrue(any(
+                    edge["from"] == "turn-2-goal"
+                    and edge["to"] == work_id
+                    and edge["relationship"] == "decomposes_into"
+                    for edge in dag["edges"]
+                ))
+                self.assertEqual(dag["nodes"][work_id]["tool"]["name"], "Read")
+
+    def test_tool_hook_skips_its_own_emit_bash_calls(self) -> None:
+        for runtime in TOOL_HOOKS:
+            with self.subTest(runtime=runtime):
+                state, environment = self._seed_watch_state(runtime, "trivial")
+                dag_path = state / "threads" / "shared" / "dag.json"
+                dag = json.loads(dag_path.read_text())
+                dag["nodes"]["turn-2-goal"]["status"] = "completed"
+                dag["active_by_agent"] = {}
+                dag["active"] = None
+                dag_path.write_text(json.dumps(dag))
+                subprocess.run(
+                    [sys.executable, str(TOOL_HOOKS[runtime])],
+                    cwd=ROOT,
+                    env=environment,
+                    input=json.dumps({
+                        "session_id": "session",
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Bash",
+                        "tool_input": {"cmd": "python3 semantic-dag/emit.py add x GOAL y"},
+                    }),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                dag = json.loads(dag_path.read_text())
+                self.assertNotIn("turn-2-work", dag["nodes"])
 
 
 if __name__ == "__main__":
