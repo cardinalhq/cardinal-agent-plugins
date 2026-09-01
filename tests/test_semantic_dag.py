@@ -37,6 +37,7 @@ SKILLS = {
     "codex": ROOT / "adapters/codex/skills/semantic-dag/SKILL.md",
     "claude": ROOT / "adapters/claude/skills/semantic-dag/SKILL.md",
 }
+VIEWER = ROOT / "common/semantic-dag/viewer"
 
 
 def _without_volatile(value):
@@ -59,11 +60,79 @@ class SemanticDagAdapterTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_viewer_session_status_reflects_dag_state_and_recency(self) -> None:
-        server_path = (
-            ROOT
-            / "adapters/codex/skills/semantic-dag/scripts/viewer/server.py"
+    def viewer_layout(self, nodes: list[dict], edges: list[dict]) -> dict:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required to exercise the viewer layout")
+        viewer = (VIEWER / "index.html").read_text()
+        start = viewer.index("function layout(nodes,edges){")
+        end = viewer.index("\nfunction subtitle", start)
+        layout_source = viewer[start:end]
+        script = "\n".join(
+            [
+                "const W=250,H=64,LEVEL=142,GAP=26,MAX_ROW_NODES=4;",
+                layout_source,
+                f"const nodes={json.dumps(nodes)};",
+                f"const edges={json.dumps(edges)};",
+                "process.stdout.write(JSON.stringify(layout(nodes,edges)));",
+            ]
         )
+        return json.loads(
+            subprocess.run(
+                [node, "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            ).stdout
+        )
+
+    def test_viewer_uses_bounded_horizontal_layout_for_dense_ranks(self) -> None:
+        nodes = [
+            {"id": "root", "created": 0},
+            *[
+                {"id": f"child-{index}", "created": index + 1}
+                for index in range(12)
+            ],
+        ]
+        edges = [
+            {"from": "root", "to": f"child-{index}"}
+            for index in range(12)
+        ]
+        result = self.viewer_layout(nodes, edges)
+
+        self.assertEqual(result["direction"], "horizontal")
+        self.assertLessEqual(result["width"], 800)
+        self.assertGreater(result["height"], result["width"])
+        self.assertLess(
+            result["positions"]["root"]["x"],
+            result["positions"]["child-0"]["x"],
+        )
+        self.assertEqual(
+            len({position["y"] for position in result["positions"].values()}),
+            len(nodes),
+        )
+
+    def test_viewer_keeps_sparse_workflows_top_down(self) -> None:
+        nodes = [{"id": f"node-{index}", "created": index} for index in range(4)]
+        edges = [
+            {"from": f"node-{index}", "to": f"node-{index + 1}"}
+            for index in range(3)
+        ]
+        result = self.viewer_layout(nodes, edges)
+
+        self.assertEqual(result["direction"], "vertical")
+        self.assertEqual(
+            len({position["x"] for position in result["positions"].values()}),
+            1,
+        )
+        self.assertEqual(
+            [result["positions"][f"node-{index}"]["y"] for index in range(4)],
+            sorted(result["positions"][f"node-{index}"]["y"] for index in range(4)),
+        )
+
+    def test_viewer_session_status_reflects_dag_state_and_recency(self) -> None:
+        server_path = VIEWER / "server.py"
         spec = importlib.util.spec_from_file_location(
             "semantic_dag_viewer_server_test", server_path
         )
@@ -105,9 +174,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertEqual(module._session_status({"nodes": {}}, 950, now=1000), "pending")
 
     def test_viewer_survives_cache_deletion_and_hands_off_to_new_build(self) -> None:
-        source_viewer = (
-            ROOT / "adapters/codex/skills/semantic-dag/scripts/viewer"
-        )
+        source_viewer = VIEWER
         stale_viewer = self.root / "deleted-plugin-cache" / "viewer"
         shutil.copytree(source_viewer, stale_viewer)
         stale_index = stale_viewer / "index.html"
@@ -174,7 +241,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
             )
             current_info = wait_for_server()
             self.assertEqual(current_info["service"], "cardinal-semantic-dag")
-            self.assertEqual(current_info["plugin_build"], "0.21.10")
+            self.assertEqual(current_info["plugin_build"], "0.21.11")
             self.assertEqual(
                 current_info["version"],
                 hashlib.sha1((source_viewer / "index.html").read_bytes()).hexdigest()[:12],
@@ -204,13 +271,24 @@ class SemanticDagAdapterTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        artifact = self.root / "codex-artifact"
-        module.build_artifact("codex", artifact)
-        viewer = artifact / "skills/semantic-dag/scripts/viewer/index.html"
-        self.assertGreater(viewer.stat().st_size, 100)
-        viewer.unlink()
+        codex_artifact = self.root / "codex-artifact"
+        claude_artifact = self.root / "claude-artifact"
+        module.build_artifact("codex", codex_artifact)
+        module.build_artifact("claude", claude_artifact)
+        packaged = {
+            "codex": codex_artifact / "skills/semantic-dag/scripts/viewer",
+            "claude": claude_artifact / "skills/semantic-dag/viewer",
+        }
+        for runtime, viewer in packaged.items():
+            with self.subTest(runtime=runtime):
+                for relative in ("server.py", "index.html", "assets/cardinal-bird.png"):
+                    self.assertEqual(
+                        (viewer / relative).read_bytes(),
+                        (VIEWER / relative).read_bytes(),
+                    )
+        (packaged["codex"] / "index.html").unlink()
         with self.assertRaisesRegex(RuntimeError, "viewer/index.html"):
-            module.validate_artifact("codex", artifact)
+            module.validate_artifact("codex", codex_artifact)
 
     def emit(self, runtime: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
@@ -346,7 +424,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
         pointer = self.root / "claude" / "current-abc123"
         pointer.write_text("drop")
 
-        server_path = ROOT / "adapters/claude/skills/semantic-dag/viewer/server.py"
+        server_path = VIEWER / "server.py"
         spec = importlib.util.spec_from_file_location("_dag_server", server_path)
         module = importlib.util.module_from_spec(spec)
         with mock.patch.dict(os.environ, {"SEMANTIC_DAG_STATE_DIR": str(self.root / "claude")}):
@@ -360,10 +438,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertFalse(pointer.exists(), "current-cwd pointer was not cleared")
 
     def test_viewer_rename_validates_and_uses_the_event_emitter(self) -> None:
-        server_path = (
-            ROOT
-            / "adapters/codex/skills/semantic-dag/scripts/viewer/server.py"
-        )
+        server_path = VIEWER / "server.py"
         spec = importlib.util.spec_from_file_location(
             "semantic_dag_viewer_rename_test", server_path
         )
@@ -441,33 +516,29 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 self.assertNotIn("def _apply(", source)
                 self.assertNotIn("def emit(", source)
 
-    def test_codex_and_claude_share_one_viewer_server(self) -> None:
+    def test_codex_and_claude_use_one_canonical_viewer(self) -> None:
         sources = {runtime: emitter.read_text() for runtime, emitter in EMITTERS.items()}
         for runtime, source in sources.items():
             with self.subTest(runtime=runtime):
                 self.assertIn('default_state_dir="~/.cardinal/state/semantic-dag"', source)
                 self.assertIn("default_port=8766", source)
                 self.assertIn(
+                    'REPO_ROOT / "common" / "semantic-dag" / "viewer"',
+                    source,
+                )
+                self.assertIn(
                     '~/.cardinal/state/semantic-dag',
                     PROMPT_HOOKS[runtime].read_text(),
                 )
-
-        codex_viewer = ROOT / "adapters/codex/skills/semantic-dag/scripts/viewer"
-        claude_viewer = ROOT / "adapters/claude/skills/semantic-dag/viewer"
-        self.assertEqual(
-            (codex_viewer / "server.py").read_bytes(),
-            (claude_viewer / "server.py").read_bytes(),
+        old_viewers = (
+            ROOT / "adapters/codex/skills/semantic-dag/scripts/viewer",
+            ROOT / "adapters/claude/skills/semantic-dag/viewer",
         )
-        self.assertEqual(
-            (codex_viewer / "index.html").read_bytes(),
-            (claude_viewer / "index.html").read_bytes(),
-        )
-        self.assertEqual(
-            (codex_viewer / "assets/cardinal-bird.png").read_bytes(),
-            (claude_viewer / "assets/cardinal-bird.png").read_bytes(),
-        )
-        server = (codex_viewer / "server.py").read_text()
-        viewer = (codex_viewer / "index.html").read_text()
+        for old_viewer in old_viewers:
+            for relative in ("server.py", "index.html", "assets/cardinal-bird.png"):
+                self.assertFalse((old_viewer / relative).exists())
+        server = (VIEWER / "server.py").read_text()
+        viewer = (VIEWER / "index.html").read_text()
         self.assertIn('path == "/sessions"', server)
         self.assertIn('suffix == "rename"', server)
         self.assertIn('path == "/assets/cardinal-bird.png"', server)
@@ -487,11 +558,12 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertIn("runtime-crown", viewer)
         self.assertIn("turn-panel", viewer)
         self.assertIn("state.turns", viewer)
+        self.assertIn("animation:active-card-pulse 1.65s", viewer)
+        self.assertIn("transform:scale(1.035)", viewer)
+        self.assertIn("animation:active-halo-pulse 1.65s", viewer)
 
     def test_claude_viewer_restores_all_active_agents(self) -> None:
-        source = (
-            ROOT / "adapters/claude/skills/semantic-dag/viewer/index.html"
-        ).read_text()
+        source = (VIEWER / "index.html").read_text()
         self.assertIn("dag.active_by_agent", source)
         self.assertIn("Object.values(state.activeByAgent)", source)
 

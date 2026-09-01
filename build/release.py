@@ -28,6 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CORE_PKG = ROOT / "core" / "cardinal_core"
+COMMON_VIEWER = ROOT / "common" / "semantic-dag" / "viewer"
 
 # adapter -> (mirror repo slug, plugin subpath inside the mirror)
 MIRRORS = {
@@ -55,6 +56,11 @@ REQUIRED_ARTIFACTS = {
         "skills/semantic-dag/scripts/viewer/index.html",
         "skills/semantic-dag/scripts/viewer/assets/cardinal-bird.png",
     ),
+}
+
+VIEWER_DESTINATIONS = {
+    "claude": Path("skills/semantic-dag/viewer"),
+    "codex": Path("skills/semantic-dag/scripts/viewer"),
 }
 
 BANNER = (
@@ -93,6 +99,16 @@ def build_artifact(adapter: str, dest: Path) -> None:
     if vendor_dest.exists():
         shutil.rmtree(vendor_dest)
     shutil.copytree(CORE_PKG, vendor_dest, ignore=shutil.ignore_patterns("__pycache__"))
+    viewer_relative = VIEWER_DESTINATIONS.get(adapter)
+    if viewer_relative is not None:
+        viewer_dest = dest / viewer_relative
+        if viewer_dest.exists():
+            shutil.rmtree(viewer_dest)
+        shutil.copytree(
+            COMMON_VIEWER,
+            viewer_dest,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
     # Plugin-level LICENSE and .gitignore ship in every artifact even when
     # the adapter dir doesn't carry them (marketplaces expect LICENSE; the
     # ignore file keeps user checkouts from committing pyc noise).
