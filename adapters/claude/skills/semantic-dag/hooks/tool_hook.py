@@ -124,7 +124,7 @@ def main() -> int:
         goal_id = f"turn-{turn_n}-goal"
         if agent == "root" and goal_id in (dag.get("nodes") or {}):
             add_args += ["--parent", goal_id]
-        else:
+        elif agent == "root":
             add_args += ["--root"]
         emit_sync(*add_args)
         emit_sync("activate", work_id)

@@ -103,7 +103,7 @@ def main() -> None:
     context = (
         "Persistent Semantic DAG watch mode is active for this Codex task. "
         "The prompt hook already repainted the existing viewer; do not run `begin` or open a separate DAG thread. "
-        f"Use the emitter at {EMITTER}. Create and activate only durable semantic nodes with "
+        f"Use the emitter at {EMITTER}. The hook already created and activated this turn's GOAL; add only distinct durable child nodes with "
         "`add <id> <TYPE> <label>` and `activate <id>`; valid types are GOAL, QUESTION, HYPOTHESIS, "
         "DECISION, WORK, EVIDENCE, and OUTCOME, and labels must be concrete 2–7 word phrases. "
         "Use stable IDs and connect nodes with decomposes_into, raises, tested_by, supported_by, "

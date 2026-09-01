@@ -939,6 +939,60 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 ))
                 self.assertEqual(work["tool"]["name"], "Bash")
 
+    def test_tool_hook_preserves_subagent_parent_when_synthesizing_work(self) -> None:
+        for runtime in TOOL_HOOKS:
+            with self.subTest(runtime=runtime):
+                state, environment = self._seed_watch_state(
+                    runtime, "investigate delegated query gap"
+                )
+                dag_path = state / "threads" / "shared" / "dag.json"
+                dag = json.loads(dag_path.read_text())
+                dag["agents"]["query_scout"] = {
+                    "id": "query_scout",
+                    "label": "Query scout",
+                    "status": "active",
+                    "parent": "turn-2-goal",
+                    "parent_agent": "root",
+                }
+                dag_path.write_text(json.dumps(dag))
+                (state / "bindings" / "session.json").write_text(json.dumps({
+                    "thread": "shared",
+                    "agent": "query_scout",
+                }))
+
+                subprocess.run(
+                    [sys.executable, str(TOOL_HOOKS[runtime])],
+                    cwd=ROOT,
+                    env=environment,
+                    input=json.dumps({
+                        "session_id": "session",
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Read",
+                        "tool_input": {"file_path": "query.go"},
+                    }),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
+                work_id = "query_scout::turn-2-work"
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    dag = json.loads(dag_path.read_text())
+                    node = dag["nodes"].get(work_id)
+                    if node and node.get("tool"):
+                        break
+                    time.sleep(0.05)
+                self.assertIn(work_id, dag["nodes"])
+                self.assertEqual(dag["active_by_agent"]["query_scout"], work_id)
+                self.assertTrue(any(
+                    edge["from"] == "turn-2-goal"
+                    and edge["to"] == work_id
+                    and edge["relationship"] == "decomposes_into"
+                    for edge in dag["edges"]
+                ))
+                self.assertEqual(dag["nodes"][work_id]["tool"]["name"], "Read")
+
     def test_tool_hook_skips_its_own_emit_bash_calls(self) -> None:
         for runtime in TOOL_HOOKS:
             with self.subTest(runtime=runtime):
