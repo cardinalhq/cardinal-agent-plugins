@@ -35,7 +35,7 @@ def _without_volatile(value):
         return {
             key: _without_volatile(item)
             for key, item in value.items()
-            if key not in {"created", "updated", "ts", "session_started", "cwd", "runtime"}
+            if key not in {"created", "updated", "ts", "session_started", "cwd", "runtime", "started", "ended"}
         }
     if isinstance(value, list):
         return [_without_volatile(item) for item in value]
@@ -149,6 +149,70 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.emit(runtime, "activate", "proof", "--agent", "scout", *common)
         return self.dag(runtime)
 
+    def test_reset_starts_a_new_turn_without_cross_turn_auto_chain(self) -> None:
+        thread = ("--thread", "turns")
+        self.emit("claude", "start", "first turn", *thread)
+        self.emit("claude", "add", "goal1", "GOAL", "answer first question", *thread)
+        self.emit("claude", "activate", "goal1", *thread)
+        self.emit("claude", "add", "work1", "WORK", "investigate first thing", *thread)
+        self.emit("claude", "activate", "work1", *thread)
+
+        # Turn boundary — reset must NOT auto-chain the next add to work1 (turn 1).
+        self.emit("claude", "reset", "second turn", *thread)
+        self.emit("claude", "add", "hyp2", "HYPOTHESIS", "second turn hypothesis", *thread)
+
+        dag = json.loads((self.root / "claude/threads/turns/dag.json").read_text())
+        self.assertEqual(dag["turn"], 2)
+        self.assertEqual([turn["n"] for turn in dag["turns"]], [1, 2])
+        self.assertEqual(dag["turns"][0]["topic"], "first turn")
+        self.assertIsNotNone(dag["turns"][0]["ended"])
+        self.assertEqual(dag["turns"][1]["topic"], "second turn")
+        self.assertIsNone(dag["turns"][1]["ended"])
+
+        # First add in turn 2 must NOT chain to any turn-1 node.
+        cross_turn = [
+            edge for edge in dag["edges"]
+            if dag["nodes"][edge["from"]]["turn"] != dag["nodes"][edge["to"]]["turn"]
+        ]
+        self.assertEqual(
+            cross_turn, [], f"unexpected cross-turn edges: {cross_turn!r}"
+        )
+        self.assertEqual(dag["nodes"]["hyp2"]["turn"], 2)
+        self.assertEqual(dag["nodes"]["work1"]["status"], "completed")
+
+    def test_load_dag_reconciles_turn_pointer_with_turns_list(self) -> None:
+        """A stale/corrupt state file must not leave `turn` past `max(turns.n)`."""
+        thread_dir = self.root / "claude" / "threads" / "recover"
+        thread_dir.mkdir(parents=True)
+        (thread_dir / "dag.json").write_text(json.dumps({
+            "thread": "recover",
+            "runtime": "claude",
+            "turn": 5,
+            "turns": [{"n": 1, "topic": "only turn", "started": 0, "ended": None, "outcome": ""}],
+            "nodes": {},
+            "edges": [],
+            "agents": {"root": {"id": "root", "label": "Root", "status": "active"}},
+        }))
+        # An add should stamp with the reconciled current turn (1), not 5.
+        self.emit(
+            "claude", "add", "n1", "GOAL", "recover clamped turn",
+            "--root", "--thread", "recover",
+        )
+        dag = json.loads((thread_dir / "dag.json").read_text())
+        self.assertEqual(dag["turn"], 1)
+        self.assertEqual(dag["nodes"]["n1"]["turn"], 1)
+
+    def test_finish_with_empty_summary_preserves_prior_outcome(self) -> None:
+        thread = ("--thread", "outcome")
+        self.emit("claude", "start", "task", *thread)
+        self.emit("claude", "add", "a", "WORK", "do a", *thread)
+        self.emit("claude", "activate", "a", *thread)
+        self.emit("claude", "finish", "meaningful outcome", *thread)
+        # A second finish with no summary must not blank the outcome.
+        self.emit("claude", "finish", "", *thread)
+        dag = json.loads((self.root / "claude/threads/outcome/dag.json").read_text())
+        self.assertEqual(dag["turns"][-1]["outcome"], "meaningful outcome")
+
     def test_codex_and_claude_materialize_the_same_graph(self) -> None:
         codex = self.exercise("codex")
         claude = self.exercise("claude")
@@ -164,9 +228,14 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertEqual(codex["agents"]["scout"]["label"], "Parity Scout")
         self.assertEqual(codex["agents"]["scout"]["task"], "Inspect parity")
         self.assertEqual(codex["agents"]["scout"]["parent_agent"], "root")
-        self.assertIn(
-            {"from": "goal", "to": "scout::proof", "relationship": "decomposes_into"},
-            codex["edges"],
+        self.assertTrue(
+            any(
+                edge["from"] == "goal"
+                and edge["to"] == "scout::proof"
+                and edge["relationship"] == "decomposes_into"
+                for edge in codex["edges"]
+            ),
+            f"expected goal→scout::proof edge in {codex['edges']!r}",
         )
 
     def test_entrypoints_are_thin_core_adapters(self) -> None:
@@ -212,9 +281,11 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertIn('id="agents-tab"', viewer)
         self.assertIn('id="agent-workflows"', viewer)
         self.assertIn('id="agents-view"', viewer)
-        self.assertIn("(node.agent||'root')===agent.id", viewer)
+        self.assertIn("(node.agent||'root')===agentId", viewer)
         self.assertIn("agent.parent_agent", viewer)
         self.assertIn("runtime-crown", viewer)
+        self.assertIn("turn-panel", viewer)
+        self.assertIn("state.turns", viewer)
 
     def test_claude_viewer_restores_all_active_agents(self) -> None:
         source = (
