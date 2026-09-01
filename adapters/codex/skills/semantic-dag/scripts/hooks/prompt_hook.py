@@ -82,7 +82,7 @@ def main() -> None:
         "refuted_by, resolved_by, based_on, leads_to, depends_on, produces, implements, validates, or supersedes. "
         "Keep commands, narration, and glossary concepts as `tool`, `note`, or `concept` metadata, not nodes. "
         "On every substantive turn that introduces domain language, attach 1–3 important non-obvious terms with `concept` so the Glossary is populated without filler. "
-        "Immediately before each user-visible progress commentary, mirror the same sentence with `note` on the active node. "
+        "Native Codex progress commentary is mirrored onto the active node automatically; use `note` only for graph narration that was not sent to the user. "
         "Immediately before the final response, run `finish` with a factual one-line outcome. "
         f"Consult the full skill at {SKILL} only when subagent provenance or another edge case needs more detail. "
         "Watch mode remains active on later prompts until the user submits `semantic-dag off`."
