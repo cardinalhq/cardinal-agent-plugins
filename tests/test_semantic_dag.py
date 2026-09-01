@@ -202,6 +202,37 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertEqual(dag["turn"], 1)
         self.assertEqual(dag["nodes"]["n1"]["turn"], 1)
 
+    def test_delete_thread_purges_state_bindings_and_pointer(self) -> None:
+        """/t/<thread>/delete removes dag+events, session-id bindings that
+        point at that thread, and any current-<cwd> pointer files."""
+        state_dir = self.root / "delete"
+        state_dir.mkdir(parents=True)
+        self.emit("claude", "start", "one", "--thread", "keep")
+        self.emit("claude", "start", "two", "--thread", "drop")
+        self.emit("claude", "add", "n", "GOAL", "the drop turn goal",
+                  "--root", "--thread", "drop")
+        drop_dir = self.root / "claude" / "threads" / "drop"
+        keep_dir = self.root / "claude" / "threads" / "keep"
+        bindings_dir = self.root / "claude" / "bindings"
+        bindings_dir.mkdir(parents=True, exist_ok=True)
+        (bindings_dir / "sess-drop.json").write_text(json.dumps({"thread": "drop", "agent": "root"}))
+        (bindings_dir / "sess-keep.json").write_text(json.dumps({"thread": "keep", "agent": "root"}))
+        pointer = self.root / "claude" / "current-abc123"
+        pointer.write_text("drop")
+
+        server_path = ROOT / "adapters/claude/skills/semantic-dag/viewer/server.py"
+        spec = importlib.util.spec_from_file_location("_dag_server", server_path)
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {"SEMANTIC_DAG_STATE_DIR": str(self.root / "claude")}):
+            spec.loader.exec_module(module)
+            module._delete_thread("drop")
+
+        self.assertTrue(keep_dir.is_dir(), "keep thread was collateral damage")
+        self.assertFalse(drop_dir.exists(), "drop thread directory was not removed")
+        self.assertFalse((bindings_dir / "sess-drop.json").exists(), "binding for drop remained")
+        self.assertTrue((bindings_dir / "sess-keep.json").exists(), "binding for keep was removed")
+        self.assertFalse(pointer.exists(), "current-cwd pointer was not cleared")
+
     def test_finish_with_empty_summary_preserves_prior_outcome(self) -> None:
         thread = ("--thread", "outcome")
         self.emit("claude", "start", "task", *thread)
