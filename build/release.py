@@ -40,6 +40,23 @@ MIRRORS = {
 # Monorepo-only files never shipped to mirrors.
 EXCLUDE = {"tests", "REPORT.md", "CORE_GAPS.md", "__pycache__"}
 
+REQUIRED_ARTIFACTS = {
+    "claude": (
+        ".claude-plugin/plugin.json",
+        "skills/semantic-dag/emit.py",
+        "skills/semantic-dag/viewer/server.py",
+        "skills/semantic-dag/viewer/index.html",
+        "skills/semantic-dag/viewer/assets/cardinal-bird.png",
+    ),
+    "codex": (
+        ".codex-plugin/plugin.json",
+        "skills/semantic-dag/scripts/emit.py",
+        "skills/semantic-dag/scripts/viewer/server.py",
+        "skills/semantic-dag/scripts/viewer/index.html",
+        "skills/semantic-dag/scripts/viewer/assets/cardinal-bird.png",
+    ),
+}
+
 BANNER = (
     "> [!NOTE]\n"
     "> This repository is a **release mirror**. Development happens in\n"
@@ -83,6 +100,21 @@ def build_artifact(adapter: str, dest: Path) -> None:
         shutil.copy(ROOT / "LICENSE", dest / "LICENSE")
     if not (dest / ".gitignore").exists():
         (dest / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+    validate_artifact(adapter, dest)
+
+
+def validate_artifact(adapter: str, dest: Path) -> None:
+    """Fail a release before tagging when required packaged assets are absent."""
+    missing = [
+        relative
+        for relative in REQUIRED_ARTIFACTS.get(adapter, ())
+        if not (dest / relative).is_file() or not (dest / relative).stat().st_size
+    ]
+    if missing:
+        raise RuntimeError(
+            f"{adapter} release artifact is missing required files: "
+            + ", ".join(missing)
+        )
 
 
 def ensure_banner(readme: Path) -> None:

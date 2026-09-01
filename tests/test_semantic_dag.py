@@ -1,13 +1,17 @@
 """Cross-adapter contract tests for the shared Semantic DAG emitter."""
 from __future__ import annotations
 
+import hashlib
 import json
 import importlib.util
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import time
 import unittest
+import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -99,6 +103,114 @@ class SemanticDagAdapterTests(unittest.TestCase):
             "completed",
         )
         self.assertEqual(module._session_status({"nodes": {}}, 950, now=1000), "pending")
+
+    def test_viewer_survives_cache_deletion_and_hands_off_to_new_build(self) -> None:
+        source_viewer = (
+            ROOT / "adapters/codex/skills/semantic-dag/scripts/viewer"
+        )
+        stale_viewer = self.root / "deleted-plugin-cache" / "viewer"
+        shutil.copytree(source_viewer, stale_viewer)
+        stale_index = stale_viewer / "index.html"
+        stale_index.write_text(stale_index.read_text() + "\n<!-- stale build -->\n")
+
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SEMANTIC_DAG_PORT": str(port),
+                "SEMANTIC_DAG_STATE_DIR": str(self.root / "state"),
+                "SEMANTIC_DAG_NO_OPEN": "1",
+                "SEMANTIC_DAG_NO_SESSION_BRIDGE": "1",
+            }
+        )
+        stale_process = subprocess.Popen(
+            [sys.executable, str(stale_viewer / "server.py")],
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        def read(path: str, timeout: float = 0.5) -> bytes:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}{path}", timeout=timeout
+            ) as response:
+                return response.read()
+
+        def wait_for_server() -> dict:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    return json.loads(read("/version"))
+                except (OSError, ValueError):
+                    time.sleep(0.05)
+            self.fail("viewer server did not become reachable")
+
+        try:
+            stale_info = wait_for_server()
+            self.assertEqual(stale_info["service"], "cardinal-semantic-dag")
+
+            shutil.rmtree(stale_viewer.parent)
+            self.assertIn(b"<!doctype html>", read("/").lower())
+            self.assertGreater(len(read("/assets/cardinal-bird.png")), 100)
+            self.assertEqual(wait_for_server(), stale_info)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(EMITTERS["codex"]),
+                    "reset",
+                    "Upgrade-safe viewer",
+                    "--thread",
+                    "upgrade-safe",
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+            current_info = wait_for_server()
+            self.assertEqual(current_info["service"], "cardinal-semantic-dag")
+            self.assertEqual(current_info["plugin_build"], "0.21.10")
+            self.assertEqual(
+                current_info["version"],
+                hashlib.sha1((source_viewer / "index.html").read_bytes()).hexdigest()[:12],
+            )
+            self.assertNotEqual(current_info["server_version"], "missing")
+            self.assertIn(b"<!doctype html>", read("/").lower())
+            stale_process.wait(timeout=3)
+        finally:
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/shutdown", data=b"", method="POST"
+                )
+                urllib.request.urlopen(request, timeout=0.5).read()
+            except OSError:
+                pass
+            if stale_process.poll() is None:
+                stale_process.terminate()
+                stale_process.wait(timeout=3)
+
+    def test_release_build_requires_packaged_viewer_assets(self) -> None:
+        release_path = ROOT / "build/release.py"
+        spec = importlib.util.spec_from_file_location(
+            "semantic_dag_release_test", release_path
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        artifact = self.root / "codex-artifact"
+        module.build_artifact("codex", artifact)
+        viewer = artifact / "skills/semantic-dag/scripts/viewer/index.html"
+        self.assertGreater(viewer.stat().st_size, 100)
+        viewer.unlink()
+        with self.assertRaisesRegex(RuntimeError, "viewer/index.html"):
+            module.validate_artifact("codex", artifact)
 
     def emit(self, runtime: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
