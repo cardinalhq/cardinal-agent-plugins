@@ -15,6 +15,8 @@ EMITTER = Path(__file__).parents[1] / "emit.py"
 SKILL = Path(__file__).parents[2] / "SKILL.md"
 SAFE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 DISABLE_RE = re.compile(r"^\s*(?:[$/])?semantic[- ]?dag\s+(?:off|stop|disable)\s*$", re.IGNORECASE)
+WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'/-]*")
+GENERIC_LABEL_RE = re.compile(r"\b(?:phase|stage|step|part|task)\s*[-:#]?\s*\d+\b", re.IGNORECASE)
 
 
 def safe_id(value: str) -> str:
@@ -32,6 +34,28 @@ def read_json(path: Path) -> dict:
 def short_topic(prompt: str) -> str:
     words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'_-]*", prompt)
     return " ".join(words[:6]) or "Continue watched task"
+
+
+def goal_label(prompt: str) -> str:
+    words = WORD_RE.findall(prompt)
+    label = " ".join(words[:6])
+    if len(WORD_RE.findall(label)) < 2:
+        label = "Handle user request"
+    if GENERIC_LABEL_RE.search(label):
+        label = "Handle user request"
+    trimmed = WORD_RE.findall(label)
+    if len(trimmed) > 7:
+        label = " ".join(trimmed[:7])
+    return label
+
+
+def current_turn(thread: str) -> int:
+    dag = read_json(STATE_DIR / "threads" / safe_id(thread) / "dag.json")
+    value = dag.get("turn", 1)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
 
 
 def run_emit(thread: str, *arguments: str) -> None:
@@ -72,6 +96,10 @@ def main() -> None:
         print(json.dumps({"systemMessage": "Semantic DAG watch mode disabled for this task."}))
         return
     run_emit(thread, "reset", short_topic(prompt))
+    turn_n = current_turn(thread)
+    goal_id = f"turn-{turn_n}-goal"
+    run_emit(thread, "add", goal_id, "GOAL", goal_label(prompt), "--root")
+    run_emit(thread, "activate", goal_id)
     context = (
         "Persistent Semantic DAG watch mode is active for this Codex task. "
         "The prompt hook already repainted the existing viewer; do not run `begin` or open a separate DAG thread. "
