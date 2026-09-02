@@ -13,6 +13,7 @@ import sys
 import time
 import unittest
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -1084,6 +1085,154 @@ class SemanticDagAdapterTests(unittest.TestCase):
             }],
         )
         self.assertNotIn("Completed result.", [note["text"] for note in node["notes"]])
+
+    def test_codex_session_bridge_registers_native_subagent_launch(self) -> None:
+        state = self.root / "native-subagent-start-state"
+        environment = {
+            "SEMANTIC_DAG_STATE_DIR": str(state),
+            "SEMANTIC_DAG_NO_SERVER": "1",
+            "SEMANTIC_DAG_NO_OPEN": "1",
+            "SEMANTIC_DAG_NO_SESSION_BRIDGE": "1",
+        }
+        common = ["--thread", "session"]
+        with mock.patch.dict(os.environ, environment, clear=False):
+            subprocess.run(
+                [sys.executable, str(EMITTERS["codex"]), "start", "Native launch", *common],
+                cwd=ROOT,
+                env={**os.environ, **environment},
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(EMITTERS["codex"]),
+                    "add",
+                    "delegate",
+                    "WORK",
+                    "Delegate focused review",
+                    "--root",
+                    *common,
+                ],
+                cwd=ROOT,
+                env={**os.environ, **environment},
+                check=True,
+            )
+            subprocess.run(
+                [sys.executable, str(EMITTERS["codex"]), "activate", "delegate", *common],
+                cwd=ROOT,
+                env={**os.environ, **environment},
+                check=True,
+            )
+
+            binding = state / "bindings/root-native.json"
+            binding.parent.mkdir(parents=True, exist_ok=True)
+            binding.write_text(json.dumps({"thread": "session", "agent": "root"}))
+
+            spec = importlib.util.spec_from_file_location(
+                "codex_native_subagent_start_test", CODEX_SESSION_BRIDGE
+            )
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            record = {
+                "timestamp": "2026-08-29T21:45:25.325Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "call-spawn-1",
+                    "occurred_at_ms": int(time.time() * 1000),
+                    "agent_thread_id": "child-native",
+                    "agent_path": "/root/final_code_review",
+                    "kind": "started",
+                },
+            }
+            with mock.patch.object(module, "_start_child_bridge") as start_child:
+                module._emit_record("root-native", record)
+                # Replayed native activity must remain idempotent.
+                module._emit_record("root-native", record)
+
+        dag = json.loads((state / "threads/session/dag.json").read_text())
+        agent = dag["agents"]["final_code_review"]
+        self.assertEqual(agent["label"], "Final Code Review")
+        self.assertEqual(agent["parent_agent"], "root")
+        self.assertEqual(agent["parent"], "delegate")
+        self.assertEqual(agent["native_thread"], "child-native")
+        self.assertEqual(
+            {
+                key: value
+                for key, value in json.loads(
+                    (state / "bindings/child-native.json").read_text()
+                ).items()
+                if key != "since"
+            },
+            {"thread": "session", "agent": "final_code_review"},
+        )
+        events = [
+            json.loads(line)
+            for line in (state / "threads/session/events.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(
+            sum(event.get("type") == "agent_begin" for event in events),
+            1,
+        )
+        self.assertEqual(start_child.call_count, 2)
+
+    def test_codex_session_bridge_namespaces_nested_native_agent_paths(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "codex_nested_subagent_path_test", CODEX_SESSION_BRIDGE
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(
+            os.environ,
+            {"SEMANTIC_DAG_STATE_DIR": str(self.root / "nested-agent-state")},
+            clear=False,
+        ):
+            spec.loader.exec_module(module)
+        self.assertEqual(
+            module._agent_id_from_path("/root/planner/reviewer"),
+            "planner.reviewer",
+        )
+        self.assertEqual(
+            module._agent_label_from_path("/root/planner/reviewer"),
+            "Reviewer",
+        )
+        self.assertIsNone(
+            module.subagent_start_from_session_record({
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "kind": "interacted",
+                    "agent_thread_id": "child",
+                    "agent_path": "/root/planner/reviewer",
+                },
+            })
+        )
+
+    def test_codex_child_bridge_skips_only_forked_history(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "codex_child_launch_boundary_test", CODEX_SESSION_BRIDGE
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(
+            os.environ,
+            {"SEMANTIC_DAG_STATE_DIR": str(self.root / "child-boundary-state")},
+            clear=False,
+        ):
+            spec.loader.exec_module(module)
+        before = {"timestamp": "2026-08-29T21:45:25.100Z", "type": "before"}
+        after = {"timestamp": "2026-08-29T21:45:25.500Z", "type": "after"}
+        stream = io.StringIO(json.dumps(before) + "\n" + json.dumps(after) + "\n")
+        boundary = datetime.fromisoformat("2026-08-29T21:45:25.325+00:00").timestamp()
+        with mock.patch.object(module, "_emit_record") as emit_record:
+            module._process_available(stream, "child-native", boundary)
+        emit_record.assert_called_once_with("child-native", after)
 
     def test_codex_session_bridge_suppresses_recent_explicit_note_duplicate(self) -> None:
         spec = importlib.util.spec_from_file_location(
