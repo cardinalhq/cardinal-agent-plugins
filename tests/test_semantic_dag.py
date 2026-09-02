@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import importlib.util
 import os
@@ -244,7 +245,9 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(EMITTERS["codex"]),
-                    "reset",
+                    # `start`, not `reset`: this only needs an emit that runs
+                    # `_ensure_server`, and only `start` may create a thread.
+                    "start",
                     "Upgrade-safe viewer",
                     "--thread",
                     "upgrade-safe",
@@ -258,7 +261,12 @@ class SemanticDagAdapterTests(unittest.TestCase):
             )
             current_info = wait_for_server()
             self.assertEqual(current_info["service"], "cardinal-semantic-dag")
-            self.assertEqual(current_info["plugin_build"], "0.21.12")
+            # Read the shipped version rather than pinning it, so routine
+            # release bumps do not masquerade as viewer-handoff failures.
+            codex_version = json.loads(
+                (ROOT / "adapters/codex/.codex-plugin/plugin.json").read_text()
+            )["version"]
+            self.assertEqual(current_info["plugin_build"], codex_version)
             self.assertEqual(
                 current_info["version"],
                 hashlib.sha1((source_viewer / "index.html").read_bytes()).hexdigest()[:12],
@@ -307,8 +315,16 @@ class SemanticDagAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "viewer/index.html"):
             module.validate_artifact("codex", codex_artifact)
 
-    def emit(self, runtime: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def emit_env(self, runtime: str) -> dict[str, str]:
         environment = os.environ.copy()
+        # The suite may itself run inside Claude Code or Codex, whose session
+        # env vars feed `_native_thread()`. Drop them so thread resolution is
+        # decided by the test, not by the host that happens to run it.
+        for name in (
+            "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_PROJECT_DIR",
+            "CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENAI_CODEX_SESSION_ID",
+        ):
+            environment.pop(name, None)
         environment.update(
             {
                 "SEMANTIC_DAG_STATE_DIR": str(self.root / runtime),
@@ -317,14 +333,31 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 "SEMANTIC_DAG_NO_SESSION_BRIDGE": "1",
             }
         )
+        return environment
+
+    def emit(self, runtime: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(EMITTERS[runtime]), *arguments],
             cwd=ROOT,
-            env=environment,
+            env=self.emit_env(runtime),
             capture_output=True,
             text=True,
             check=True,
         )
+
+    def emit_expecting_failure(
+        self, runtime: str, *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            [sys.executable, str(EMITTERS[runtime]), *arguments],
+            cwd=ROOT,
+            env=self.emit_env(runtime),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0, f"expected failure, got {result.stdout!r}")
+        return result
 
     def dag(self, runtime: str) -> dict:
         path = self.root / runtime / "threads/shared/dag.json"
@@ -423,6 +456,99 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertEqual(dag["turn"], 1)
         self.assertEqual(dag["nodes"]["n1"]["turn"], 1)
 
+    def test_only_start_may_create_a_thread(self) -> None:
+        """Editing events must never materialize a thread.
+
+        A dangling cwd pointer, or a session deleted from the viewer while the
+        agent is still emitting, resolves to a thread id whose state is gone.
+        Letting those events lazily rebuild the thread produced sessions with
+        no `start` event, an empty topic (rendered "(no topic)"), and
+        `--parent` references to nodes that only existed in the discarded DAG.
+        """
+        for arguments in (
+            ("add", "n1", "GOAL", "resurrect a dead thread", "--root"),
+            ("done", "n1"),
+            ("note", "n1", "narration onto nothing"),
+            ("finish", "an outcome for a thread that is gone"),
+        ):
+            with self.subTest(command=arguments[0]):
+                result = self.emit_expecting_failure(
+                    "claude", *arguments, "--thread", "ghost"
+                )
+                self.assertIn("has not been started", result.stderr)
+        self.assertFalse(
+            (self.root / "claude" / "threads" / "ghost").exists(),
+            "a refused event left thread scaffolding behind",
+        )
+
+    def test_started_thread_still_accepts_edits(self) -> None:
+        self.emit("claude", "start", "guard does not overreach", "--thread", "live")
+        self.emit("claude", "add", "n1", "GOAL", "real work here", "--root", "--thread", "live")
+        self.emit("claude", "done", "n1", "--thread", "live")
+        dag = json.loads((self.root / "claude" / "threads" / "live" / "dag.json").read_text())
+        self.assertEqual(dag["topic"], "guard does not overreach")
+        self.assertEqual(dag["nodes"]["n1"]["status"], "completed")
+
+    def test_start_requires_a_topic(self) -> None:
+        """A root session with no topic renders as "(no topic)" forever."""
+        result = self.emit_expecting_failure("claude", "start", "--thread", "untitled")
+        self.assertIn("topic", result.stderr)
+        self.assertFalse((self.root / "claude" / "threads" / "untitled").exists())
+        blank = self.emit_expecting_failure("claude", "start", "   ", "--thread", "blank")
+        self.assertIn("topic", blank.stderr)
+
+    def test_claude_emitter_reads_the_session_id_claude_code_actually_exports(self) -> None:
+        """emit.py must resolve session identity the same way the other hooks do.
+
+        Claude Code exports CLAUDE_CODE_SESSION_ID; CLAUDE_SESSION_ID is only a
+        legacy variant. Naming just the legacy one left `_native_session_id()`
+        permanently None, so every `start` minted a random thread id, bindings
+        were never written, pointers recorded `session_id: null`, and the
+        prompt hook refused to adopt its own thread — watch mode never engaged.
+        """
+        hook = (ROOT / "adapters/claude/hooks/git-state.py").read_text()
+        expected = [
+            name
+            for name in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")
+            if f'os.environ.get("{name}")' in hook
+        ]
+        self.assertEqual(
+            expected,
+            ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"],
+            "git-state.py no longer documents the canonical session-id precedence",
+        )
+
+        spec = importlib.util.spec_from_file_location(
+            "claude_emitter_config_test", EMITTERS["claude"]
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(tuple(expected), module.CONFIG.native_thread_env)
+
+    def test_codex_bridge_survives_its_thread_being_deleted(self) -> None:
+        """The bridge is the one caller that emits in-process.
+
+        Claude's hooks shell out with check=False, so a refused emit is inert
+        there. The Codex bridge is a long-lived daemon with no try/except
+        around `_emit_record`, so an unhandled refusal would silently kill it
+        (stderr is DEVNULL). Deleting a session from the viewer while the
+        bridge is mid-record must stop it, not crash it.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "codex_bridge_delete_test", CODEX_SESSION_BRIDGE
+        )
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(
+            os.environ, {"SEMANTIC_DAG_STATE_DIR": str(self.root / "codex")}
+        ):
+            spec.loader.exec_module(module)
+            stream = io.StringIO('{"one": 1}\n{"two": 2}\n')
+            with mock.patch.object(
+                module, "_emit_record", side_effect=module.ThreadNotStarted("gone")
+            ):
+                offset = module._process_available(stream, "sess")
+        self.assertEqual(offset, 0, "checkpoint advanced past the record it could not write")
+
     def test_delete_thread_purges_state_bindings_and_pointer(self) -> None:
         """/t/<thread>/delete removes dag+events, session-id bindings that
         point at that thread, and any current-<cwd> pointer files."""
@@ -438,8 +564,16 @@ class SemanticDagAdapterTests(unittest.TestCase):
         bindings_dir.mkdir(parents=True, exist_ok=True)
         (bindings_dir / "sess-drop.json").write_text(json.dumps({"thread": "drop", "agent": "root"}))
         (bindings_dir / "sess-keep.json").write_text(json.dumps({"thread": "keep", "agent": "root"}))
-        pointer = self.root / "claude" / "current-abc123"
-        pointer.write_text("drop")
+        legacy_pointer = self.root / "claude" / "current-abc123"
+        legacy_pointer.write_text("drop")
+        # The live format is session-tagged JSON. Matching the raw file text
+        # against the thread id only ever cleared the legacy form, so deleting
+        # a session left this pointer dangling and the next emit in that cwd
+        # resurrected the thread as an empty-topic shard.
+        tagged_pointer = self.root / "claude" / "current-def456"
+        tagged_pointer.write_text(json.dumps({"thread": "drop", "session_id": "sess-drop"}))
+        keep_pointer = self.root / "claude" / "current-999999"
+        keep_pointer.write_text(json.dumps({"thread": "keep", "session_id": "sess-keep"}))
 
         server_path = VIEWER / "server.py"
         spec = importlib.util.spec_from_file_location("_dag_server", server_path)
@@ -452,7 +586,9 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertFalse(drop_dir.exists(), "drop thread directory was not removed")
         self.assertFalse((bindings_dir / "sess-drop.json").exists(), "binding for drop remained")
         self.assertTrue((bindings_dir / "sess-keep.json").exists(), "binding for keep was removed")
-        self.assertFalse(pointer.exists(), "current-cwd pointer was not cleared")
+        self.assertFalse(legacy_pointer.exists(), "legacy bare-text pointer was not cleared")
+        self.assertFalse(tagged_pointer.exists(), "session-tagged JSON pointer was not cleared")
+        self.assertTrue(keep_pointer.exists(), "pointer for a surviving thread was cleared")
 
     def test_viewer_rename_validates_and_uses_the_event_emitter(self) -> None:
         server_path = VIEWER / "server.py"
