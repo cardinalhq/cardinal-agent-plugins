@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 STATE_DIR = Path(os.path.expanduser(os.environ.get("SEMANTIC_DAG_STATE_DIR", "~/.cardinal/state/semantic-dag")))
+OPTOUTS_DIR = STATE_DIR / "opt-outs"
 EMITTER = Path(__file__).parents[1] / "emit.py"
 SKILL = Path(__file__).parents[1] / "SKILL.md"
 SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]")
@@ -39,10 +40,27 @@ def read_json(path: Path) -> dict:
 
 def default_watch_enabled() -> bool:
     override = os.environ.get("SEMANTIC_DAG_WATCH_DEFAULT")
-    if override is not None:
+    if override is not None and override.strip():
         return override.strip().lower() not in ("0", "false", "off", "no")
-    configured = read_json(STATE_DIR / "config.json").get("watch_default")
+    try:
+        settings = json.loads((STATE_DIR / "config.json").read_text())
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    if not isinstance(settings, dict):
+        return False
+    configured = settings.get("watch_default")
     return configured if isinstance(configured, bool) else True
+
+
+def session_opted_out(session: str) -> bool:
+    return (OPTOUTS_DIR / safe_id(session)).is_file()
+
+
+def record_session_opt_out(session: str) -> None:
+    OPTOUTS_DIR.mkdir(parents=True, exist_ok=True)
+    (OPTOUTS_DIR / safe_id(session)).touch(exist_ok=True)
 
 
 def short_topic(prompt: str) -> str:
@@ -151,6 +169,14 @@ def main() -> None:
     prompt = str(payload.get("user_prompt") or payload.get("prompt") or "").strip()
     if TASK_NOTIFICATION_RE.match(prompt):
         return
+    binding = read_json(STATE_DIR / "bindings" / f"{safe_id(session)}.json")
+    bound_thread = binding.get("thread")
+    if not isinstance(bound_thread, str) and DISABLE_RE.fullmatch(prompt):
+        record_session_opt_out(session)
+        print(json.dumps({"systemMessage": "Semantic DAG watch mode disabled for this session."}))
+        return
+    if not isinstance(bound_thread, str) and session_opted_out(session):
+        return
     thread = discover_thread(payload, session)
     started = False
     if not thread:
@@ -162,7 +188,7 @@ def main() -> None:
             "start",
             short_topic(prompt),
             session=session,
-            quiet=bool(DISABLE_RE.fullmatch(prompt)),
+            quiet=False,
         )
         started = True
     dag = read_json(STATE_DIR / "threads" / thread / "dag.json")

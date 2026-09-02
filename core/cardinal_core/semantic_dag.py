@@ -15,6 +15,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from contextlib import contextmanager
@@ -79,19 +80,44 @@ def _settings_file() -> Path:
 
 
 def _load_settings() -> dict:
+    target = _settings_file()
     try:
-        value = json.loads(_settings_file().read_text())
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
+        raw = target.read_text()
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        raise ValueError(f"could not read {target}: {exc}") from exc
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{target} contains invalid JSON; refusing to overwrite it") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{target} must contain a JSON object; refusing to overwrite it")
+    return value
 
 
 def _save_settings(settings: dict) -> None:
     target = _settings_file()
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(settings, indent=2) + "\n")
-    temporary.replace(target)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(settings, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 THREAD_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")

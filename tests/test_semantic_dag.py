@@ -744,6 +744,10 @@ class SemanticDagAdapterTests(unittest.TestCase):
         self.assertIn("Problem statement", viewer)
         self.assertIn("function agentProblem", viewer)
         self.assertIn("function agentSolution", viewer)
+        self.assertIn(
+            "agent.id==='root'?`${state.runtime==='claude'?'Claude':'Codex'} session`",
+            viewer,
+        )
         self.assertIn("body.workflow-fullscreen #drawer{z-index:25", viewer)
         self.assertIn("if(fullscreen||event.target.closest('button,.node'))return", viewer)
         self.assertIn(
@@ -1397,6 +1401,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 (state / "config.json").write_text(json.dumps({"watch_default": False}))
                 environment = os.environ.copy()
                 environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
+                environment["SEMANTIC_DAG_WATCH_DEFAULT"] = ""
                 result = subprocess.run(
                     [sys.executable, str(prompt_hook)],
                     cwd=ROOT,
@@ -1409,10 +1414,53 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertFalse((state / "bindings" / "fresh-session.json").exists())
 
+    def test_first_prompt_opt_out_does_not_create_a_dag(self) -> None:
+        for runtime, prompt_hook in PROMPT_HOOKS.items():
+            with self.subTest(runtime=runtime):
+                state = self.root / f"first-opt-out-{runtime}"
+                environment = os.environ.copy()
+                environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
+                result = subprocess.run(
+                    [sys.executable, str(prompt_hook)],
+                    cwd=ROOT,
+                    env=environment,
+                    input=json.dumps({
+                        "session_id": "fresh-session",
+                        "prompt": "semantic-dag off",
+                    }),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("watch mode disabled", result.stdout)
+                self.assertFalse((state / "bindings").exists())
+                self.assertFalse((state / "threads").exists())
+                self.assertTrue((state / "opt-outs" / "fresh-session").is_file())
+
+                later = subprocess.run(
+                    [sys.executable, str(prompt_hook)],
+                    cwd=ROOT,
+                    env=environment,
+                    input=json.dumps({
+                        "session_id": "fresh-session",
+                        "prompt": "Do the work",
+                    }),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertEqual(later.stdout, "")
+                self.assertFalse((state / "bindings").exists())
+                self.assertFalse((state / "threads").exists())
+
     def test_watch_default_command_persists_shared_setting(self) -> None:
         for runtime, emitter in EMITTERS.items():
             with self.subTest(runtime=runtime):
                 state = self.root / f"watch-command-{runtime}"
+                state.mkdir(parents=True)
+                (state / "config.json").write_text(json.dumps({
+                    "future_setting": {"keep": True},
+                }))
                 environment = os.environ.copy()
                 environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
                 result = subprocess.run(
@@ -1424,10 +1472,65 @@ class SemanticDagAdapterTests(unittest.TestCase):
                     check=True,
                 )
                 self.assertIn("default watch mode: off", result.stdout)
-                self.assertEqual(
-                    json.loads((state / "config.json").read_text())["watch_default"],
-                    False,
-                )
+                settings = json.loads((state / "config.json").read_text())
+                self.assertEqual(settings["watch_default"], False)
+                self.assertEqual(settings["future_setting"], {"keep": True})
+                self.assertEqual(list(state.glob(".config.json.*.tmp")), [])
+
+    def test_watch_default_refuses_to_overwrite_invalid_settings(self) -> None:
+        for runtime, emitter in EMITTERS.items():
+            for label, contents in (("invalid-json", "{"), ("non-object", "[]")):
+                with self.subTest(runtime=runtime, contents=label):
+                    state = self.root / f"invalid-watch-config-{runtime}-{label}"
+                    state.mkdir(parents=True)
+                    config = state / "config.json"
+                    config.write_text(contents)
+                    environment = os.environ.copy()
+                    environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
+                    result = subprocess.run(
+                        [sys.executable, str(emitter), "watch-default", "off"],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("refusing to overwrite", result.stderr)
+                    self.assertEqual(config.read_text(), contents)
+
+        core = (ROOT / "core/cardinal_core/semantic_dag.py").read_text()
+        self.assertIn("tempfile.NamedTemporaryFile", core)
+
+    def test_concurrent_watch_default_writes_remain_atomic(self) -> None:
+        state = self.root / "concurrent-watch-config"
+        state.mkdir(parents=True)
+        (state / "config.json").write_text(json.dumps({"future_setting": "keep"}))
+        environment = os.environ.copy()
+        environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
+        processes = [
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(EMITTERS["codex"]),
+                    "watch-default",
+                    "on" if index % 2 else "off",
+                ],
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for index in range(12)
+        ]
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+
+        settings = json.loads((state / "config.json").read_text())
+        self.assertEqual(settings["future_setting"], "keep")
+        self.assertIsInstance(settings["watch_default"], bool)
+        self.assertEqual(list(state.glob(".config.json.*.tmp")), [])
 
 
     def _seed_watch_state(self, runtime: str, prompt: str, dag_overrides: dict | None = None):
