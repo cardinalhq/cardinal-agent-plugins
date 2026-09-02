@@ -33,6 +33,11 @@ class PromptHookSessionIsolationTests(unittest.TestCase):
             / f"current-{hashlib.sha1(str(self.cwd).encode()).hexdigest()[:12]}"
         )
         self.state.mkdir(parents=True, exist_ok=True)
+        # These cases exercise isolation while the user has explicitly enabled
+        # automatic DAG startup; the plugin itself defaults to opt-in.
+        (self.state / "config.json").write_text(
+            json.dumps({"watch_default": True})
+        )
         self.thread_dir = self.state / "threads" / "c-owning-thread"
         self.thread_dir.mkdir(parents=True, exist_ok=True)
         # Watch mode ON — otherwise the hook exits before session logic.
@@ -44,6 +49,7 @@ class PromptHookSessionIsolationTests(unittest.TestCase):
     def _run(self, session_id: str, prompt: str = "continue the task") -> tuple[int, str]:
         env = os.environ.copy()
         env["SEMANTIC_DAG_STATE_DIR"] = str(self.state)
+        env["SEMANTIC_DAG_WATCH_DEFAULT"] = ""
         payload = json.dumps({
             "session_id": session_id,
             "cwd": str(self.cwd),
