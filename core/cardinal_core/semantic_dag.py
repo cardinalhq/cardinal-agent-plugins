@@ -74,6 +74,26 @@ def _bindings_dir() -> Path:
     return _state_dir() / "bindings"
 
 
+def _settings_file() -> Path:
+    return _state_dir() / "config.json"
+
+
+def _load_settings() -> dict:
+    try:
+        value = json.loads(_settings_file().read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_settings(settings: dict) -> None:
+    target = _settings_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(settings, indent=2) + "\n")
+    temporary.replace(target)
+
+
 THREAD_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 AGENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 GENERIC_LABEL_RE = re.compile(
@@ -1027,6 +1047,15 @@ def main(config: RuntimeConfig) -> int:
     command, arguments = arguments[0], arguments[1:]
 
     try:
+        if command == "watch-default":
+            if not arguments or arguments[0].lower() not in ("on", "off"):
+                raise ValueError("usage: watch-default <on|off>")
+            settings = _load_settings()
+            settings["watch_default"] = arguments[0].lower() == "on"
+            _save_settings(settings)
+            print(f"Semantic DAG default watch mode: {arguments[0].lower()}")
+            return 0
+
         agent = _resolve_agent(arguments)
         if command in ("begin", "start"):
             override = _safe_thread(_pop_flag(arguments, "--thread"))
