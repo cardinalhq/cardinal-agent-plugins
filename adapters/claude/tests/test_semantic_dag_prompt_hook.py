@@ -71,9 +71,11 @@ class PromptHookSessionIsolationTests(unittest.TestCase):
         }))
         rc, _ = self._run("sess-B")
         self.assertEqual(rc, 0)
-        # No binding for B, and B did NOT emit the watch-mode context
-        # (which would only fire if a thread was discovered).
-        self.assertFalse(self._binding_for("sess-B").exists())
+        # Default-on mode creates a DAG owned by B. It must not attach B
+        # to A's stale cwd pointer.
+        binding = json.loads(self._binding_for("sess-B").read_text())
+        self.assertEqual(binding.get("thread"), "sess-B")
+        self.assertNotEqual(binding.get("thread"), "c-owning-thread")
 
     def test_same_session_adopts_pointer_and_writes_binding(self) -> None:
         self.pointer.write_text(json.dumps({
@@ -111,7 +113,9 @@ class PromptHookSessionIsolationTests(unittest.TestCase):
         self.pointer.write_text("c-owning-thread")
         rc, _ = self._run("sess-fresh")
         self.assertEqual(rc, 0)
-        self.assertFalse(self._binding_for("sess-fresh").exists())
+        binding = json.loads(self._binding_for("sess-fresh").read_text())
+        self.assertEqual(binding.get("thread"), "sess-fresh")
+        self.assertNotEqual(binding.get("thread"), "c-owning-thread")
 
 
 if __name__ == "__main__":
