@@ -1364,12 +1364,39 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 self.assertNotIn("python3 <emit> file ", skill)
                 self.assertNotIn("Record every materially read", skill)
 
-    def test_prompt_hook_enables_new_sessions_by_default(self) -> None:
+    def test_prompt_hook_leaves_new_sessions_unbound_by_plugin_default(self) -> None:
         for runtime, prompt_hook in PROMPT_HOOKS.items():
             with self.subTest(runtime=runtime):
-                state = self.root / f"default-watch-{runtime}"
+                state = self.root / f"plugin-default-{runtime}"
                 environment = os.environ.copy()
                 environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
+                environment["SEMANTIC_DAG_WATCH_DEFAULT"] = ""
+                environment["SEMANTIC_DAG_NO_SERVER"] = "1"
+                environment["SEMANTIC_DAG_NO_OPEN"] = "1"
+                result = subprocess.run(
+                    [sys.executable, str(prompt_hook)],
+                    cwd=ROOT,
+                    env=environment,
+                    input=json.dumps({
+                        "session_id": "fresh-session",
+                        "prompt": "Explain the slow checkout clearly",
+                    }),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertEqual(result.stdout, "")
+                self.assertFalse((state / "bindings" / "fresh-session.json").exists())
+
+    def test_user_default_enables_new_sessions(self) -> None:
+        for runtime, prompt_hook in PROMPT_HOOKS.items():
+            with self.subTest(runtime=runtime):
+                state = self.root / f"user-default-{runtime}"
+                state.mkdir(parents=True)
+                (state / "config.json").write_text(json.dumps({"watch_default": True}))
+                environment = os.environ.copy()
+                environment["SEMANTIC_DAG_STATE_DIR"] = str(state)
+                environment["SEMANTIC_DAG_WATCH_DEFAULT"] = ""
                 environment["SEMANTIC_DAG_NO_SERVER"] = "1"
                 environment["SEMANTIC_DAG_NO_OPEN"] = "1"
                 result = subprocess.run(
@@ -1385,7 +1412,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
                     check=True,
                 )
                 payload = json.loads(result.stdout)
-                self.assertIn("Default Semantic DAG watch mode", payload["hookSpecificOutput"]["additionalContext"])
+                self.assertIn("User-default Semantic DAG watch mode", payload["hookSpecificOutput"]["additionalContext"])
                 binding = json.loads((state / "bindings" / "fresh-session.json").read_text())
                 dag = json.loads((state / "threads" / binding["thread"] / "dag.json").read_text())
                 self.assertTrue(dag["watch_mode"])
@@ -1393,7 +1420,7 @@ class SemanticDagAdapterTests(unittest.TestCase):
                 self.assertEqual(dag["nodes"]["turn-1-goal"]["status"], "active")
                 self.assertIn("slow checkout", dag["nodes"]["turn-1-goal"]["description"])
 
-    def test_global_default_can_leave_new_sessions_unbound(self) -> None:
+    def test_user_default_can_leave_new_sessions_unbound(self) -> None:
         for runtime, prompt_hook in PROMPT_HOOKS.items():
             with self.subTest(runtime=runtime):
                 state = self.root / f"disabled-default-{runtime}"
