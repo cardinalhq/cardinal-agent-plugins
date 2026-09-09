@@ -9,7 +9,7 @@ core/cardinal_core/     shared runtime — OTLP emission, initiative
                         resolution, spend limits, device consent,
                         session counters, typed Semantic DAG emission
 adapters/               per-agent surfaces (codex, gemini, cursor,
-                        claude; omnigent later)
+                        claude, omnigent, opencode, pi)
 build/vendor.py         copies core into each plugin artifact so shipped
                         plugins stay self-contained (no pip for users)
 docs/specs/             the extraction spec and migration plan
@@ -26,6 +26,13 @@ migrated with byte-equal golden parity against their shipped plugins
 The Claude adapter also ships an auto-installed Invariant `PreToolUse`
 hook (`adapters/claude/hooks/invariant-check.py`) — advisory-only, fires
 before Edit/Write/MultiEdit on code covered by an Invariant guarantee.
+
+Native [OpenCode](adapters/opencode/README.md) and [Pi](adapters/pi/README.md)
+packages provide session/tool/usage telemetry and Cardinal MCP access. Build
+them with `python3 build/native.py`; test with `npm ci --ignore-scripts` and
+`npm run test:native`. See [native package releases](docs/RELEASING-NATIVE.md)
+for installable artifacts, compatibility targets, and the backend runtime
+filter needed before production session analytics can consume their usage.
 
 ## Release flow
 
@@ -80,8 +87,9 @@ cd core && python3 -m unittest discover tests -v   # core suite
 python3 build/vendor.py --all                       # vendor core into adapters
 ```
 
-Requires Python 3.11+. No third-party dependencies — plugins ship as
-stdlib-only scripts.
+The Python runtime supports Python 3.9+ and uses only the standard library.
+The OpenCode and Pi packages also require Node; Pi's MCP client has npm
+dependencies. See their adapter READMEs for supported runtime versions.
 
 ## License
 

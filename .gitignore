@@ -27,3 +27,5 @@ k8s/controller/.pytest_cache/
 # anything meant to be shared belongs in docs/ proper.
 docs/local-notes/
 .polly/
+node_modules/
+*.tgz
