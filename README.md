@@ -27,6 +27,12 @@ The Claude adapter also ships an auto-installed Invariant `PreToolUse`
 hook (`adapters/claude/hooks/invariant-check.py`) — advisory-only, fires
 before Edit/Write/MultiEdit on code covered by an Invariant guarantee.
 
+Claude also ships opt-in decision capture (`cardinal-decision on`): a
+`UserPromptSubmit` hook asks the agent to record the choices it makes with
+`bin/cardinal-decision`, and each one is sent as a `cardinal.decision` event
+tagged with engineer, session, repo, branch, PR, anchors, and D18 code
+clusters. See [docs/specs/decision-telemetry.md](docs/specs/decision-telemetry.md).
+
 Native [OpenCode](adapters/opencode/README.md) and [Pi](adapters/pi/README.md)
 packages provide session/tool/usage telemetry and Cardinal MCP access. Build
 them with `python3 build/native.py`; test with `npm ci --ignore-scripts` and
