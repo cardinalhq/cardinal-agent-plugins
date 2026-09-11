@@ -7,7 +7,7 @@ One contract, written once, shipped to every agent runtime:
 ```
 core/cardinal_core/     shared runtime — OTLP emission, initiative
                         resolution, spend limits, device consent,
-                        session counters, typed Semantic DAG emission
+                        session counters
 adapters/               per-agent surfaces (codex, gemini, cursor,
                         claude, omnigent, opencode, pi)
 build/vendor.py         copies core into each plugin artifact so shipped

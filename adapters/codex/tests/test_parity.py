@@ -363,13 +363,16 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("Stop", hooks["hooks"])
         self.assertIn("SubagentStop", hooks["hooks"])
         self.assertIn("cardinal-codex-plugin", json.dumps(hooks))
-        hook_text = json.dumps(hooks)
-        self.assertIn("--semantic-dag-prompt", hook_text)
-        self.assertIn("--semantic-dag-tool", hook_text)
-        self.assertIn("PreToolUse", hooks["hooks"])
-        self.assertIn("PostToolUse", hooks["hooks"])
+        # Semantic DAG is gone: its PreToolUse/PostToolUse tool hooks are
+        # no longer registered, and the telemetry hook handles neither.
+        self.assertNotIn("PreToolUse", hooks["hooks"])
+        self.assertNotIn("PostToolUse", hooks["hooks"])
+        self.assertNotIn("semantic-dag", json.dumps(hooks))
 
-    def test_repair_hooks_replaces_legacy_semantic_dag_paths_without_auth(self):
+    def test_repair_hooks_strips_legacy_semantic_dag_paths_without_auth(self):
+        """Installs connected before the Semantic DAG removal still carry
+        prompt/tool hook entries pointing at deleted files. --repair-hooks
+        is the supported way to clear them, and must not re-add them."""
         legacy_root = self.home / ".codex" / "skills" / "semantic-dag"
         self.hooks.parent.mkdir(parents=True, exist_ok=True)
         self.hooks.write_text(json.dumps({
@@ -398,11 +401,11 @@ class ConnectTests(unittest.TestCase):
 
         hook_text = self.hooks.read_text()
         self.assertNotIn(str(legacy_root), hook_text)
+        self.assertNotIn("semantic-dag", hook_text)
         hooks = read_json(self.hooks)["hooks"]
-        self.assertIn("PreToolUse", hooks)
-        self.assertIn("PostToolUse", hooks)
-        self.assertIn("--semantic-dag-prompt", hook_text)
-        self.assertIn("--semantic-dag-tool", hook_text)
+        # The stale groups held nothing else, so the events go away.
+        self.assertNotIn("PreToolUse", hooks)
+        self.assertIn("SessionStart", hooks)
         self.assertTrue((self.home / ".codex" / "cardinal" / "cardinal-codex-telemetry.py").is_file())
         manifest = read_json(ROOT / ".codex-plugin" / "plugin.json")
         self.assertEqual(read_json(self.state)["plugin_version"], manifest["version"])
