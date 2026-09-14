@@ -21,8 +21,16 @@ function decisionTool(z, onRecorded) {
       id: z.string().optional().describe(f.id),
     },
     async execute(args, toolContext) {
-      try { return await recordDecision("opencode", toolContext.sessionID, toolContext.directory, args); }
-      finally { onRecorded(toolContext.sessionID); }
+      try {
+        const { message, context } = await recordDecision("opencode", toolContext.sessionID, toolContext.directory, args,
+          { tool: DECISION_TOOL.name, signal: toolContext.abort });
+        onRecorded(toolContext.sessionID, context);
+        return message;
+      } catch (error) {
+        // A killed or failed record may still have written the ledger; re-read it next time.
+        onRecorded(toolContext.sessionID, undefined, true);
+        throw error;
+      }
     },
   };
 }
@@ -33,11 +41,18 @@ export default async function CardinalPlugin({ client, directory }, options = {}
   const bridge = options.bridge || createBridge("opencode", { warn });
   const sessions = new Map();
   const readConnection = options.connection || (() => connection("opencode"));
-  // One context lookup per session per user message; system.transform runs on every model request.
+  // One context lookup per session per user message; messages.transform runs on every chat step.
   const decisionContexts = new Map();
+  const compacting = new Set();
+  const cacheContext = (id, pending) => {
+    if (decisionContexts.size >= 1024) decisionContexts.delete(decisionContexts.keys().next().value);
+    decisionContexts.set(id, pending);
+  };
   // Without zod (an install that skipped dependencies) the prompt points at the CLI instead.
   const z = "zod" in options ? options.zod : await loadZod();
-  const tool = z ? decisionTool(z, (id) => decisionContexts.delete(id)) : undefined;
+  const tool = z ? decisionTool(z, (id, context, failed) => {
+    if (failed) decisionContexts.delete(id); else cacheContext(id, Promise.resolve(context));
+  }) : undefined;
   async function context(id) {
     if (!id) return undefined;
     let info = sessions.get(id);
@@ -54,19 +69,30 @@ export default async function CardinalPlugin({ client, directory }, options = {}
   }
   return {
     ...(tool ? { tool: { [DECISION_TOOL.name]: tool } } : {}),
-    async "chat.message"(input) { decisionContexts.delete(input?.sessionID); },
-    async "experimental.chat.system.transform"(input, output) {
+    async "chat.message"(input) { decisionContexts.delete(input?.sessionID); compacting.delete(input?.sessionID); },
+    // OpenCode 1.18.30 triggers this immediately before compaction's messages.transform
+    // (session/compaction.ts:372-379); that summarization request has no tools.
+    async "experimental.session.compacting"(input) { if (input?.sessionID) compacting.add(input.sessionID); },
+    // Chat turns only: the chat loop triggers messages.transform right before the model call
+    // (session/prompt.ts:1255), while title generation builds its messages without it
+    // (prompt.ts:222-233). system.transform is not used because it also fires for title/agent
+    // generation with no way to tell them apart (session/llm/request.ts:68-72, agent/agent.ts:381).
+    async "experimental.chat.messages.transform"(_input, output) {
       try {
-        const ctx = await context(input?.sessionID);
+        const messages = Array.isArray(output?.messages) ? output.messages : [];
+        const sessionID = messages.find((m) => m?.info?.sessionID)?.info.sessionID;
+        if (!sessionID || compacting.delete(sessionID)) return;
+        const user = messages.findLast((m) => m?.info?.role === "user");
+        const ctx = user && Array.isArray(user.parts) ? await context(sessionID) : undefined;
         if (!ctx) return;
-        let pending = decisionContexts.get(ctx.session_id);
+        let pending = decisionContexts.get(sessionID);
         if (!pending) {
-          if (decisionContexts.size >= 1024) decisionContexts.delete(decisionContexts.keys().next().value);
-          pending = decisionContext("opencode", ctx.session_id, ctx.cwd, tool ? DECISION_TOOL.name : undefined);
-          decisionContexts.set(ctx.session_id, pending);
+          pending = decisionContext("opencode", sessionID, ctx.cwd, tool ? DECISION_TOOL.name : undefined);
+          cacheContext(sessionID, pending);
         }
         const text = await pending;
-        if (text && Array.isArray(output?.system)) output.system.push(text);
+        // Same in-memory synthetic user part OpenCode uses for its own reminders (session/reminders.ts).
+        if (text) user.parts.push({ id: `prt_cardinal_decisions_${user.info.id}`, sessionID, messageID: user.info.id, type: "text", text, synthetic: true });
       } catch { /* Decision capture must never break a model request. */ }
     },
     async config(config) {
@@ -91,6 +117,7 @@ export default async function CardinalPlugin({ client, directory }, options = {}
         } else if (event.type === "session.deleted") {
           sessions.delete(p.info.id);
           decisionContexts.delete(p.info.id);
+          compacting.delete(p.info.id);
         } else if (event.type === "message.updated") {
           const info = p.info;
           const ctx = await context(info.sessionID);

@@ -24,6 +24,9 @@ from cardinal_core.paths import AgentPaths, atomic_write_json, atomic_write_secr
 # hold the per-session lock and the bridge kills a child after 10s, so a cache
 # miss on `gh` must stay short.
 PR_TIMEOUT_SEC = 1.5
+# `decision record` worst case: 4 git calls at 1s + ls-tree + gh + emit
+# = 4 + 3 + 1.5 + 3 = 11.5s, well inside the bridge's 20s kill.
+CLUSTER_TIMEOUT_SEC = 3.0
 DECISION_EMIT_TIMEOUT_SEC = 3.0
 EXIT_USAGE = 2
 EXIT_OFF = 3
@@ -280,6 +283,23 @@ def decision_context(runtime, session_id, entries, tool=None):
     )
 
 
+def bounded_clusters(anchors, repo_root, head_sha, cache):
+    """decisions.code_clusters with a smaller ls-tree budget (it uses load_domains' 5s default)."""
+    anchor_paths = [(a["path"], a.get("kind") == "directory") for a in anchors if a.get("path") is not None]
+    if not anchor_paths or not repo_root or not head_sha:
+        return [], None
+    loaded = decisions.load_domains(repo_root, head_sha, cache, timeout=CLUSTER_TIMEOUT_SEC)
+    if loaded is None:
+        return [], None
+    domains, scheme = loaded
+    ids = []
+    for path, is_dir in anchor_paths:
+        for cluster_id in decisions.match_clusters(domains, path, is_dir):
+            if cluster_id not in ids:
+                ids.append(cluster_id)
+    return ids[:decisions.MAX_CLUSTERS], scheme
+
+
 def decision_record(args, paths):
     runtime = args.runtime
     if not decisions.is_enabled(paths.runtime_dir, decisions_override()):
@@ -305,8 +325,8 @@ def decision_record(args, paths):
         print(f"cardinal-{runtime} decision: {err}", file=sys.stderr)
         return EXIT_USAGE
     cache = decisions.cache_dir(paths.runtime_dir)
-    clusters, scheme = decisions.code_clusters(decision["anchors"], repo_root, head_sha, cache)
-    pr_number, pr_url = pull_request(cwd, repo, branch, paths, timeout=4.0)
+    clusters, scheme = bounded_clusters(decision["anchors"], repo_root, head_sha, cache)
+    pr_number, pr_url = pull_request(cwd, repo, branch, paths)
     known = {entry["id"] for entry in ledger}
     unknown = [link["to"] for link in decision["links"] if link["to"] not in known]
     decisions.record_in_ledger(paths.runtime_dir, session_id, decision)
@@ -326,11 +346,18 @@ def decision_record(args, paths):
     if clusters:
         tags.append("clusters " + ", ".join(clusters))
     detail = f" ({'; '.join(tags)})" if tags else ""
-    print(f"Recorded decision {decision['id']}: {decision['choice']}{detail}")
+    lines = [f"Recorded decision {decision['id']}: {decision['choice']}{detail}"]
     if unknown:
-        print(f"Note: no earlier decision in this session has id {', '.join(unknown)}; the link was kept as given.")
+        lines.append(f"Note: no earlier decision in this session has id {', '.join(unknown)}; the link was kept as given.")
     if conn is None:
-        print(f"Cardinal telemetry isn't connected, so this decision was only saved locally (run cardinal-{runtime} connect).")
+        lines.append(f"Cardinal telemetry isn't connected, so this decision was only saved locally (run cardinal-{runtime} connect).")
+    message = "\n".join(lines)
+    if args.json:
+        # Hosts refresh their cached prompt context from this instead of spawning again.
+        ledger = decisions.read_ledger(paths.runtime_dir, session_id)
+        print(json.dumps({"message": message, "context": decision_context(runtime, session_id, ledger, args.tool)}))
+    else:
+        print(message)
     return 0
 
 
@@ -377,6 +404,8 @@ def add_decision_parser(sub):
                        ("--supersedes", "an earlier decision this one replaces")):
         record.add_argument(flag, action="append", default=[], metavar="ID", help=text)
     record.add_argument("--id", help="decision id; reuse an existing id to revise that decision")
+    record.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    record.add_argument("--tool", help=argparse.SUPPRESS)
     dsub.add_parser("on", help="turn decision capture on")
     dsub.add_parser("off", help="turn decision capture off")
     status_parser = dsub.add_parser("status", help="show whether capture is on")

@@ -83,9 +83,9 @@ export default function cardinal(pi: ExtensionAPI) {
       anchor: ids(f.anchor), follows: ids(f.follows), refines: ids(f.refines), supersedes: ids(f.supersedes),
       id: Type.Optional(Type.String({ description: f.id })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const text = await recordDecision("pi", ctx.sessionManager.getSessionId(), ctx.cwd, params);
-      return { content: [{ type: "text", text }], details: {} };
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const { message } = await recordDecision("pi", ctx.sessionManager.getSessionId(), ctx.cwd, params, { signal });
+      return { content: [{ type: "text", text: message }], details: {} };
     },
   });
 }

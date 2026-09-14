@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,16 +80,36 @@ export const DECISION_TOOL = {
   },
 };
 
-/** `decision` CLI invocation. Request/response, unlike the fire-and-forget telemetry queue. */
-export function runDecision(runtime, args, { cwd, timeout = 15000, python = process.env.CARDINAL_PYTHON || "python3" } = {}) {
+/** Default `decision record` kill: well above cardinal_native's ~11.5s worst-case internal budget. */
+export const DECISION_RECORD_TIMEOUT_MS = 20000;
+
+/**
+ * `decision` CLI invocation. Request/response, unlike the fire-and-forget telemetry queue.
+ * The child leads its own process group so a timeout or host abort also stops its git/gh children.
+ */
+export function runDecision(runtime, args, { cwd, timeout = DECISION_RECORD_TIMEOUT_MS, signal, python = process.env.CARDINAL_PYTHON || "python3" } = {}) {
   return new Promise((resolve) => {
-    let stdout = "", stderr = "", done = false;
-    const finish = (code) => { if (!done) { done = true; clearTimeout(timer); resolve({ code, stdout, stderr }); } };
-    let child;
+    let stdout = "", stderr = "", done = false, child, timer;
+    const onAbort = () => stop();
+    const finish = (code) => {
+      if (done) return;
+      done = true; clearTimeout(timer); signal?.removeEventListener?.("abort", onAbort);
+      resolve({ code, stdout, stderr });
+    };
+    const stop = () => {
+      if (child?.pid && child.exitCode === null && child.signalCode === null) {
+        try { process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* already gone */ } }
+      }
+      finish(-1);
+    };
+    if (signal?.aborted) return finish(-1);
     try {
-      child = spawn(python, pythonArgs(runtime, "decision", args), { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      child = spawn(python, pythonArgs(runtime, "decision", args), {
+        cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: process.platform !== "win32",
+      });
     } catch { return finish(-1); }
-    const timer = setTimeout(() => { child.kill(); finish(-1); }, timeout);
+    timer = setTimeout(stop, timeout);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("error", () => finish(-1));
@@ -97,16 +117,30 @@ export function runDecision(runtime, args, { cwd, timeout = 15000, python = proc
   });
 }
 
-/** Cheap pre-check so the common "capture off" case never spawns Python per prompt. Python stays authoritative. */
-async function decisionsMayBeEnabled(runtime, env = process.env) {
-  if (env.CARDINAL_DECISIONS !== undefined) return true;
-  try { await access(join(agentHome(runtime, env), "cardinal", "decisions", "config.json")); return true; } catch { return false; }
+function parseOverride(value) {
+  const lowered = typeof value === "string" ? value.trim().toLowerCase() : undefined;
+  if (["1", "true", "on", "yes"].includes(lowered)) return true;
+  if (["0", "false", "off", "no"].includes(lowered)) return false;
+  return undefined;
+}
+
+/**
+ * Mirrors cardinal_core.decisions.is_enabled (env override, then config.json) so the common
+ * "capture off" case never spawns Python per prompt. Python re-checks before acting.
+ */
+export async function decisionsEnabled(runtime, env = process.env) {
+  const forced = parseOverride(env.CARDINAL_DECISIONS);
+  if (forced !== undefined) return forced;
+  try {
+    const config = JSON.parse(await readFile(join(agentHome(runtime, env), "cardinal", "decisions", "config.json"), "utf8"));
+    return config?.enabled === true;
+  } catch { return false; }
 }
 
 /** Decision instructions + this session's ledger, or undefined when capture is off or anything fails. */
 export async function decisionContext(runtime, sessionId, cwd, tool, { timeout = 1500 } = {}) {
   try {
-    if (!sessionId || !(await decisionsMayBeEnabled(runtime))) return undefined;
+    if (!sessionId || !(await decisionsEnabled(runtime))) return undefined;
     const { code, stdout } = await runDecision(runtime, ["context", `--session=${sessionId}`, ...(tool ? [`--tool=${tool}`] : [])], { cwd, timeout });
     return code === 0 && stdout.trim() ? stdout.trim() : undefined;
   } catch { return undefined; }
@@ -124,12 +158,22 @@ export function decisionRecordArgs(sessionId, params = {}) {
   return args;
 }
 
-/** Runs `decision record`; resolves with its message, throws so the host marks a failed call as an error. */
-export async function recordDecision(runtime, sessionId, cwd, params, options = {}) {
+/**
+ * Runs `decision record`; resolves with { message, context } (the refreshed prompt context).
+ * Throws so the host marks a failed or aborted call as an error.
+ */
+export async function recordDecision(runtime, sessionId, cwd, params, { tool, signal, timeout } = {}) {
   if (!sessionId) throw new Error("Cardinal could not determine the session id.");
-  const { code, stdout, stderr } = await runDecision(runtime, decisionRecordArgs(sessionId, params), { cwd, ...options });
+  const args = [...decisionRecordArgs(sessionId, params), "--json", ...(tool ? [`--tool=${tool}`] : [])];
+  const { code, stdout, stderr } = await runDecision(runtime, args, { cwd, signal, timeout });
+  if (signal?.aborted) throw new Error("Decision recording was cancelled.");
   if (code !== 0) throw new Error((stderr || stdout).trim() || "Cardinal could not record the decision. Check Python 3.9+.");
-  return stdout.trim();
+  try {
+    const result = JSON.parse(stdout);
+    return { message: String(result.message ?? ""), context: typeof result.context === "string" ? result.context : undefined };
+  } catch {
+    return { message: stdout.trim(), context: undefined };
+  }
 }
 
 async function runPython(runtime, events) {

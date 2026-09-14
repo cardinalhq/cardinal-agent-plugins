@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import openCode from "../../dist/native/opencode/index.js";
 import pi from "../../dist/native/pi/index.ts";
-import { createBridge, runDecision } from "../../dist/native/opencode/lib/bridge.js";
+import { createBridge, decisionsEnabled, runDecision } from "../../dist/native/opencode/lib/bridge.js";
 import { z } from "zod";
 
 const attributes = record => Object.fromEntries(record.attributes.map(a => [a.key, Object.values(a.value)[0]]));
@@ -164,36 +164,56 @@ test("Pi decision capture: opt-in system prompt + native tool -> cardinal.decisi
   assert(!JSON.stringify(bodies).includes("PRIVATE_SENTINEL"));
 });
 
-test("OpenCode decision capture: system transform + native tool -> cardinal.decision with PR", async t => {
+test("OpenCode decision capture: chat-turn message transform + native tool -> cardinal.decision with PR", async t => {
   const { dir, bodies } = await fixture(t, "opencode");
   const client = { app: { log: async () => {} }, session: { get: async ({ path }) => ({ data: { id: path.id, directory: path.id === "foreign" ? "/elsewhere" : dir } }) } };
   const plugin = await openCode({ client, directory: dir });
-  const system = async (target, sessionID) => {
-    const output = { system: ["BASE"] };
-    await target["experimental.chat.system.transform"]({ sessionID, model: {} }, output);
-    return output.system;
+  // Shape of the chat loop's messages.transform output: history with the latest user message last.
+  const chat = async (target, sessionID) => {
+    const messages = [
+      { info: { id: "u0", sessionID, role: "user" }, parts: [{ type: "text", text: "earlier" }] },
+      { info: { id: "a0", sessionID, role: "assistant" }, parts: [] },
+      { info: { id: "u1", sessionID, role: "user" }, parts: [{ type: "text", text: "PRIVATE_SENTINEL" }] },
+    ];
+    await target["experimental.chat.messages.transform"]({}, { messages });
+    assert.equal(messages[0].parts.length, 1, "only the latest user message is extended");
+    return messages[2].parts.slice(1);
   };
   const tool = plugin.tool.cardinal_record_decision;
   // OpenCode wraps plugin args with z.object and serializes them for the model.
   assert.equal(z.object(tool.args).safeParse({}).success, false);
   assert.deepEqual(z.toJSONSchema(z.object(tool.args)).required, ["choice"]);
+  // system.transform also fires for title/agent generation, so it must stay unused.
+  assert.equal(plugin["experimental.chat.system.transform"], undefined);
 
-  assert.deepEqual(await system(plugin, "s1"), ["BASE"], "capture is off by default");
+  assert.deepEqual(await chat(plugin, "s1"), [], "capture is off by default");
   assert.equal((await runDecision("opencode", ["on"])).code, 0);
-  assert.deepEqual(await system(plugin, "s1"), ["BASE"], "cached until the next user message");
+  assert.deepEqual(await chat(plugin, "s1"), [], "cached until the next user message");
   await plugin["chat.message"]({ sessionID: "s1" }, { message: {}, parts: [] });
-  const [, context] = await system(plugin, "s1");
-  assert.match(context, /`cardinal_record_decision` tool/);
-  assert.match(context, /\(none yet\)/);
-  assert.deepEqual(await system(plugin, "foreign"), ["BASE"], "other workspaces are untouched");
+  const [part] = await chat(plugin, "s1");
+  assert.equal(part.synthetic, true);
+  assert.equal(part.messageID, "u1");
+  assert.match(part.text, /`cardinal_record_decision` tool/);
+  assert.match(part.text, /\(none yet\)/);
+  assert.deepEqual(await chat(plugin, "foreign"), [], "other workspaces are untouched");
 
-  const text = await tool.execute({ choice: "Use SQLite", why: "Zero ops" }, { sessionID: "s1", directory: dir });
+  // Compaction's summarization request (no tools) gets nothing; the next chat step does.
+  await plugin["experimental.session.compacting"]({ sessionID: "s1" }, { context: [], prompt: undefined });
+  assert.deepEqual(await chat(plugin, "s1"), [], "compaction input is left alone");
+  assert.equal((await chat(plugin, "s1")).length, 1);
+
+  const text = await tool.execute({ choice: "Use SQLite", why: "Zero ops" }, { sessionID: "s1", directory: dir, abort: new AbortController().signal });
   assert.match(text, /^Recorded decision use-sqlite: Use SQLite \(PR #42\)/);
-  assert.match((await system(plugin, "s1"))[1], /- use-sqlite: Use SQLite/, "recording refreshes the ledger");
+  // The cache is refreshed from the record result: a disabled Python must not be needed.
+  const python = process.env.CARDINAL_PYTHON; process.env.CARDINAL_PYTHON = "/nonexistent/python";
+  try { assert.match((await chat(plugin, "s1"))[0].text, /- use-sqlite: Use SQLite/, "recording refreshes the ledger"); }
+  finally { python === undefined ? delete process.env.CARDINAL_PYTHON : process.env.CARDINAL_PYTHON = python; }
+  const aborted = new AbortController(); aborted.abort();
+  await assert.rejects(tool.execute({ choice: "Never" }, { sessionID: "s1", directory: dir, abort: aborted.signal }), /cancelled/);
 
   const fallback = await openCode({ client, directory: dir }, { zod: undefined, bridge: { send() {}, async flush() {} } });
   assert.equal(fallback.tool, undefined);
-  assert.match((await system(fallback, "s1"))[1], /cardinal-opencode\.js" decision record --session s1/);
+  assert.match((await chat(fallback, "s1"))[0].text, /cardinal-opencode\.js" decision record --session s1/);
   await plugin.dispose();
 
   const [decision] = decisionEvent(bodies);
@@ -201,6 +221,55 @@ test("OpenCode decision capture: system transform + native tool -> cardinal.deci
   assert.equal(decision.agent_runtime, "opencode");
   assert.equal(decision["cardinal.pr_url"], "https://github.com/cardinalhq/fixture/pull/42");
   assert.equal(decision["cardinal.decision.rationale"], "Zero ops");
+});
+
+test("decision fast path reads the enabled state, not just the config file's existence", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "cardinal-enabled-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const env = { CARDINAL_PI_HOME: dir };
+  assert.equal(await decisionsEnabled("pi", env), false, "no config");
+  await mkdir(join(dir, "cardinal", "decisions"), { recursive: true });
+  const config = join(dir, "cardinal", "decisions", "config.json");
+  await writeFile(config, '{"enabled":false}');
+  assert.equal(await decisionsEnabled("pi", env), false, "left behind by `decision off`");
+  await writeFile(config, '{"enabled":true}');
+  assert.equal(await decisionsEnabled("pi", env), true);
+  assert.equal(await decisionsEnabled("pi", { ...env, CARDINAL_DECISIONS: "0" }), false, "env override wins");
+  assert.equal(await decisionsEnabled("pi", { ...env, CARDINAL_DECISIONS: "maybe" }), true, "unparseable override falls back to config");
+  await writeFile(config, '{"enabled":false}');
+  assert.equal(await decisionsEnabled("pi", { ...env, CARDINAL_DECISIONS: " ON " }), true);
+});
+
+test("decision recorder is killed with its whole process group on abort and timeout", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "cardinal-kill-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const python = join(dir, "python");
+  // Stands in for Python blocked on a `gh`/`git` grandchild.
+  await writeFile(python, `#!/bin/sh\nsleep 30 &\necho $! > "${dir}/$1.pid"\nwait\n`, { mode: 0o755 });
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const grandchild = async name => {
+    for (let i = 0; i < 100; i++) {
+      try { return Number(await readFile(join(dir, `${name}.pid`), "utf8")); } catch { await new Promise(r => setTimeout(r, 20)); }
+    }
+    throw new Error("grandchild never started");
+  };
+  const settle = async pid => { for (let i = 0; i < 50 && alive(pid); i++) await new Promise(r => setTimeout(r, 20)); return alive(pid); };
+
+  const controller = new AbortController();
+  // pythonArgs puts the script path first; name the pid file after a unique arg instead.
+  const aborted = runDecision("pi", [], { python, signal: controller.signal, timeout: 60000 });
+  const abortPid = await grandchild("-B");
+  controller.abort();
+  assert.equal((await aborted).code, -1);
+  assert.equal(await settle(abortPid), false, "abort kills the grandchild");
+
+  await rm(join(dir, "-B.pid"));
+  const started = Date.now();
+  const timedOut = runDecision("pi", [], { python, timeout: 300 });
+  const timeoutPid = await grandchild("-B");
+  assert.equal((await timedOut).code, -1);
+  assert(Date.now() - started < 5000);
+  assert.equal(await settle(timeoutPid), false, "timeout kills the grandchild");
 });
 
 test("bridge serializes batches, drains on shutdown, and isolates failures", async () => {

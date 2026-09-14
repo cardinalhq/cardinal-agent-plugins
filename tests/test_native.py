@@ -217,6 +217,25 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(self.cli("decision", "off")[0], 0)
         self.assertFalse(native.decisions.is_enabled(self.paths.runtime_dir))
 
+    def test_decision_record_budget_fits_bridge_and_json_refreshes_context(self):
+        self.save()
+        self.cli("decision", "on")
+        self.assertLess(4 * 1.0 + native.CLUSTER_TIMEOUT_SEC + native.PR_TIMEOUT_SEC + native.DECISION_EMIT_TIMEOUT_SEC, 15.0,
+                        "worst case must stay well inside the bridge's 20s kill")
+        domains = ([{"id": "d18:core", "cover": "core/"}], "d18-v1:cap=100,min=10")
+        with patch.object(native.initiative, "git", side_effect=fake_git), patch.object(native.otlp, "emit_records"), \
+                patch.object(native.decisions, "load_domains", return_value=domains) as load, \
+                patch.object(native.decisions, "match_clusters", return_value=["d18:core"]):
+            code, out, err = self.cli("decision", "record", "--session", "s1", "--choice", "Use SQLite",
+                                      "--anchor", "core/x.py", "--json", "--tool", "cardinal_record_decision")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(load.call_args.kwargs["timeout"], native.CLUSTER_TIMEOUT_SEC)
+        self.assertEqual(self.gh.call_args.args[2], native.PR_TIMEOUT_SEC)
+        result = json.loads(out)
+        self.assertEqual(result["message"], "Recorded decision use-sqlite: Use SQLite (clusters d18:core)")
+        self.assertIn("- use-sqlite: Use SQLite", result["context"])
+        self.assertIn("`cardinal_record_decision` tool", result["context"])
+
     def test_decision_record_without_connection_is_local_and_validates(self):
         self.cli("decision", "on", runtime="opencode")
         with patch.object(native.initiative, "git", return_value=None), patch.object(native.otlp, "emit_records") as emit:

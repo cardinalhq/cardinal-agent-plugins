@@ -89,16 +89,18 @@ is omitted; a runtime-reported cost of zero is preserved.
 
 Off by default. `cardinal-opencode decision on|off|status [--session ID]` toggles it;
 `CARDINAL_DECISIONS=1/0` in OpenCode's environment overrides the switch. While it
-is on, the plugin appends the recording instructions and this session's decision
-ledger to the system prompt through `experimental.chat.system.transform`, and the
-agent records choices with the `cardinal_record_decision` tool. Each recorded
+is on, the plugin adds the recording instructions and this session's decision
+ledger to chat turns as an in-memory synthetic part on the latest user message
+(`experimental.chat.messages.transform`), and the agent records choices with the
+`cardinal_record_decision` tool. Title generation never sees it, and compaction
+requests are skipped (`experimental.session.compacting`). Each recorded
 decision is one `cardinal.decision` event (repo, branch, head sha, PR, anchors,
 code clusters) and is kept in the ledger under `cardinal/decisions/`. The same
 record is available as `cardinal-opencode decision record --session ID --choice …`.
 
-Limits: the system-prompt hook is marked experimental in `@opencode-ai/plugin`
-1.18.30 and may change. The ledger is refreshed on each new user message and after
-the tool records a decision. The tool is registered in every session, and returns
+Limits: both hooks are marked experimental in `@opencode-ai/plugin` 1.18.30 and
+may change. The ledger is refreshed on each new user message and from each
+recorded decision. A cancelled tool call stops the recorder and its `git`/`gh` children. The tool is registered in every session, and returns
 an error while capture is off. It needs the package's `zod` dependency; an install
 without dependencies gets instructions to run the CLI through the shell instead.
 
