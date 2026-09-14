@@ -3,7 +3,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { connection } from "./lib/bridge.js";
 
 /** Lazy connection: installing the extension never initiates a remote tool call. */
-export function cardinalMcp({ readConnection = () => connection("pi"), makeClient = () => new Client({ name: "cardinal-pi-plugin", version: "0.1.0" }) } = {}) {
+export function cardinalMcp({ readConnection = () => connection("pi"), makeClient = () => new Client({ name: "cardinal-pi-plugin", version: "0.2.0" }) } = {}) {
   let current, fingerprint, connecting;
   let acquiring = Promise.resolve();
   async function close() {

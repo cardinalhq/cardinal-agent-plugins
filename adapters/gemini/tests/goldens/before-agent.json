@@ -134,6 +134,18 @@
                       "value": {
                         "stringValue": "feature"
                       }
+                    },
+                    {
+                      "key": "cardinal_pr_number",
+                      "value": {
+                        "intValue": "7"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/cardinalhq/fixture-repo/pull/7"
+                      }
                     }
                   ]
                 }
@@ -261,6 +273,18 @@
                       "value": {
                         "stringValue": "code-review"
                       }
+                    },
+                    {
+                      "key": "cardinal_pr_number",
+                      "value": {
+                        "intValue": "7"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/cardinalhq/fixture-repo/pull/7"
+                      }
                     }
                   ]
                 }
@@ -387,6 +411,18 @@
                       "key": "cardinal_command",
                       "value": {
                         "stringValue": "cardinal:status"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_number",
+                      "value": {
+                        "intValue": "7"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/cardinalhq/fixture-repo/pull/7"
                       }
                     }
                   ]

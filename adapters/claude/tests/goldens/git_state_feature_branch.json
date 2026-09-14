@@ -120,6 +120,18 @@
                       }
                     },
                     {
+                      "key": "cardinal.pr_number",
+                      "value": {
+                        "intValue": "42"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/cardinalhq/golden-repo/pull/42"
+                      }
+                    },
+                    {
                       "key": "plan_type",
                       "value": {
                         "stringValue": "max"

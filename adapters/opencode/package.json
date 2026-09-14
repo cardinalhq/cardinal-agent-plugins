@@ -1,6 +1,6 @@
 {
   "name": "@cardinalhq/opencode-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Cardinal session telemetry and MCP for OpenCode",
   "type": "module",
   "license": "Apache-2.0",
@@ -9,5 +9,6 @@
   "bin": { "cardinal-opencode": "./bin/cardinal-opencode.js" },
   "files": ["index.js", "bin", "lib", "README.md", "LICENSE"],
   "engines": { "node": ">=20" },
+  "dependencies": { "zod": "^4.1.8" },
   "scripts": { "prepack": "node ./check-package.js" }
 }

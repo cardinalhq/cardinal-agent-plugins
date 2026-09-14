@@ -363,11 +363,18 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("Stop", hooks["hooks"])
         self.assertIn("SubagentStop", hooks["hooks"])
         self.assertIn("cardinal-codex-plugin", json.dumps(hooks))
-        # Semantic DAG is gone: its PreToolUse/PostToolUse tool hooks are
-        # no longer registered, and the telemetry hook handles neither.
+        # Semantic DAG is gone: its PreToolUse tool hook is no longer
+        # registered.
         self.assertNotIn("PreToolUse", hooks["hooks"])
-        self.assertNotIn("PostToolUse", hooks["hooks"])
         self.assertNotIn("semantic-dag", json.dumps(hooks))
+        # PostToolUse is registered only for hook-side decision emission:
+        # exact "Bash" matcher, no status message on every shell call.
+        (group,) = hooks["hooks"]["PostToolUse"]
+        self.assertEqual(group["matcher"], "Bash")
+        (handler,) = group["hooks"]
+        self.assertIn("--event PostToolUse", handler["command"])
+        self.assertIn("cardinal-codex-plugin", handler["command"])
+        self.assertNotIn("statusMessage", handler)
 
     def test_repair_hooks_strips_legacy_semantic_dag_paths_without_auth(self):
         """Installs connected before the Semantic DAG removal still carry

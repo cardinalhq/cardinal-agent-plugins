@@ -10,6 +10,7 @@ From the repository root:
 
 ```sh
 python3 build/native.py opencode
+npm install --omit=dev --prefix ./dist/native/opencode
 node dist/native/opencode/bin/cardinal-opencode.js connect
 ```
 
@@ -40,7 +41,7 @@ installation directory. Point OpenCode at that directory's
 command manages the connection.
 
 After the package is published to npm, the plugin config may instead name
-`@cardinalhq/opencode-plugin@0.1.0` and connection commands can use
+`@cardinalhq/opencode-plugin@0.2.0` and connection commands can use
 `npx --package @cardinalhq/opencode-plugin cardinal-opencode connect`.
 The initial implementation does not publish the package automatically.
 
@@ -67,7 +68,10 @@ Cardinal state directory; set `CARDINAL_PYTHON` to select a Python executable.
 
 ## Telemetry
 
-- `cardinal.git_state`: repository, branch, HEAD, cwd, initiative attribution.
+- `cardinal.git_state`: repository, branch, HEAD, cwd, initiative attribution,
+  and the branch's PR (`cardinal_pr_number`, `cardinal_pr_url`) when `gh pr view`
+  resolves one. The lookup is cached per repo + branch (10 min, 2 min for a miss),
+  bounded to 1.5s, and skipped on protected branches; no PR means no PR keys.
 - `api_request` and `cardinal.turn_usage`: completed assistant-message usage,
   model/provider, cache and reasoning tokens, runtime-reported cost.
 - `cardinal.turn_tool` and `tool_result`: completed/failed tool calls,
@@ -80,6 +84,25 @@ deduplication across reloads. Telemetry is best-effort: the queue is bounded,
 delivery is not retried, and failures never interrupt the agent. No prompts,
 assistant text, tool outputs, or raw shell commands are emitted. Unknown cost
 is omitted; a runtime-reported cost of zero is preserved.
+
+## Decision capture
+
+Off by default. `cardinal-opencode decision on|off|status [--session ID]` toggles it;
+`CARDINAL_DECISIONS=1/0` in OpenCode's environment overrides the switch. While it
+is on, the plugin adds the recording instructions and this session's decision
+ledger to chat turns as an in-memory synthetic part on the latest user message
+(`experimental.chat.messages.transform`), and the agent records choices with the
+`cardinal_record_decision` tool. Title generation never sees it, and compaction
+requests are skipped (`experimental.session.compacting`). Each recorded
+decision is one `cardinal.decision` event (repo, branch, head sha, PR, anchors,
+code clusters) and is kept in the ledger under `cardinal/decisions/`. The same
+record is available as `cardinal-opencode decision record --session ID --choice …`.
+
+Limits: both hooks are marked experimental in `@opencode-ai/plugin` 1.18.30 and
+may change. The ledger is refreshed on each new user message and from each
+recorded decision. A cancelled tool call stops the recorder and its `git`/`gh` children. The tool is registered in every session, and returns
+an error while capture is off. It needs the package's `zod` dependency; an install
+without dependencies gets instructions to run the CLI through the shell instead.
 
 Spend enforcement, subscription-plan reporting, subagent cost aggregation,
 and skill/command attribution are not part of this initial adapter. See

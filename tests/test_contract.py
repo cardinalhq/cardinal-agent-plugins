@@ -259,6 +259,8 @@ class ContractTests(unittest.TestCase):
         allowed = REQUIRED_KEYS["cardinal.git_state"] | {
             "cardinal_initiative_name", "cardinal_command",
             "plan_type", "rate_limit_tier", "event_name", "session_id",
+            # docs/specs/adapter-parity.md: present only when a PR resolves.
+            "cardinal_pr_number", "cardinal_pr_url",
         }
         for adapter in ADAPTERS:
             keys = self.by_adapter[adapter].get("cardinal.git_state", set())

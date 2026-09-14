@@ -71,3 +71,12 @@ anchors for long-lived joins.
 `~/.claude/cardinal/decisions/`: `config.json` (the on/off switch),
 `sessions/<session>.json` (the ledger the prompt hook renders), and
 `cache/` (D18 domains, PR lookups).
+
+## Sandboxing
+
+Claude Code's Bash sandbox is opt-in. With it on, `cardinal-decision record`
+can't write `~/.claude/cardinal/` or reach Cardinal's ingest host, so Claude
+Code asks to rerun it unsandboxed. To avoid the prompt, add
+`~/.claude/cardinal` to the sandbox's allowed write paths and your Cardinal
+ingest host to its allowed network domains. Hooks run outside the sandbox and
+are unaffected.

@@ -143,6 +143,18 @@
                       "value": {
                         "stringValue": "cardinal:status"
                       }
+                    },
+                    {
+                      "key": "cardinal_pr_number",
+                      "value": {
+                        "intValue": "77"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/cardinalhq/golden-fixture/pull/77"
+                      }
                     }
                   ]
                 }

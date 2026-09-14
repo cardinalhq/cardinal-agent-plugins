@@ -34,6 +34,16 @@
       "event": "AfterModel",
       "returncode": 0,
       "stdout": ""
+    },
+    {
+      "event": "AfterModel",
+      "returncode": 0,
+      "stdout": ""
+    },
+    {
+      "event": "AfterModel",
+      "returncode": 0,
+      "stdout": ""
     }
   ],
   "batches": [
@@ -147,19 +157,19 @@
                     {
                       "key": "cache_read_tokens",
                       "value": {
-                        "intValue": "200"
+                        "intValue": "0"
                       }
                     },
                     {
                       "key": "cache_read_input_tokens",
                       "value": {
-                        "intValue": "200"
+                        "intValue": "0"
                       }
                     },
                     {
                       "key": "cost_usd",
                       "value": {
-                        "doubleValue": 0.000267
+                        "doubleValue": 0.000282
                       }
                     }
                   ]
@@ -224,19 +234,19 @@
                     {
                       "key": "cache_read_tokens",
                       "value": {
-                        "intValue": "200"
+                        "intValue": "0"
                       }
                     },
                     {
                       "key": "cache_read_input_tokens",
                       "value": {
-                        "intValue": "200"
+                        "intValue": "0"
                       }
                     },
                     {
                       "key": "cost_usd",
                       "value": {
-                        "doubleValue": 0.000267
+                        "doubleValue": 0.000282
                       }
                     },
                     {
@@ -369,25 +379,25 @@
                     {
                       "key": "thought_tokens",
                       "value": {
-                        "intValue": "1200"
+                        "intValue": "1500"
                       }
                     },
                     {
                       "key": "cache_read_tokens",
                       "value": {
-                        "intValue": "2500"
+                        "intValue": "0"
                       }
                     },
                     {
                       "key": "cache_read_input_tokens",
                       "value": {
-                        "intValue": "2500"
+                        "intValue": "0"
                       }
                     },
                     {
                       "key": "cost_usd",
                       "value": {
-                        "doubleValue": 0.023906
+                        "doubleValue": 0.02925
                       }
                     }
                   ]
@@ -446,25 +456,25 @@
                     {
                       "key": "thought_tokens",
                       "value": {
-                        "intValue": "1200"
+                        "intValue": "1500"
                       }
                     },
                     {
                       "key": "cache_read_tokens",
                       "value": {
-                        "intValue": "2500"
+                        "intValue": "0"
                       }
                     },
                     {
                       "key": "cache_read_input_tokens",
                       "value": {
-                        "intValue": "2500"
+                        "intValue": "0"
                       }
                     },
                     {
                       "key": "cost_usd",
                       "value": {
-                        "doubleValue": 0.023906
+                        "doubleValue": 0.02925
                       }
                     },
                     {

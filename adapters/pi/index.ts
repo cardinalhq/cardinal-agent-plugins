@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createBridge } from "./lib/bridge.js";
+import { createBridge, DECISION_TOOL, decisionContext, recordDecision } from "./lib/bridge.js";
 import { cardinalMcp } from "./mcp.js";
+
+const ids = (description: string) => Type.Optional(Type.Array(Type.String(), { description }));
 
 export default function cardinal(pi: ExtensionAPI) {
   let notify = (_message: string) => {};
@@ -18,9 +20,12 @@ export default function cardinal(pi: ExtensionAPI) {
     run = randomUUID(); modelCall = ""; tools.clear();
     bridge.send({ ...context(ctx), kind: "session", event_id: ctx.sessionManager.getSessionId() });
   });
-  pi.on("before_agent_start", async (_event, ctx) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     run = randomUUID(); modelCall = "";
     bridge.send({ ...context(ctx), kind: "user", event_id: run });
+    // Pi applies a returned systemPrompt for this turn only and chains extensions.
+    const decisions = await decisionContext("pi", ctx.sessionManager.getSessionId(), ctx.cwd, DECISION_TOOL.name);
+    return decisions ? { systemPrompt: `${event.systemPrompt ?? ""}\n\n${decisions}` } : undefined;
   });
   pi.on("turn_start", async (event, ctx) => {
     modelCall = `${run}:${event.turnIndex}`;
@@ -65,5 +70,22 @@ export default function cardinal(pi: ExtensionAPI) {
     promptSnippet: "Execute a discovered Cardinal tool.",
     parameters: Type.Object({ name: Type.String(), arguments: Type.Record(Type.String(), Type.Unknown()) }),
     async execute(_id, params, signal) { return await mcp.call(params.name, params.arguments, signal); },
+  });
+  const f = DECISION_TOOL.fields;
+  pi.registerTool({
+    name: DECISION_TOOL.name, label: "Record decision", description: DECISION_TOOL.description,
+    parameters: Type.Object({
+      choice: Type.String({ description: f.choice }),
+      question: Type.Optional(Type.String({ description: f.question })),
+      why: Type.Optional(Type.String({ description: f.why })),
+      alt: ids(f.alt),
+      by: Type.Optional(Type.Union([Type.Literal("agent"), Type.Literal("user")], { description: f.by })),
+      anchor: ids(f.anchor), follows: ids(f.follows), refines: ids(f.refines), supersedes: ids(f.supersedes),
+      id: Type.Optional(Type.String({ description: f.id })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const { message } = await recordDecision("pi", ctx.sessionManager.getSessionId(), ctx.cwd, params, { signal });
+      return { content: [{ type: "text", text: message }], details: {} };
+    },
   });
 }

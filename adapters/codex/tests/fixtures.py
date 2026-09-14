@@ -160,14 +160,59 @@ def make_repo(parent: Path, branch: str) -> Path:
     return repo
 
 
+FIXTURE_PR_NUMBER = 99
+FIXTURE_PR_URL = "https://github.com/cardinalhq/golden-fixture/pull/99"
+
+# Stub `gh` so PR resolution never touches the network. Mode via
+# CARDINAL_FIXTURE_GH: default prints the fixture PR, "none" fails like
+# `gh pr view` on a branch without a PR, "slow" outlives the hook's
+# bounded timeout (exec so the timeout's kill reaches the sleeper).
+GH_STUB = f"""#!/bin/sh
+if [ -n "$CARDINAL_FIXTURE_GH_LOG" ]; then echo "$*" >> "$CARDINAL_FIXTURE_GH_LOG"; fi
+case "$CARDINAL_FIXTURE_GH" in
+  none) echo 'no pull requests found' >&2; exit 1 ;;
+  slow) exec sleep 5 ;;
+esac
+echo '{{"number": {FIXTURE_PR_NUMBER}, "url": "{FIXTURE_PR_URL}"}}'
+"""
+
+
+def seed_pr_cache(home: Path, repo: str, branch: str,
+                  number: int | None = FIXTURE_PR_NUMBER,
+                  url: str | None = FIXTURE_PR_URL,
+                  at: float | None = None) -> Path:
+    """Pre-seed the PR cache decisions.resolve_pr maintains, so the sync
+    UserPromptSubmit path (cache-only) is deterministic."""
+    path = home / ".codex" / "cardinal" / "decisions" / "cache" / "prs.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cache = json.loads(path.read_text()) if path.exists() else {}
+    cache[f"{repo}#{branch}"] = {"at": time.time() if at is None else at,
+                                 "number": number, "url": url}
+    path.write_text(json.dumps(cache))
+    return path
+
+
+def install_gh_stub(home: Path) -> Path:
+    bin_dir = home / ".fixture-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    if not gh.exists():
+        gh.write_text(GH_STUB)
+        gh.chmod(0o755)
+    return bin_dir
+
+
 def run_hook(hook: Path, event: str, home: Path, stdin: dict,
              env_extra: dict[str, str] | None = None,
              timeout: int = 30) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["HOME"] = str(home)
-    # Session-id and debug-capture env must never leak in from the caller.
+    env["PATH"] = f"{install_gh_stub(home)}{os.pathsep}{env.get('PATH', '')}"
+    # Session-id, debug-capture and decision-capture env must never leak
+    # in from the caller.
     for k in ("CODEX_SESSION_ID", "OPENAI_CODEX_SESSION_ID",
-              "CARDINAL_CODEX_DEBUG_PAYLOADS"):
+              "CARDINAL_CODEX_DEBUG_PAYLOADS", "CARDINAL_DECISIONS",
+              "CARDINAL_FIXTURE_GH", "CARDINAL_FIXTURE_GH_LOG"):
         env.pop(k, None)
     if env_extra:
         env.update(env_extra)
@@ -338,6 +383,9 @@ def scenario_telemetry(hook: Path) -> dict[str, Any]:
             out["stop_second"] = batches[1]
 
             repo = make_repo(home, "feat/worktree-fix-99-cool-thing")
+            # The sync path reads PR facts from cache only; seeding it keeps
+            # the golden independent of subprocess timing.
+            seed_pr_cache(home, "cardinalhq/golden-fixture", "feat/worktree-fix-99-cool-thing")
             r = run_hook(hook, "UserPromptSubmit", home, {
                 "session_id": SESSION_ID,
                 "cwd": str(repo),
