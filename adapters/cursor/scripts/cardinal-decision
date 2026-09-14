@@ -8,23 +8,22 @@ Two audiences, two kinds of subcommand:
            the default Auto-review mode runs agent shell commands in a
            sandbox (writes only in the workspace and /tmp, network
            denied by default), so `record` has no side effects at all: it
-           validates the arguments, prints one machine-readable marker
-           line, and exits 0. It never reads ~/.cursor (a sandbox may deny
+           validates the arguments, prints one confirmation marker line,
+           and exits 0. It never reads ~/.cursor (a sandbox may deny
            that, and guessing would misreport the on/off state), never
            writes, never runs `gh`, never touches the network.
            The plugin's postToolUse hook — which runs outside the sandbox
-           — finds the marker in the command output, applies the on/off
-           gate, writes the session ledger, resolves the PR, and emits the
-           single `cardinal.decision` OTLP event.
+           — re-parses the command the agent ran with the same argument
+           parser (hooks/_decision_cli.py), accepts the decision only when
+           the marker in the output matches it, applies the on/off gate,
+           writes the session ledger, and hands the PR lookup and the
+           single `cardinal.decision` emit to a detached background child.
 
   on       run BY THE USER in their own terminal: turn capture on
   off      run by the user: turn capture off
   status   run by the user: show the setting (and a session's decisions)
 
 CARDINAL_DECISIONS=1/0 in the hook process env overrides on/off.
-
-Core decision logic (validation, anchors, clusters, ledger, attributes)
-lives in the vendored cardinal_core.decisions.
 """
 
 from __future__ import annotations
@@ -36,17 +35,13 @@ import sys
 sys.dont_write_bytecode = True
 
 import argparse  # noqa: E402
-import json  # noqa: E402
 import os  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+import _decision_cli  # noqa: E402
 from cardinal_core import decisions  # noqa: E402
 
-# One line on stdout: MARKER_PREFIX + compact JSON. Parsed by the
-# postToolUse hook (hooks/cardinal-cursor-telemetry.py).
-MARKER_PREFIX = "cardinal-decision-record:v1 "
-MAX_ANCHOR_SPEC = 500
 EXIT_USAGE = 2
 
 
@@ -89,47 +84,12 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_record(args: argparse.Namespace) -> int:
-    cwd = os.getcwd()
-    anchor_specs = [spec[:MAX_ANCHOR_SPEC] for spec in args.anchor][: decisions.MAX_ANCHORS]
     try:
-        # Validation only: the hook re-parses anchors against the repo root
-        # and derives the final id against the session ledger.
-        for spec in anchor_specs:
-            decisions.parse_anchor(spec, None, cwd)
-        decision = decisions.build_decision(
-            choice=args.choice,
-            question=args.question,
-            rationale=args.why,
-            decided_by=args.by,
-            alternatives=args.alt,
-            follows_from=args.follows,
-            refines=args.refines,
-            supersedes=args.supersedes,
-            decision_id=args.id,
-        )
+        marker, decision = _decision_cli.build_marker(args, os.getcwd())
     except decisions.DecisionError as err:
         print(f"cardinal-decision: {err}", file=sys.stderr)
         return EXIT_USAGE
-
-    def ids(relation: str) -> list[str]:
-        return [link["to"] for link in decision["links"] if link["relation"] == relation]
-
-    marker = {
-        "v": 1,
-        "session": args.session,
-        "cwd": cwd,
-        "id": decision["id"] if args.id else None,
-        "choice": decision["choice"],
-        "question": decision["question"],
-        "why": decision["rationale"],
-        "alt": decision["alternatives"],
-        "by": decision["decided_by"],
-        "anchor": anchor_specs,
-        "follows": ids("follows_from"),
-        "refines": ids("refines"),
-        "supersedes": ids("supersedes"),
-    }
-    print(MARKER_PREFIX + json.dumps(marker, separators=(",", ":"), ensure_ascii=True))
+    print(_decision_cli.marker_line(marker))
     print(
         f"Decision submitted: {decision['choice']} (proposed id {decision['id']}). "
         "Cardinal's hook records it after this command finishes and reports the final id."
@@ -137,51 +97,17 @@ def cmd_record(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="cardinal-decision",
-        description="Record the decisions an agent makes, tagged for the Cardinal Agent Outcomes dashboard.",
-    )
-    sub = parser.add_subparsers(dest="command", metavar="{record,on,off,status}")
-
-    record = sub.add_parser(
-        "record",
-        help="(agent) submit one decision; side-effect free, recorded by the Cardinal hook",
-    )
-    record.add_argument("--session", help="optional; the hook uses the Cursor conversation id")
-    record.add_argument("--choice", required=True, help="the option chosen, in a few words")
-    record.add_argument("--question", help="the question this decision settles")
-    record.add_argument("--why", help="one sentence on why this option won")
-    record.add_argument("--alt", action="append", default=[], metavar="OPTION",
-                        help="an option that was considered and rejected (repeatable)")
-    record.add_argument("--by", choices=decisions.DECIDED_BY, default="agent",
-                        help="who made the call (default: agent)")
-    record.add_argument("--anchor", action="append", default=[], metavar="ANCHOR",
-                        help="file, dir/, file::Symbol, or <kind>:<identifier>[@path] the decision governs (repeatable)")
-    record.add_argument("--follows", action="append", default=[], metavar="ID",
-                        help="an earlier decision this one only makes sense because of")
-    record.add_argument("--refines", action="append", default=[], metavar="ID",
-                        help="an earlier decision this one narrows")
-    record.add_argument("--supersedes", action="append", default=[], metavar="ID",
-                        help="an earlier decision this one replaces")
-    record.add_argument("--id", help="decision id; reuse an existing id to revise that decision")
-    record.set_defaults(func=cmd_record)
-
-    sub.add_parser("on", help="(user, own terminal) turn decision capture on").set_defaults(func=cmd_on)
-    sub.add_parser("off", help="(user, own terminal) turn decision capture off").set_defaults(func=cmd_off)
-    status = sub.add_parser("status", help="(user, own terminal) show whether capture is on")
-    status.add_argument("--session", help="also list this session's decisions")
-    status.set_defaults(func=cmd_status)
-    return parser
+HANDLERS = {"record": cmd_record, "on": cmd_on, "off": cmd_off, "status": cmd_status}
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    parser = _decision_cli.build_parser()
     args = parser.parse_args(argv)
-    if not getattr(args, "func", None):
+    handler = HANDLERS.get(args.command)
+    if handler is None:
         parser.print_help()
         return EXIT_USAGE
-    return args.func(args)
+    return handler(args)
 
 
 if __name__ == "__main__":

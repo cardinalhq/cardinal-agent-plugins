@@ -116,7 +116,10 @@ def build_sandbox(root: Path, ingest_endpoint: str) -> dict[str, Any]:
 
 
 def hook_env(home: Path) -> dict[str, str]:
-    env = {**os.environ, "HOME": str(home), **_GIT_ENV}
+    # postToolUse hands its OTLP posts to a detached child; run that job
+    # inline so each step's batches are captured deterministically.
+    env = {**os.environ, "HOME": str(home), **_GIT_ENV,
+           "CARDINAL_CURSOR_BACKGROUND_INLINE": "1"}
     bin_dir = home / "bin"
     if bin_dir.is_dir():
         env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"

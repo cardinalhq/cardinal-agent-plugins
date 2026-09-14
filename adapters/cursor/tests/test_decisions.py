@@ -2,13 +2,18 @@
 in the Cursor adapter.
 
 Decision flow under test: the agent's sandboxed `cardinal-decision record`
-only validates and prints a marker line; the postToolUse hook (outside
-the sandbox) applies the on/off gate, writes the ledger, resolves the PR
-and is the single emitter of cardinal.decision.
+only validates and prints a confirmation marker; the postToolUse hook
+(outside the sandbox) re-derives the decision from the argv of the command
+the agent actually ran, accepts it only when a matching marker confirms
+the run, applies the on/off gate, writes the ledger, and hands every
+network send (turn_tool, clusters + PR + cardinal.decision) to a detached
+background child.
 
 Scripts run as subprocesses with HOME pointed at a temp dir whose
 ~/.cursor connection state routes OTLP to a local stub, inside a temp git
-repo with an origin remote and a stub `gh` on PATH. No network.
+repo with an origin remote and a stub `gh` on PATH. No network. Hooks run
+their background job inline (CARDINAL_CURSOR_BACKGROUND_INLINE=1) except
+where a test exercises the detached child.
 
 Run: uv run --no-project --with pytest python -m pytest adapters/cursor/tests/test_decisions.py -q
 """
@@ -80,10 +85,13 @@ def _load_module(name: str, path: Path):
 
 class _OTLPStub(BaseHTTPRequestHandler):
     received: list = []
+    delay = 0.0
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         type(self).received.append(json.loads(body))
+        if type(self).delay:
+            time.sleep(type(self).delay)
         self.send_response(200)
         self.end_headers()
 
@@ -113,9 +121,14 @@ def _snapshot(*roots: Path) -> dict:
     return out
 
 
+def _marker_line(stdout: str) -> str:
+    return next(line for line in stdout.splitlines() if line.startswith(MARKER))
+
+
 class CursorDecisionBase(unittest.TestCase):
     def setUp(self):
         _OTLPStub.received = []
+        _OTLPStub.delay = 0.0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.tmp = TemporaryDirectory()
@@ -158,9 +171,12 @@ class CursorDecisionBase(unittest.TestCase):
             self.cursor.chmod(0o755)
         self.tmp.cleanup()
 
-    def env(self, **extra) -> dict:
+    def env(self, inline: bool = True, **extra) -> dict:
         path = f"{self.bin}:{os.path.dirname(GIT)}:/usr/bin:/bin"
-        return {"HOME": str(self.home), "PATH": path, **extra}
+        env = {"HOME": str(self.home), "PATH": path, **extra}
+        if inline:
+            env["CARDINAL_CURSOR_BACKGROUND_INLINE"] = "1"
+        return env
 
     def enable(self) -> None:
         self.cli("on")
@@ -173,23 +189,32 @@ class CursorDecisionBase(unittest.TestCase):
         self.assertEqual(proc.returncode, expect_rc, proc.stdout + proc.stderr)
         return proc
 
-    def hook(self, event: str, payload: dict, **env) -> str:
+    def hook(self, event: str, payload: dict, inline: bool = True, **env) -> str:
         proc = subprocess.run(
             [sys.executable, str(HOOK), "--event", event], input=json.dumps(payload),
-            env=self.env(**env), capture_output=True, text=True, timeout=30,
+            env=self.env(inline=inline, **env), capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout
 
     def records(self, event_name: str) -> list:
         out = []
-        for body in _OTLPStub.received:
+        for body in list(_OTLPStub.received):
             resource = _attrs(body["resourceLogs"][0]["resource"]["attributes"])
             for rec in body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]:
                 attrs = _attrs(rec["attributes"])
                 if attrs.get("event_name") == event_name:
                     out.append((resource, attrs))
         return out
+
+    def wait_for_records(self, event_name: str, count: int = 1, timeout: float = 15.0) -> list:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            found = self.records(event_name)
+            if len(found) >= count:
+                return found
+            time.sleep(0.1)
+        self.fail(f"background child never delivered {count} {event_name}")
 
     RECORD_ARGS = (
         "record",
@@ -222,38 +247,17 @@ class CursorDecisionBase(unittest.TestCase):
         payload.update(overrides)
         return payload
 
-    def prime_pr_cache(self) -> None:
-        """A prompt's git_state resolves the PR synchronously and caches it,
-        so the recorder (cache-only) sees it without spawning a refresh."""
-        if not getattr(self, "_pr_primed", False):
-            self.hook("beforeSubmitPrompt", {"hook_event_name": "beforeSubmitPrompt",
-                                             "conversation_id": "c1", "prompt": "hi",
-                                             "workspace_roots": [str(self.repo)]})
-            self._pr_primed = True
-
     def agent_command(self, args) -> str:
         return f'python3 "{CLI}" ' + " ".join(shlex.quote(a) for a in args)
 
-    def agent_records(self, *args: str, prime: bool = True, **hook_env) -> str:
+    def agent_records(self, *args: str, **hook_env) -> str:
         """Agent runs the CLI (unsandboxed here), then Cursor fires postToolUse."""
-        if prime:
-            self.prime_pr_cache()
         args = args or self.RECORD_ARGS
         stdout = self.cli(*args).stdout
         return self.hook("postToolUse", self.shell_payload(self.agent_command(args), stdout), **hook_env)
 
-    def wait_for_pr_cache(self, timeout: float = 8.0) -> dict:
-        path = self.cursor / "cardinal" / "decisions" / "cache" / "prs.json"
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                data = json.loads(path.read_text())
-                if data:
-                    return data
-            except (OSError, ValueError):
-                pass
-            time.sleep(0.1)
-        self.fail("detached PR refresh never wrote the cache")
+    def context(self, out: str) -> str:
+        return json.loads(out)["additional_context"]
 
 
 class SandboxedRecordCliTest(CursorDecisionBase):
@@ -283,8 +287,7 @@ class SandboxedRecordCliTest(CursorDecisionBase):
         self.assertEqual(_OTLPStub.received, [])
         self.assertFalse(self.gh_calls.exists())
 
-        [marker_line] = [l for l in proc.stdout.splitlines() if l.startswith(MARKER)]
-        marker = json.loads(marker_line[len(MARKER):])
+        marker = json.loads(_marker_line(proc.stdout)[len(MARKER):])
         self.assertEqual(marker["v"], 1)
         self.assertEqual(marker["choice"], "Use mutation-run S3 LSM")
         self.assertEqual(marker["why"], "Global ID-only lookup without per-ID database rows.")
@@ -322,7 +325,7 @@ class SandboxedRecordCliTest(CursorDecisionBase):
 class HookRecordsDecisionTest(CursorDecisionBase):
     def test_hook_emits_tagged_decision_from_documented_payload(self):
         self.enable()
-        out = json.loads(self.agent_records())
+        context = self.context(self.agent_records())
 
         [(resource, attrs)] = self.records("cardinal.decision")
         self.assertEqual(resource["service.name"], "cursor")
@@ -344,8 +347,7 @@ class HookRecordsDecisionTest(CursorDecisionBase):
         self.assertEqual(int(attrs["cardinal.pr_number"]), 42)
         self.assertEqual(attrs["cardinal.pr_url"], "https://github.com/acme/widgets/pull/42")
 
-        self.assertIn("Cardinal recorded decision use-mutation-run-s3-lsm", out["additional_context"])
-        self.assertIn("PR #42", out["additional_context"])
+        self.assertIn("Cardinal recorded decision use-mutation-run-s3-lsm", context)
         # turn_tool telemetry for the same call is unaffected.
         self.assertEqual(len(self.records("cardinal.turn_tool")), 1)
 
@@ -355,11 +357,11 @@ class HookRecordsDecisionTest(CursorDecisionBase):
         self.assertEqual(len(self.records("cardinal.decision")), 1)
 
     def test_gate_off_means_no_emit_and_no_ledger(self):
-        out = json.loads(self.agent_records())
+        context = self.context(self.agent_records())
         self.assertEqual(self.records("cardinal.decision"), [])
         self.assertFalse((self.cursor / "cardinal" / "decisions" / "sessions").exists())
-        self.assertIn("decision capture is off", out["additional_context"])
-        self.assertIn("own terminal", out["additional_context"])
+        self.assertIn("decision capture is off", context)
+        self.assertIn("own terminal", context)
         self.assertEqual(len(self.records("cardinal.turn_tool")), 1)
 
     def test_env_override_forces_gate(self):
@@ -369,18 +371,10 @@ class HookRecordsDecisionTest(CursorDecisionBase):
         self.agent_records(CARDINAL_DECISIONS="0")
         self.assertEqual(len(self.records("cardinal.decision")), 1)
 
-    def test_marker_from_other_command_is_ignored(self):
+    def test_spoofed_markers_without_a_real_run_are_ignored(self):
         self.enable()
-        stdout = self.cli(*self.RECORD_ARGS).stdout
-        out = self.hook("postToolUse", self.shell_payload("cat build.log", stdout))
-        self.assertEqual(out, "")
-        self.assertEqual(self.records("cardinal.decision"), [])
-
-    def test_spoofed_markers_are_never_recorded(self):
-        self.enable()
-        self.prime_pr_cache()
         stdout = self.cli("record", "--choice", "Use X").stdout
-        marker = next(l for l in stdout.splitlines() if l.startswith(MARKER))
+        marker = _marker_line(stdout)
         spoofs = [
             f"echo {shlex.quote(marker)}",
             f"printf '%s\\n' {shlex.quote(marker)}",
@@ -388,7 +382,7 @@ class HookRecordsDecisionTest(CursorDecisionBase):
             "grep cardinal-decision-record saved-output.txt",
             "cat saved-output.txt",
             f"echo python3 {CLI} record --choice X",
-            f"grep -r 'cardinal-decision record' .",
+            "grep -r 'cardinal-decision record' .",
         ]
         for command in spoofs:
             with self.subTest(command=command):
@@ -396,9 +390,42 @@ class HookRecordsDecisionTest(CursorDecisionBase):
         self.assertEqual(self.records("cardinal.decision"), [])
         self.assertFalse((self.cursor / "cardinal" / "decisions" / "sessions").exists())
 
-    def test_legit_invocations_with_quoted_paths(self):
+    def _spoof_and_real(self):
+        real_args = ("record", "--choice", "Use X")
+        real_out = self.cli(*real_args).stdout
+        spoof = _marker_line(self.cli("record", "--choice", "Evil choice", "--by", "user").stdout)
+        return real_args, real_out, spoof
+
+    def test_spoof_before_real_records_only_the_real_decision(self):
         self.enable()
-        self.prime_pr_cache()
+        real_args, real_out, spoof = self._spoof_and_real()
+        command = f"echo {shlex.quote(spoof)} ; {self.agent_command(real_args)}"
+        context = self.context(self.hook("postToolUse", self.shell_payload(command, spoof + "\n" + real_out)))
+        [(_, attrs)] = self.records("cardinal.decision")
+        self.assertEqual(attrs["cardinal.decision.choice"], "Use X")
+        self.assertEqual(attrs["cardinal.decision.decided_by"], "agent")
+        self.assertNotIn("Evil", context)
+        self.assertIn("Cardinal recorded decision use-x", context)
+
+    def test_spoof_after_real_records_only_the_real_decision(self):
+        self.enable()
+        real_args, real_out, spoof = self._spoof_and_real()
+        command = f"{self.agent_command(real_args)} && echo {shlex.quote(spoof)}"
+        self.hook("postToolUse", self.shell_payload(command, real_out + spoof + "\n"))
+        [(_, attrs)] = self.records("cardinal.decision")
+        self.assertEqual(attrs["cardinal.decision.choice"], "Use X")
+
+    def test_spoof_matching_real_content_is_harmless(self):
+        self.enable()
+        real_args, real_out, _ = self._spoof_and_real()
+        echoed = _marker_line(real_out)
+        command = f"echo {shlex.quote(echoed)}; {self.agent_command(real_args)}"
+        self.hook("postToolUse", self.shell_payload(command, echoed + "\n" + real_out))
+        [(_, attrs)] = self.records("cardinal.decision")
+        self.assertEqual(attrs["cardinal.decision.choice"], "Use X")
+
+    def test_legit_invocations_with_quoted_paths_newlines_flags_and_env(self):
+        self.enable()
         spaced = self.root / "plugin dir" / "scripts"
         spaced.mkdir(parents=True)
         shutil.copy(CLI, spaced / "cardinal-decision")
@@ -408,57 +435,67 @@ class HookRecordsDecisionTest(CursorDecisionBase):
             f"'{spaced / 'cardinal-decision'}' record --choice 'Use X'",
             f'cd "{self.repo}" && python3.12 {shlex.quote(str(CLI))} record --choice "Use X"',
             f'/usr/bin/python3 "{CLI}" record --choice "Use X" | tee /tmp/out',
+            f'cd "{self.repo}"\npython3 "{CLI}" record --choice "Use X"\n',
+            f'python3 -u "{CLI}" record --choice "Use X"',
+            f'env CARDINAL_TRACE=1 python3 -B -X utf8 "{CLI}" record --choice "Use X"',
+            f'FOO=bar python3 "{CLI}" record \\\n  --choice "Use X"',
         ]
         for command in commands:
             with self.subTest(command=command):
-                out = json.loads(self.hook("postToolUse", self.shell_payload(command, stdout)))
-                self.assertIn("Cardinal recorded decision use-x", out["additional_context"])
+                context = self.context(self.hook("postToolUse", self.shell_payload(command, stdout)))
+                self.assertIn("Cardinal recorded decision use-x", context)
         self.assertEqual(len(self.records("cardinal.decision")), len(commands))
 
-    def test_one_marker_per_invocation(self):
-        # A real record call followed by a cat of saved markers: only the
-        # invocation's own (first) marker is recorded.
+    def test_two_records_on_separate_lines(self):
         self.enable()
-        self.prime_pr_cache()
-        own = self.cli("record", "--choice", "Use X").stdout
-        saved = self.cli("record", "--choice", "Old choice").stdout
-        command = self.agent_command(("record", "--choice", "Use X")) + " && cat saved.txt"
-        self.hook("postToolUse", self.shell_payload(command, own + saved))
-        [(_, attrs)] = self.records("cardinal.decision")
-        self.assertEqual(attrs["cardinal.decision.choice"], "Use X")
+        first = ("record", "--choice", "Use X")
+        second = ("record", "--choice", "Use Y")
+        stdout = self.cli(*first).stdout + self.cli(*second).stdout
+        command = f"{self.agent_command(first)}\n{self.agent_command(second)}"
+        self.hook("postToolUse", self.shell_payload(command, stdout))
+        choices = [a["cardinal.decision.choice"] for _, a in self.records("cardinal.decision")]
+        self.assertEqual(choices, ["Use X", "Use Y"])
 
-    def test_recording_failure_is_reported_not_swallowed(self):
+    def test_not_recorded_replies_when_a_record_run_cannot_be_confirmed(self):
         self.enable()
-        self.prime_pr_cache()
-        decisions_dir = self.cursor / "cardinal" / "decisions"
-        (decisions_dir / "sessions").write_text("not a directory")
-        out = json.loads(self.agent_records("record", "--choice", "Use X"))
-        context = out["additional_context"]
-        self.assertIn('Cardinal did NOT record the decision "Use X"', context)
-        self.assertNotIn("Traceback", context)
-        self.assertLess(len(context), 400)
+        cases = {
+            "no marker in output": (
+                self.agent_command(("record", "--choice", "Use X")),
+                "Traceback (most recent call last):\n  PermissionError: denied\n",
+                'Cardinal did NOT record the decision "Use X": the command output has no matching confirmation',
+            ),
+            "only a mismatching marker": (
+                self.agent_command(("record", "--choice", "Use X")),
+                _marker_line(self.cli("record", "--choice", "Something else").stdout),
+                'Cardinal did NOT record the decision "Use X"',
+            ),
+            "invalid argv": (
+                f'python3 "{CLI}" record --by robot --choice X',
+                "",
+                "Cardinal did NOT record the decision: invalid cardinal-decision arguments",
+            ),
+            "unparseable command": (
+                f'python3 "{CLI}" record --choice "Use X',
+                "",
+                "Cardinal did NOT record the decision: could not parse the shell command",
+            ),
+        }
+        for name, (command, stdout, expected) in cases.items():
+            with self.subTest(name):
+                context = self.context(self.hook("postToolUse", self.shell_payload(command, stdout)))
+                self.assertIn(expected, context)
+                self.assertNotIn("Traceback", context.replace("Traceback (most", ""))
         self.assertEqual(self.records("cardinal.decision"), [])
 
-    def test_recorder_never_waits_on_gh_and_refreshes_in_background(self):
+    def test_marker_from_other_command_is_ignored(self):
         self.enable()
-        self.write_gh('sleep 2; echo \'{"number": 42, "url": "https://github.com/acme/widgets/pull/42"}\'')
-        started = time.monotonic()
-        out = json.loads(self.agent_records("record", "--choice", "Use X", prime=False))
-        self.assertLess(time.monotonic() - started, 2.0 + 1.0)  # CLI + hook, gh's 2s sleep not awaited
-        self.assertNotIn("PR #", out["additional_context"])
-        [(_, first)] = self.records("cardinal.decision")
-        self.assertNotIn("cardinal.pr_number", first)
-
-        cache = self.wait_for_pr_cache()
-        self.assertEqual(cache["acme/widgets#feat/trace-index"]["number"], 42)
-        out = json.loads(self.agent_records("record", "--choice", "Use Y", prime=False))
-        self.assertIn("PR #42", out["additional_context"])
-        self.assertEqual(int(self.records("cardinal.decision")[-1][1]["cardinal.pr_number"]), 42)
-        self.assertEqual(len(self.gh_calls.read_text().splitlines()), 1)
+        stdout = self.cli(*self.RECORD_ARGS).stdout
+        out = self.hook("postToolUse", self.shell_payload("cat build.log", stdout))
+        self.assertEqual(out, "")
+        self.assertEqual(self.records("cardinal.decision"), [])
 
     def test_legacy_dict_tool_output_shape(self):
         self.enable()
-        self.prime_pr_cache()
         args = ("record", "--choice", "Use X")
         stdout = self.cli(*args).stdout
         payload = {
@@ -474,11 +511,11 @@ class HookRecordsDecisionTest(CursorDecisionBase):
     def test_links_ledger_and_status(self):
         self.enable()
         self.agent_records("record", "--id", "dir", "--choice", "Exact trace directory")
-        out = json.loads(self.agent_records(
+        context = self.context(self.agent_records(
             "record", "--id", "lsm", "--choice", "Mutation-run S3 LSM",
             "--supersedes", "dir", "--follows", "elsewhere", "--by", "user",
         ))
-        self.assertIn("no earlier decision in this session has id elsewhere", out["additional_context"])
+        self.assertIn("no earlier decision in this session has id elsewhere", context)
         attrs = self.records("cardinal.decision")[-1][1]
         self.assertEqual(attrs["cardinal.decision.decided_by"], "user")
         self.assertEqual(json.loads(attrs["cardinal.decision.links"]), [
@@ -499,18 +536,21 @@ class HookRecordsDecisionTest(CursorDecisionBase):
         self.agent_records("record", "--choice", "use x!")
         self.assertEqual(self.records("cardinal.decision")[-1][1]["cardinal.decision.id"], "use-x-2")
 
-    def test_tampered_marker_is_revalidated(self):
+    def test_recording_failure_is_reported_not_swallowed(self):
         self.enable()
-        line = MARKER + json.dumps({"v": 1, "choice": "Use X", "by": "agent", "refines": ["Bad Id"]})
-        out = json.loads(self.hook("postToolUse", self.shell_payload("python3 cardinal-decision record", line)))
-        self.assertIn("did not record", out["additional_context"])
+        decisions_dir = self.cursor / "cardinal" / "decisions"
+        (decisions_dir / "sessions").write_text("not a directory")
+        context = self.context(self.agent_records("record", "--choice", "Use X"))
+        self.assertIn('Cardinal did NOT record the decision "Use X"', context)
+        self.assertNotIn("Traceback", context)
+        self.assertLess(len(context), 400)
         self.assertEqual(self.records("cardinal.decision"), [])
 
     def test_not_connected_saves_locally(self):
         (self.cursor / "cardinal-secrets.json").unlink()
         self.enable()
-        out = json.loads(self.agent_records("record", "--choice", "Use X"))
-        self.assertIn("only saved locally", out["additional_context"])
+        context = self.context(self.agent_records("record", "--choice", "Use X"))
+        self.assertIn("only saved locally", context)
         self.assertIn("- use-x: Use X", self.cli("status", "--session", "c1").stdout)
 
     def test_notify_and_decision_share_one_output(self):
@@ -518,10 +558,43 @@ class HookRecordsDecisionTest(CursorDecisionBase):
         limits_dir = self.cursor / "cardinal" / "limits"
         limits_dir.mkdir(parents=True)
         (limits_dir / "c1.notify.json").write_text(json.dumps({"message": "Budget at 60%.", "band": 1}))
-        out = json.loads(self.agent_records("record", "--choice", "Use X"))
-        context = out["additional_context"]
+        context = self.context(self.agent_records("record", "--choice", "Use X"))
         self.assertTrue(context.startswith("Budget at 60%."))
         self.assertIn("Cardinal recorded decision use-x", context)
+
+
+class DetachedBackgroundTest(CursorDecisionBase):
+    def test_hook_returns_fast_while_ingest_stalls(self):
+        self.enable()
+        _OTLPStub.delay = 3.0
+        args = ("record", "--choice", "Use X", "--anchor", "svc/f3.go")
+        stdout = self.cli(*args).stdout
+        payload = self.shell_payload(self.agent_command(args), stdout)
+
+        started = time.monotonic()
+        out = self.hook("postToolUse", payload, inline=False)
+        elapsed = time.monotonic() - started
+        print(f"\npostToolUse hook returned in {elapsed:.3f}s with ingest stalled 3s")
+
+        self.assertLess(elapsed, 1.0, f"hook took {elapsed:.2f}s with ingest stalled")
+        self.assertIn("Cardinal recorded decision use-x", self.context(out))
+        self.assertTrue((self.cursor / "cardinal" / "decisions" / "sessions").is_dir())
+
+        # The detached child still delivers turn_tool, then the decision
+        # with clusters and PR, and removes its spool file.
+        self.wait_for_records("cardinal.turn_tool")
+        [(_, attrs)] = self.wait_for_records("cardinal.decision")
+        self.assertEqual(int(attrs["cardinal.pr_number"]), 42)
+        self.assertEqual(json.loads(attrs["cardinal.decision.code_clusters"]), ["d18:svc"])
+        self.assertEqual(list((self.cursor / "cardinal" / "spool").glob("*")), [])
+
+    def test_plain_tool_call_also_returns_fast(self):
+        _OTLPStub.delay = 3.0
+        payload = self.shell_payload("ls -la", "total 0")
+        started = time.monotonic()
+        self.assertEqual(self.hook("postToolUse", payload, inline=False), "")
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.wait_for_records("cardinal.turn_tool")
 
 
 class UserCommandsTest(CursorDecisionBase):
@@ -549,21 +622,21 @@ class SessionStartDecisionContextTest(CursorDecisionBase):
                 "session_id": "c1", "workspace_roots": [str(cwd or self.repo)]}
 
     def test_off_injects_only_convention_prompt(self):
-        out = json.loads(self.hook("sessionStart", self.payload()))
-        self.assertNotIn("decision capture", out["additional_context"])
-        self.assertIn("Cardinal-instrumented Cursor session", out["additional_context"])
+        context = self.context(self.hook("sessionStart", self.payload()))
+        self.assertNotIn("decision capture", context)
+        self.assertIn("Cardinal-instrumented Cursor session", context)
 
     def test_on_describes_sandbox_safe_flow_and_ledger(self):
         self.enable()
         self.agent_records("record", "--id", "dir", "--choice", "Exact trace directory")
-        out = json.loads(self.hook("sessionStart", self.payload()))
-        context = out["additional_context"]
+        context = self.context(self.hook("sessionStart", self.payload()))
         self.assertTrue(context.startswith("You are running inside a Cardinal-instrumented Cursor session"))
         self.assertIn("Cardinal decision capture is on for this session", context)
         self.assertIn(f'python3 "{CLI}" record --choice', context)
         self.assertNotIn("--session", context)
         self.assertIn("works in the sandbox", context)
-        self.assertIn("Do not run `cardinal-decision on`, `off`, or `status`", context)
+        self.assertIn("ask to run it outside the sandbox", context)
+        self.assertIn("Do not run `cardinal-decision on`, `off`, or", context)
         self.assertIn("the user in their own terminal", context)
         self.assertIn("- dir: Exact trace directory", context)
 
@@ -571,9 +644,9 @@ class SessionStartDecisionContextTest(CursorDecisionBase):
         self.enable()
         plain = self.home / "plain"
         plain.mkdir()
-        out = json.loads(self.hook("sessionStart", self.payload(plain)))
-        self.assertTrue(out["additional_context"].startswith("Cardinal decision capture is on"))
-        self.assertIn("(none yet)", out["additional_context"])
+        context = self.context(self.hook("sessionStart", self.payload(plain)))
+        self.assertTrue(context.startswith("Cardinal decision capture is on"))
+        self.assertIn("(none yet)", context)
 
     def test_off_outside_git_repo_is_silent(self):
         plain = self.home / "plain"
@@ -582,8 +655,8 @@ class SessionStartDecisionContextTest(CursorDecisionBase):
 
     def test_env_override_off_wins(self):
         self.enable()
-        out = json.loads(self.hook("sessionStart", self.payload(), CARDINAL_DECISIONS="0"))
-        self.assertNotIn("decision capture", out["additional_context"])
+        context = self.context(self.hook("sessionStart", self.payload(), CARDINAL_DECISIONS="0"))
+        self.assertNotIn("decision capture", context)
 
 
 class GitStatePrLinkageTest(CursorDecisionBase):
@@ -628,35 +701,52 @@ class GitStatePrLinkageTest(CursorDecisionBase):
 
 
 class InvocationParserTest(unittest.TestCase):
-    """Unit coverage for the shell-aware `cardinal-decision record` check."""
+    """Unit coverage for the shell-aware `cardinal-decision record` parser."""
 
     def setUp(self):
         self.hook = _load_module("cursor_telemetry_invocations", HOOK)
 
-    def test_counts(self):
-        count = self.hook.decision_record_invocations
+    def test_invocations(self):
+        parse = self.hook.decision_invocations
         cases = [
-            ('python3 "/a b/cardinal-decision" record --choice X', 1),
-            ("/p/scripts/cardinal-decision record --choice X", 1),
-            ("python3.11 cardinal-decision record --choice 'a; b'", 1),
-            ("cd /repo && python3 cardinal-decision record --choice X; python cardinal-decision record --choice Y", 2),
-            ("(python3 cardinal-decision record --choice X)", 1),
-            ("echo cardinal-decision record", 0),
-            ("printf 'cardinal-decision-record:v1 {}'", 0),
-            ("grep cardinal-decision out.txt", 0),
-            ("cat out.txt | grep cardinal-decision", 0),
-            ("python3 cardinal-decision status", 0),
-            ("python3 cardinal-decision-record record", 0),
-            ("node cardinal-decision record", 0),
-            ("python3 'unbalanced cardinal-decision record", 0),
+            ('python3 "/a b/cardinal-decision" record --choice X', [["record", "--choice", "X"]]),
+            ("/p/scripts/cardinal-decision record --choice X", [["record", "--choice", "X"]]),
+            ("python3.11 cardinal-decision record --choice 'a; b'", [["record", "--choice", "a; b"]]),
+            ("cd /repo && python3 cardinal-decision record --choice X; python cardinal-decision record --choice Y",
+             [["record", "--choice", "X"], ["record", "--choice", "Y"]]),
+            ("cd /repo\npython3 -u cardinal-decision record --choice X\n", [["record", "--choice", "X"]]),
+            ("env FOO=1 BAR=2 python3 -B -X utf8 cardinal-decision record --choice X", [["record", "--choice", "X"]]),
+            ("FOO=1 /usr/bin/env -u BAZ python3 -Ximporttime cardinal-decision record --choice X",
+             [["record", "--choice", "X"]]),
+            ("python3 cardinal-decision record \\\n  --choice X", [["record", "--choice", "X"]]),
+            ("(python3 cardinal-decision record --choice X)", [["record", "--choice", "X"]]),
+            ("python3 cardinal-decision record --why 'line one\nline two' --choice X",
+             [["record", "--why", "line one\nline two", "--choice", "X"]]),
+            ("python3 -c 'cardinal-decision record'", []),
+            ("python3 -uc 'print(1)' cardinal-decision record", []),
+            ("python3 -m cardinal-decision record", []),
+            ("echo cardinal-decision record", []),
+            ("printf 'cardinal-decision-record:v1 {}'", []),
+            ("grep cardinal-decision out.txt", []),
+            ("cat out.txt | grep cardinal-decision", []),
+            ("python3 cardinal-decision status", []),
+            ("python3 cardinal-decision-record record", []),
+            ("node cardinal-decision record", []),
         ]
         for command, expected in cases:
             with self.subTest(command=command):
-                self.assertEqual(count(command), expected)
+                self.assertEqual(parse(command), (expected, None))
+
+    def test_unparseable(self):
+        invocations, error = self.hook.decision_invocations("python3 'cardinal-decision record --choice X")
+        self.assertEqual(invocations, [])
+        self.assertIn("could not parse", error)
+        # Unbalanced quotes in an unrelated command stay silent.
+        self.assertEqual(self.hook.decision_invocations("grep cardinal-decision 'x"), ([], None))
 
 
 class ResolvePrTimeoutTest(unittest.TestCase):
-    """Synchronous hook paths bound the gh call."""
+    """The synchronous beforeSubmitPrompt git_state path bounds the gh call."""
 
     def test_timeout_is_bounded_and_errors_swallowed(self):
         hook = _load_module("cursor_telemetry_pr", HOOK)
@@ -667,17 +757,10 @@ class ResolvePrTimeoutTest(unittest.TestCase):
         with mock.patch.object(hook.decisions, "resolve_pr", side_effect=RuntimeError("boom")):
             self.assertEqual(hook.resolve_pr("/x", "a/b", "feat/y"), (None, None))
 
-    def test_decision_path_budget_fits_legacy_5s_hook_timeout(self):
-        hook = _load_module("cursor_telemetry_budget", HOOK)
-        self.assertLessEqual(hook.DECISION_CLUSTER_TIMEOUT_SEC + hook.DECISION_EMIT_TIMEOUT_SEC, 3.0)
-        with mock.patch.object(hook.decisions, "load_domains", return_value=None) as ld:
-            hook.bounded_code_clusters([{"kind": "file", "identifier": "a.py", "path": "a.py"}], "/r", "sha")
-        self.assertEqual(ld.call_args.kwargs["timeout"], hook.DECISION_CLUSTER_TIMEOUT_SEC)
-
 
 class RecordingHookInstallTest(unittest.TestCase):
     """postToolUse (the recorder) is registered at both user and --project
-    hooks.json locations with a timeout that fits the recording work."""
+    hooks.json locations."""
 
     def test_post_tool_use_registered_user_and_project(self):
         with TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
