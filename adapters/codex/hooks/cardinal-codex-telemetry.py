@@ -40,13 +40,15 @@ MAX_EVENTS_PER_STOP = 512
 # the hook times out (hooks.json gives it 5s), so the prompt path never
 # waits on `gh`: it reads the PR cache and refreshes it in a detached child.
 PR_REFRESH_TIMEOUT_SEC = 10.0
-# PostToolUse decision recording must finish well inside the hook timeout
-# (a kill between the ledger write and the emit loses the event): cached PR
-# only (background refresh on a miss), a short `git ls-tree` budget for
-# D18 clusters, and a short OTLP post.
-DECISION_CLUSTER_TIMEOUT_SEC = 1.0
-DECISION_EMIT_TIMEOUT_SEC = 1.5
+# PostToolUse decision recording does only local work synchronously (argv
+# parse, gate, validation, id, ledger write, reply; PR from cache). D18
+# clusters and the OTLP send run in ONE detached child fed by a 0600 spool
+# file, so a stalled ingest or DNS can never hold the tool result or push
+# the hook past its timeout (which would discard the reply).
 REFRESH_PR_EVENT = "_RefreshPr"
+BACKGROUND_EVENT = "_Background"
+# Tests only: run the spooled job in-process for deterministic assertions.
+BACKGROUND_INLINE_ENV = "CARDINAL_CODEX_BACKGROUND_INLINE"
 # The launcher execs this file from the connected plugin root (or newest
 # cache), so the sibling scripts/ dir is the install the agent should call.
 DECISION_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-decision"
@@ -254,50 +256,109 @@ def cached_pr_lookup(paths: AgentPaths):
     return lookup
 
 
-def record_decision_specs(
-    payload: dict[str, Any], specs: list[dict[str, Any]], reports: list[str],
-) -> None:
+def spawn_background(job: dict[str, Any]) -> bool:
+    """Spool `job` (0600, O_EXCL) and run it in a detached child with
+    /dev/null stdio and its own session (Codex waits for the hook's stdout
+    to close and kills the process group only on timeout). Same pattern as
+    the Gemini adapter. False when the job could not be queued."""
+    try:
+        spool_dir = codex_paths().runtime_dir / "spool"
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        path = spool_dir / f"{job.get('kind')}-{os.getpid()}-{time.time_ns()}.json"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(job, fh, default=str)
+    except (OSError, TypeError, ValueError):
+        return False
+    if os.environ.get(BACKGROUND_INLINE_ENV) == "1":
+        run_background_job(path)
+        return True
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--event", BACKGROUND_EVENT,
+             "--background", str(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True,
+        )
+    except OSError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def run_background_job(path: Path) -> None:
+    try:
+        job = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    if isinstance(job, dict) and job.get("kind") == "decisions":
+        entries = job.get("entries")
+        if isinstance(entries, list) and entries:
+            _codex_decisions.emit_entries(codex_paths(), entries, PLUGIN_VERSION)
+
+
+def record_decisions(payload: dict[str, Any], specs: list[dict[str, Any]],
+                     reasons: list[str]) -> list[str]:
+    """Synchronous local half; returns the lines reported to the agent."""
     paths = codex_paths()
     if not decisions.is_enabled(paths.runtime_dir, os.environ.get(decisions.ENABLE_ENV)):
-        reports.append(_codex_decisions.CAPTURE_OFF_REPORT)
-        return
+        return [_codex_decisions.CAPTURE_OFF_REPORT]
+    reports = list(reasons)
+    if not specs:
+        return reports
     # The session Codex observed — never the marker's self-reported one.
     session_id = session_id_from_payload(payload)
     if not session_id:
-        reports.append("Cardinal did NOT record the decision: the hook payload had no session id.")
-        return
+        return reports + ["Cardinal did NOT record the decision: the hook payload had no session id."]
     payload_cwd = str(payload.get("cwd") or os.getcwd())
     lookup = cached_pr_lookup(paths)
+    connected = otlp.connection_from_paths(paths) is not None
+    entries: list[dict[str, Any]] = []
+    recorded: list[str] = []
     for spec in specs:
         if not os.path.isdir(spec["cwd"]):
             spec = dict(spec, cwd=payload_cwd)
         try:
-            result = _codex_decisions.apply_spec(
-                paths, spec, session_id, PLUGIN_VERSION,
-                pr_lookup=lookup,
-                cluster_timeout=DECISION_CLUSTER_TIMEOUT_SEC,
-                emit_timeout=DECISION_EMIT_TIMEOUT_SEC,
-            )
-            reports.append(_codex_decisions.report_line(result))
+            entry = _codex_decisions.record_local(paths, spec, session_id, lookup)
         except decisions.DecisionError as err:
-            reports.append(f"Cardinal did NOT record the decision: {err}")
+            reports.append(f"Cardinal did NOT record decision {spec['choice']!r}: {err}")
+            continue
         except Exception as err:
-            reports.append(f"Cardinal did NOT record the decision ({type(err).__name__}: {err}).")
+            reports.append(f"Cardinal did NOT record decision {spec['choice']!r} "
+                           f"({type(err).__name__}: {err}).")
+            continue
+        entries.append(entry)
+        recorded.append(_codex_decisions.report_line(entry, connected))
+    if entries and connected and not spawn_background({"kind": "decisions", "entries": entries}):
+        recorded.append("Warning: the decisions above were saved locally but Cardinal could not "
+                        "queue sending them.")
+    return recorded + reports
 
 
 def handle_post_tool_use(payload: dict[str, Any]) -> None:
-    """Hook-side decision emission — the only cardinal.decision emitter.
-    Bash calls whose command ran cardinal-decision and whose output holds
-    a cardinal-decision-record:v1 marker are recorded; everything else returns
-    immediately and silently."""
-    specs = _codex_decisions.specs_from_post_tool_use(payload)
-    if not specs:
-        return
-    reports: list[str] = []
+    """Hook-side decision recording — the only cardinal.decision emitter.
+    Silent for every tool call that doesn't run `cardinal-decision record`;
+    once one does, always replies (recorded, or NOT recorded and why)."""
     try:
-        record_decision_specs(payload, specs, reports)
-    except Exception as err:  # never fail silently once a marker was seen
-        reports.append(f"Cardinal did NOT record the decision ({type(err).__name__}: {err}).")
+        specs, reasons = _codex_decisions.plan_post_tool_use(payload)
+    except Exception as err:
+        specs, reasons = [], [f"Cardinal did NOT record the decision ({type(err).__name__}: {err})."]
+    if not specs and not reasons:
+        return
+    try:
+        reports = record_decisions(payload, specs, reasons)
+    except Exception as err:  # never fail silently once an invocation was seen
+        reports = reasons + [f"Cardinal did NOT record the decision ({type(err).__name__}: {err})."]
+    if not reports:
+        return
     # PostToolUse accepts hookSpecificOutput.additionalContext
     # (codex-rs/hooks/schema/generated/post-tool-use.command.output.schema.json).
     sys.stdout.write(json.dumps({
@@ -918,7 +979,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--event", required=True)
     parser.add_argument("--refresh", help=argparse.SUPPRESS)
+    parser.add_argument("--background", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.event == BACKGROUND_EVENT:
+        try:
+            if args.background:
+                run_background_job(Path(args.background))
+        except Exception:
+            pass
+        silent_exit()
 
     if args.event == REFRESH_PR_EVENT:
         try:

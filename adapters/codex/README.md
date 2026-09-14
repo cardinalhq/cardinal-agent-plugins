@@ -109,30 +109,40 @@ are spawned by Codex outside the sandbox (plain `Command::new`,
    the same wire format as the Cursor adapter) and exits 0. It never reads
    or writes `~/.codex`, never runs `gh`, and makes no network call.
 3. **PostToolUse (unsandboxed), the only emitter.** It acts on
-   `tool_name` `Bash` whose `tool_input.command` itself invokes
-   `cardinal-decision record` and whose `tool_response` has a line starting
-   with the marker.
-   - **Spoof guard:** matching uses shell-aware tokenization. A
-     command-position token (optionally after env assignments or a
-     `python3 [-flags]` interpreter) must have basename
-     `cardinal-decision` and be followed by `record`. So
-     `echo`/`printf`/`grep`/`cat` of marker lines is ignored.
-   - **What it does:** applies the on/off gate, re-validates, assigns the
-     final id against the ledger, resolves anchors and clusters, writes the
-     ledger and emits one `cardinal.decision` with the hook's connection
-     and resource attributes.
-   - **Report-back:** the result goes to the agent as PostToolUse
-     `hookSpecificOutput.additionalContext`. Failures are reported as "NOT
-     recorded" with the reason, never swallowed.
+   `tool_name` `Bash` calls whose `tool_input.command` itself runs
+   `cardinal-decision record`.
+   - **Argv first.** Invocations are found with shell-aware tokenization:
+     backslash continuations are joined, and the call may follow `;`, `&&`
+     or `|`, env assignments, a path, or `python3 [options]` including
+     `-X utf8`. Each decision is built from that invocation's real argv,
+     using the CLI's own argparse spec.
+   - **Marker as confirmation only.** The marker in `tool_response` merely
+     confirms the CLI ran and validated. It is accepted only when its JSON
+     equals the argv-derived decision, and each marker confirms at most one
+     invocation. A differing spoofed marker (`echo`, `cat`, `grep`, before
+     or after the real call) is ignored; a matching one is harmless.
+   - **Synchronous (local only):** argv parse, on/off gate, validation,
+     final id against the ledger, git facts, PR from cache (detached
+     refresh on a miss), ledger write, reply.
+   - **Background:** D18 clusters and the OTLP send run in one detached
+     child (own session, /dev/null stdio) fed by a 0600 spool file under
+     `~/.codex/cardinal/spool/`, the same pattern as the Gemini adapter. A
+     stalled ingest or DNS never holds the tool result or the hook
+     timeout.
+   - **Always replies once invoked.** The result goes to the agent as
+     PostToolUse `hookSpecificOutput.additionalContext`. If nothing could be
+     recorded, the reply says NOT recorded and why:
+     - capture off, or no session id;
+     - unparsable or invalid arguments;
+     - no matching marker (the command failed, or its output was truncated
+       or altered);
+     - an unsupported form such as `bash -lc "..."` whose output carries a
+       marker;
+     - a ledger write error.
    - **Session:** it uses the payload's `session_id` only, never the
      marker's.
-   - **Time budget:** the PR comes from cache only, with a detached refresh
-     on a miss; D18 `git ls-tree` gets 1s and the OTLP post 1.5s. This fits
-     well inside the 10s timeout that `cardinal-connect` registers for this
-     hook.
 
-   Identical markers are processed once. Every other shell call returns
-   immediately and prints nothing.
+   Every other shell call returns immediately and prints nothing.
 
 `record --emit` is for a human in their own terminal: it records and emits
 directly and prints no marker, so PostToolUse never emits it again, even
@@ -141,9 +151,16 @@ sandbox blocks. They report the exact terminal command on failure, and the
 `cardinal-decision` skill runs only `status` and tells the user to toggle
 from their own terminal.
 
-**Upgrading:** installs connected before this change have no `PostToolUse`
-entry. Run `cardinal-connect --repair-hooks` and restart Codex;
-`cardinal-decision status` reports whether the hook is registered.
+**Upgrading, and restart Codex:** installs connected before this change
+have no `PostToolUse` entry. Run `cardinal-connect --repair-hooks`, then
+**restart Codex**. Codex builds its hook set when a session starts
+(`Hooks::new` in `codex-rs/core/src/session/session.rs`). It rebuilds it
+(`Session::refresh_hooks`, `core/src/session/mod.rs`) only at the end of
+its own config-reload path, which runs on a config change made through
+Codex, not on an external `hooks.json` edit. Without a restart, the prompt
+hook (which reads `hooks.json`) could show recording instructions while no
+PostToolUse emitter is active. `cardinal-decision status` reports whether
+the hook is registered.
 
 ### Host-surface evidence (openai/codex `a4354e2d`, https://learn.chatgpt.com/docs/hooks)
 

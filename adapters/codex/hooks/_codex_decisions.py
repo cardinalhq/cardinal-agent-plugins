@@ -9,24 +9,29 @@ can neither write ~/.codex/cardinal nor POST OTLP. Hooks are spawned by
 Codex itself, outside the sandbox (codex-rs/hooks/src/engine/command_runner.rs
 build_command).
 
-So `cardinal-decision record` only validates and prints one marker line,
-the same wire format the Cursor adapter uses:
+`cardinal-decision record` only validates and prints one marker line, the
+same wire format the Cursor adapter uses:
 
     cardinal-decision-record:v1 {"v":1,"session":...,"cwd":...,"id":...,
       "choice":...,"question":...,"why":...,"alt":[...],"by":...,
       "anchor":[...],"follows":[...],"refines":[...],"supersedes":[...]}
 
-and the telemetry hook's PostToolUse handler (tool_name "Bash",
-tool_input.command, tool_response = command output; codex-rs/core/src/
-tools/handlers/unified_exec.rs post_unified_exec_tool_use_payload) parses
-it and calls `apply_spec`, which is the ONLY emitter: gate, re-validation,
-final id against the ledger, ledger write + one `cardinal.decision` log.
-`record --emit` (a human in their own terminal) calls `apply_spec`
-directly and prints no marker, so the hook never emits it a second time.
+The PostToolUse handler (tool_name "Bash", tool_input.command,
+tool_response = command output; codex-rs/core/src/tools/handlers/
+unified_exec.rs post_unified_exec_tool_use_payload) is the ONLY emitter.
+The decision is built from the real invocation's argv — parsed shell-aware
+from tool_input.command with the same argparse spec the CLI uses — and the
+marker is only confirmation that the CLI ran and validated it: a marker is
+accepted only when it equals the argv-derived one. A spoofed marker
+(`echo`, `cat` of a log, ...) that differs is ignored; one that matches is
+harmless. Local work (validate, id, ledger) is synchronous; clusters and
+the OTLP send run in one detached child. `record --emit` (a human in their
+own terminal) records and emits directly and prints no marker.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -46,20 +51,85 @@ SPEC_KEYS = (
     "follows", "refines", "supersedes",
 )
 LIST_KEYS = ("alt", "anchor", "follows", "refines", "supersedes")
+# Marker fields the argv fully determines (cwd comes from the CLI process;
+# session only when --session was passed).
+CONFIRM_KEYS = ("v", "id", "choice", "question", "why", "alt", "by", "anchor",
+                "follows", "refines", "supersedes")
 MAX_ANCHOR_SPEC = 500
 EMIT_TIMEOUT_SEC = 3.0
 SCOPE_NAME = "cardinal-codex-plugin"
+CLI_NAME = "cardinal-decision"
+
+CAPTURE_OFF_REPORT = (
+    "Cardinal decision capture is off, so this decision was not recorded. "
+    "Only the user can turn it on (`cardinal-decision on` in their own terminal)."
+)
 
 
 def codex_paths() -> AgentPaths:
     return AgentPaths(home=Path.home() / ".codex")
 
 
+# --- shared argv spec ----------------------------------------------------------
+
+
+def add_record_arguments(record: argparse.ArgumentParser) -> None:
+    """`cardinal-decision record` flags — shared by the CLI and the hook's
+    argv parser so both derive the same decision from the same command."""
+    record.add_argument("--session", help="session id (supplied by the prompt hook; the hook uses "
+                                          "the Codex session it observes)")
+    record.add_argument("--choice", required=True, help="the option chosen, in a few words")
+    record.add_argument("--question", help="the question this decision settles")
+    record.add_argument("--why", help="one sentence on why this option won")
+    record.add_argument("--alt", action="append", default=[], metavar="OPTION",
+                        help="an option that was considered and rejected (repeatable)")
+    record.add_argument("--by", choices=decisions.DECIDED_BY, default="agent",
+                        help="who made the call (default: agent)")
+    record.add_argument("--anchor", action="append", default=[], metavar="ANCHOR",
+                        help="file, dir/, file::Symbol, or <kind>:<identifier>[@path] the decision governs (repeatable)")
+    record.add_argument("--follows", action="append", default=[], metavar="ID",
+                        help="an earlier decision this one only makes sense because of")
+    record.add_argument("--refines", action="append", default=[], metavar="ID",
+                        help="an earlier decision this one narrows")
+    record.add_argument("--supersedes", action="append", default=[], metavar="ID",
+                        help="an earlier decision this one replaces")
+    record.add_argument("--id", help="decision id; reuse an existing id to revise that decision")
+    record.add_argument("--emit", action="store_true",
+                        help="record and emit directly (your own terminal only; not inside Codex)")
+
+
+class _ArgvError(Exception):
+    pass
+
+
+class _RaisingParser(argparse.ArgumentParser):
+    def error(self, message: str):  # type: ignore[override]
+        raise _ArgvError(message)
+
+    def exit(self, status: int = 0, message: Optional[str] = None):  # type: ignore[override]
+        raise _ArgvError(message or "exited")
+
+
+def parse_record_argv(argv: list[str]) -> argparse.Namespace:
+    parser = _RaisingParser(prog=f"{CLI_NAME} record", add_help=False)
+    add_record_arguments(parser)
+    return parser.parse_args(argv)
+
+
+def spec_from_args(args: argparse.Namespace, cwd: str, session: Optional[str]) -> dict[str, Any]:
+    return {
+        "session": session, "cwd": cwd, "id": args.id, "choice": args.choice,
+        "question": args.question, "why": args.why, "alt": list(args.alt), "by": args.by,
+        "anchor": list(args.anchor), "follows": list(args.follows),
+        "refines": list(args.refines), "supersedes": list(args.supersedes),
+    }
+
+
 # --- marker ------------------------------------------------------------------
 
 
 def normalize_spec(raw: Any) -> Optional[dict[str, Any]]:
-    """Coerce a decoded marker to the spec shape; None when unusable."""
+    """Coerce a spec/marker dict to the spec shape; None when unusable."""
     if not isinstance(raw, dict) or raw.get("v", MARKER_VERSION) != MARKER_VERSION:
         return None
     spec: dict[str, Any] = {}
@@ -75,19 +145,18 @@ def normalize_spec(raw: Any) -> Optional[dict[str, Any]]:
     return spec
 
 
-def marker_from_decision(spec: dict[str, Any], decision: dict[str, Any], explicit_id: bool) -> str:
-    """Cursor-compatible marker line from a validated decision: cleaned
-    field values, `id` only when the agent chose one (the hook derives the
-    final id against the ledger otherwise)."""
+def marker_body(spec: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    """Cursor-compatible marker JSON from a validated decision: cleaned
+    field values, `id` only when the agent chose one."""
 
     def ids(relation: str) -> list[str]:
         return [link["to"] for link in decision["links"] if link["relation"] == relation]
 
-    body = {
+    return {
         "v": MARKER_VERSION,
         "session": spec.get("session"),
         "cwd": spec["cwd"],
-        "id": decision["id"] if explicit_id else None,
+        "id": decision["id"] if spec.get("id") else None,
         "choice": decision["choice"],
         "question": decision["question"],
         "why": decision["rationale"],
@@ -98,28 +167,25 @@ def marker_from_decision(spec: dict[str, Any], decision: dict[str, Any], explici
         "refines": ids("refines"),
         "supersedes": ids("supersedes"),
     }
-    return MARKER + json.dumps(body, separators=(",", ":"), ensure_ascii=True)
 
 
-def extract_specs(text: str, seen: Optional[set[str]] = None) -> list[dict[str, Any]]:
-    """Specs from marker lines (line must start with the marker). `seen`
-    dedupes identical markers that appear in more than one output field."""
-    seen = set() if seen is None else seen
+def marker_line(spec: dict[str, Any], decision: dict[str, Any]) -> str:
+    return MARKER + json.dumps(marker_body(spec, decision), separators=(",", ":"), ensure_ascii=True)
+
+
+def extract_markers(text: str) -> list[dict[str, Any]]:
+    """Every JSON object on a line starting with the marker, in order."""
     out = []
     for line in text.splitlines():
         line = line.strip()
         if not line.startswith(MARKER):
             continue
-        raw = line[len(MARKER):]
-        if raw in seen:
-            continue
-        seen.add(raw)
         try:
-            spec = normalize_spec(json.loads(raw))
+            body = json.loads(line[len(MARKER):])
         except ValueError:
             continue
-        if spec is not None:
-            out.append(spec)
+        if isinstance(body, dict):
+            out.append(body)
     return out
 
 
@@ -133,23 +199,33 @@ def _strings(node: Any) -> list[str]:
     return []
 
 
+# --- invocation discovery --------------------------------------------------------
+
 _SHELL_OPERATORS = frozenset({";", "&&", "||", "|", "|&", "&", "(", ")", ";;", "{", "}"})
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)*)?$")
+_PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "--check-hash-based-pycs"})
+_PYTHON_NOT_SCRIPT = frozenset({"-c", "-m", "-"})
 _COMMAND_PREFIXES = frozenset({"exec", "command", "env", "nohup", "time"})
-CLI_NAME = "cardinal-decision"
+_REDIRECT_RE = re.compile(r"^[<>&]+$")
+_CONTINUATION_RE = re.compile(r"\\\r?\n")
+_MENTION_RE = re.compile(r"cardinal-decision['\"]?\s+record\b")
 
 
-def invokes_record(command: str) -> bool:
-    """True when the shell command itself runs `cardinal-decision record`:
-    a command-position token (after an operator, env assignments, or a
-    `python3 [-flags]` interpreter) whose basename is cardinal-decision,
-    followed by `record`. A substring test is spoofable — the marker prefix
-    contains "cardinal-decision", so `echo`/`grep`/`cat`/`printf` of marker
-    lines would otherwise be recorded."""
-    for line in command.splitlines():
+def find_record_invocations(command: str) -> list[list[str]]:
+    """argv (the tokens after `record`) of every `cardinal-decision record`
+    the shell command runs in command position — directly, via a path, after
+    env assignments, or through `python3 [options]`. Backslash-continued
+    lines are joined first. Forms that hide the call inside a string (e.g.
+    `bash -lc "..."`) are not parsed."""
+    out: list[list[str]] = []
+    for line in _CONTINUATION_RE.sub(" ", command).splitlines():
         try:
-            tokens = list(shlex.shlex(line, posix=True, punctuation_chars=True))
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+            # Split only on whitespace and shell punctuation; otherwise
+            # `svc/a.py::Name`, `config:X@path` etc. break into pieces.
+            lexer.whitespace_split = True
+            tokens = list(lexer)
         except ValueError:
             continue
         at_command = True
@@ -166,61 +242,116 @@ def invokes_record(command: str) -> bool:
             if _ASSIGNMENT_RE.match(token) or token in _COMMAND_PREFIXES:
                 i += 1
                 continue
+            at_command = False
             j = i
             if _PYTHON_RE.match(os.path.basename(token)):
                 j += 1
                 while j < len(tokens) and tokens[j].startswith("-") and tokens[j] not in _SHELL_OPERATORS:
-                    j += 1
+                    if tokens[j] in _PYTHON_NOT_SCRIPT:
+                        break
+                    j += 2 if tokens[j] in _PYTHON_VALUE_OPTIONS else 1
             if (j + 1 < len(tokens) and os.path.basename(tokens[j]) == CLI_NAME
                     and tokens[j + 1] == "record"):
-                return True
-            at_command = False
+                k = j + 2
+                argv: list[str] = []
+                while k < len(tokens) and tokens[k] not in _SHELL_OPERATORS:
+                    if _REDIRECT_RE.match(tokens[k]):
+                        if argv and argv[-1].isdigit():
+                            argv.pop()  # the fd of `2>&1`
+                        k += 2  # the redirect and its target
+                        continue
+                    argv.append(tokens[k])
+                    k += 1
+                out.append(argv)
+                i = k
+                continue
             i += 1
-    return False
+    return out
 
 
-def specs_from_post_tool_use(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Marker specs from a Codex PostToolUse payload for a Bash call whose
-    command invoked `cardinal-decision record`. Anything else yields []."""
+def mentions_record(command: str) -> bool:
+    return bool(_MENTION_RE.search(command))
+
+
+# --- planning a PostToolUse payload -------------------------------------------------
+
+
+def plan_post_tool_use(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """(specs to record, not-recorded reasons) for one PostToolUse payload.
+    Both empty → the tool call has nothing to do with decision capture.
+
+    Each parsed invocation must be confirmed by a marker equal to the
+    decision its argv produces; each marker confirms at most one
+    invocation. Specs are built from argv, never from marker contents."""
     if payload.get("tool_name") != "Bash":
-        return []
+        return [], []
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not invokes_record(command):
-        return []
-    seen: set[str] = set()
-    return [spec for text in _strings(payload.get("tool_response")) for spec in extract_specs(text, seen)]
+    if not isinstance(command, str):
+        return [], []
+    markers = [m for text in _strings(payload.get("tool_response")) for m in extract_markers(text)]
+    invocations = find_record_invocations(command)
+    if not invocations:
+        if markers and mentions_record(command):
+            return [], ["Cardinal did NOT record the decision: this command form isn't supported "
+                        "(run cardinal-decision record directly, not inside `bash -c` or a string)."]
+        return [], []
+
+    specs: list[dict[str, Any]] = []
+    reasons: list[str] = []
+    unused = list(markers)
+    for argv in invocations:
+        try:
+            args = parse_record_argv(argv)
+        except _ArgvError as err:
+            reasons.append(f"Cardinal did NOT record a decision: couldn't parse its arguments ({err}).")
+            continue
+        if args.emit:
+            continue  # the CLI recorded and emitted itself; no marker expected
+        match = None
+        for marker in unused:
+            cwd = marker.get("cwd")
+            if not isinstance(cwd, str) or not cwd:
+                continue
+            spec = spec_from_args(args, cwd, args.session or marker.get("session"))
+            try:
+                expected = marker_body(spec, preview(spec))
+            except decisions.DecisionError:
+                break
+            if all(marker.get(k) == expected[k] for k in CONFIRM_KEYS) and (
+                args.session is None or marker.get("session") == args.session
+            ):
+                match = (marker, spec)
+                break
+        if match is None:
+            try:
+                preview(spec_from_args(args, str(payload.get("cwd") or os.getcwd()), args.session))
+                why = ("no matching confirmation from the CLI in the command output "
+                       "(the command failed, its output was truncated, or it was altered)")
+            except decisions.DecisionError as err:
+                why = str(err)
+            reasons.append(f"Cardinal did NOT record decision {args.choice!r}: {why}.")
+            continue
+        unused.remove(match[0])
+        specs.append(match[1])
+    return specs, reasons
 
 
-CAPTURE_OFF_REPORT = (
-    "Cardinal decision capture is off, so this decision was not recorded. "
-    "Only the user can turn it on (`cardinal-decision on` in their own terminal)."
-)
+# --- validation + local recording --------------------------------------------------
 
 
-def report_line(result: dict[str, Any]) -> str:
-    """What the PostToolUse hook tells the agent after recording (same
-    wording as the Cursor adapter)."""
-    decision = result["decision"]
-    tags = [f"PR #{result['pr_number']}"] if result["pr_number"] else []
-    if result["clusters"]:
-        tags.append("clusters " + ", ".join(result["clusters"]))
-    detail = f" ({'; '.join(tags)})" if tags else ""
-    lines = [f"Cardinal recorded decision {decision['id']}: {decision['choice']}{detail}"]
-    if result["unknown_links"]:
-        lines.append(
-            f"Note: no earlier decision in this session has id {', '.join(result['unknown_links'])}; "
-            "the link was kept as given."
-        )
-    if not result["connected"]:
-        lines.append("Cardinal telemetry isn't connected, so it was only saved locally.")
-    return "\n".join(lines)
-
-
-# --- validation + application ----------------------------------------------
+_GIT_FACTS: dict[str, tuple[Optional[str], Optional[str], Optional[str], Optional[str]]] = {}
 
 
 def _git_facts(cwd: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Memoized per process: one hook call recording several decisions in
+    the same cwd runs git once."""
+    if cwd not in _GIT_FACTS:
+        _GIT_FACTS[cwd] = _git_facts_uncached(cwd)
+    return _GIT_FACTS[cwd]
+
+
+def _git_facts_uncached(cwd: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     repo_root = git(["rev-parse", "--show-toplevel"], cwd)
     if not repo_root:
         return None, None, None, None
@@ -233,8 +364,6 @@ def _git_facts(cwd: str) -> tuple[Optional[str], Optional[str], Optional[str], O
 def build_from_spec(
     spec: dict[str, Any], ledger: list[dict[str, Any]], repo_root: Optional[str],
 ) -> dict[str, Any]:
-    """decisions.build_decision over a spec. Pure apart from path
-    resolution; raises decisions.DecisionError on invalid input."""
     anchors = [decisions.parse_anchor(a, repo_root, spec["cwd"]) for a in spec["anchor"]]
     return decisions.build_decision(
         choice=spec["choice"],
@@ -252,11 +381,35 @@ def build_from_spec(
 
 
 def preview(spec: dict[str, Any]) -> dict[str, Any]:
-    """Validate with no side effects and no ~/.codex access (the sandbox
-    may deny reads there too): anchors are parsed without a repo root and
-    no ledger is consulted — the hook re-validates against both."""
+    """Validate with no side effects and no ~/.codex access: anchors parsed
+    without a repo root, no ledger — the hook re-validates against both."""
     spec = dict(spec, anchor=[a[:MAX_ANCHOR_SPEC] for a in spec["anchor"]][: decisions.MAX_ANCHORS])
     return build_from_spec(spec, [], None)
+
+
+PrLookup = Callable[[str, Optional[str], Optional[str]], "tuple[Optional[int], Optional[str]]"]
+
+
+def record_local(
+    paths: AgentPaths, spec: dict[str, Any], session_id: str, pr_lookup: PrLookup,
+) -> dict[str, Any]:
+    """Synchronous, local-only half: git facts, validation against the
+    ledger (final id), PR via `pr_lookup`, ledger write. Returns the entry
+    the background emitter needs. Raises DecisionError / OSError."""
+    cwd = spec["cwd"]
+    repo_root, head_sha, branch, repo = _git_facts(cwd)
+    ledger = decisions.read_ledger(paths.runtime_dir, session_id)
+    decision = build_from_spec(spec, ledger, repo_root)
+    pr_number, pr_url = pr_lookup(cwd, repo, branch)
+    known = {entry["id"] for entry in ledger}
+    unknown = [link["to"] for link in decision["links"] if link["to"] not in known]
+    decisions.record_in_ledger(paths.runtime_dir, session_id, decision)
+    return {
+        "session_id": session_id, "decision": decision, "repo_root": repo_root,
+        "head_sha": head_sha, "branch": branch, "repo": repo,
+        "pr_number": pr_number, "pr_url": pr_url, "unknown_links": unknown,
+        "ts_ns": time.time_ns(),
+    }
 
 
 def resource_attrs(paths: AgentPaths, plugin_version: str) -> dict[str, Any]:
@@ -271,15 +424,11 @@ def resource_attrs(paths: AgentPaths, plugin_version: str) -> dict[str, Any]:
     )
 
 
-PrLookup = Callable[[str, Optional[str], Optional[str]], "tuple[Optional[int], Optional[str]]"]
-
-
 def bounded_code_clusters(
     anchors: list[dict[str, str]], repo_root: Optional[str], head_sha: Optional[str],
     cache: Path, timeout: float,
 ) -> tuple[list[str], Optional[str]]:
-    """decisions.code_clusters with a caller-set `git ls-tree` budget
-    (code_clusters itself uses load_domains' 5s default)."""
+    """decisions.code_clusters with a caller-set `git ls-tree` budget."""
     paths = [(a["path"], a.get("kind") == "directory") for a in anchors if a.get("path") is not None]
     if not paths or not repo_root or not head_sha:
         return [], None
@@ -295,62 +444,52 @@ def bounded_code_clusters(
     return ids[: decisions.MAX_CLUSTERS], scheme
 
 
-def apply_spec(
-    paths: AgentPaths,
-    spec: dict[str, Any],
-    session_id: str,
-    plugin_version: str,
-    *,
-    pr_lookup: Optional[PrLookup] = None,
-    cluster_timeout: float = 5.0,
-    emit_timeout: float = EMIT_TIMEOUT_SEC,
-    now_ns: Callable[[], int] = time.time_ns,
-) -> dict[str, Any]:
-    """Build the decision, write the ledger, emit one cardinal.decision.
-    Must run unsandboxed (hook, or a human's terminal). `pr_lookup`
-    defaults to a live `gh` resolution; the hook passes a cache-only one."""
-    cwd = spec["cwd"]
-    repo_root, head_sha, branch, repo = _git_facts(cwd)
-    ledger = decisions.read_ledger(paths.runtime_dir, session_id)
-    decision = build_from_spec(spec, ledger, repo_root)
+def emit_entries(
+    paths: AgentPaths, entries: list[dict[str, Any]], plugin_version: str,
+    *, cluster_timeout: float = 5.0, emit_timeout: float = EMIT_TIMEOUT_SEC,
+) -> list[list[str]]:
+    """Network half (background child, or --emit): D18 clusters + one OTLP
+    post for all entries. Returns each entry's clusters."""
     cache = decisions.cache_dir(paths.runtime_dir)
-    clusters, scheme = bounded_code_clusters(decision["anchors"], repo_root, head_sha, cache, cluster_timeout)
-    if pr_lookup is None:
-        pr_number, pr_url = decisions.resolve_pr(cwd, repo, branch, cache)
-    else:
-        pr_number, pr_url = pr_lookup(cwd, repo, branch)
-    known = {entry["id"] for entry in ledger}
-    unknown = [link["to"] for link in decision["links"] if link["to"] not in known]
-    decisions.record_in_ledger(paths.runtime_dir, session_id, decision)
-
-    connection = otlp.connection_from_paths(paths)
-    if connection is not None:
+    records = []
+    all_clusters = []
+    for entry in entries:
+        decision = entry["decision"]
+        clusters, scheme = bounded_code_clusters(
+            decision["anchors"], entry.get("repo_root"), entry.get("head_sha"), cache, cluster_timeout)
+        all_clusters.append(clusters)
         attrs = decisions.decision_attributes(
-            session_id=session_id,
-            decision=decision,
-            code_clusters=clusters,
-            cluster_scheme=scheme,
-            repo=repo,
-            branch=branch,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            pr_url=pr_url,
+            session_id=entry["session_id"], decision=decision,
+            code_clusters=clusters, cluster_scheme=scheme,
+            repo=entry.get("repo"), branch=entry.get("branch"), head_sha=entry.get("head_sha"),
+            pr_number=entry.get("pr_number"), pr_url=entry.get("pr_url"),
         )
+        records.append(otlp.log_record(decisions.DECISION_EVENT, attrs, int(entry.get("ts_ns") or time.time_ns())))
+    connection = otlp.connection_from_paths(paths)
+    if connection is not None and records:
         otlp.emit_records(
-            [otlp.log_record(decisions.DECISION_EVENT, attrs, now_ns())],
-            connection,
-            resource_attrs(paths, plugin_version),
-            scope_name=SCOPE_NAME,
-            scope_version=plugin_version,
-            timeout=emit_timeout,
+            records, connection, resource_attrs(paths, plugin_version),
+            scope_name=SCOPE_NAME, scope_version=plugin_version, timeout=emit_timeout,
         )
-    return {
-        "decision": decision,
-        "pr_number": pr_number,
-        "clusters": clusters,
-        "unknown_links": unknown,
-        "connected": connection is not None,
-    }
+    return all_clusters
+
+
+def report_line(entry: dict[str, Any], connected: bool, clusters: Optional[list[str]] = None,
+                prefix: str = "Cardinal recorded decision") -> str:
+    decision = entry["decision"]
+    tags = [f"PR #{entry['pr_number']}"] if entry.get("pr_number") else []
+    if clusters:
+        tags.append("clusters " + ", ".join(clusters))
+    detail = f" ({'; '.join(tags)})" if tags else ""
+    lines = [f"{prefix} {decision['id']}: {decision['choice']}{detail}"]
+    if entry.get("unknown_links"):
+        lines.append(
+            f"Note: no earlier decision in this session has id {', '.join(entry['unknown_links'])}; "
+            "the link was kept as given."
+        )
+    if not connected:
+        lines.append("Cardinal telemetry isn't connected, so it was only saved locally.")
+    return "\n".join(lines)
 
 
 # --- hook registration -------------------------------------------------------
@@ -358,8 +497,7 @@ def apply_spec(
 
 def post_tool_use_registered(paths: AgentPaths) -> bool:
     """True when ~/.codex/hooks.json has the managed PostToolUse handler
-    that performs the hook-side emission. Without it a marker would never
-    be picked up, so the prompt must not ask the agent to record."""
+    that performs the hook-side emission."""
     groups = read_json(paths.home / "hooks.json").get("hooks", {})
     groups = groups.get("PostToolUse") if isinstance(groups, dict) else None
     if not isinstance(groups, list):

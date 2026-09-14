@@ -120,27 +120,19 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_record(args: argparse.Namespace) -> int:
     session_id = _session(args)
-    spec = handoff.normalize_spec({
-        "session": session_id, "cwd": os.getcwd(), "choice": args.choice,
-        "question": args.question, "why": args.why, "alt": args.alt, "by": args.by,
-        "anchor": args.anchor, "follows": args.follows, "refines": args.refines,
-        "supersedes": args.supersedes, "id": args.id,
-    })
-    if spec is None:
-        print("cardinal-decision: --choice is required: the option that was chosen, in a few words",
-              file=sys.stderr)
-        return EXIT_USAGE
+    spec = handoff.spec_from_args(args, os.getcwd(), session_id)
 
     if not args.emit:
         # Sandbox-safe handoff: validate only — no ~/.codex reads or
         # writes, no gh, no network — and print the marker. The hook
-        # applies the on/off gate and records it.
+        # re-derives the decision from this command's argv, checks the
+        # marker matches, applies the on/off gate and records it.
         try:
             decision = handoff.preview(spec)
         except decisions.DecisionError as err:
             print(f"cardinal-decision: {err}", file=sys.stderr)
             return EXIT_USAGE
-        print(handoff.marker_from_decision(spec, decision, explicit_id=bool(args.id)))
+        print(handoff.marker_line(spec, decision))
         print(f"Decision submitted: {decision['choice']} (proposed id {decision['id']}). "
               "Cardinal's hook records it after this command finishes and reports the final id.")
         return 0
@@ -152,8 +144,11 @@ def cmd_record(args: argparse.Namespace) -> int:
     if not session_id:
         print("cardinal-decision: --session is required with --emit.", file=sys.stderr)
         return EXIT_USAGE
+    cache = decisions.cache_dir(paths.runtime_dir)
     try:
-        result = handoff.apply_spec(paths, spec, session_id, _plugin_version.plugin_version())
+        entry = handoff.record_local(
+            paths, spec, session_id, lambda cwd, repo, branch: decisions.resolve_pr(cwd, repo, branch, cache),
+        )
     except decisions.DecisionError as err:
         print(f"cardinal-decision: {err}", file=sys.stderr)
         return EXIT_USAGE
@@ -161,17 +156,9 @@ def cmd_record(args: argparse.Namespace) -> int:
         print(f"cardinal-decision: can't write {paths.runtime_dir} ({err.strerror or err}). "
               "--emit must run outside the Codex sandbox; the agent should omit it.", file=sys.stderr)
         return EXIT_WRITE
-    decision = result["decision"]
-    tags = [f"PR #{result['pr_number']}"] if result["pr_number"] else []
-    if result["clusters"]:
-        tags.append("clusters " + ", ".join(result["clusters"]))
-    detail = f" ({'; '.join(tags)})" if tags else ""
-    print(f"Recorded decision {decision['id']}: {decision['choice']}{detail}")
-    if result["unknown_links"]:
-        print(f"Note: no earlier decision in this session has id {', '.join(result['unknown_links'])}; "
-              "the link was kept as given.")
-    if not result["connected"]:
-        print("Cardinal telemetry isn't connected, so this decision was only saved locally (run cardinal-connect).")
+    connected = otlp.connection_from_paths(paths) is not None
+    (clusters,) = handoff.emit_entries(paths, [entry], _plugin_version.plugin_version())
+    print(handoff.report_line(entry, connected, clusters, prefix="Recorded decision"))
     return 0
 
 
@@ -183,26 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="{record,on,off,status}")
 
     record = sub.add_parser("record", help="record one decision")
-    record.add_argument("--session", help="session id (supplied by the prompt hook; the hook prefers "
-                                          "the Codex session it observes)")
-    record.add_argument("--choice", required=True, help="the option chosen, in a few words")
-    record.add_argument("--question", help="the question this decision settles")
-    record.add_argument("--why", help="one sentence on why this option won")
-    record.add_argument("--alt", action="append", default=[], metavar="OPTION",
-                        help="an option that was considered and rejected (repeatable)")
-    record.add_argument("--by", choices=decisions.DECIDED_BY, default="agent",
-                        help="who made the call (default: agent)")
-    record.add_argument("--anchor", action="append", default=[], metavar="ANCHOR",
-                        help="file, dir/, file::Symbol, or <kind>:<identifier>[@path] the decision governs (repeatable)")
-    record.add_argument("--follows", action="append", default=[], metavar="ID",
-                        help="an earlier decision this one only makes sense because of")
-    record.add_argument("--refines", action="append", default=[], metavar="ID",
-                        help="an earlier decision this one narrows")
-    record.add_argument("--supersedes", action="append", default=[], metavar="ID",
-                        help="an earlier decision this one replaces")
-    record.add_argument("--id", help="decision id; reuse an existing id to revise that decision")
-    record.add_argument("--emit", action="store_true",
-                        help="record and emit directly (your own terminal only; not inside Codex)")
+    # Shared with the hook, which re-parses this command's argv.
+    handoff.add_record_arguments(record)
     record.set_defaults(func=cmd_record)
 
     sub.add_parser("on", help="turn decision capture on").set_defaults(func=cmd_on)
