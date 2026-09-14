@@ -18,11 +18,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.machinery import SourceFileLoader
@@ -220,12 +222,38 @@ class CursorDecisionBase(unittest.TestCase):
         payload.update(overrides)
         return payload
 
-    def agent_records(self, *args: str, **hook_env) -> str:
+    def prime_pr_cache(self) -> None:
+        """A prompt's git_state resolves the PR synchronously and caches it,
+        so the recorder (cache-only) sees it without spawning a refresh."""
+        if not getattr(self, "_pr_primed", False):
+            self.hook("beforeSubmitPrompt", {"hook_event_name": "beforeSubmitPrompt",
+                                             "conversation_id": "c1", "prompt": "hi",
+                                             "workspace_roots": [str(self.repo)]})
+            self._pr_primed = True
+
+    def agent_command(self, args) -> str:
+        return f'python3 "{CLI}" ' + " ".join(shlex.quote(a) for a in args)
+
+    def agent_records(self, *args: str, prime: bool = True, **hook_env) -> str:
         """Agent runs the CLI (unsandboxed here), then Cursor fires postToolUse."""
+        if prime:
+            self.prime_pr_cache()
         args = args or self.RECORD_ARGS
         stdout = self.cli(*args).stdout
-        command = f'python3 "{CLI}" ' + " ".join(args)
-        return self.hook("postToolUse", self.shell_payload(command, stdout), **hook_env)
+        return self.hook("postToolUse", self.shell_payload(self.agent_command(args), stdout), **hook_env)
+
+    def wait_for_pr_cache(self, timeout: float = 8.0) -> dict:
+        path = self.cursor / "cardinal" / "decisions" / "cache" / "prs.json"
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                data = json.loads(path.read_text())
+                if data:
+                    return data
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.1)
+        self.fail("detached PR refresh never wrote the cache")
 
 
 class SandboxedRecordCliTest(CursorDecisionBase):
@@ -348,8 +376,89 @@ class HookRecordsDecisionTest(CursorDecisionBase):
         self.assertEqual(out, "")
         self.assertEqual(self.records("cardinal.decision"), [])
 
+    def test_spoofed_markers_are_never_recorded(self):
+        self.enable()
+        self.prime_pr_cache()
+        stdout = self.cli("record", "--choice", "Use X").stdout
+        marker = next(l for l in stdout.splitlines() if l.startswith(MARKER))
+        spoofs = [
+            f"echo {shlex.quote(marker)}",
+            f"printf '%s\\n' {shlex.quote(marker)}",
+            "grep -h cardinal-decision saved-output.txt",
+            "grep cardinal-decision-record saved-output.txt",
+            "cat saved-output.txt",
+            f"echo python3 {CLI} record --choice X",
+            f"grep -r 'cardinal-decision record' .",
+        ]
+        for command in spoofs:
+            with self.subTest(command=command):
+                self.assertEqual(self.hook("postToolUse", self.shell_payload(command, stdout)), "")
+        self.assertEqual(self.records("cardinal.decision"), [])
+        self.assertFalse((self.cursor / "cardinal" / "decisions" / "sessions").exists())
+
+    def test_legit_invocations_with_quoted_paths(self):
+        self.enable()
+        self.prime_pr_cache()
+        spaced = self.root / "plugin dir" / "scripts"
+        spaced.mkdir(parents=True)
+        shutil.copy(CLI, spaced / "cardinal-decision")
+        stdout = self.cli("record", "--choice", "Use X").stdout
+        commands = [
+            f'python3 "{spaced / "cardinal-decision"}" record --choice "Use X"',
+            f"'{spaced / 'cardinal-decision'}' record --choice 'Use X'",
+            f'cd "{self.repo}" && python3.12 {shlex.quote(str(CLI))} record --choice "Use X"',
+            f'/usr/bin/python3 "{CLI}" record --choice "Use X" | tee /tmp/out',
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                out = json.loads(self.hook("postToolUse", self.shell_payload(command, stdout)))
+                self.assertIn("Cardinal recorded decision use-x", out["additional_context"])
+        self.assertEqual(len(self.records("cardinal.decision")), len(commands))
+
+    def test_one_marker_per_invocation(self):
+        # A real record call followed by a cat of saved markers: only the
+        # invocation's own (first) marker is recorded.
+        self.enable()
+        self.prime_pr_cache()
+        own = self.cli("record", "--choice", "Use X").stdout
+        saved = self.cli("record", "--choice", "Old choice").stdout
+        command = self.agent_command(("record", "--choice", "Use X")) + " && cat saved.txt"
+        self.hook("postToolUse", self.shell_payload(command, own + saved))
+        [(_, attrs)] = self.records("cardinal.decision")
+        self.assertEqual(attrs["cardinal.decision.choice"], "Use X")
+
+    def test_recording_failure_is_reported_not_swallowed(self):
+        self.enable()
+        self.prime_pr_cache()
+        decisions_dir = self.cursor / "cardinal" / "decisions"
+        (decisions_dir / "sessions").write_text("not a directory")
+        out = json.loads(self.agent_records("record", "--choice", "Use X"))
+        context = out["additional_context"]
+        self.assertIn('Cardinal did NOT record the decision "Use X"', context)
+        self.assertNotIn("Traceback", context)
+        self.assertLess(len(context), 400)
+        self.assertEqual(self.records("cardinal.decision"), [])
+
+    def test_recorder_never_waits_on_gh_and_refreshes_in_background(self):
+        self.enable()
+        self.write_gh('sleep 2; echo \'{"number": 42, "url": "https://github.com/acme/widgets/pull/42"}\'')
+        started = time.monotonic()
+        out = json.loads(self.agent_records("record", "--choice", "Use X", prime=False))
+        self.assertLess(time.monotonic() - started, 2.0 + 1.0)  # CLI + hook, gh's 2s sleep not awaited
+        self.assertNotIn("PR #", out["additional_context"])
+        [(_, first)] = self.records("cardinal.decision")
+        self.assertNotIn("cardinal.pr_number", first)
+
+        cache = self.wait_for_pr_cache()
+        self.assertEqual(cache["acme/widgets#feat/trace-index"]["number"], 42)
+        out = json.loads(self.agent_records("record", "--choice", "Use Y", prime=False))
+        self.assertIn("PR #42", out["additional_context"])
+        self.assertEqual(int(self.records("cardinal.decision")[-1][1]["cardinal.pr_number"]), 42)
+        self.assertEqual(len(self.gh_calls.read_text().splitlines()), 1)
+
     def test_legacy_dict_tool_output_shape(self):
         self.enable()
+        self.prime_pr_cache()
         args = ("record", "--choice", "Use X")
         stdout = self.cli(*args).stdout
         payload = {
@@ -518,6 +627,34 @@ class GitStatePrLinkageTest(CursorDecisionBase):
         self.assertFalse(self.gh_calls.exists())
 
 
+class InvocationParserTest(unittest.TestCase):
+    """Unit coverage for the shell-aware `cardinal-decision record` check."""
+
+    def setUp(self):
+        self.hook = _load_module("cursor_telemetry_invocations", HOOK)
+
+    def test_counts(self):
+        count = self.hook.decision_record_invocations
+        cases = [
+            ('python3 "/a b/cardinal-decision" record --choice X', 1),
+            ("/p/scripts/cardinal-decision record --choice X", 1),
+            ("python3.11 cardinal-decision record --choice 'a; b'", 1),
+            ("cd /repo && python3 cardinal-decision record --choice X; python cardinal-decision record --choice Y", 2),
+            ("(python3 cardinal-decision record --choice X)", 1),
+            ("echo cardinal-decision record", 0),
+            ("printf 'cardinal-decision-record:v1 {}'", 0),
+            ("grep cardinal-decision out.txt", 0),
+            ("cat out.txt | grep cardinal-decision", 0),
+            ("python3 cardinal-decision status", 0),
+            ("python3 cardinal-decision-record record", 0),
+            ("node cardinal-decision record", 0),
+            ("python3 'unbalanced cardinal-decision record", 0),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                self.assertEqual(count(command), expected)
+
+
 class ResolvePrTimeoutTest(unittest.TestCase):
     """Synchronous hook paths bound the gh call."""
 
@@ -529,6 +666,13 @@ class ResolvePrTimeoutTest(unittest.TestCase):
         self.assertEqual(rp.call_args.kwargs["timeout"], hook.PR_RESOLVE_TIMEOUT_SEC)
         with mock.patch.object(hook.decisions, "resolve_pr", side_effect=RuntimeError("boom")):
             self.assertEqual(hook.resolve_pr("/x", "a/b", "feat/y"), (None, None))
+
+    def test_decision_path_budget_fits_legacy_5s_hook_timeout(self):
+        hook = _load_module("cursor_telemetry_budget", HOOK)
+        self.assertLessEqual(hook.DECISION_CLUSTER_TIMEOUT_SEC + hook.DECISION_EMIT_TIMEOUT_SEC, 3.0)
+        with mock.patch.object(hook.decisions, "load_domains", return_value=None) as ld:
+            hook.bounded_code_clusters([{"kind": "file", "identifier": "a.py", "path": "a.py"}], "/r", "sha")
+        self.assertEqual(ld.call_args.kwargs["timeout"], hook.DECISION_CLUSTER_TIMEOUT_SEC)
 
 
 class RecordingHookInstallTest(unittest.TestCase):

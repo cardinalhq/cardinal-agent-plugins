@@ -31,6 +31,8 @@ import argparse
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -41,6 +43,7 @@ import _plugin_version  # noqa: E402
 from cardinal_core import decisions, limits, otlp, session  # noqa: E402
 from cardinal_core.bashclass import classify_bash_command  # noqa: E402,F401
 from cardinal_core.initiative import (  # noqa: E402,F401
+    PROTECTED_BRANCHES,
     canonical_repo,
     detect_command,
     git,
@@ -48,7 +51,7 @@ from cardinal_core.initiative import (  # noqa: E402,F401
     resolve_initiative,
     strip_worktree_noise,
 )
-from cardinal_core.paths import AgentPaths  # noqa: E402
+from cardinal_core.paths import AgentPaths, read_json  # noqa: E402
 
 PLUGIN_VERSION = _plugin_version.plugin_version()
 SCOPE_NAME = "cardinal-cursor-plugin"
@@ -91,6 +94,19 @@ PR_RESOLVE_TIMEOUT_SEC = 1.5
 # and the marker line its `record` subcommand prints for postToolUse.
 DECISION_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-decision"
 DECISION_MARKER_PREFIX = "cardinal-decision-record:v1 "
+
+# Decision recording runs inside postToolUse, which installs made before
+# 1dbc997 registered with Cursor's 5s timeout (15s after re-running
+# cardinal-connect). Worst case must fit the 5s budget: 4 git calls
+# (normally ms), a D18 tree listing bounded here (core's default is 5s),
+# no `gh` on the hook path (cached PR only; a detached child refreshes the
+# cache), and one decision emit bounded here. The reply is written before
+# the slower turn_tool emit.
+DECISION_CLUSTER_TIMEOUT_SEC = 1.5
+DECISION_EMIT_TIMEOUT_SEC = 1.5
+
+_SHELL_OPERATOR_CHARS = frozenset(";&|()")
+_PYTHON_INTERPRETER_RE = re.compile(r"^python(\d+(\.\d+)*)?$")
 
 EXIT_CODE_RE = re.compile(r"(?:exit(?:ed)?|status)[ :]+(-?\d+)", re.IGNORECASE)
 
@@ -169,7 +185,9 @@ def resource_attrs(
 
 
 def emit_records(
-    records: list[dict[str, Any]], payload: dict[str, Any] | None = None
+    records: list[dict[str, Any]],
+    payload: dict[str, Any] | None = None,
+    timeout: float = otlp.DEFAULT_TIMEOUT_SEC,
 ) -> None:
     if not records:
         return
@@ -182,6 +200,7 @@ def emit_records(
         resource_attrs(PATHS.read_state(), payload),
         scope_name=SCOPE_NAME,
         scope_version=PLUGIN_VERSION,
+        timeout=timeout,
     )
 
 
@@ -447,11 +466,49 @@ def _tool_output_texts(tool_output: Any) -> list[str]:
     return texts
 
 
+def decision_record_invocations(command: str) -> int:
+    """How many times the shell command actually runs `cardinal-decision
+    record`: a token in command position (start of the command or after a
+    shell operator), optionally behind a python interpreter, whose basename
+    is `cardinal-decision`, followed by the token `record`. Mentions in
+    arguments (echo, printf, grep, cat of saved output) don't count, and an
+    unparseable command counts as zero."""
+    if "cardinal-decision" not in command:
+        return 0
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return 0
+    count = 0
+    at_command_start = True
+    for i, token in enumerate(tokens):
+        if token and set(token) <= _SHELL_OPERATOR_CHARS:
+            at_command_start = True
+            continue
+        if at_command_start:
+            j = i
+            if _PYTHON_INTERPRETER_RE.match(os.path.basename(token)):
+                j += 1
+            if (
+                j + 1 < len(tokens)
+                and os.path.basename(tokens[j]) == "cardinal-decision"
+                and tokens[j + 1] == "record"
+            ):
+                count += 1
+        at_command_start = False
+    return count
+
+
 def submitted_decisions(command: str, tool_output: Any) -> list[dict[str, Any]]:
     """Marker payloads printed by `cardinal-decision record` in this tool
-    call. The command itself must invoke cardinal-decision, so a marker
-    echoed by some other command (cat of a log, etc.) is ignored."""
-    if "cardinal-decision" not in command:
+    call. Only commands that actually invoke `cardinal-decision record`
+    are considered, and at most one marker per invocation is accepted (the
+    CLI prints its marker first), so markers echoed, grepped, or cat'ed
+    from saved output are never re-recorded."""
+    limit = decision_record_invocations(command)
+    if not limit:
         return []
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
@@ -470,7 +527,88 @@ def submitted_decisions(command: str, tool_output: Any) -> list[dict[str, Any]]:
                 continue
             if isinstance(obj, dict) and obj.get("v") == 1:
                 out.append(obj)
+                if len(out) >= limit:
+                    return out
     return out
+
+
+_PR_REFRESH_SPAWNED: set[tuple[str, str]] = set()
+
+
+def cached_pr(cwd: str, repo: str | None, branch: str | None) -> tuple[int | None, str | None]:
+    """The branch's PR from core's resolve_pr cache only (never runs `gh`
+    on the hook path). A missing or expired entry triggers one detached
+    `--refresh-pr` child that runs the normal resolve_pr and fills the
+    cache for later decisions and git_state records. Reads core's cache
+    layout (`prs.json`, key `<repo>#<branch>`, decisions.py resolve_pr)."""
+    if not repo or not branch or branch == "HEAD" or branch in PROTECTED_BRANCHES:
+        return None, None
+    entry = read_json(decisions.cache_dir(PATHS.runtime_dir) / "prs.json").get(f"{repo}#{branch}")
+    number = url = None
+    fresh = False
+    if isinstance(entry, dict):
+        number, url = entry.get("number"), entry.get("url")
+        ttl = decisions.PR_CACHE_TTL_SEC if number else decisions.PR_NEGATIVE_TTL_SEC
+        try:
+            fresh = time.time() - float(entry.get("at") or 0) < ttl
+        except (TypeError, ValueError):
+            fresh = False
+    if not fresh:
+        spawn_pr_refresh(cwd, repo, branch)
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        return None, None
+    return number, url if isinstance(url, str) and url else None
+
+
+def spawn_pr_refresh(cwd: str, repo: str, branch: str) -> None:
+    key = (repo, branch)
+    if key in _PR_REFRESH_SPAWNED:
+        return
+    _PR_REFRESH_SPAWNED.add(key)
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--refresh-pr",
+             json.dumps([cwd, repo, branch])],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError:
+        pass
+
+
+def refresh_pr_main(raw: str) -> None:
+    """Detached child: resolve the PR with core's normal gh budget."""
+    try:
+        cwd, repo, branch = json.loads(raw)
+        decisions.resolve_pr(cwd, repo, branch, decisions.cache_dir(PATHS.runtime_dir))
+    except Exception:
+        pass
+
+
+def bounded_code_clusters(
+    anchors: list[dict[str, str]], repo_root: str | None, head_sha: str | None
+) -> tuple[list[str], str | None]:
+    """decisions.code_clusters with a smaller ls-tree budget (core's
+    load_domains defaults to 5s). Same shape as the native adapter."""
+    anchor_paths = [(a["path"], a.get("kind") == "directory") for a in anchors if a.get("path") is not None]
+    if not anchor_paths or not repo_root or not head_sha:
+        return [], None
+    loaded = decisions.load_domains(
+        repo_root, head_sha, decisions.cache_dir(PATHS.runtime_dir),
+        timeout=DECISION_CLUSTER_TIMEOUT_SEC,
+    )
+    if loaded is None:
+        return [], None
+    domains, scheme = loaded
+    ids: list[str] = []
+    for path, is_dir in anchor_paths:
+        for cluster_id in decisions.match_clusters(domains, path, is_dir):
+            if cluster_id not in ids:
+                ids.append(cluster_id)
+    return ids[: decisions.MAX_CLUSTERS], scheme
 
 
 def _marker_str(value: Any) -> str | None:
@@ -519,9 +657,8 @@ def record_decision(conv_id: str, marker: dict[str, Any], payload: dict[str, Any
     except decisions.DecisionError as err:
         return f"Cardinal did not record the decision: {err}"
 
-    cache = decisions.cache_dir(PATHS.runtime_dir)
-    clusters, scheme = decisions.code_clusters(decision["anchors"], repo_root, head_sha, cache)
-    pr_number, pr_url = resolve_pr(cwd, repo, branch)
+    clusters, scheme = bounded_code_clusters(decision["anchors"], repo_root, head_sha)
+    pr_number, pr_url = cached_pr(cwd, repo, branch)
     known = {entry["id"] for entry in ledger}
     unknown = [link["to"] for link in decision["links"] if link["to"] not in known]
     decisions.record_in_ledger(PATHS.runtime_dir, conv_id, decision)
@@ -539,7 +676,10 @@ def record_decision(conv_id: str, marker: dict[str, Any], payload: dict[str, Any
             pr_number=pr_number,
             pr_url=pr_url,
         )
-        emit_records([log_record(decisions.DECISION_EVENT, attrs, time.time_ns())], payload)
+        emit_records(
+            [log_record(decisions.DECISION_EVENT, attrs, time.time_ns())], payload,
+            timeout=DECISION_EMIT_TIMEOUT_SEC,
+        )
 
     tags = [f"PR #{pr_number}"] if pr_number else []
     if clusters:
@@ -559,15 +699,35 @@ def record_decision(conv_id: str, marker: dict[str, Any], payload: dict[str, Any
 def record_submitted_decisions(
     conv_id: str, command: str, tool_output: Any, payload: dict[str, Any]
 ) -> list[str]:
+    """additional_context lines for every submitted decision. Once a marker
+    is found the agent always gets an answer: an unexpected failure is
+    reported as NOT recorded (exception type + short message, no
+    traceback) instead of being swallowed."""
     markers = submitted_decisions(command, tool_output)
     if not markers:
         return []
-    if not decisions.is_enabled(PATHS.runtime_dir, os.environ.get(decisions.ENABLE_ENV)):
+    try:
+        enabled = decisions.is_enabled(PATHS.runtime_dir, os.environ.get(decisions.ENABLE_ENV))
+    except Exception as err:
+        return [f"Cardinal did NOT record the decision: {_short_error(err)}"]
+    if not enabled:
         return [
             "Cardinal decision capture is off, so this decision was not recorded. "
             "Only the user can turn it on (`cardinal-decision on` in their own terminal)."
         ]
-    return [record_decision(conv_id, marker, payload) for marker in markers]
+    out: list[str] = []
+    for marker in markers:
+        try:
+            out.append(record_decision(conv_id, marker, payload))
+        except Exception as err:
+            choice = _marker_str(marker.get("choice")) or "?"
+            out.append(f'Cardinal did NOT record the decision "{choice[:80]}": {_short_error(err)}')
+    return out
+
+
+def _short_error(err: BaseException) -> str:
+    text = " ".join(str(err).split())
+    return f"{type(err).__name__}: {text[:160]}" if text else type(err).__name__
 
 
 def handle_post_tool_use(payload: dict[str, Any]) -> None:
@@ -632,7 +792,6 @@ def handle_post_tool_use(payload: dict[str, Any]) -> None:
     }
     records.append(log_record("tool_result", tool_result_attrs, now_ns + 1))
 
-    emit_records(records, payload)
     state["tool_seq"] += 1
     session.save_progress(PATHS, conv_id, state)
 
@@ -651,11 +810,15 @@ def handle_post_tool_use(payload: dict[str, Any]) -> None:
     try:
         command = tool_input.get("command") or tool_input.get("cmd") or ""
         contexts.extend(record_submitted_decisions(conv_id, str(command), tool_output, payload))
-    except Exception:
-        pass
+    except Exception as err:
+        contexts.append(f"Cardinal did NOT record the decision: {_short_error(err)}")
+    # Reply before the turn_tool/tool_result emit so a slow ingest can't
+    # push the agent-facing answer past the hook timeout.
     if contexts:
         sys.stdout.write(json.dumps({"additional_context": "\n\n".join(contexts)}))
         sys.stdout.flush()
+
+    emit_records(records, payload)
 
 
 def handle_pre_compact(payload: dict[str, Any]) -> None:
@@ -803,8 +966,9 @@ def decision_context(conv_id: str) -> str | None:
         "Run it from the workspace root. The command only checks the arguments and prints "
         "a line that Cardinal's hook records once the command finishes, so it needs no "
         "network or file access and works in the sandbox. The hook then tells you the "
-        "recorded id. Do not run `cardinal-decision on`, `off`, or `status`: those are for "
-        "the user in their own terminal.\n"
+        "recorded id. If the sandbox refuses to run it, ask to run it outside the sandbox: "
+        "it only prints and changes nothing. Do not run `cardinal-decision on`, `off`, or "
+        "`status`: those are for the user in their own terminal.\n"
         "Record choices, not progress, findings, or tool calls. Use --by user when the user "
         "made the call. Anchor the files or symbols the decision governs. Link a decision to "
         "an earlier one when it builds on, narrows, or replaces it.\n"
@@ -862,7 +1026,12 @@ HANDLERS = {
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--event", required=False, default=None)
+    parser.add_argument("--refresh-pr", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.refresh_pr is not None:
+        refresh_pr_main(args.refresh_pr)
+        silent_exit()
 
     raw = sys.stdin.read()
     try:
