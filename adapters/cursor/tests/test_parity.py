@@ -5,7 +5,9 @@ Two layers:
 1. GoldenParityTests — runs the migrated hook script against the SAME
    synthetic fixtures used to capture tests/goldens/*.json from the
    pre-migration shipped plugin (cardinal-cursor-plugin v0.2.0), and
-   asserts byte-equal normalized OTLP output and hook stdout.
+   asserts byte-equal normalized OTLP output and hook stdout. Goldens 02
+   and 06 were re-captured from the current hook to add the PR keys; see
+   capture_goldens.py before re-capturing from v0.2.0.
 
 2. Behavioral tests ported from the source repo's
    tests/test_cardinal_plugin.py — contract-parity fixtures (initiative,

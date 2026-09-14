@@ -75,6 +75,7 @@ What that means for Cardinal in cloud agents:
 
 - **Initiative-convention prompt, budget standing, and decision-capture instructions:** not delivered, because they all ride on `sessionStart`.
 - **Decision capture:** you can still run `cardinal-decision record` if the CLI exists in the cloud VM at the path your hook config uses, but the agent is never told to. The on/off switch and ledger live under the VM's `~/.cursor/cardinal/`, not your laptop's.
+- **Spend-limits gate:** runs on `beforeSubmitPrompt`, so it can block or warn in cloud agents too.
 - **`git_state` PR linkage:** `beforeSubmitPrompt` runs once hooks are active, but `gh` in the cloud VM is usually missing or not authenticated, so expect the PR keys to be absent there. Server-side branch → PR joins still apply.
 - **Tool-level telemetry** (`postToolUse`, `subagentStop`, `preCompact`, `afterAgent*`): runs normally.
 

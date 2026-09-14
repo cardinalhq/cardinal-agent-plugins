@@ -10,7 +10,7 @@ An audit of all seven adapters (2026-09-14) found:
 |---|---|---|
 | claude | partial — `git_state` has repo/branch/head_sha, no PR | yes |
 | codex | partial | no |
-| cursor | partial (no `git_state` at all in cloud agents) | no |
+| cursor | partial (cloud agents need `--project` hooks; `sessionStart` doesn't run there) | no |
 | gemini | partial | no |
 | omnigent | no — branch/repo only, no head_sha | no |
 | opencode | partial | no |
