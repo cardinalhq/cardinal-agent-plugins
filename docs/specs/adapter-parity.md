@@ -51,7 +51,14 @@ Same semantics as Claude (`docs/specs/decision-telemetry.md`):
   (`decisions.render_ledger`).
 
 Host surfaces must be verified against the host's real hook/plugin API, not
-assumed. Where a host cannot inject context, the adapter documents the gap
+assumed.
+
+Agent shell commands may run sandboxed: Codex (`workspace-write`, the default)
+and Cursor 3.6+ Auto-review (macOS/Linux) block network and writes outside the
+workspace. On those hosts the agent-run `record` command only validates and
+prints a marker; an unsandboxed hook parses it, writes the ledger, and emits
+the single `cardinal.decision`. Claude's sandbox is opt-in and prompts to
+escalate, so Claude keeps CLI-side emission. Where a host cannot inject context, the adapter documents the gap
 instead of shipping a flow that never fires.
 
 ## Per-adapter work
