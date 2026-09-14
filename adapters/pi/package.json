@@ -1,6 +1,6 @@
 {
   "name": "@cardinalhq/pi-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Cardinal session telemetry and MCP tools for the Pi coding agent",
   "type": "module",
   "license": "Apache-2.0",

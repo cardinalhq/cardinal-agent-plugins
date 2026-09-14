@@ -26,7 +26,7 @@ Install the tarball with `npm install /path/to/artifact.tgz` into an installatio
 directory, then run `pi install /absolute/installation/directory/node_modules/@cardinalhq/pi-plugin`.
 Its `node_modules/.bin/cardinal-pi` command manages the connection.
 
-After publication, installation can use `pi install npm:@cardinalhq/pi-plugin@0.1.0`
+After publication, installation can use `pi install npm:@cardinalhq/pi-plugin@0.2.0`
 and `npx --package @cardinalhq/pi-plugin cardinal-pi connect`.
 The initial implementation does not publish the package automatically.
 

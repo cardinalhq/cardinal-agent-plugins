@@ -41,7 +41,7 @@ installation directory. Point OpenCode at that directory's
 command manages the connection.
 
 After the package is published to npm, the plugin config may instead name
-`@cardinalhq/opencode-plugin@0.1.0` and connection commands can use
+`@cardinalhq/opencode-plugin@0.2.0` and connection commands can use
 `npx --package @cardinalhq/opencode-plugin cardinal-opencode connect`.
 The initial implementation does not publish the package automatically.
 
