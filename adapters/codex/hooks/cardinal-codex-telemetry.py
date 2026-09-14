@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -25,7 +26,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plugin_version  # noqa: E402
-from cardinal_core import bashclass, initiative, limits, otlp, pricing  # noqa: E402
+from cardinal_core import bashclass, decisions, initiative, limits, otlp, pricing  # noqa: E402
 from cardinal_core import session as core_session  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
 
@@ -33,6 +34,12 @@ from cardinal_core.paths import AgentPaths  # noqa: E402
 PLUGIN_VERSION = _plugin_version.plugin_version()
 HOOK_TIMEOUT_SEC = 2.0
 MAX_EVENTS_PER_STOP = 512
+# UserPromptSubmit is synchronous in Codex (the turn waits for the hook to
+# exit), so a `gh pr view` cache miss must stay short.
+PR_RESOLVE_TIMEOUT_SEC = 1.5
+# The launcher execs this file from the connected plugin root (or newest
+# cache), so the sibling scripts/ dir is the install the agent should call.
+DECISION_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-decision"
 
 # P5 capture affordance (subagent-telemetry-enrichment field 4, step 1):
 # Codex's SubagentStop payload shape has never been observed in the wild,
@@ -129,6 +136,47 @@ def dump_debug_payload(event: str, payload: dict[str, Any]) -> None:
         pass
 
 
+def build_decision_context(cli: str, session_id: str, entries: list[dict[str, Any]]) -> str:
+    """Decision-capture instructions + session ledger (Claude parity:
+    adapters/claude/hooks/decision-prompt.py), with Codex's invocation."""
+    command = f"python3 {shlex.quote(cli)} record --session {shlex.quote(session_id)}"
+    return (
+        "Cardinal decision capture is on for this session. When you make a choice that "
+        "constrains later work (picking between approaches, settling an open question, or "
+        "the user deciding something), record it right away with one shell command:\n"
+        f'{command} --choice "<the option chosen, 2-7 words>" '
+        '--question "<what had to be settled>" --why "<one sentence>" '
+        '[--alt "<rejected option>"]... [--by user] [--anchor <path>[::Symbol]]... '
+        "[--follows|--refines|--supersedes <id>]\n"
+        "Record choices, not progress, findings, or tool calls. Use --by user when the user "
+        "made the call. Anchor the files or symbols the decision governs. Link a decision to "
+        "an earlier one when it builds on, narrows, or replaces it.\n"
+        "Decisions so far this session:\n"
+        f"{decisions.render_ledger(entries)}"
+    )
+
+
+def decision_context(paths: AgentPaths, session_id: str) -> str | None:
+    """Context to inject when decision capture is on, else None. File
+    reads only — safe on the synchronous prompt path."""
+    if not decisions.is_enabled(paths.runtime_dir, os.environ.get(decisions.ENABLE_ENV)):
+        return None
+    entries = decisions.read_ledger(paths.runtime_dir, session_id)
+    return build_decision_context(str(DECISION_CLI), session_id, entries)
+
+
+def merge_prompt_output(gate_out: dict[str, Any] | None, context: str | None) -> dict[str, Any] | None:
+    """Codex parses a hook's stdout as ONE JSON object, so the spend gate
+    and decision context share it. A block verdict wins outright."""
+    out = dict(gate_out or {})
+    if context and out.get("decision") != "block":
+        specific = dict(out.get("hookSpecificOutput") or {"hookEventName": "UserPromptSubmit"})
+        existing = specific.get("additionalContext")
+        specific["additionalContext"] = f"{existing}\n\n{context}" if existing else context
+        out["hookSpecificOutput"] = specific
+    return out or None
+
+
 def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
     session_id = session_id_from_payload(payload)
     if not session_id:
@@ -138,12 +186,22 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
 
     # Sync gate FIRST — its stdout is the hook's verdict channel and must
     # not wait on any network call below.
+    gate_out = None
     try:
         gate_out = limits.gate_output(
             paths, session_id, hook_event_name="UserPromptSubmit"
         )
-        if gate_out:
-            sys.stdout.write(json.dumps(gate_out))
+    except Exception:
+        pass
+    context = None
+    try:
+        context = decision_context(paths, session_id)
+    except Exception:
+        pass
+    try:
+        prompt_out = merge_prompt_output(gate_out, context)
+        if prompt_out:
+            sys.stdout.write(json.dumps(prompt_out))
             sys.stdout.flush()
     except Exception:
         pass
@@ -158,6 +216,16 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
     remote_url = initiative.git(["remote", "get-url", "origin"], cwd)
     repo = initiative.canonical_repo(remote_url)
     initiative_name, initiative_type = initiative.resolve_initiative(branch)
+    pr_number = pr_url = None
+    try:
+        # Cached per repo+branch; skipped without a repo/branch or on a
+        # protected branch. Unresolved → both keys dropped by log_record.
+        pr_number, pr_url = decisions.resolve_pr(
+            cwd, repo, branch, decisions.cache_dir(paths.runtime_dir),
+            timeout=PR_RESOLVE_TIMEOUT_SEC,
+        )
+    except Exception:
+        pass
     attrs: dict[str, Any] = {
         "session_id": session_id,
         "cardinal_cwd": cwd,
@@ -165,6 +233,8 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
         "cardinal_branch": branch,
         "cardinal_repo": repo,
         "cardinal_remote_url": remote_url,
+        "cardinal_pr_number": pr_number,
+        "cardinal_pr_url": pr_url,
         "cardinal_initiative_name": initiative_name,
         "cardinal_initiative_type": initiative_type,
         "cardinal_command": initiative.detect_command(

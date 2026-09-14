@@ -89,6 +89,18 @@
                   }
                 },
                 {
+                  "key": "cardinal_pr_number",
+                  "value": {
+                    "intValue": "99"
+                  }
+                },
+                {
+                  "key": "cardinal_pr_url",
+                  "value": {
+                    "stringValue": "https://github.com/cardinalhq/golden-fixture/pull/99"
+                  }
+                },
+                {
                   "key": "cardinal_initiative_name",
                   "value": {
                     "stringValue": "cool-thing"

@@ -11,6 +11,7 @@ shared algorithms and the OTLP contract now come from `core/cardinal_core`.
 | `cardinal-connect` | Runs Cardinal's device-code flow, mints ingest and MCP keys, writes managed Codex MCP config, and installs Cardinal telemetry hooks. |
 | `cardinal-status` | Shows the recorded Cardinal workspace and probes the configured ingest and MCP endpoints. |
 | `cardinal-disconnect` | Best-effort revokes Cardinal keys, removes managed Codex config/hooks, and deletes local state. |
+| `cardinal-decision` | Turns opt-in decision capture on/off and shows its status (see Decision capture). |
 | `cardinal-optimize-toolkit` | Mines the caller's last 30 days of session telemetry via the `cardinal` MCP server's `outcomes__*` tools for capability-fit recommendations, and on explicit confirmation writes the accepted artifact to `.codex/agents/<name>.toml`. Explicit-invocation only (W4.T4.2; see `docs/specs/toolkit-hive-mind.md` §4). |
 
 ## Layout
@@ -53,7 +54,14 @@ Cardinal/Lakerunner event contract over OTLP/HTTP:
 - `cardinal.git_state` on `UserPromptSubmit`, including initiative
   classification from the branch name and slash-command detection. A
   research-classified context shell is also emitted outside Git and for
-  repositories without a first commit.
+  repositories without a first commit. When `gh pr view` resolves the
+  branch's PR (via `cardinal_core.decisions.resolve_pr`, cached per
+  repo+branch under `~/.codex/cardinal/decisions/cache/`, skipped on
+  protected branches) the record also carries `cardinal_pr_number` and
+  `cardinal_pr_url`; otherwise both keys are absent. Codex runs
+  `UserPromptSubmit` synchronously, so the `gh` call is bounded to 1.5s.
+- `cardinal.decision` from `scripts/cardinal-decision record` (see
+  Decision capture below).
 - `cardinal.turn_usage` per model call; `cardinal.plan_state` once per
   session and `cardinal.plan_usage` throttled to one snapshot per 10
   minutes, from Codex rate-limit blocks.
@@ -65,7 +73,49 @@ session's spend-budget standing; the per-prompt spend-limits gate reads the
 locally cached verdict (file I/O only) and fails open.
 
 State lives under `~/.codex/cardinal/` (telemetry progress cursors, plan
-stamp, limits verdicts); `cardinal-disconnect` removes it.
+stamp, limits verdicts, decision setting + ledgers); `cardinal-disconnect`
+removes it.
+
+## Decision capture
+
+Same contract as the Claude adapter (`docs/specs/decision-telemetry.md`),
+off by default:
+
+```bash
+python3 scripts/cardinal-decision on|off|status [--session <id>]
+python3 scripts/cardinal-decision record --session <id> --choice "..." [--question ...] [--why ...] ...
+```
+
+`CARDINAL_DECISIONS=1/0` in the environment overrides on/off (Codex has no
+settings env block). `record` emits one `cardinal.decision` log with the
+same connection and resource attributes the telemetry hook uses
+(`~/.codex/cardinal.json` + `cardinal-secrets.json`); unconnected, it only
+writes the local ledger. The `cardinal-decision` skill wraps on/off/status.
+
+When capture is on, the existing `UserPromptSubmit` hook (no new
+`hooks.json` entry) injects the recording instructions plus the session
+ledger as `hookSpecificOutput.additionalContext`. The command it gives the
+agent is `python3 <plugin root>/scripts/cardinal-decision record --session
+<id>`, where the plugin root is the one the stable launcher actually
+executed, so it matches the running install. Codex parses a hook's stdout
+as a single JSON object, so the decision context is merged into the spend
+gate's output (appended after any warn-tier context); a block verdict is
+emitted unchanged.
+
+Host-surface evidence that Codex feeds this into the model:
+- Docs (https://learn.chatgpt.com/docs/hooks, formerly
+  developers.openai.com/codex/hooks): `UserPromptSubmit` is synchronous and
+  its `additionalContext` "is added as extra developer context".
+- Source (openai/codex `a4354e2d`):
+  `codex-rs/hooks/src/events/user_prompt_submit.rs` `parse_completed`
+  appends `parsed.additional_context` to `additional_contexts_for_model`;
+  `codex-rs/hooks/schema/generated/user-prompt-submit.command.output.schema.json`
+  defines `hookSpecificOutput.additionalContext` (with
+  `additionalProperties: false` on the top-level object).
+
+Unverified: whether Codex exports a session id to shell commands. The CLI
+falls back to `CODEX_SESSION_ID` / `OPENAI_CODEX_SESSION_ID`, but the prompt
+always passes `--session` explicitly.
 
 ## Tests
 
@@ -74,6 +124,16 @@ python3 build/vendor.py codex          # from the repo root, once
 cd adapters/codex
 python3 -m unittest tests.test_parity -v
 ```
+
+`tests/test_decisions.py` covers `cardinal-decision`, prompt injection and
+`git_state` PR linkage. `tests/fixtures.py` puts a stub `gh` first on PATH
+for every hook run, so no test reaches GitHub.
+
+Exception to the rule below: `user_prompt_submit.json` was re-captured
+from this adapter for the intentional `cardinal_pr_number` /
+`cardinal_pr_url` addition (the pre-migration plugin never emitted them);
+the diff was only those two attributes, and every other golden was
+unchanged.
 
 To re-capture goldens (only if fixtures change — goldens must always come
 from the shipped pre-migration plugin, never from this adapter):

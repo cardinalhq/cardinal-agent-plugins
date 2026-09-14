@@ -160,14 +160,43 @@ def make_repo(parent: Path, branch: str) -> Path:
     return repo
 
 
+FIXTURE_PR_NUMBER = 99
+FIXTURE_PR_URL = "https://github.com/cardinalhq/golden-fixture/pull/99"
+
+# Stub `gh` so PR resolution never touches the network. Mode via
+# CARDINAL_FIXTURE_GH: default prints the fixture PR, "none" fails like
+# `gh pr view` on a branch without a PR, "slow" outlives the hook's
+# bounded timeout (exec so the timeout's kill reaches the sleeper).
+GH_STUB = f"""#!/bin/sh
+case "$CARDINAL_FIXTURE_GH" in
+  none) echo 'no pull requests found' >&2; exit 1 ;;
+  slow) exec sleep 5 ;;
+esac
+echo '{{"number": {FIXTURE_PR_NUMBER}, "url": "{FIXTURE_PR_URL}"}}'
+"""
+
+
+def install_gh_stub(home: Path) -> Path:
+    bin_dir = home / ".fixture-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    if not gh.exists():
+        gh.write_text(GH_STUB)
+        gh.chmod(0o755)
+    return bin_dir
+
+
 def run_hook(hook: Path, event: str, home: Path, stdin: dict,
              env_extra: dict[str, str] | None = None,
              timeout: int = 30) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["HOME"] = str(home)
-    # Session-id and debug-capture env must never leak in from the caller.
+    env["PATH"] = f"{install_gh_stub(home)}{os.pathsep}{env.get('PATH', '')}"
+    # Session-id, debug-capture and decision-capture env must never leak
+    # in from the caller.
     for k in ("CODEX_SESSION_ID", "OPENAI_CODEX_SESSION_ID",
-              "CARDINAL_CODEX_DEBUG_PAYLOADS"):
+              "CARDINAL_CODEX_DEBUG_PAYLOADS", "CARDINAL_DECISIONS",
+              "CARDINAL_FIXTURE_GH"):
         env.pop(k, None)
     if env_extra:
         env.update(env_extra)
