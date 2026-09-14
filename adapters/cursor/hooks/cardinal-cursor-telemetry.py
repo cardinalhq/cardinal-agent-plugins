@@ -1045,10 +1045,12 @@ def decision_context(conv_id: str) -> str | None:
         "Cardinal decision capture is on for this session. When you make a choice that "
         "constrains later work (picking between approaches, settling an open question, or "
         "the user deciding something), record it right away with one terminal command:\n"
-        f'python3 "{DECISION_CLI}" record --choice "<the option chosen, 2-7 words>" '
-        '--question "<what had to be settled>" --why "<one sentence>" '
-        '[--alt "<rejected option>"]... [--by user] [--anchor <path>[::Symbol]]... '
+        f"python3 \"{DECISION_CLI}\" record --choice '<the option chosen, 2-7 words>' "
+        "--question '<what had to be settled>' --why '<one sentence>' "
+        "[--alt '<rejected option>']... [--by user] [--anchor <path>[::Symbol]]... "
         "[--follows|--refines|--supersedes <id>]\n"
+        "Wrap every value in single quotes so the shell doesn't expand $ or backticks; "
+        "if the hook sees different text than the command printed, it refuses to record. "
         "Run it from the workspace root. The command only checks the arguments and prints "
         "a line that Cardinal's hook records once the command finishes, so it needs no "
         "network or file access and works in the sandbox. The hook then tells you the "
