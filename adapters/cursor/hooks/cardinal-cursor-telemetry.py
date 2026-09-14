@@ -38,7 +38,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plugin_version  # noqa: E402
-from cardinal_core import limits, otlp, session  # noqa: E402
+from cardinal_core import decisions, limits, otlp, session  # noqa: E402
 from cardinal_core.bashclass import classify_bash_command  # noqa: E402,F401
 from cardinal_core.initiative import (  # noqa: E402,F401
     canonical_repo,
@@ -82,6 +82,13 @@ TARGET_KEYS = {
     "Write": "file_path",
     "NotebookEdit": "notebook_path",
 }
+
+# Upper bound on the `gh pr view` call made on the synchronous
+# beforeSubmitPrompt path (cache miss only; hits are file reads).
+PR_RESOLVE_TIMEOUT_SEC = 1.5
+
+# The decision-capture CLI the sessionStart context tells the agent to run.
+DECISION_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-decision"
 
 EXIT_CODE_RE = re.compile(r"(?:exit(?:ed)?|status)[ :]+(-?\d+)", re.IGNORECASE)
 
@@ -331,6 +338,23 @@ def limits_gate_output(conv_id: str) -> dict[str, Any] | None:
 # Handlers
 # ---------------------------------------------------------------------------
 
+def resolve_pr(
+    cwd: str, repo: str | None, branch: str | None
+) -> tuple[int | None, str | None]:
+    """(number, url) of the branch's PR via core `decisions.resolve_pr`
+    (`gh pr view`, cached per repo+branch), or (None, None). Cursor's
+    beforeSubmitPrompt is synchronous, so the `gh` call is bounded by
+    PR_RESOLVE_TIMEOUT_SEC; any failure leaves the keys absent and never
+    fails the git_state record."""
+    try:
+        return decisions.resolve_pr(
+            cwd, repo, branch, decisions.cache_dir(PATHS.runtime_dir),
+            timeout=PR_RESOLVE_TIMEOUT_SEC,
+        )
+    except Exception:
+        return None, None
+
+
 def handle_before_submit_prompt(payload: dict[str, Any]) -> None:
     """Sync gate → git_state emit → async verdict refresh."""
     conv_id = conv_id_from_payload(payload)
@@ -371,6 +395,9 @@ def handle_before_submit_prompt(payload: dict[str, Any]) -> None:
             "cardinal_command": detect_command(payload.get("prompt") or payload.get("message")),
             **read_plan_stamp(),
         }
+        pr_number, pr_url = resolve_pr(cwd, repo, branch)
+        attrs["cardinal_pr_number"] = pr_number
+        attrs["cardinal_pr_url"] = pr_url
         emit_records([log_record("cardinal.git_state", attrs, time.time_ns())], payload)
 
     try:
@@ -588,18 +615,61 @@ def handle_subagent_stop(payload: dict[str, Any]) -> None:
 CONVENTION_PROMPT = session.convention_prompt("Cursor")
 
 
+def decision_context(conv_id: str) -> str | None:
+    """Decision-capture instructions for the conversation's initial system
+    context, or None when capture is off (the default).
+
+    Cursor's only documented surface that puts hook output in front of
+    the model at conversation start is sessionStart `additional_context`
+    ("Additional context to add to the conversation's initial system
+    context", cursor.com/docs/agent/hooks). beforeSubmitPrompt's output
+    schema is `{continue, user_message}` only, so the per-prompt ledger
+    refresh Claude gets on UserPromptSubmit is not available; the ledger
+    shown here is the one at session start, and each `record` call
+    reports its id in the shell output the agent reads."""
+    if not decisions.is_enabled(PATHS.runtime_dir, os.environ.get(decisions.ENABLE_ENV)):
+        return None
+    entries = decisions.read_ledger(PATHS.runtime_dir, conv_id)
+    return (
+        "Cardinal decision capture is on for this session. When you make a choice that "
+        "constrains later work (picking between approaches, settling an open question, or "
+        "the user deciding something), record it right away with one terminal command:\n"
+        f'python3 "{DECISION_CLI}" record --session {conv_id} --choice "<the option chosen, 2-7 words>" '
+        '--question "<what had to be settled>" --why "<one sentence>" '
+        '[--alt "<rejected option>"]... [--by user] [--anchor <path>[::Symbol]]... '
+        "[--follows|--refines|--supersedes <id>]\n"
+        "Run it from the workspace root. Record choices, not progress, findings, or tool "
+        "calls. Use --by user when the user made the call. Anchor the files or symbols the "
+        "decision governs. Link a decision to an earlier one when it builds on, narrows, or "
+        "replaces it; each record command prints the id it saved.\n"
+        "Decisions so far this session:\n"
+        f"{decisions.render_ledger(entries)}"
+    )
+
+
 def handle_session_start(payload: dict[str, Any]) -> None:
     cwd = cwd_from_payload(payload)
-    if not is_git_repo(cwd):
+    conv_id = conv_id_from_payload(payload)
+    parts: list[str] = []
+    if is_git_repo(cwd):
+        context = CONVENTION_PROMPT
+        try:
+            standing = session.budget_standing(PATHS, conv_id, cwd)
+            if standing:
+                context = f"{CONVENTION_PROMPT}\n\n{standing}"
+        except Exception:
+            pass
+        parts.append(context)
+    if conv_id:
+        try:
+            decision = decision_context(conv_id)
+            if decision:
+                parts.append(decision)
+        except Exception:
+            pass
+    if not parts:
         return
-    context = CONVENTION_PROMPT
-    try:
-        standing = session.budget_standing(PATHS, conv_id_from_payload(payload), cwd)
-        if standing:
-            context = f"{CONVENTION_PROMPT}\n\n{standing}"
-    except Exception:
-        pass
-    sys.stdout.write(json.dumps({"additional_context": context}))
+    sys.stdout.write(json.dumps({"additional_context": "\n\n".join(parts)}))
     sys.stdout.flush()
 
 

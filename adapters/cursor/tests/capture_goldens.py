@@ -13,6 +13,12 @@ Usage:
 
 The source tree is read-only; default location can be overridden with
 --source or CARDINAL_CURSOR_SOURCE.
+
+NOTE: goldens 02 and 06 (git_state) now also carry cardinal_pr_number /
+cardinal_pr_url, which were added after migration (docs/specs/adapter-parity.md) and
+resolved by the sandbox's stub `gh`. v0.2.0 never emitted them, so a
+fresh capture from the shipped plugin drops those keys. Re-add them, or
+regenerate from the migrated hook, and review the diff.
 """
 
 from __future__ import annotations

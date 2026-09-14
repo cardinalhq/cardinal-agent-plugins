@@ -38,6 +38,11 @@ from harness import StubIngest, _normalize  # noqa: E402
 CONV_ID = "conv-golden-0001"
 FIXTURE_BRANCH = "feat/golden-fixture"
 FIXTURE_REMOTE = "git@github.com:cardinalhq/golden-fixture.git"
+# Returned by the sandbox's stub `gh`. The git_state goldens (02, 06)
+# carry cardinal_pr_number / cardinal_pr_url from it — an adapter-side
+# addition on top of the v0.2.0 capture (docs/specs/adapter-parity.md).
+FIXTURE_PR_NUMBER = 77
+FIXTURE_PR_URL = "https://github.com/cardinalhq/golden-fixture/pull/77"
 
 # Cursor base fields present on every hook payload (Divergence L):
 # stamped onto the OTLP resource as cursor.model / cursor.model_id /
@@ -96,11 +101,25 @@ def build_sandbox(root: Path, ingest_endpoint: str) -> dict[str, Any]:
     _git("commit", "-q", "-m", "golden fixture commit")
     _git("remote", "add", "origin", FIXTURE_REMOTE)
 
+    # Stub `gh` so git_state PR resolution is deterministic and never
+    # touches the network (hook_env puts <home>/bin first on PATH).
+    bin_dir = home / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        f"echo '{{\"number\": {FIXTURE_PR_NUMBER}, \"url\": \"{FIXTURE_PR_URL}\"}}'\n"
+    )
+    gh.chmod(0o755)
+
     return {"home": home, "cursor": cursor, "repo": repo}
 
 
 def hook_env(home: Path) -> dict[str, str]:
     env = {**os.environ, "HOME": str(home), **_GIT_ENV}
+    bin_dir = home / "bin"
+    if bin_dir.is_dir():
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     for var in ("CARDINAL_CURSOR_DEBUG_PAYLOADS", "CARDINAL_CURSOR_STRICT_WARN",
                 "CURSOR_PROJECT_DIR"):
         env.pop(var, None)
