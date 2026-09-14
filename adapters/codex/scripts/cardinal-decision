@@ -2,46 +2,56 @@
 """cardinal-decision (codex) — record the decisions an agent makes while it works.
 
 Each recorded decision becomes one `cardinal.decision` OTLP event tagged
-with the engineer (the user.email resource attribute), session, repo,
-branch, head sha, the branch's PR when `gh` can resolve it, anchors
-(files/symbols the decision governs) and D18 code clusters derived from
-them. Same contract as the Claude adapter (docs/specs/decision-telemetry.md).
+with the engineer, session, repo, branch, head sha, the branch's PR when
+`gh` resolves it, anchors and D18 code clusters. Same contract as the
+Claude adapter (docs/specs/decision-telemetry.md).
 
-Capture is off by default:
-    cardinal-decision on        turn capture on for this user
-    cardinal-decision off       turn it off
-    cardinal-decision status    show the setting (and a session's decisions)
+Codex runs the agent's shell commands sandboxed (no network, no writes to
+~/.codex), so in Codex this CLI is a handoff, not the emitter:
 
-When capture is on, the telemetry hook's UserPromptSubmit handler tells
-the agent how to record decisions and supplies --session.
+    cardinal-decision record --session <id> --choice ...
+        validates, prints one `cardinal-decision-record:v1 {...}` line (the
+        Cursor adapter's wire format), exits 0, never reads or writes
+        ~/.codex and makes no network calls. The telemetry hook's
+        PostToolUse handler (unsandboxed) reads that line from the command
+        output, writes the ledger and emits the event. The prompt hook
+        supplies --session and this command.
+    cardinal-decision record --emit ...
+        for a human in their own terminal: records and emits directly and
+        prints no marker, so nothing is emitted twice.
+
+Capture is off by default. `on`/`off` write ~/.codex/cardinal, which the
+Codex sandbox blocks — run them from your own terminal:
+    cardinal-decision on | off | status [--session <id>]
 CARDINAL_DECISIONS=1/0 in the environment overrides on/off.
-
-Core logic lives in the vendored cardinal_core.decisions; the ingest
-connection comes from ~/.codex/cardinal.json + cardinal-secrets.json, the
-same files the telemetry hook emits with.
 """
 
 from __future__ import annotations
 
-import argparse
-import os
 import sys
-import time
-from pathlib import Path
+
+# `record` runs inside Codex's sandbox: never write bytecode caches next to
+# the plugin (outside the writable roots).
+sys.dont_write_bytecode = True
+
+import argparse  # noqa: E402
+import os  # noqa: E402
+import shlex  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+import _codex_decisions as handoff  # noqa: E402
 import _plugin_version  # noqa: E402
 from cardinal_core import decisions, otlp  # noqa: E402
-from cardinal_core.initiative import canonical_repo, git  # noqa: E402
-from cardinal_core.paths import AgentPaths  # noqa: E402
 
-EMIT_TIMEOUT_SEC = 3.0
 EXIT_USAGE = 2
 EXIT_OFF = 3
+EXIT_WRITE = 1
+SELF = Path(__file__).resolve()
 
 
-def codex_paths() -> AgentPaths:
-    return AgentPaths(home=Path.home() / ".codex")
+def terminal_command(subcommand: str) -> str:
+    return f"python3 {shlex.quote(str(SELF))} {subcommand}"
 
 
 def _override() -> str | None:
@@ -56,26 +66,51 @@ def _session(args: argparse.Namespace) -> str | None:
     )
 
 
-def cmd_on(_args: argparse.Namespace) -> int:
-    decisions.set_enabled(codex_paths().runtime_dir, True)
-    print("Decision capture is on. New prompts will ask the agent to record its decisions.")
+def _set(enabled: bool) -> int:
+    word = "on" if enabled else "off"
+    runtime_dir = handoff.codex_paths().runtime_dir
+    try:
+        decisions.set_enabled(runtime_dir, enabled)
+        # The atomic writer swallows OSError, so confirm by reading back.
+        if decisions.is_enabled(runtime_dir) != enabled:
+            raise PermissionError("write did not take effect")
+    except OSError as err:
+        print(
+            f"cardinal-decision: can't write {runtime_dir} ({err.strerror or err}). "
+            "Codex's sandbox blocks writes there; run this in your own terminal instead:\n"
+            f"  {terminal_command(word)}",
+            file=sys.stderr,
+        )
+        return EXIT_WRITE
+    if enabled:
+        print("Decision capture is on. New prompts will ask the agent to record its decisions.")
+    else:
+        print("Decision capture is off.")
     return 0
+
+
+def cmd_on(_args: argparse.Namespace) -> int:
+    return _set(True)
 
 
 def cmd_off(_args: argparse.Namespace) -> int:
-    decisions.set_enabled(codex_paths().runtime_dir, False)
-    print("Decision capture is off.")
-    return 0
+    return _set(False)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    paths = codex_paths()
+    paths = handoff.codex_paths()
     override = _override()
     enabled = decisions.is_enabled(paths.runtime_dir, override)
     source = f" ({decisions.ENABLE_ENV}={override})" if decisions.parse_override(override) is not None else ""
     print(f"Decision capture: {'on' if enabled else 'off'}{source}")
     connected = otlp.connection_from_paths(paths) is not None
     print(f"Cardinal telemetry: {'connected' if connected else 'not connected (run cardinal-connect)'}")
+    if handoff.post_tool_use_registered(paths):
+        print("Recording hook (PostToolUse): registered")
+    else:
+        print("Recording hook (PostToolUse): not registered; run `cardinal-connect --repair-hooks` "
+              "and restart Codex, or the agent is never asked to record")
+    print(f"Turn on/off from your own terminal: {terminal_command('on')} | off")
     session_id = _session(args)
     if session_id:
         print(f"Decisions in session {session_id}:")
@@ -84,89 +119,58 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_record(args: argparse.Namespace) -> int:
-    paths = codex_paths()
+    session_id = _session(args)
+    spec = handoff.normalize_spec({
+        "session": session_id, "cwd": os.getcwd(), "choice": args.choice,
+        "question": args.question, "why": args.why, "alt": args.alt, "by": args.by,
+        "anchor": args.anchor, "follows": args.follows, "refines": args.refines,
+        "supersedes": args.supersedes, "id": args.id,
+    })
+    if spec is None:
+        print("cardinal-decision: --choice is required: the option that was chosen, in a few words",
+              file=sys.stderr)
+        return EXIT_USAGE
+
+    if not args.emit:
+        # Sandbox-safe handoff: validate only — no ~/.codex reads or
+        # writes, no gh, no network — and print the marker. The hook
+        # applies the on/off gate and records it.
+        try:
+            decision = handoff.preview(spec)
+        except decisions.DecisionError as err:
+            print(f"cardinal-decision: {err}", file=sys.stderr)
+            return EXIT_USAGE
+        print(handoff.marker_from_decision(spec, decision, explicit_id=bool(args.id)))
+        print(f"Decision submitted: {decision['choice']} (proposed id {decision['id']}). "
+              "Cardinal's hook records it after this command finishes and reports the final id.")
+        return 0
+
+    paths = handoff.codex_paths()
     if not decisions.is_enabled(paths.runtime_dir, _override()):
         print("Decision capture is off. Run `cardinal-decision on` to turn it on.", file=sys.stderr)
         return EXIT_OFF
-    session_id = _session(args)
     if not session_id:
-        print("cardinal-decision: --session is required (the prompt hook supplies it).", file=sys.stderr)
+        print("cardinal-decision: --session is required with --emit.", file=sys.stderr)
         return EXIT_USAGE
-
-    cwd = os.getcwd()
-    repo_root = git(["rev-parse", "--show-toplevel"], cwd)
-    head_sha = branch = repo = None
-    if repo_root:
-        head_sha = git(["rev-parse", "HEAD"], cwd)
-        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-        repo = canonical_repo(git(["remote", "get-url", "origin"], cwd))
-
-    ledger = decisions.read_ledger(paths.runtime_dir, session_id)
     try:
-        anchors = [decisions.parse_anchor(spec, repo_root, cwd) for spec in args.anchor]
-        decision = decisions.build_decision(
-            choice=args.choice,
-            question=args.question,
-            rationale=args.why,
-            decided_by=args.by,
-            alternatives=args.alt,
-            follows_from=args.follows,
-            refines=args.refines,
-            supersedes=args.supersedes,
-            anchors=anchors,
-            decision_id=args.id,
-            existing=ledger,
-        )
+        result = handoff.apply_spec(paths, spec, session_id, _plugin_version.plugin_version())
     except decisions.DecisionError as err:
         print(f"cardinal-decision: {err}", file=sys.stderr)
         return EXIT_USAGE
-
-    cache = decisions.cache_dir(paths.runtime_dir)
-    clusters, scheme = decisions.code_clusters(decision["anchors"], repo_root, head_sha, cache)
-    pr_number, pr_url = decisions.resolve_pr(cwd, repo, branch, cache)
-    known = {entry["id"] for entry in ledger}
-    unknown = [link["to"] for link in decision["links"] if link["to"] not in known]
-    decisions.record_in_ledger(paths.runtime_dir, session_id, decision)
-
-    connection = otlp.connection_from_paths(paths)
-    if connection is not None:
-        state = paths.read_state()
-        attrs = decisions.decision_attributes(
-            session_id=session_id,
-            decision=decision,
-            code_clusters=clusters,
-            cluster_scheme=scheme,
-            repo=repo,
-            branch=branch,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            pr_url=pr_url,
-        )
-        plugin_version = _plugin_version.plugin_version()
-        otlp.emit_records(
-            [otlp.log_record(decisions.DECISION_EVENT, attrs, time.time_ns())],
-            connection,
-            otlp.resource_attrs(
-                service_name="codex",
-                agent_runtime="codex",
-                deployment_environment=state.get("deployment_environment"),
-                user_email=state.get("user_email"),
-                org=state.get("org_slug") or state.get("org_id"),
-                plugin_version=plugin_version,
-            ),
-            scope_name="cardinal-codex-plugin",
-            scope_version=plugin_version,
-            timeout=EMIT_TIMEOUT_SEC,
-        )
-
-    tags = [f"PR #{pr_number}"] if pr_number else []
-    if clusters:
-        tags.append("clusters " + ", ".join(clusters))
+    except OSError as err:
+        print(f"cardinal-decision: can't write {paths.runtime_dir} ({err.strerror or err}). "
+              "--emit must run outside the Codex sandbox; the agent should omit it.", file=sys.stderr)
+        return EXIT_WRITE
+    decision = result["decision"]
+    tags = [f"PR #{result['pr_number']}"] if result["pr_number"] else []
+    if result["clusters"]:
+        tags.append("clusters " + ", ".join(result["clusters"]))
     detail = f" ({'; '.join(tags)})" if tags else ""
     print(f"Recorded decision {decision['id']}: {decision['choice']}{detail}")
-    if unknown:
-        print(f"Note: no earlier decision in this session has id {', '.join(unknown)}; the link was kept as given.")
-    if connection is None:
+    if result["unknown_links"]:
+        print(f"Note: no earlier decision in this session has id {', '.join(result['unknown_links'])}; "
+              "the link was kept as given.")
+    if not result["connected"]:
         print("Cardinal telemetry isn't connected, so this decision was only saved locally (run cardinal-connect).")
     return 0
 
@@ -179,7 +183,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="{record,on,off,status}")
 
     record = sub.add_parser("record", help="record one decision")
-    record.add_argument("--session", help="session id (supplied by the prompt hook)")
+    record.add_argument("--session", help="session id (supplied by the prompt hook; the hook prefers "
+                                          "the Codex session it observes)")
     record.add_argument("--choice", required=True, help="the option chosen, in a few words")
     record.add_argument("--question", help="the question this decision settles")
     record.add_argument("--why", help="one sentence on why this option won")
@@ -196,6 +201,8 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--supersedes", action="append", default=[], metavar="ID",
                         help="an earlier decision this one replaces")
     record.add_argument("--id", help="decision id; reuse an existing id to revise that decision")
+    record.add_argument("--emit", action="store_true",
+                        help="record and emit directly (your own terminal only; not inside Codex)")
     record.set_defaults(func=cmd_record)
 
     sub.add_parser("on", help="turn decision capture on").set_defaults(func=cmd_on)
