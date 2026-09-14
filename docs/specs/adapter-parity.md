@@ -11,7 +11,7 @@ An audit of all seven adapters (2026-09-14) found:
 | claude | partial — `git_state` has repo/branch/head_sha, no PR | yes |
 | codex | partial | no |
 | cursor | partial (cloud agents need `--project` hooks; `sessionStart` doesn't run there) | no |
-| gemini | partial | no |
+| gemini | partial — and shipped hooks never loaded: `hooks.json` lacked the top-level `"hooks"` key and timeouts were `5` (ms). Fixed on this branch; users must re-run `cardinal-connect` | no |
 | omnigent | no — branch/repo only, no head_sha | no |
 | opencode | partial | no |
 | pi | partial | no |
