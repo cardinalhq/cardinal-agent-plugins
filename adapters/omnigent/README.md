@@ -156,54 +156,81 @@ fields come only from:
 
 1. **Labels** — `cardinal.pr_url` and/or `cardinal.pr_number` (number is
    derived from the URL when only the URL is set).
-   `cardinal_pr_source="label"`.
-2. **Observed `gh pr create`** — on a shell `tool_result` whose
-   originating command (`request_data.arguments.command`) contains
-   `gh pr create`, the last `https://<host>/<owner>/<repo>/pull/<n>` in
-   the output is taken (gh prints it on success and on the
-   "already exists" failure). Rejected when `<owner>/<repo>` disagrees
-   with a `cardinal.repo` label. Emits a boundary `cardinal.git_state`
-   and rides later records **only while the branch is unchanged**.
-   `cardinal_pr_source="tool_sniff"`.
+2. **Observed `gh pr create`** — a shell `tool_result` is linked only when
+   every gate passes (a missed PR beats a wrong one):
+   - the originating command (`request_data.arguments.command`, or `cmd`;
+     an argv list like `["bash", "-lc", "<script>"]` is unwrapped),
+     tokenized shell-aware, runs exactly one `gh pr create` (optionally
+     behind `VAR=value` / `env`), and every other `&&` / `||` / `;`
+     segment is a plain `cd` or `git` command. Pipes, redirects,
+     subshells and `$(…)` are rejected, so `grep "gh pr create"` or
+     `gh pr create; gh pr view <url>` never link;
+   - the output holds exactly one distinct
+     `https://<host>/<owner>/<repo>/pull/<n>` (gh prints it on success and
+     on the "already exists" failure);
+   - `<owner>/<repo>` equals a known repo: the `cardinal.repo` label, else
+     the single remote in this session's `git push` (`To <url>`) or
+     `git remote -v` output. No known repo means no link, so
+     `gh pr create --repo someone/fork` is never trusted blind.
 
-Not covered: PRs opened outside the session (web UI, another machine),
-`gh` output the harness does not return in the tool result, and PR state
-after an omnigent server restart (the sniffed PR is cached in-process
-only, like the sniffed branch). `cardinal_head_sha` is still not emitted —
-nothing in the policy contract reports it reliably.
+   Emits a boundary `cardinal.git_state` and rides later records only
+   while the branch is unchanged; a sniffed `git checkout -b` /
+   `git switch` clears it, even when a (now stale) `cardinal.branch`
+   label keeps winning branch resolution.
+
+Not covered: PRs opened outside the session (web UI, another machine);
+unlabeled sessions that never ran `git push` / `git remote -v`; fork
+workflows where the push remote differs from the PR's base repo; quoted
+multi-line `gh pr create` bodies (rejected by the line splitter); `gh`
+output the harness does not return in the tool result; and PR state after
+an omnigent server restart (cached in-process only, like the sniffed
+branch). The argv-list `cmd` shape is handled defensively but was not
+confirmed against a captured Codex `exec_command` payload.
+`cardinal_head_sha` is still not emitted — nothing in the policy contract
+reports it reliably. Only `cardinal_pr_number` / `cardinal_pr_url` are
+emitted, matching the other adapters.
 
 ## Decision capture: unsupported
 
 Decision capture (`cardinal.decision`, `docs/specs/decision-telemetry.md`)
-is **not supported on omnigent**, because a policy can neither put text
-into the model's context nor give the agent a tool to record with
-(verified against omnigent at the pin and at
-`feat/policy-conversation-identity`):
+is **not supported on omnigent**, because a policy has no channel to put
+the capture prompt and ledger into the model's context, and cannot give
+the agent a tool to record with. Line references are to upstream main
+`d25b9a23`:
 
-- **No context injection.** On ALLOW the engine discards `reason`
-  (`omnigent/runtime/policies/engine.py::evaluate` builds the ALLOW
-  result with `reason=None`). Native harness hooks turn an ALLOW on
-  `UserPromptSubmit` into no output, and a `PostToolUse` result reaches
-  the model only as `[Policy violation] <reason>` on DENY
-  (`omnigent/native_policy_hook.py::evaluation_response_to_hook_output`).
-  SDK executors consume only DENY from `PHASE_LLM_REQUEST`
-  (`omnigent/inner/claude_sdk_executor.py`), whose payload is metadata
-  (`system_prompt_preview`, counts), not the prompt. An ALLOW `data`
-  replacement is applied only to tool-call arguments
-  (`omnigent/server/routes/_sessions/orchestration.py`) and, runner-side,
-  to tool output via `RunnerPolicies.evaluate_tool_result`, which has no
-  callers (`omnigent/runner/policy.py`). Abusing DENY to smuggle a prompt
-  would block the user's work, which an observe-only policy must never do.
-- **No tool surface.** `FunctionPolicySpec` has no tool field
-  (`omnigent/spec/types.py`); `policy_modules` are scanned only for
+- **No usable context channel.**
+  - On ALLOW the engine discards `reason` (`omnigent/runtime/policies/engine.py`
+    L401, `reason=None` in the composed ALLOW result).
+  - Native harness hooks (`omnigent/native/native_policy_hook.py`,
+    `evaluation_response_to_hook_output` L364) emit nothing for ALLOW on
+    `UserPromptSubmit` (L418), and a `PostToolUse` result reaches the
+    model only as `[Policy violation] <reason>` on DENY (L461).
+  - SDK executors act only on DENY from `PHASE_LLM_REQUEST`
+    (`omnigent/inner/claude_sdk_executor.py` L2834-2835), whose payload is
+    metadata (`system_prompt_preview`, counts), not the prompt.
+  - ALLOW `data` **does** replace content in two places: on tool-call
+    arguments, and on TOOL_RESULT output the model sees — the server MCP
+    relay (`omnigent/server/routes/_sessions/orchestration.py`,
+    `_handle_mcp_tools_call`, L9837-9850) and sub-agent inbox output
+    (`omnigent/runner/tool_dispatch.py`, `_apply_subagent_policy_verdict`,
+    L7698-7711). That channel only reaches `mcp__omnigent__*` tool
+    results and sub-agent inbox results — not native Bash output, user
+    prompts, or the system prompt — so it cannot deliver a per-turn
+    instruction reliably. And rewriting tool output would break this
+    policy's observe-only rule (it must never alter or block the user's
+    work); DENY-smuggling is ruled out for the same reason.
+- **No tool surface.** `FunctionPolicySpec` (`omnigent/spec/types.py`
+  L1381) has no tool field; `policy_modules` are scanned only for
   `POLICY_REGISTRY` callables. Tools come from the agent spec
-  (`ToolsConfig`), which this package does not own. Without a prompt,
-  such a tool would never be used anyway.
+  (`ToolsConfig`, L844), which this package does not own.
 
 `cardinal-decision` is therefore not shipped here, and no
-`decisions.is_enabled` toggle is read. Revisit if omnigent adds a
-policy-to-context channel (e.g. honoring ALLOW `reason` as
-`additionalContext`).
+`decisions.is_enabled` toggle is read. Future path: open upstream PRs
+omnigent-ai/omnigent#3353 and #2375 add per-turn `context_providers` to
+the **agent spec** (additive system-instruction augmentation). That would
+be an agent-owned integration configured per agent spec, not a policy
+channel, so it would need a separate Cardinal component rather than a
+change to this package.
 
 ## Tests
 

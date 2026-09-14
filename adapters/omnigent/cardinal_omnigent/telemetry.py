@@ -218,13 +218,11 @@ def _git_state_record(
         "cardinal_command": initiative.detect_command(prompt),
     }
     # PR linkage (docs/specs/adapter-parity.md §1). No PR → keys absent.
-    pr_number, pr_url, pr_source = _resolve_pr(labels, state, branch)
+    pr_number, pr_url = _resolve_pr(labels, state, branch)
     if pr_number is not None:
         attrs["cardinal_pr_number"] = pr_number
     if pr_url:
         attrs["cardinal_pr_url"] = pr_url
-    if pr_source:
-        attrs["cardinal_pr_source"] = pr_source
     # Sub-agent marker attributes. When this session is a polly-dispatched
     # child (Conversation.kind == "sub_agent" per the omnigent store), stamp
     # the identity so downstream can distinguish parent-cwd-inherited
@@ -274,22 +272,23 @@ def _resolve_branch(event: Any, state: dict[str, Any]) -> tuple[str | None, str 
 
 def _resolve_pr(
     labels: dict[str, Any], state: dict[str, Any] | None, branch: str | None,
-) -> tuple[int | None, str | None, str | None]:
-    """(pr_number, pr_url, source). No local checkout exists server-side
-    (see _pr.py), so `decisions.resolve_pr` / `gh pr view` is never run:
+) -> tuple[int | None, str | None]:
+    """(pr_number, pr_url). No local checkout exists server-side (see
+    _pr.py), so `decisions.resolve_pr` / `gh pr view` is never run:
 
     1. Labels convention (``cardinal.pr_url`` / ``cardinal.pr_number``).
     2. A ``gh pr create`` observed in this session's shell tool_results —
-       only while the session is still on the branch it was observed on,
-       so a later ``git checkout -b`` does not inherit the old PR.
+       only while the session is still on the branch it was observed on.
+       A sniffed branch move also clears it (``_sniff_branch``), which
+       covers labeled sessions whose ``cardinal.branch`` label goes stale.
     """
     number, url = _pr.from_labels(labels)
     if number is not None or url:
-        return number, url, "label"
+        return number, url
     sniffed = (state or {}).get("sniffed_pr")
     if isinstance(sniffed, dict) and sniffed.get("branch") == branch:
-        return sniffed.get("number"), sniffed.get("url"), "tool_sniff"
-    return None, None, None
+        return sniffed.get("number"), sniffed.get("url")
+    return None, None
 
 
 def _handle_request(event: Any, config: dict[str, Any], session_id: str) -> None:
@@ -496,6 +495,12 @@ def _sniff_branch(
     branch = match.group("branch")
     if branch == state.get("sniffed_branch"):
         return
+    current, _ = _resolve_branch(event, state)
+    if branch != current:
+        # The work moved off the branch a PR was sniffed on. Clear it even
+        # when a cardinal.branch label keeps winning branch resolution —
+        # otherwise the stale PR would ride every later labeled record.
+        state.pop("sniffed_pr", None)
     state["sniffed_branch"] = branch
     if _label_str(_events.labels(event), "cardinal.branch"):
         return  # labels are authoritative; sniff kept only as fallback
@@ -509,19 +514,28 @@ def _sniff_pr(
     event: Any, config: dict[str, Any], session_id: str, state: dict[str, Any],
 ) -> None:
     """PR linkage from a shell tool_result whose originating command was
-    ``gh pr create``. gh prints the PR URL on success — and on the
-    "already exists" failure, which names the same branch's PR — so the
-    exit status is deliberately not consulted. Emits a fresh
-    ``cardinal.git_state`` at the boundary and caches the PR for later
-    request-phase records on the same branch."""
+    ``gh pr create`` (strict gates in _pr.py). gh prints the PR URL on
+    success — and on the "already exists" failure, which names the same
+    branch's PR — so the exit status is deliberately not consulted. Also
+    records the session's repo from ``git push`` / ``git remote -v``
+    output, the fallback known repo when no ``cardinal.repo`` label is
+    set. Emits a fresh ``cardinal.git_state`` at the boundary and caches
+    the PR for later request-phase records on the same branch."""
     command = _pr.command_from_request_data(_events.get(event, "request_data"))
+    if not command:
+        return
+    output = _pr.output_text(_events.get(event, "data"))
+    sniffed_repo = _pr.repo_from_git_output(command, output)
+    if sniffed_repo:
+        state["sniffed_repo"] = sniffed_repo
     if not _pr.is_pr_create(command):
         return
-    parsed = _pr.parse_pr_url(_pr.output_text(_events.get(event, "data")))
+    parsed = _pr.parse_single_pr_url(output)
     if parsed is None:
         return
     number, url, url_repo = parsed
-    if not _pr.repo_matches(url_repo, _label_str(_events.labels(event), "cardinal.repo")):
+    known_repo = _label_str(_events.labels(event), "cardinal.repo") or state.get("sniffed_repo")
+    if not _pr.repo_matches(url_repo, known_repo):
         return
     branch, source = _resolve_branch(event, state)
     record = {"branch": branch, "number": number, "url": url}

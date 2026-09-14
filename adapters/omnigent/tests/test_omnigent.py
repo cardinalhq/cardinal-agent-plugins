@@ -468,7 +468,7 @@ class PrLinkageTests(StubBackedTestCase):
         for attrs in states:
             self.assertEqual(attrs["cardinal_pr_number"], 104)
             self.assertEqual(attrs["cardinal_pr_url"], self.URL)
-            self.assertEqual(attrs["cardinal_pr_source"], "tool_sniff")
+            self.assertNotIn("cardinal_pr_source", attrs)
             self.assertEqual(attrs["cardinal_branch"], "feat/x")
 
     def test_already_exists_failure_with_json_string_arguments(self) -> None:
@@ -477,26 +477,30 @@ class PrLinkageTests(StubBackedTestCase):
                   "https://github.com/acme/widgets/pull/12\n")
         telemetry.telemetry_policy(self._pr_create_result(
             sid, output=output, exit_code=1,
-            arguments='{"command": "gh pr create --title fix"}',
-            labels={"cardinal.branch": "fix/y"}), self.config)
+            arguments='{"command": "gh pr create --title \\"fix; now\\""}',
+            labels={"cardinal.repo": "acme/widgets", "cardinal.branch": "fix/y"}),
+            self.config)
         (attrs,) = self.git_states()
         self.assertEqual(attrs["cardinal_pr_number"], 12)
         self.assertEqual(attrs["cardinal_pr_url"], "https://github.com/acme/widgets/pull/12")
 
     def test_duplicate_observation_emits_once(self) -> None:
         sid = "omni-pr-dup"
-        telemetry.telemetry_policy(self._pr_create_result(sid), self.config)
-        telemetry.telemetry_policy(self._pr_create_result(sid), self.config)
+        labels = {"cardinal.repo": self.REPO}
+        telemetry.telemetry_policy(self._pr_create_result(sid, labels=labels), self.config)
+        telemetry.telemetry_policy(self._pr_create_result(sid, labels=labels), self.config)
         self.assertEqual(len(self.git_states()), 1)
 
     def test_non_create_command_is_ignored(self) -> None:
         telemetry.telemetry_policy(self._pr_create_result(
-            "omni-pr-list", command="gh pr list --state open"), self.config)
+            "omni-pr-list", command="gh pr list --state open",
+            labels={"cardinal.repo": self.REPO}), self.config)
         self.assertEqual(self.git_states(), [])
 
     def test_missing_request_data_is_ignored(self) -> None:
         telemetry.telemetry_policy(fixtures.tool_result_event(
-            "omni-pr-noreq", data={"result": self.URL}), self.config)
+            "omni-pr-noreq", data={"result": self.URL},
+            labels={"cardinal.repo": self.REPO}), self.config)
         self.assertEqual(self.git_states(), [])
 
     def test_repo_label_mismatch_is_ignored(self) -> None:
@@ -504,14 +508,80 @@ class PrLinkageTests(StubBackedTestCase):
             "omni-pr-other", labels={"cardinal.repo": "acme/other"}), self.config)
         self.assertEqual(self.git_states(), [])
 
+    def test_unknown_repo_fork_is_ignored(self) -> None:
+        # No cardinal.repo label and no sniffed remote: never trusted blind.
+        telemetry.telemetry_policy(self._pr_create_result(
+            "omni-pr-fork", command="gh pr create --repo evil/fork --fill",
+            output="https://github.com/evil/fork/pull/5\n"), self.config)
+        self.assertEqual(self.git_states(), [])
+
+    def test_sniffed_push_remote_is_known_repo(self) -> None:
+        sid = "omni-pr-push"
+        telemetry.telemetry_policy(self._pr_create_result(
+            sid, command="git push -u origin feat/x",
+            output="To github.com:cardinalhq/cardinal-agent-plugins.git\n"
+                   " * [new branch]      feat/x -> feat/x\n"), self.config)
+        self.assertEqual(self.git_states(), [])
+        telemetry.telemetry_policy(self._pr_create_result(sid), self.config)
+        (attrs,) = self.git_states()
+        self.assertEqual(attrs["cardinal_pr_number"], 104)
+
+    def test_chained_push_to_other_repo_rejects_fork_pr(self) -> None:
+        telemetry.telemetry_policy(self._pr_create_result(
+            "omni-pr-chain-fork",
+            command="git push origin HEAD && gh pr create --repo evil/fork",
+            output="To https://github.com/cardinalhq/cardinal-agent-plugins.git\n"
+                   "https://github.com/evil/fork/pull/5\n"), self.config)
+        self.assertEqual(self.git_states(), [])
+
+    def test_chain_with_other_gh_command_is_ignored(self) -> None:
+        telemetry.telemetry_policy(self._pr_create_result(
+            "omni-pr-chain",
+            command=f"gh pr create --fill; gh pr view {self.URL}",
+            output=f"{self.URL}\n",
+            labels={"cardinal.repo": self.REPO}), self.config)
+        self.assertEqual(self.git_states(), [])
+
+    def test_multiple_distinct_urls_in_output_is_ignored(self) -> None:
+        telemetry.telemetry_policy(self._pr_create_result(
+            "omni-pr-multi",
+            output=("https://github.com/cardinalhq/cardinal-agent-plugins/pull/1\n"
+                    f"{self.URL}\n"),
+            labels={"cardinal.repo": self.REPO}), self.config)
+        self.assertEqual(self.git_states(), [])
+
+    def test_grep_for_gh_pr_create_is_ignored(self) -> None:
+        telemetry.telemetry_policy(self._pr_create_result(
+            "omni-pr-grep", command='grep -rn "gh pr create" docs/',
+            output=f"docs/x.md:3: gh pr create -> {self.URL}\n",
+            labels={"cardinal.repo": self.REPO}), self.config)
+        self.assertEqual(self.git_states(), [])
+
+    def test_env_and_cd_prefix_accepted(self) -> None:
+        telemetry.telemetry_policy(self._pr_create_result(
+            "omni-pr-env",
+            command="cd /work/repo && GH_PROMPT_DISABLED=1 gh pr create --fill",
+            labels={"cardinal.repo": self.REPO}), self.config)
+        (attrs,) = self.git_states()
+        self.assertEqual(attrs["cardinal_pr_number"], 104)
+
+    def test_argv_list_command_accepted(self) -> None:
+        telemetry.telemetry_policy(self._pr_create_result(
+            "omni-pr-argv", target="exec_command",
+            arguments={"cmd": ["bash", "-lc", "gh pr create --fill"]},
+            labels={"cardinal.repo": self.REPO}), self.config)
+        (attrs,) = self.git_states()
+        self.assertEqual(attrs["cardinal_pr_number"], 104)
+
     def test_branch_change_drops_sniffed_pr(self) -> None:
         sid = "omni-pr-move"
+        labels = {"cardinal.repo": self.REPO}
         telemetry.telemetry_policy(fixtures.tool_call_shell_event(
-            sid, command="git checkout -b feat/a"), self.config)
-        telemetry.telemetry_policy(self._pr_create_result(sid), self.config)
+            sid, command="git checkout -b feat/a", labels=labels), self.config)
+        telemetry.telemetry_policy(self._pr_create_result(sid, labels=labels), self.config)
         telemetry.telemetry_policy(fixtures.tool_call_shell_event(
-            sid, command="git checkout -b feat/b"), self.config)
-        telemetry.telemetry_policy(fixtures.request_event(sid), self.config)
+            sid, command="git checkout -b feat/b", labels=labels), self.config)
+        telemetry.telemetry_policy(fixtures.request_event(sid, labels=labels), self.config)
         states = self.git_states()
         self.assertEqual([s["cardinal_branch"] for s in states],
                          ["feat/a", "feat/a", "feat/b", "feat/b"])
@@ -520,12 +590,26 @@ class PrLinkageTests(StubBackedTestCase):
             self.assertNotIn("cardinal_pr_number", attrs)
             self.assertNotIn("cardinal_pr_url", attrs)
 
+    def test_branch_change_drops_sniffed_pr_on_labeled_session(self) -> None:
+        sid = "omni-pr-move-labeled"
+        labels = {"cardinal.repo": self.REPO, "cardinal.branch": "feat/x"}
+        telemetry.telemetry_policy(self._pr_create_result(sid, labels=labels), self.config)
+        telemetry.telemetry_policy(fixtures.tool_call_shell_event(
+            sid, command="git checkout -b feat/b", labels=labels), self.config)
+        telemetry.telemetry_policy(fixtures.request_event(sid, labels=labels), self.config)
+        states = self.git_states()
+        self.assertEqual(len(states), 2)  # PR boundary + request (labels: no branch boundary)
+        self.assertEqual(states[0]["cardinal_pr_number"], 104)
+        self.assertNotIn("cardinal_pr_number", states[1])
+        self.assertNotIn("cardinal_pr_url", states[1])
+
     def test_labels_convention_derives_number_from_url(self) -> None:
         telemetry.telemetry_policy(fixtures.request_event(
             "omni-pr-label", labels={"cardinal.pr_url": self.URL}), self.config)
         (attrs,) = self.git_states()
         self.assertEqual(attrs["cardinal_pr_number"], 104)
-        self.assertEqual(attrs["cardinal_pr_source"], "label")
+        self.assertEqual(attrs["cardinal_pr_url"], self.URL)
+        self.assertNotIn("cardinal_pr_source", attrs)
 
     def test_no_pr_signal_keys_absent(self) -> None:
         telemetry.telemetry_policy(fixtures.request_event("omni-pr-none"), self.config)
@@ -538,18 +622,38 @@ class PrLinkageTests(StubBackedTestCase):
         from unittest import mock
         with mock.patch("subprocess.run", side_effect=AssertionError("no gh")), \
                 mock.patch("subprocess.Popen", side_effect=AssertionError("no gh")):
-            telemetry.telemetry_policy(self._pr_create_result("omni-pr-nogh"), self.config)
-            telemetry.telemetry_policy(fixtures.request_event("omni-pr-nogh"), self.config)
+            labels = {"cardinal.repo": self.REPO}
+            telemetry.telemetry_policy(self._pr_create_result(
+                "omni-pr-nogh", labels=labels), self.config)
+            telemetry.telemetry_policy(fixtures.request_event(
+                "omni-pr-nogh", labels=labels), self.config)
         self.assertEqual(len(self.git_states()), 2)
 
 
 class PrParseTests(unittest.TestCase):
-    def test_last_url_wins_and_ghes_host_accepted(self) -> None:
+    def test_single_distinct_url_and_ghes_host(self) -> None:
         from cardinal_omnigent import _pr
-        text = ("see https://github.com/a/b/pull/1\n"
-                "https://git.corp.example/team/svc/pull/77")
-        self.assertEqual(_pr.parse_pr_url(text),
-                         (77, "https://git.corp.example/team/svc/pull/77", "team/svc"))
+        url = "https://git.corp.example/team/svc/pull/77"
+        self.assertEqual(_pr.parse_single_pr_url(f"{url}\nopened {url}"),
+                         (77, url, "team/svc"))
+        self.assertIsNone(_pr.parse_single_pr_url(
+            f"https://github.com/a/b/pull/1\n{url}"))
+
+    def test_segment_parser_rejects_pipes_redirects_substitution(self) -> None:
+        from cardinal_omnigent import _pr
+        for command in ("gh pr create --fill | tee out", "gh pr create > out",
+                        "echo $(gh pr create)", "(gh pr create)",
+                        'gh pr create --title "unbalanced'):
+            self.assertFalse(_pr.is_pr_create(command), command)
+
+    def test_repo_from_git_remote_v(self) -> None:
+        from cardinal_omnigent import _pr
+        output = ("origin\thttps://github.com/Acme/Widgets.git (fetch)\n"
+                  "origin\thttps://github.com/Acme/Widgets.git (push)\n")
+        self.assertEqual(_pr.repo_from_git_output("git remote -v", output), "acme/widgets")
+        two = output + "upstream\tgit@github.com:other/widgets.git (fetch)\n"
+        self.assertIsNone(_pr.repo_from_git_output("git remote -v", two))
+        self.assertIsNone(_pr.repo_from_git_output("cat notes.txt", output))
 
     def test_output_text_nested_shapes(self) -> None:
         from cardinal_omnigent import _pr
@@ -562,7 +666,10 @@ class PrParseTests(unittest.TestCase):
     def test_pr_create_detection(self) -> None:
         from cardinal_omnigent import _pr
         self.assertTrue(_pr.is_pr_create("cd x && gh  pr create --fill"))
+        self.assertTrue(_pr.is_pr_create("env GH_HOST=x gh pr create"))
         self.assertFalse(_pr.is_pr_create("gh pr view 3"))
+        self.assertFalse(_pr.is_pr_create("gh pr create && gh pr create"))
+        self.assertFalse(_pr.is_pr_create('echo "gh pr create"'))
 
 
 class WorktreeParseTests(unittest.TestCase):
