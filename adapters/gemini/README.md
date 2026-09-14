@@ -26,16 +26,18 @@ event contract used by the sibling plugins (see `docs/specs/gemini-parity.md`
 at the repository root for the full parity map):
 
 - `cardinal.git_state` from the active Git checkout on `BeforeAgent`, with initiative classification from the branch name (worktree-noise stripped), slash-command detection, and the branch's PR (`cardinal_pr_number` / `cardinal_pr_url`) when `gh pr view` resolves one (cached per repo+branch; keys absent otherwise).
-- `api_request` + `cardinal.turn_usage` per model call from `AfterModel`. Gemini CLI fires `AfterModel` once per streamed chunk; the hook exits immediately on non-final chunks and accounts the final chunk's `llm_response.usageMetadata` (prompt, candidates, total — thought/tool-use-prompt tokens are derived as the remainder; cached-content tokens are not exposed to hooks, so cost ignores cache discounts).
+- `api_request` + `cardinal.turn_usage` per model call from `AfterModel`. Gemini CLI fires `AfterModel` once per streamed chunk; the hook exits immediately on non-final chunks and accounts the final chunk's `llm_response.usageMetadata` (prompt, candidates, total — thought/tool-use-prompt tokens are derived as the remainder; cached-content tokens are not exposed to hooks, so cost ignores cache discounts). Treat cost as an upper bound: the remainder mixes thought and tool-use-prompt tokens and is priced at the output rate. A stream that errors before its final chunk records no usage for that call.
 - `cardinal.turn_tool` + `tool_result` per tool call from `AfterTool`, with `mcp__<server>__<tool>` on `turn_tool` (from `mcp_context`), Bash-verb `bash_class` classification, and success from `tool_response.error`.
 - `cardinal.plan_usage` (compaction trigger) from `PreCompress`; Gemini's payload carries only `trigger`. Downstream disambiguates from per-model-call plan_usage on the presence of `plan.compact_trigger`.
-- No `cardinal.subagent_usage`: Gemini CLI's `AfterAgent` fires once per main-agent turn (not per subagent), so it is not registered.
+- No `cardinal.subagent_usage`: Gemini CLI's `AfterAgent` fires once per main-agent turn (not per subagent), so it is not registered. Subagents run their own chat through the same hooks, so their model usage likely lands in the parent session's `cardinal.turn_usage` without a subagent marker.
 
 Hooks never wait on the network: each one does local-file work, prints its
 output, and hands OTLP posts, the `gh` PR lookup and the limits-verdict
 refresh to a detached background process. The one exception is
 `SessionStart`, which makes a single 1.5s-bounded spend-limits fetch per
-session when the backend advertises spend limits.
+session when the backend advertises spend limits. Handoff is best-effort:
+a failed send is not retried, and a job file whose background process died
+before reading it stays under `~/.gemini/cardinal/spool/`.
 
 Claude subscription-specific plan fields that do not exist in Gemini CLI are
 left empty; Gemini plan/rate-limit fields are mapped onto the existing plan
@@ -43,10 +45,9 @@ usage columns where possible.
 
 ### Payload-shape capture
 
-Gemini CLI's hook payload key names for a few surfaces (notably `AfterAgent`
-token totals and `PreCompress` context slice) haven't been observed in the
-wild yet, so the emitter probes several key spellings and falls back
-gracefully. To help pin them down, set `CARDINAL_GEMINI_DEBUG_PAYLOADS=1`
+The hook handlers follow the payload shapes in gemini-cli's
+`packages/core/src/hooks/types.ts`, but haven't been checked against a live
+Gemini CLI session yet. Non-final `AfterModel` chunks exit before the dump. To help pin them down, set `CARDINAL_GEMINI_DEBUG_PAYLOADS=1`
 before starting Gemini CLI — raw hook payloads land under
 `~/.gemini/cardinal/telemetry/debug/<Event>-<ts>.json`. Share these with the
 plugin maintainers so the parity spec (`docs/specs/gemini-parity.md`) can be
@@ -96,7 +97,7 @@ writes:
 | File | What gets written |
 | --- | --- |
 | `~/.gemini/extensions/cardinal/gemini-extension.json` | Extension manifest with concrete `mcpServers.cardinal` entry, tagged `cardinalManaged: true`. |
-| `~/.gemini/extensions/cardinal/hooks/hooks.json` | Cardinal hook entries for `SessionStart`, `BeforeAgent`, `AfterModel`, `AfterTool`, `AfterAgent`, `PreCompress`, `SessionEnd`. Each command string embeds the marker `cardinal-gemini-plugin` for disconnect identification. |
+| `~/.gemini/extensions/cardinal/hooks/hooks.json` | Cardinal hook entries for `SessionStart`, `BeforeAgent`, `AfterModel`, `AfterTool`, `PreCompress`, `SessionEnd`. Each command string embeds the marker `cardinal-gemini-plugin` for disconnect identification. |
 | `~/.gemini/extensions/cardinal/GEMINI.md` | Context file loaded into the model context by Gemini CLI. |
 | `~/.gemini/settings.json` | Managed `telemetry` block pointing Gemini's native OTLP exporter at Cardinal ingest. |
 | `~/.gemini/cardinal.json` | Non-secret state: org/user metadata, endpoint URLs, key ids, key prefixes, and config locations. |
