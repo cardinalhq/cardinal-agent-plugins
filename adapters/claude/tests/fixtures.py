@@ -378,8 +378,24 @@ def collect(stub: StubIngest, proc: subprocess.CompletedProcess) -> dict:
 # Scenarios
 # ---------------------------------------------------------------------------
 
+_GH_PR_FOUND = (
+    "#!/bin/sh\n"
+    "echo '{\"number\": 42, \"url\": \"https://github.com/cardinalhq/golden-repo/pull/42\"}'\n"
+)
+_GH_FAILS = "#!/bin/sh\necho 'no pull requests found' >&2\nexit 1\n"
+
+
+def write_gh_stub(bin_dir: Path, script: str) -> Path:
+    """Stub `gh` so PR resolution never touches the network."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(script)
+    gh.chmod(0o755)
+    return bin_dir
+
+
 def _git_state_scenario(hooks_dir: Path, tmp: Path, *, branch: str,
-                        prompt: str, with_plan_cache: bool) -> dict:
+                        prompt: str, with_plan_cache: bool, gh: str) -> dict:
     stub = StubIngest().start()
     try:
         home = tmp / "home"
@@ -387,6 +403,7 @@ def _git_state_scenario(hooks_dir: Path, tmp: Path, *, branch: str,
         if with_plan_cache:
             seed_plan_cache(home)
         repo = make_git_repo(tmp / "repo", branch)
+        bin_dir = write_gh_stub(tmp / "bin", gh)
         payload = {
             "session_id": SESSION_ID,
             "transcript_path": str(tmp / "proj" / f"{SESSION_ID}.jsonl"),
@@ -394,7 +411,9 @@ def _git_state_scenario(hooks_dir: Path, tmp: Path, *, branch: str,
             "hook_event_name": "UserPromptSubmit",
             "prompt": prompt,
         }
-        proc = run_hook(hooks_dir / "git-state.py", payload, base_env(home))
+        env = base_env(home)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+        proc = run_hook(hooks_dir / "git-state.py", payload, env)
         return collect(stub, proc)
     finally:
         stub.stop()
@@ -403,18 +422,21 @@ def _git_state_scenario(hooks_dir: Path, tmp: Path, *, branch: str,
 def scenario_git_state_feature_branch(hooks_dir: Path, tmp: Path) -> dict:
     return _git_state_scenario(
         hooks_dir, tmp, branch="feat/golden-fixture",
-        prompt="/code-review --fix please", with_plan_cache=True)
+        prompt="/code-review --fix please", with_plan_cache=True,
+        gh=_GH_PR_FOUND)
 
 
 def scenario_git_state_worktree_branch(hooks_dir: Path, tmp: Path) -> dict:
     return _git_state_scenario(
         hooks_dir, tmp, branch="worktree-fix-1018-github-app-repo-picker",
-        prompt="hello there", with_plan_cache=False)
+        prompt="hello there", with_plan_cache=False, gh=_GH_FAILS)
 
 
 def scenario_git_state_main_branch(hooks_dir: Path, tmp: Path) -> dict:
+    # Protected branch: resolve_pr skips gh even though the stub has a PR.
     return _git_state_scenario(
-        hooks_dir, tmp, branch="main", prompt="ship it", with_plan_cache=False)
+        hooks_dir, tmp, branch="main", prompt="ship it", with_plan_cache=False,
+        gh=_GH_PR_FOUND)
 
 
 def scenario_turn_usage_stop(hooks_dir: Path, tmp: Path) -> dict:
