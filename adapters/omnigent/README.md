@@ -125,7 +125,8 @@ labels:
 one initiative, `<type-prefix>/<kebab-name>`). Sessions without labels
 attribute to `initiative=None, type=research` — same as protected-branch
 sessions on the CLI adapters, so rollups stay honest. Consequently
-`cardinal.git_state` here carries repo/branch/initiative facts but not
+`cardinal.git_state` here carries repo/branch/initiative facts, and PR
+facts where a reliable signal exists (see PR linkage below), but not
 `head_sha`/`cwd`/`remote_url` (structurally unavailable server-side).
 
 **Branch sniffing (enrichment):** creation-time labels can't see a
@@ -139,6 +140,70 @@ Identity is per-event: `user.email` comes from
 `event.context.actor.run_as`; `cardinal.omnigent_harness` (resource
 attribute) from `event.context.harness` so downstream can slice by
 underlying harness.
+
+## PR linkage (`cardinal_pr_number` / `cardinal_pr_url`)
+
+The CLI adapters resolve the branch's PR with
+`cardinal_core.decisions.resolve_pr` (`gh pr view` in the checkout). That
+cannot work here: the policy event carries no cwd
+(`omnigent/policies/function.py::FunctionPolicy._build_event`, unchanged
+between the pin and upstream main `cc83145e`), and a session's
+`Conversation.workspace` is a path on the **runner's host** — the host,
+not the server, runs git (`omnigent/server/routes/_host_worktree.py`,
+`omnigent/host/git_worktree.py`). Running `gh` in the server's own cwd
+would attribute the wrong repo, so this package never shells out. PR
+fields come only from:
+
+1. **Labels** — `cardinal.pr_url` and/or `cardinal.pr_number` (number is
+   derived from the URL when only the URL is set).
+   `cardinal_pr_source="label"`.
+2. **Observed `gh pr create`** — on a shell `tool_result` whose
+   originating command (`request_data.arguments.command`) contains
+   `gh pr create`, the last `https://<host>/<owner>/<repo>/pull/<n>` in
+   the output is taken (gh prints it on success and on the
+   "already exists" failure). Rejected when `<owner>/<repo>` disagrees
+   with a `cardinal.repo` label. Emits a boundary `cardinal.git_state`
+   and rides later records **only while the branch is unchanged**.
+   `cardinal_pr_source="tool_sniff"`.
+
+Not covered: PRs opened outside the session (web UI, another machine),
+`gh` output the harness does not return in the tool result, and PR state
+after an omnigent server restart (the sniffed PR is cached in-process
+only, like the sniffed branch). `cardinal_head_sha` is still not emitted —
+nothing in the policy contract reports it reliably.
+
+## Decision capture: unsupported
+
+Decision capture (`cardinal.decision`, `docs/specs/decision-telemetry.md`)
+is **not supported on omnigent**, because a policy can neither put text
+into the model's context nor give the agent a tool to record with
+(verified against omnigent at the pin and at
+`feat/policy-conversation-identity`):
+
+- **No context injection.** On ALLOW the engine discards `reason`
+  (`omnigent/runtime/policies/engine.py::evaluate` builds the ALLOW
+  result with `reason=None`). Native harness hooks turn an ALLOW on
+  `UserPromptSubmit` into no output, and a `PostToolUse` result reaches
+  the model only as `[Policy violation] <reason>` on DENY
+  (`omnigent/native_policy_hook.py::evaluation_response_to_hook_output`).
+  SDK executors consume only DENY from `PHASE_LLM_REQUEST`
+  (`omnigent/inner/claude_sdk_executor.py`), whose payload is metadata
+  (`system_prompt_preview`, counts), not the prompt. An ALLOW `data`
+  replacement is applied only to tool-call arguments
+  (`omnigent/server/routes/_sessions/orchestration.py`) and, runner-side,
+  to tool output via `RunnerPolicies.evaluate_tool_result`, which has no
+  callers (`omnigent/runner/policy.py`). Abusing DENY to smuggle a prompt
+  would block the user's work, which an observe-only policy must never do.
+- **No tool surface.** `FunctionPolicySpec` has no tool field
+  (`omnigent/spec/types.py`); `policy_modules` are scanned only for
+  `POLICY_REGISTRY` callables. Tools come from the agent spec
+  (`ToolsConfig`), which this package does not own. Without a prompt,
+  such a tool would never be used anyway.
+
+`cardinal-decision` is therefore not shipped here, and no
+`decisions.is_enabled` toggle is read. Revisit if omnigent adds a
+policy-to-context channel (e.g. honoring ALLOW `reason` as
+`additionalContext`).
 
 ## Tests
 
