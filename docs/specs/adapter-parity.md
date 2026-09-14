@@ -78,3 +78,18 @@ instead of shipping a flow that never fires.
   native). Goldens re-captured only for the intended `git_state` change.
 - An independent review per adapter checks the host surface claims against
   the host's API/types and runs the tests.
+
+## Outcome
+
+| Adapter | PR linkage | Decision capture | Caveats |
+|---|---|---|---|
+| claude | `git-state.py` (async hook) | CLI records and emits | Opt-in Bash sandbox prompts to escalate |
+| codex | _pending final review_ | | |
+| cursor | `beforeSubmitPrompt`, cached `gh` | Sandboxed CLI prints a marker; `postToolUse` rebuilds the decision from the real argv, writes the ledger, and sends from a detached child | `sessionStart` (instructions) doesn't run in cloud agents; that hooks run unsandboxed is inferred, not verified live |
+| gemini | `BeforeAgent`, network in a detached child | `BeforeAgent` `additionalContext` + CLI | Shipped hooks never loaded; needs Gemini CLI 0.26+ and a `cardinal-connect` re-run; cost is an upper bound; no `subagent_usage` |
+| opencode | shared native bridge | `cardinal_record_decision` tool + `experimental.chat.messages.transform` | Prompt hook is experimental |
+| pi | shared native bridge | `cardinal_record_decision` tool + `before_agent_start` `systemPrompt` | — |
+| omnigent | labels or observed `gh pr create` only; no head_sha | Unsupported: policies can't add model context or tools | Known mis-attribution cases in adapter README |
+
+Only Claude has been exercised in a live host session; the others are
+verified against host source/docs and tests.
