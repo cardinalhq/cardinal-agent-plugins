@@ -43,20 +43,29 @@ State lives under `~/.cursor/cardinal/` (telemetry progress cursors, plan stamp,
 
 ## Decision capture (opt-in)
 
-`scripts/cardinal-decision` records the choices an agent makes while it works. Each one becomes a `cardinal.decision` event tagged with your email, the Cursor conversation id, repo, branch, head sha, PR, anchors, and code clusters. It behaves the same as the Claude plugin's `cardinal-decision` (see `docs/specs/decision-telemetry.md` at the repository root).
+Records the choices an agent makes while it works. Each one becomes a `cardinal.decision` event tagged with your email, the Cursor conversation id, repo, branch, head sha, PR, anchors, and code clusters. The event and the on/off semantics match the Claude plugin (see `docs/specs/decision-telemetry.md` at the repository root). The recording path is different because of Cursor's sandbox.
+
+**You run these in your own terminal** (not the agent):
 
 ```bash
 python3 scripts/cardinal-decision on        # off by default
 python3 scripts/cardinal-decision status [--session <conversation-id>]
-python3 scripts/cardinal-decision record --session <conversation-id> --choice "..." [--question ...] [--why ...] [--alt ...] [--anchor path[::Symbol]] [--by user]
 python3 scripts/cardinal-decision off
 ```
 
-`CARDINAL_DECISIONS=1` / `0` in the environment overrides `on` / `off`. It uses the same ingest connection as the hooks (`~/.cursor/cardinal.json` + `cardinal-secrets.json`). If you aren't connected, decisions are only saved locally.
+`CARDINAL_DECISIONS=1` / `0` in the environment Cursor's hooks run with overrides `on` / `off`.
 
-**How the agent is told to record decisions.** When capture is on, the `sessionStart` hook adds the recording instructions (with `--session` filled in) and the session's decisions so far to its `additional_context`. Cursor documents that field as *"Additional context to add to the conversation's initial system context"* ([hooks docs](https://cursor.com/docs/agent/hooks)). It is the only surface this plugin uses. Limits of that surface:
+**The agent runs `cardinal-decision record`, and a hook records it.** Since Cursor 3.6, the default Auto-review mode runs agent shell commands in a sandbox: writes are limited to the workspace and `/tmp`, and network access is denied by default ([run modes](https://cursor.com/docs/agent/security/run-modes), [sandbox reference](https://cursor.com/docs/reference/sandbox)). So the flow is split:
 
-- **The instructions arrive once, at session start.** `beforeSubmitPrompt` can't add context: its output schema is `{continue, user_message}` only. So unlike Claude's per-prompt `UserPromptSubmit` injection, the list of earlier decisions isn't refreshed on each turn. Each `record` call prints the id it saved, and the agent sees that in the terminal output.
+1. The agent runs `python3 scripts/cardinal-decision record --choice "..." [--question ...] [--why ...] [--alt ...] [--anchor path[::Symbol]] [--by user] [--follows|--refines|--supersedes <id>]`. The command only validates the arguments, prints one `cardinal-decision-record:v1 {json}` line, and exits 0. It never reads or writes `~/.cursor`, never runs `gh`, and never opens a network connection, so it succeeds in the sandbox and can't misreport whether capture is on.
+2. Cursor fires `postToolUse` for that shell call with `tool_input.command` and `tool_output` (a JSON string with `stdout`), as documented in the [hooks docs](https://cursor.com/docs/agent/hooks). The Cardinal hook looks for the marker line, but only when the command itself invoked `cardinal-decision`.
+3. The hook applies the on/off gate. If capture is on, it re-validates the decision, derives the final id against the session ledger, resolves anchors and code clusters, resolves the branch's PR with `gh`, writes the ledger under `~/.cursor/cardinal/decisions/`, and emits the event using the hooks' ingest connection. It then reports the recorded id, or why nothing was recorded, back to the agent as `additional_context`.
+
+The hook is the only thing that writes or emits a decision. In Run Everything mode (unsandboxed) or on Windows, the CLI still has no side effects, so nothing is sent twice. The hook runs outside the agent sandbox. The existing hooks already write under `~/.cursor/cardinal/` and POST to ingest from there. That means the `gh`-based PR lookup and the `git` calls made while recording **still run unsandboxed**, with your `gh` credentials, bounded by a 1.5s `gh` timeout. `cardinal-connect` registers `postToolUse` with a 15s timeout so this work fits. If you aren't connected, decisions are only saved to the local ledger.
+
+**How the agent is told to record decisions.** When capture is on, the `sessionStart` hook adds the recording instructions and the session's decisions so far to its `additional_context`. Cursor documents that field as *"Additional context to add to the conversation's initial system context"* ([hooks docs](https://cursor.com/docs/agent/hooks)). The instructions tell the agent the command is sandbox-safe, that the hook reports the id, and that `on` / `off` / `status` are for the user. Limits of that surface:
+
+- **The instructions arrive once, at session start.** `beforeSubmitPrompt` can't add context: its output schema is `{continue, user_message}` only. So unlike Claude's per-prompt `UserPromptSubmit` injection, the list of earlier decisions isn't refreshed on each turn. The `postToolUse` reply after each `record` gives the agent the id it needs for later links.
 - **Turning capture on doesn't affect sessions that are already open.** Start a new chat to pick it up.
 - **User Rules are not used.** They live only in Cursor Settings (*Customize → Rules*), and there's no file on disk the plugin could write ([rules docs](https://cursor.com/docs/context/rules)). Project rules (`.cursor/rules/*.mdc`) would have to be committed to each repo.
 
@@ -74,7 +83,7 @@ This additionally writes `.cursor/mcp.json` and `.cursor/hooks.json` at your rep
 What that means for Cardinal in cloud agents:
 
 - **Initiative-convention prompt, budget standing, and decision-capture instructions:** not delivered, because they all ride on `sessionStart`.
-- **Decision capture:** you can still run `cardinal-decision record` if the CLI exists in the cloud VM at the path your hook config uses, but the agent is never told to. The on/off switch and ledger live under the VM's `~/.cursor/cardinal/`, not your laptop's.
+- **Decision capture:** the agent is never told to record decisions. If it runs `cardinal-decision record` anyway, the recorder (`postToolUse`) does run in cloud agents, but only if the CLI and hook exist in the VM at the paths your hook config uses. The on/off switch and ledger it checks live under the VM's `~/.cursor/cardinal/`, not your laptop's, and `gh` there is usually unauthenticated, so the PR will be missing.
 - **Spend-limits gate:** runs on `beforeSubmitPrompt`, so it can block or warn in cloud agents too.
 - **`git_state` PR linkage:** `beforeSubmitPrompt` runs once hooks are active, but `gh` in the cloud VM is usually missing or not authenticated, so expect the PR keys to be absent there. Server-side branch → PR joins still apply.
 - **Tool-level telemetry** (`postToolUse`, `subagentStop`, `preCompact`, `afterAgent*`): runs normally.

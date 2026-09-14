@@ -1,16 +1,21 @@
 """Tests for PR linkage on cardinal.git_state and opt-in decision capture
-(scripts/cardinal-decision + sessionStart additional_context) in the
-Cursor adapter.
+in the Cursor adapter.
+
+Decision flow under test: the agent's sandboxed `cardinal-decision record`
+only validates and prints a marker line; the postToolUse hook (outside
+the sandbox) applies the on/off gate, writes the ledger, resolves the PR
+and is the single emitter of cardinal.decision.
 
 Scripts run as subprocesses with HOME pointed at a temp dir whose
 ~/.cursor connection state routes OTLP to a local stub, inside a temp git
 repo with an origin remote and a stub `gh` on PATH. No network.
 
-Run: python3 -m pytest adapters/cursor/tests/test_decisions.py -q
+Run: uv run --no-project --with pytest python -m pytest adapters/cursor/tests/test_decisions.py -q
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -20,6 +25,7 @@ import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -29,11 +35,45 @@ ADAPTER = TESTS_DIR.parent
 REPO_ROOT = ADAPTER.parent.parent
 CLI = ADAPTER / "scripts" / "cardinal-decision"
 HOOK = ADAPTER / "hooks" / "cardinal-cursor-telemetry.py"
+CONNECT = ADAPTER / "scripts" / "cardinal-connect"
 GIT = shutil.which("git") or "/usr/bin/git"
+MARKER = "cardinal-decision-record:v1 "
 
 if not (ADAPTER / "hooks" / "cardinal_core" / "decisions.py").exists():
     subprocess.run([sys.executable, str(REPO_ROOT / "build" / "vendor.py"), "cursor"],
                    check=True, capture_output=True)
+
+# Loaded via PYTHONPATH for the sandbox simulation: any network connect,
+# subprocess spawn, or filesystem mutation kills the process with 97.
+SANDBOX_SITECUSTOMIZE = '''
+import builtins, os, socket, subprocess
+
+def _deny(*_a, **_k):
+    os.write(2, b"SANDBOX-VIOLATION\\n")
+    os._exit(97)
+
+socket.socket.connect = _deny
+socket.create_connection = _deny
+subprocess.Popen.__init__ = _deny
+for _name in ("mkdir", "makedirs", "replace", "rename", "remove", "unlink", "rmdir"):
+    setattr(os, _name, _deny)
+_real_open = builtins.open
+
+def _open(file, mode="r", *a, **k):
+    if any(c in mode for c in "wax+"):
+        _deny()
+    return _real_open(file, mode, *a, **k)
+
+builtins.open = _open
+'''
+
+
+def _load_module(name: str, path: Path):
+    loader = SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 class _OTLPStub(BaseHTTPRequestHandler):
@@ -57,14 +97,28 @@ def _attrs(kvs: list) -> dict:
     return out
 
 
+def _snapshot(*roots: Path) -> dict:
+    out = {}
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in dirnames + filenames:
+                p = Path(dirpath) / name
+                try:
+                    st = p.lstat()
+                except OSError:
+                    continue
+                out[str(p)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
 class CursorDecisionBase(unittest.TestCase):
     def setUp(self):
         _OTLPStub.received = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.tmp = TemporaryDirectory()
-        root = Path(os.path.realpath(self.tmp.name))
-        self.home = root / "home"
+        self.root = Path(os.path.realpath(self.tmp.name))
+        self.home = self.root / "home"
         self.cursor = self.home / ".cursor"
         self.cursor.mkdir(parents=True)
         (self.cursor / "cardinal.json").write_text(json.dumps({
@@ -74,7 +128,7 @@ class CursorDecisionBase(unittest.TestCase):
             "org_slug": "acme",
         }))
         (self.cursor / "cardinal-secrets.json").write_text(json.dumps({"ingest_api_key": "test-key"}))
-        self.repo = root / "repo"
+        self.repo = self.root / "repo"
         self.repo.mkdir()
         for args in (["init", "-q", "-b", "feat/trace-index"],
                      ["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
@@ -85,9 +139,9 @@ class CursorDecisionBase(unittest.TestCase):
             (self.repo / "svc" / f"f{i}.go").write_text("package svc\n")
         subprocess.run([GIT, "add", "-A"], cwd=self.repo, check=True, capture_output=True)
         subprocess.run([GIT, "commit", "-q", "-m", "init"], cwd=self.repo, check=True, capture_output=True)
-        self.bin = root / "bin"
+        self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.gh_calls = root / "gh-calls"
+        self.gh_calls = self.root / "gh-calls"
         self.write_gh('echo \'{"number": 42, "url": "https://github.com/acme/widgets/pull/42"}\'')
 
     def write_gh(self, body: str) -> None:
@@ -98,15 +152,20 @@ class CursorDecisionBase(unittest.TestCase):
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
+        if self.cursor.exists():
+            self.cursor.chmod(0o755)
         self.tmp.cleanup()
 
     def env(self, **extra) -> dict:
         path = f"{self.bin}:{os.path.dirname(GIT)}:/usr/bin:/bin"
         return {"HOME": str(self.home), "PATH": path, **extra}
 
-    def cli(self, *args: str, expect_rc: int = 0, **env) -> subprocess.CompletedProcess:
+    def enable(self) -> None:
+        self.cli("on")
+
+    def cli(self, *args: str, expect_rc: int = 0, env: dict | None = None) -> subprocess.CompletedProcess:
         proc = subprocess.run(
-            [sys.executable, str(CLI), *args], cwd=self.repo, env=self.env(**env),
+            [sys.executable, str(CLI), *args], cwd=self.repo, env=env or self.env(),
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(proc.returncode, expect_rc, proc.stdout + proc.stderr)
@@ -115,7 +174,7 @@ class CursorDecisionBase(unittest.TestCase):
     def hook(self, event: str, payload: dict, **env) -> str:
         proc = subprocess.run(
             [sys.executable, str(HOOK), "--event", event], input=json.dumps(payload),
-            env=self.env(**env), capture_output=True, text=True, timeout=20,
+            env=self.env(**env), capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout
@@ -130,48 +189,120 @@ class CursorDecisionBase(unittest.TestCase):
                     out.append((resource, attrs))
         return out
 
+    RECORD_ARGS = (
+        "record",
+        "--question", "How do we index billions of trace IDs?",
+        "--choice", "Use mutation-run S3 LSM",
+        "--why", "Global ID-only lookup without per-ID database rows.",
+        "--alt", "Per-ID rows in Postgres",
+        "--anchor", "svc/f3.go::Index.Put",
+        "--anchor", "config:TRACE_INDEX_ENABLED",
+    )
 
-class CursorDecisionCliTest(CursorDecisionBase):
-    def test_off_by_default(self):
-        proc = self.cli("record", "--session", "c1", "--choice", "Use X", expect_rc=3)
-        self.assertIn("cardinal-decision on", proc.stderr)
-        self.assertEqual(self.records("cardinal.decision"), [])
+    def shell_payload(self, command: str, stdout: str, **overrides) -> dict:
+        """postToolUse payload in the shape Cursor documents
+        (cursor.com/docs/agent/hooks): tool_name "Shell", tool_input.command,
+        tool_output as a JSON string with exitCode/stdout, cwd."""
+        payload = {
+            "hook_event_name": "postToolUse",
+            "conversation_id": "c1",
+            "generation_id": "g1",
+            "model": "claude-4.5-sonnet",
+            "cursor_version": "3.6.0",
+            "workspace_roots": [str(self.repo)],
+            "tool_name": "Shell",
+            "tool_input": {"command": command},
+            "tool_output": json.dumps({"exitCode": 0, "stdout": stdout}),
+            "tool_use_id": "tool-1",
+            "cwd": str(self.repo),
+            "duration": 120,
+        }
+        payload.update(overrides)
+        return payload
 
-    def test_env_override_turns_capture_on(self):
-        self.cli("record", "--session", "c1", "--choice", "Use X", CARDINAL_DECISIONS="1")
-        self.assertEqual(len(self.records("cardinal.decision")), 1)
+    def agent_records(self, *args: str, **hook_env) -> str:
+        """Agent runs the CLI (unsandboxed here), then Cursor fires postToolUse."""
+        args = args or self.RECORD_ARGS
+        stdout = self.cli(*args).stdout
+        command = f'python3 "{CLI}" ' + " ".join(args)
+        return self.hook("postToolUse", self.shell_payload(command, stdout), **hook_env)
 
-    def test_on_off_status_use_cursor_runtime_dir(self):
-        self.cli("on")
-        config = self.cursor / "cardinal" / "decisions" / "config.json"
-        self.assertEqual(json.loads(config.read_text()), {"enabled": True})
-        self.assertIn("Decision capture: on", self.cli("status").stdout)
-        self.assertIn("Cardinal telemetry: connected", self.cli("status").stdout)
-        self.cli("off")
-        self.assertIn("Decision capture: off", self.cli("status").stdout)
-        self.assertIn("(CARDINAL_DECISIONS=1)", self.cli("status", CARDINAL_DECISIONS="1").stdout)
 
-    def test_records_a_tagged_decision(self):
-        self.cli("on")
-        proc = self.cli(
-            "record", "--session", "c1",
-            "--question", "How do we index billions of trace IDs?",
-            "--choice", "Use mutation-run S3 LSM",
-            "--why", "Global ID-only lookup without per-ID database rows.",
-            "--alt", "Per-ID rows in Postgres",
-            "--anchor", "svc/f3.go::Index.Put",
-            "--anchor", "config:TRACE_INDEX_ENABLED",
-        )
-        self.assertIn("Recorded decision use-mutation-run-s3-lsm", proc.stdout)
-        self.assertIn("PR #42", proc.stdout)
+class SandboxedRecordCliTest(CursorDecisionBase):
+    def sandbox_env(self) -> dict:
+        site = self.root / "sandbox-site"
+        site.mkdir(exist_ok=True)
+        (site / "sitecustomize.py").write_text(SANDBOX_SITECUSTOMIZE)
+        return self.env(PYTHONPATH=str(site))
+
+    def test_record_has_no_side_effects_inside_sandbox(self):
+        # Capture is "off" in ~/.cursor, and ~/.cursor is unreadable: the CLI
+        # must neither read it nor report the gate.
+        (self.cursor / "cardinal" / "decisions").mkdir(parents=True)
+        (self.cursor / "cardinal" / "decisions" / "config.json").write_text('{"enabled": false}')
+        env = self.sandbox_env()
+        # Snapshot while everything is readable, then deny ~/.cursor.
+        before = _snapshot(self.home, self.repo, ADAPTER / "hooks", ADAPTER / "scripts")
+        self.cursor.chmod(0)
+
+        proc = self.cli(*self.RECORD_ARGS, env=env)
+
+        self.cursor.chmod(0o755)
+        self.assertNotIn("SANDBOX-VIOLATION", proc.stderr)
+        self.assertNotIn("capture is off", proc.stdout + proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(_snapshot(self.home, self.repo, ADAPTER / "hooks", ADAPTER / "scripts"), before)
+        self.assertEqual(_OTLPStub.received, [])
+        self.assertFalse(self.gh_calls.exists())
+
+        [marker_line] = [l for l in proc.stdout.splitlines() if l.startswith(MARKER)]
+        marker = json.loads(marker_line[len(MARKER):])
+        self.assertEqual(marker["v"], 1)
+        self.assertEqual(marker["choice"], "Use mutation-run S3 LSM")
+        self.assertEqual(marker["why"], "Global ID-only lookup without per-ID database rows.")
+        self.assertEqual(marker["alt"], ["Per-ID rows in Postgres"])
+        self.assertEqual(marker["anchor"], ["svc/f3.go::Index.Put", "config:TRACE_INDEX_ENABLED"])
+        self.assertEqual(marker["by"], "agent")
+        self.assertEqual(marker["cwd"], str(self.repo))
+        self.assertIsNone(marker["id"])
+        self.assertIn("proposed id use-mutation-run-s3-lsm", proc.stdout)
+
+    def test_sandbox_trap_actually_fires(self):
+        # Guard against a silently ineffective trap: `on` writes ~/.cursor.
+        proc = subprocess.run([sys.executable, str(CLI), "on"], cwd=self.repo, env=self.sandbox_env(),
+                              capture_output=True, text=True, timeout=20)
+        self.assertEqual(proc.returncode, 97)
+
+    def test_validation_errors_exit_2_without_marker(self):
+        proc = self.cli("record", "--choice", "Use X", "--refines", "Bad Id", expect_rc=2,
+                        env=self.sandbox_env())
+        self.assertIn("is not a decision id", proc.stderr)
+        self.assertNotIn(MARKER, proc.stdout)
+        proc = self.cli("record", "--choice", "   ", expect_rc=2, env=self.sandbox_env())
+        self.assertIn("--choice is required", proc.stderr)
+
+    def test_record_does_not_emit_even_when_on_and_connected(self):
+        # Run Everything mode: unsandboxed CLI, capture on — still no emit.
+        self.enable()
+        proc = self.cli(*self.RECORD_ARGS)
+        self.assertIn(MARKER, proc.stdout)
+        self.assertEqual(_OTLPStub.received, [])
+        self.assertFalse((self.cursor / "cardinal" / "decisions" / "sessions").exists())
+        self.assertFalse(self.gh_calls.exists())
+
+
+class HookRecordsDecisionTest(CursorDecisionBase):
+    def test_hook_emits_tagged_decision_from_documented_payload(self):
+        self.enable()
+        out = json.loads(self.agent_records())
 
         [(resource, attrs)] = self.records("cardinal.decision")
         self.assertEqual(resource["service.name"], "cursor")
-        self.assertEqual(resource["agent.runtime"], "cursor")
         self.assertEqual(resource["user.email"], "eng1@example.com")
-        self.assertEqual(resource["cardinal.org"], "acme")
+        self.assertEqual(resource["cursor.model"], "claude-4.5-sonnet")
         self.assertEqual(attrs["session_id"], "c1")
         self.assertEqual(attrs["cardinal.decision.id"], "use-mutation-run-s3-lsm")
+        self.assertEqual(attrs["cardinal.decision.question"], "How do we index billions of trace IDs?")
         self.assertEqual(attrs["cardinal.decision.decided_by"], "agent")
         self.assertEqual(json.loads(attrs["cardinal.decision.alternatives"]), ["Per-ID rows in Postgres"])
         self.assertEqual(json.loads(attrs["cardinal.decision.anchors"]), [
@@ -185,14 +316,60 @@ class CursorDecisionCliTest(CursorDecisionBase):
         self.assertEqual(int(attrs["cardinal.pr_number"]), 42)
         self.assertEqual(attrs["cardinal.pr_url"], "https://github.com/acme/widgets/pull/42")
 
-    def test_links_and_ledger(self):
-        self.cli("on")
-        self.cli("record", "--session", "c1", "--id", "dir", "--choice", "Exact trace directory")
-        proc = self.cli(
-            "record", "--session", "c1", "--id", "lsm", "--choice", "Mutation-run S3 LSM",
+        self.assertIn("Cardinal recorded decision use-mutation-run-s3-lsm", out["additional_context"])
+        self.assertIn("PR #42", out["additional_context"])
+        # turn_tool telemetry for the same call is unaffected.
+        self.assertEqual(len(self.records("cardinal.turn_tool")), 1)
+
+    def test_single_emitter_across_cli_and_hook(self):
+        self.enable()
+        self.agent_records()
+        self.assertEqual(len(self.records("cardinal.decision")), 1)
+
+    def test_gate_off_means_no_emit_and_no_ledger(self):
+        out = json.loads(self.agent_records())
+        self.assertEqual(self.records("cardinal.decision"), [])
+        self.assertFalse((self.cursor / "cardinal" / "decisions" / "sessions").exists())
+        self.assertIn("decision capture is off", out["additional_context"])
+        self.assertIn("own terminal", out["additional_context"])
+        self.assertEqual(len(self.records("cardinal.turn_tool")), 1)
+
+    def test_env_override_forces_gate(self):
+        self.agent_records(CARDINAL_DECISIONS="1")
+        self.assertEqual(len(self.records("cardinal.decision")), 1)
+        self.enable()
+        self.agent_records(CARDINAL_DECISIONS="0")
+        self.assertEqual(len(self.records("cardinal.decision")), 1)
+
+    def test_marker_from_other_command_is_ignored(self):
+        self.enable()
+        stdout = self.cli(*self.RECORD_ARGS).stdout
+        out = self.hook("postToolUse", self.shell_payload("cat build.log", stdout))
+        self.assertEqual(out, "")
+        self.assertEqual(self.records("cardinal.decision"), [])
+
+    def test_legacy_dict_tool_output_shape(self):
+        self.enable()
+        args = ("record", "--choice", "Use X")
+        stdout = self.cli(*args).stdout
+        payload = {
+            "hook_event_name": "postToolUse", "conversationId": "c1", "generation_id": "g1",
+            "workspaceRoots": [str(self.repo)], "toolName": "run_terminal_cmd",
+            "toolInput": {"command": f"python3 {CLI} record --choice 'Use X'"},
+            "toolOutput": {"exit_code": 0, "stdout": stdout},
+        }
+        self.hook("postToolUse", payload)
+        [(_, attrs)] = self.records("cardinal.decision")
+        self.assertEqual(attrs["cardinal.decision.id"], "use-x")
+
+    def test_links_ledger_and_status(self):
+        self.enable()
+        self.agent_records("record", "--id", "dir", "--choice", "Exact trace directory")
+        out = json.loads(self.agent_records(
+            "record", "--id", "lsm", "--choice", "Mutation-run S3 LSM",
             "--supersedes", "dir", "--follows", "elsewhere", "--by", "user",
-        )
-        self.assertIn("no earlier decision in this session has id elsewhere", proc.stdout)
+        ))
+        self.assertIn("no earlier decision in this session has id elsewhere", out["additional_context"])
         attrs = self.records("cardinal.decision")[-1][1]
         self.assertEqual(attrs["cardinal.decision.decided_by"], "user")
         self.assertEqual(json.loads(attrs["cardinal.decision.links"]), [
@@ -200,27 +377,61 @@ class CursorDecisionCliTest(CursorDecisionBase):
             {"relation": "supersedes", "to": "dir"},
         ])
         status = self.cli("status", "--session", "c1")
+        self.assertIn("Decision capture: on", status.stdout)
         self.assertIn("- dir: Exact trace directory [superseded by lsm]", status.stdout)
 
-    def test_usage_errors(self):
-        self.cli("on")
-        proc = self.cli("record", "--choice", "Use X", expect_rc=2)
-        self.assertIn("--session is required", proc.stderr)
-        proc = self.cli("record", "--session", "c1", "--choice", "Use X", "--refines", "Bad Id", expect_rc=2)
-        self.assertIn("is not a decision id", proc.stderr)
+    def test_auto_id_made_unique_against_ledger(self):
+        self.enable()
+        self.agent_records("record", "--choice", "Use X")
+        self.agent_records("record", "--choice", "Use X", "--question", "again")
+        self.agent_records("record", "--id", "use-x", "--choice", "Use Y")
+        ids = [a["cardinal.decision.id"] for _, a in self.records("cardinal.decision")]
+        self.assertEqual(ids, ["use-x", "use-x", "use-x"])  # same choice/explicit id = revision
+        self.agent_records("record", "--choice", "use x!")
+        self.assertEqual(self.records("cardinal.decision")[-1][1]["cardinal.decision.id"], "use-x-2")
+
+    def test_tampered_marker_is_revalidated(self):
+        self.enable()
+        line = MARKER + json.dumps({"v": 1, "choice": "Use X", "by": "agent", "refines": ["Bad Id"]})
+        out = json.loads(self.hook("postToolUse", self.shell_payload("python3 cardinal-decision record", line)))
+        self.assertIn("did not record", out["additional_context"])
         self.assertEqual(self.records("cardinal.decision"), [])
 
-    def test_saved_locally_when_not_connected(self):
+    def test_not_connected_saves_locally(self):
         (self.cursor / "cardinal-secrets.json").unlink()
-        self.cli("on")
-        proc = self.cli("record", "--session", "c1", "--choice", "Use X")
-        self.assertIn("only saved locally", proc.stdout)
-        self.assertEqual(self.records("cardinal.decision"), [])
+        self.enable()
+        out = json.loads(self.agent_records("record", "--choice", "Use X"))
+        self.assertIn("only saved locally", out["additional_context"])
         self.assertIn("- use-x: Use X", self.cli("status", "--session", "c1").stdout)
 
-    def test_no_subcommand_prints_help(self):
-        proc = self.cli(expect_rc=2)
-        self.assertIn("record", proc.stdout)
+    def test_notify_and_decision_share_one_output(self):
+        self.enable()
+        limits_dir = self.cursor / "cardinal" / "limits"
+        limits_dir.mkdir(parents=True)
+        (limits_dir / "c1.notify.json").write_text(json.dumps({"message": "Budget at 60%.", "band": 1}))
+        out = json.loads(self.agent_records("record", "--choice", "Use X"))
+        context = out["additional_context"]
+        self.assertTrue(context.startswith("Budget at 60%."))
+        self.assertIn("Cardinal recorded decision use-x", context)
+
+
+class UserCommandsTest(CursorDecisionBase):
+    def test_on_off_status_use_cursor_runtime_dir(self):
+        self.cli("on")
+        config = self.cursor / "cardinal" / "decisions" / "config.json"
+        self.assertEqual(json.loads(config.read_text()), {"enabled": True})
+        status = self.cli("status").stdout
+        self.assertIn("Decision capture: on", status)
+        self.assertIn("Cardinal telemetry: connected", status)
+        self.cli("off")
+        self.assertIn("Decision capture: off", self.cli("status").stdout)
+        self.assertIn("(CARDINAL_DECISIONS=1)", self.cli("status", env=self.env(CARDINAL_DECISIONS="1")).stdout)
+
+    def test_help_marks_user_commands(self):
+        out = self.cli("--help").stdout
+        self.assertIn("(user, own terminal)", out)
+        self.assertIn("(agent)", out)
+        self.assertEqual(self.cli(expect_rc=2).returncode, 2)
 
 
 class SessionStartDecisionContextTest(CursorDecisionBase):
@@ -233,18 +444,22 @@ class SessionStartDecisionContextTest(CursorDecisionBase):
         self.assertNotIn("decision capture", out["additional_context"])
         self.assertIn("Cardinal-instrumented Cursor session", out["additional_context"])
 
-    def test_on_appends_protocol_and_ledger(self):
-        self.cli("on")
-        self.cli("record", "--session", "c1", "--id", "dir", "--choice", "Exact trace directory")
+    def test_on_describes_sandbox_safe_flow_and_ledger(self):
+        self.enable()
+        self.agent_records("record", "--id", "dir", "--choice", "Exact trace directory")
         out = json.loads(self.hook("sessionStart", self.payload()))
         context = out["additional_context"]
         self.assertTrue(context.startswith("You are running inside a Cardinal-instrumented Cursor session"))
         self.assertIn("Cardinal decision capture is on for this session", context)
-        self.assertIn(f'python3 "{CLI}" record --session c1', context)
+        self.assertIn(f'python3 "{CLI}" record --choice', context)
+        self.assertNotIn("--session", context)
+        self.assertIn("works in the sandbox", context)
+        self.assertIn("Do not run `cardinal-decision on`, `off`, or `status`", context)
+        self.assertIn("the user in their own terminal", context)
         self.assertIn("- dir: Exact trace directory", context)
 
     def test_on_outside_git_repo_still_injects_decision_context(self):
-        self.cli("on")
+        self.enable()
         plain = self.home / "plain"
         plain.mkdir()
         out = json.loads(self.hook("sessionStart", self.payload(plain)))
@@ -257,7 +472,7 @@ class SessionStartDecisionContextTest(CursorDecisionBase):
         self.assertEqual(self.hook("sessionStart", self.payload(plain)), "")
 
     def test_env_override_off_wins(self):
-        self.cli("on")
+        self.enable()
         out = json.loads(self.hook("sessionStart", self.payload(), CARDINAL_DECISIONS="0"))
         self.assertNotIn("decision capture", out["additional_context"])
 
@@ -304,23 +519,37 @@ class GitStatePrLinkageTest(CursorDecisionBase):
 
 
 class ResolvePrTimeoutTest(unittest.TestCase):
-    """The synchronous beforeSubmitPrompt path bounds the gh call."""
+    """Synchronous hook paths bound the gh call."""
 
     def test_timeout_is_bounded_and_errors_swallowed(self):
-        from importlib.machinery import SourceFileLoader
-        import importlib.util
-
-        loader = SourceFileLoader("cursor_telemetry_pr", str(HOOK))
-        spec = importlib.util.spec_from_loader("cursor_telemetry_pr", loader)
-        hook = importlib.util.module_from_spec(spec)
-        loader.exec_module(hook)
-
+        hook = _load_module("cursor_telemetry_pr", HOOK)
         self.assertLessEqual(hook.PR_RESOLVE_TIMEOUT_SEC, 1.5)
         with mock.patch.object(hook.decisions, "resolve_pr", return_value=(9, "u")) as rp:
             self.assertEqual(hook.resolve_pr("/x", "a/b", "feat/y"), (9, "u"))
         self.assertEqual(rp.call_args.kwargs["timeout"], hook.PR_RESOLVE_TIMEOUT_SEC)
         with mock.patch.object(hook.decisions, "resolve_pr", side_effect=RuntimeError("boom")):
             self.assertEqual(hook.resolve_pr("/x", "a/b", "feat/y"), (None, None))
+
+
+class RecordingHookInstallTest(unittest.TestCase):
+    """postToolUse (the recorder) is registered at both user and --project
+    hooks.json locations with a timeout that fits the recording work."""
+
+    def test_post_tool_use_registered_user_and_project(self):
+        with TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            connect = _load_module("cardinal_connect_decisions", CONNECT)
+            user = Path(tmp) / ".cursor" / "hooks.json"
+            project = Path(tmp) / "repo" / ".cursor" / "hooks.json"
+            for path in (user, project):
+                connect.write_hooks_config(path)
+                [entry] = json.loads(path.read_text())["hooks"]["postToolUse"]
+                self.assertIn(str(HOOK), entry["command"])
+                self.assertIn("--event postToolUse", entry["command"])
+                self.assertIn("cardinal-cursor-plugin", entry["command"])
+                self.assertGreaterEqual(entry["timeout"], 10)
+                # Re-running connect replaces, never duplicates, the recorder.
+                connect.write_hooks_config(path)
+                self.assertEqual(len(json.loads(path.read_text())["hooks"]["postToolUse"]), 1)
 
 
 if __name__ == "__main__":

@@ -87,8 +87,10 @@ TARGET_KEYS = {
 # beforeSubmitPrompt path (cache miss only; hits are file reads).
 PR_RESOLVE_TIMEOUT_SEC = 1.5
 
-# The decision-capture CLI the sessionStart context tells the agent to run.
+# The decision-capture CLI the sessionStart context tells the agent to run,
+# and the marker line its `record` subcommand prints for postToolUse.
 DECISION_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-decision"
+DECISION_MARKER_PREFIX = "cardinal-decision-record:v1 "
 
 EXIT_CODE_RE = re.compile(r"(?:exit(?:ed)?|status)[ :]+(-?\d+)", re.IGNORECASE)
 
@@ -418,6 +420,156 @@ def _tick_turn(conv_id: str, generation_id: Any, state: dict[str, Any]) -> None:
         state["last_prompt_generation"] = gen
 
 
+# ---------------------------------------------------------------------------
+# Decision capture (postToolUse). `cardinal-decision record` runs inside
+# Cursor's agent sandbox, so it only validates and prints a marker line;
+# this hook (outside the sandbox) gates, writes the ledger, resolves the
+# PR, and emits the one cardinal.decision event.
+# ---------------------------------------------------------------------------
+
+def _tool_output_texts(tool_output: Any) -> list[str]:
+    """Candidate stdout texts. Cursor documents postToolUse `tool_output`
+    as a JSON-stringified result (`{"exitCode":0,"stdout":"..."}`); older
+    payloads carry a dict or plain text."""
+    texts: list[str] = []
+    parsed: Any = tool_output
+    if isinstance(tool_output, str):
+        texts.append(tool_output)
+        try:
+            parsed = json.loads(tool_output)
+        except ValueError:
+            parsed = None
+    if isinstance(parsed, dict):
+        for key in ("stdout", "output", "text"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+    return texts
+
+
+def submitted_decisions(command: str, tool_output: Any) -> list[dict[str, Any]]:
+    """Marker payloads printed by `cardinal-decision record` in this tool
+    call. The command itself must invoke cardinal-decision, so a marker
+    echoed by some other command (cat of a log, etc.) is ignored."""
+    if "cardinal-decision" not in command:
+        return []
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for text in _tool_output_texts(tool_output):
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith(DECISION_MARKER_PREFIX):
+                continue
+            raw = line[len(DECISION_MARKER_PREFIX):]
+            if raw in seen:
+                continue
+            seen.add(raw)
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and obj.get("v") == 1:
+                out.append(obj)
+    return out
+
+
+def _marker_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _marker_list(value: Any, cap: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str)][:cap]
+
+
+def record_decision(conv_id: str, marker: dict[str, Any], payload: dict[str, Any]) -> str:
+    """Validate, ledger, and emit one submitted decision. Returns the line
+    reported back to the agent via additional_context."""
+    cwd = _marker_str(marker.get("cwd"))
+    if not cwd or not os.path.isdir(cwd):
+        cwd = cwd_from_payload(payload)
+    repo_root = git(["rev-parse", "--show-toplevel"], cwd)
+    head_sha = branch = repo = None
+    if repo_root:
+        head_sha = git(["rev-parse", "HEAD"], cwd)
+        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+        repo = canonical_repo(git(["remote", "get-url", "origin"], cwd))
+
+    ledger = decisions.read_ledger(PATHS.runtime_dir, conv_id)
+    by = marker.get("by")
+    try:
+        anchors = [
+            decisions.parse_anchor(spec, repo_root, cwd)
+            for spec in _marker_list(marker.get("anchor"), decisions.MAX_ANCHORS)
+        ]
+        decision = decisions.build_decision(
+            choice=_marker_str(marker.get("choice")),
+            question=_marker_str(marker.get("question")),
+            rationale=_marker_str(marker.get("why")),
+            decided_by=by if by in decisions.DECIDED_BY else "agent",
+            alternatives=_marker_list(marker.get("alt"), decisions.MAX_ALTERNATIVES),
+            follows_from=_marker_list(marker.get("follows"), decisions.MAX_LINKS),
+            refines=_marker_list(marker.get("refines"), decisions.MAX_LINKS),
+            supersedes=_marker_list(marker.get("supersedes"), decisions.MAX_LINKS),
+            anchors=anchors,
+            decision_id=_marker_str(marker.get("id")),
+            existing=ledger,
+        )
+    except decisions.DecisionError as err:
+        return f"Cardinal did not record the decision: {err}"
+
+    cache = decisions.cache_dir(PATHS.runtime_dir)
+    clusters, scheme = decisions.code_clusters(decision["anchors"], repo_root, head_sha, cache)
+    pr_number, pr_url = resolve_pr(cwd, repo, branch)
+    known = {entry["id"] for entry in ledger}
+    unknown = [link["to"] for link in decision["links"] if link["to"] not in known]
+    decisions.record_in_ledger(PATHS.runtime_dir, conv_id, decision)
+
+    connected = otlp.connection_from_paths(PATHS) is not None
+    if connected:
+        attrs = decisions.decision_attributes(
+            session_id=conv_id,
+            decision=decision,
+            code_clusters=clusters,
+            cluster_scheme=scheme,
+            repo=repo,
+            branch=branch,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            pr_url=pr_url,
+        )
+        emit_records([log_record(decisions.DECISION_EVENT, attrs, time.time_ns())], payload)
+
+    tags = [f"PR #{pr_number}"] if pr_number else []
+    if clusters:
+        tags.append("clusters " + ", ".join(clusters))
+    detail = f" ({'; '.join(tags)})" if tags else ""
+    lines = [f"Cardinal recorded decision {decision['id']}: {decision['choice']}{detail}"]
+    if unknown:
+        lines.append(
+            f"Note: no earlier decision in this session has id {', '.join(unknown)}; "
+            "the link was kept as given."
+        )
+    if not connected:
+        lines.append("Cardinal telemetry isn't connected, so it was only saved locally.")
+    return "\n".join(lines)
+
+
+def record_submitted_decisions(
+    conv_id: str, command: str, tool_output: Any, payload: dict[str, Any]
+) -> list[str]:
+    markers = submitted_decisions(command, tool_output)
+    if not markers:
+        return []
+    if not decisions.is_enabled(PATHS.runtime_dir, os.environ.get(decisions.ENABLE_ENV)):
+        return [
+            "Cardinal decision capture is off, so this decision was not recorded. "
+            "Only the user can turn it on (`cardinal-decision on` in their own terminal)."
+        ]
+    return [record_decision(conv_id, marker, payload) for marker in markers]
+
+
 def handle_post_tool_use(payload: dict[str, Any]) -> None:
     """Emit cardinal.turn_tool + tool_result from one payload; piggyback
     any staged notify message as `additional_context` output (once per
@@ -484,16 +636,26 @@ def handle_post_tool_use(payload: dict[str, Any]) -> None:
     state["tool_seq"] += 1
     session.save_progress(PATHS, conv_id, state)
 
+    contexts: list[str] = []
     # Piggyback pending notify/warn context onto the hook output. This
     # is the Cursor adapter's substitute for Claude's inline
     # systemMessage on the submit hook — see Divergence E.
     try:
         msg = limits.consume_notify(PATHS, conv_id)
         if msg:
-            sys.stdout.write(json.dumps({"additional_context": msg}))
-            sys.stdout.flush()
+            contexts.append(msg)
     except Exception:
         pass
+    # Decisions submitted by a sandboxed `cardinal-decision record` call:
+    # this hook is their only recorder and emitter.
+    try:
+        command = tool_input.get("command") or tool_input.get("cmd") or ""
+        contexts.extend(record_submitted_decisions(conv_id, str(command), tool_output, payload))
+    except Exception:
+        pass
+    if contexts:
+        sys.stdout.write(json.dumps({"additional_context": "\n\n".join(contexts)}))
+        sys.stdout.flush()
 
 
 def handle_pre_compact(payload: dict[str, Any]) -> None:
@@ -625,8 +787,8 @@ def decision_context(conv_id: str) -> str | None:
     context", cursor.com/docs/agent/hooks). beforeSubmitPrompt's output
     schema is `{continue, user_message}` only, so the per-prompt ledger
     refresh Claude gets on UserPromptSubmit is not available; the ledger
-    shown here is the one at session start, and each `record` call
-    reports its id in the shell output the agent reads."""
+    shown here is the one at session start, and the postToolUse hook
+    reports each recorded id back as additional_context."""
     if not decisions.is_enabled(PATHS.runtime_dir, os.environ.get(decisions.ENABLE_ENV)):
         return None
     entries = decisions.read_ledger(PATHS.runtime_dir, conv_id)
@@ -634,14 +796,18 @@ def decision_context(conv_id: str) -> str | None:
         "Cardinal decision capture is on for this session. When you make a choice that "
         "constrains later work (picking between approaches, settling an open question, or "
         "the user deciding something), record it right away with one terminal command:\n"
-        f'python3 "{DECISION_CLI}" record --session {conv_id} --choice "<the option chosen, 2-7 words>" '
+        f'python3 "{DECISION_CLI}" record --choice "<the option chosen, 2-7 words>" '
         '--question "<what had to be settled>" --why "<one sentence>" '
         '[--alt "<rejected option>"]... [--by user] [--anchor <path>[::Symbol]]... '
         "[--follows|--refines|--supersedes <id>]\n"
-        "Run it from the workspace root. Record choices, not progress, findings, or tool "
-        "calls. Use --by user when the user made the call. Anchor the files or symbols the "
-        "decision governs. Link a decision to an earlier one when it builds on, narrows, or "
-        "replaces it; each record command prints the id it saved.\n"
+        "Run it from the workspace root. The command only checks the arguments and prints "
+        "a line that Cardinal's hook records once the command finishes, so it needs no "
+        "network or file access and works in the sandbox. The hook then tells you the "
+        "recorded id. Do not run `cardinal-decision on`, `off`, or `status`: those are for "
+        "the user in their own terminal.\n"
+        "Record choices, not progress, findings, or tool calls. Use --by user when the user "
+        "made the call. Anchor the files or symbols the decision governs. Link a decision to "
+        "an earlier one when it builds on, narrows, or replaces it.\n"
         "Decisions so far this session:\n"
         f"{decisions.render_ledger(entries)}"
     )
