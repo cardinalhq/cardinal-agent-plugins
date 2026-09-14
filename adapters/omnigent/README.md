@@ -186,6 +186,14 @@ output the harness does not return in the tool result; and PR state after
 an omnigent server restart (cached in-process only, like the sniffed
 branch). The argv-list `cmd` shape is handled defensively but was not
 confirmed against a captured Codex `exec_command` payload.
+
+Known mis-attribution: the sniffed remote isn't scoped to a directory. In an
+unlabeled session, `cd /elsewhere && git remote -v` (or
+`git -C /elsewhere push`) followed by a `gh pr create` for that other repo
+links the PR to this session's branch. On a labeled session, a PR opened
+after a sniffed branch switch is recorded under the `cardinal.branch` label,
+because the label wins branch resolution.
+
 `cardinal_head_sha` is still not emitted — nothing in the policy contract
 reports it reliably. Only `cardinal_pr_number` / `cardinal_pr_url` are
 emitted, matching the other adapters.
