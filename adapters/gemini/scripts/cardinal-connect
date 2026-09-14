@@ -180,14 +180,17 @@ def apply_settings(ingest: dict, mcp_url: str | None, mcp_key: str | None,
             settings["mcpServers"] = servers
 
         hooks_root = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
+        # Gemini CLI hook `timeout` is in MILLISECONDS (hookRunner kills the
+        # process and skips output parsing on expiry). BeforeAgent's worst
+        # case is ~6s: gh PR lookup 1.5s + OTLP post 2s + verdict refresh 2s.
         for event, timeout in (
-            ("SessionStart", 5),
-            ("BeforeAgent", 5),
-            ("AfterModel", 5),
-            ("AfterTool", 5),
-            ("AfterAgent", 5),
-            ("PreCompress", 5),
-            ("SessionEnd", 5),
+            ("SessionStart", 10000),
+            ("BeforeAgent", 10000),
+            ("AfterModel", 10000),
+            ("AfterTool", 10000),
+            ("AfterAgent", 10000),
+            ("PreCompress", 10000),
+            ("SessionEnd", 10000),
         ):
             groups = hooks_root.get(event) if isinstance(hooks_root.get(event), list) else []
             # Strip prior Cardinal-managed entries before re-appending.

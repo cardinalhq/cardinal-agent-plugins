@@ -13,6 +13,7 @@ This is a Gemini-CLI-native port of the command surface shared by the
 | `cardinal-connect` | Runs Cardinal's device-code flow, mints ingest and MCP keys, installs the Cardinal extension bundle under `~/.gemini/extensions/cardinal/`, and wires Gemini CLI's native OTLP exporter to Cardinal ingest. |
 | `cardinal-status` | Shows the recorded Cardinal workspace and probes the configured ingest and MCP endpoints. |
 | `cardinal-disconnect` | Best-effort revokes Cardinal keys, removes the extension bundle and managed settings.json entries, and deletes local state. |
+| `cardinal-decision` | Opt-in decision capture: `on` / `off` / `status`, and `record` (called by the agent) emits one `cardinal.decision` event tagged with repo, branch, head sha, PR, anchors and code clusters. |
 
 ## Telemetry scope
 
@@ -24,7 +25,7 @@ any hook code. On top of that, plugin-owned hooks emit the Cardinal-specific
 event contract used by the sibling plugins (see `docs/specs/gemini-parity.md`
 at the repository root for the full parity map):
 
-- `cardinal.git_state` from the active Git checkout on `BeforeAgent`, with initiative classification from the branch name (worktree-noise stripped) and slash-command detection.
+- `cardinal.git_state` from the active Git checkout on `BeforeAgent`, with initiative classification from the branch name (worktree-noise stripped), slash-command detection, and the branch's PR (`cardinal_pr_number` / `cardinal_pr_url`) when `gh pr view` resolves one (cached per repo+branch, bounded to 1.5s; keys absent otherwise).
 - `api_request` + `cardinal.turn_usage` per model call from `AfterModel` — Gemini CLI surfaces per-call token buckets in the hook payload directly, so no transcript scraping is needed.
 - `cardinal.turn_tool` + `tool_result` per tool call from `AfterTool`, with MCP-qualified `tool_name` on `turn_tool` and Bash-verb `bash_class` classification.
 - `cardinal.subagent_usage` from `AfterAgent` payload keys (`subagent_type`, `agent_id`, `subagent_description`, `total_tokens`, `duration_ms`).
@@ -61,8 +62,18 @@ same server-side contract:
   server-authored reason. Verdicts refresh in the background after each
   prompt's telemetry post. Everything fails open.
 
+- **Decision capture (opt-in)** — `python3 scripts/cardinal-decision on`
+  turns it on (`CARDINAL_DECISIONS=1/0` in the environment overrides).
+  While on, the `BeforeAgent` hook appends
+  `hookSpecificOutput.additionalContext` to each prompt telling the agent
+  to record material choices with `python3 <plugin>/scripts/cardinal-decision
+  record --session <id> ...` and listing the session's decisions so far.
+  Each record emits one `cardinal.decision` event (same contract as the
+  Claude plugin, `docs/specs/decision-telemetry.md`).
+
 State lives under `~/.gemini/cardinal/` (telemetry progress cursors, plan
-stamp, limits verdicts); `cardinal-disconnect` removes it.
+stamp, limits verdicts, decision config + ledgers); `cardinal-disconnect`
+removes it.
 
 ## Install locally
 

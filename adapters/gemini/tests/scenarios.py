@@ -69,6 +69,27 @@ def make_fixture_repo(root: Path) -> Path:
     return repo
 
 
+FIXTURE_PR = {"number": 7, "url": "https://github.com/cardinalhq/fixture-repo/pull/7"}
+
+
+def write_gh_stub(workdir: Path) -> Path:
+    """A fake `gh` that resolves the fixture branch to FIXTURE_PR (and
+    nothing else), so BeforeAgent PR linkage never touches the network."""
+    bin_dir = workdir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1 $2 $3" = "pr view {FIXTURE_BRANCH}" ]; then\n'
+        f"  echo '{json.dumps(FIXTURE_PR)}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    gh.chmod(0o755)
+    return bin_dir
+
+
 def write_connected_state(home: Path, endpoint: str) -> None:
     gemini = home / ".gemini"
     gemini.mkdir(parents=True, exist_ok=True)
@@ -331,7 +352,10 @@ def run_scenario(hook_script: Path, scenario: dict[str, Any], workdir: Path) -> 
             setup(home)
 
         env = {k: v for k, v in os.environ.items()
-               if k not in ("GEMINI_SESSION_ID", "CARDINAL_GEMINI_DEBUG_PAYLOADS")}
+               if k not in ("GEMINI_SESSION_ID", "CARDINAL_GEMINI_DEBUG_PAYLOADS",
+                            "CARDINAL_DECISIONS")}
+        # Stub `gh` first on PATH: no network, deterministic PR linkage.
+        env["PATH"] = f"{write_gh_stub(workdir)}{os.pathsep}{env.get('PATH', '')}"
         env["HOME"] = str(home)
         env["GIT_CONFIG_GLOBAL"] = "/dev/null"
         env["GIT_CONFIG_SYSTEM"] = "/dev/null"

@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -37,7 +38,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plugin_version  # noqa: E402
-from cardinal_core import bashclass, initiative, limits, otlp, pricing, session  # noqa: E402
+from cardinal_core import bashclass, decisions, initiative, limits, otlp, pricing, session  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
 
 
@@ -46,6 +47,13 @@ SCOPE_NAME = "cardinal-gemini-plugin"
 
 PATHS = AgentPaths(home=Path.home() / ".gemini")
 DEBUG_PAYLOADS_ENV = "CARDINAL_GEMINI_DEBUG_PAYLOADS"
+
+# Decision capture CLI, resolved from this hook's own location so the
+# injected instruction names the installed plugin's absolute path.
+DECISION_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-decision"
+# BeforeAgent is synchronous (the prompt waits on it): bound the `gh pr view`
+# call on a PR-cache miss.
+PR_RESOLVE_TIMEOUT_SEC = 1.5
 
 TARGET_KEYS = {
     "read_file": "path",
@@ -114,6 +122,49 @@ def dump_debug_payload(event: str, payload: dict[str, Any]) -> None:
 # BeforeAgent — closest analogue to Claude's UserPromptSubmit
 # ---------------------------------------------------------------------------
 
+def build_decision_context(cli: str, session_id: str, entries: list[dict[str, Any]]) -> str:
+    """Decision-recording instructions + this session's ledger. Gemini CLI
+    HTML-escapes `<`/`>` in additionalContext, so placeholders use braces."""
+    return (
+        "Cardinal decision capture is on for this session. When you make a choice that "
+        "constrains later work (picking between approaches, settling an open question, or "
+        "the user deciding something), record it right away with one run_shell_command call:\n"
+        f'python3 "{cli}" record --session {shlex.quote(session_id)} '
+        '--choice "{the option chosen, 2-7 words}" '
+        '--question "{what had to be settled}" --why "{one sentence}" '
+        '[--alt "{rejected option}"]... [--by user] [--anchor {path}[::Symbol]]... '
+        "[--follows|--refines|--supersedes {id}]\n"
+        "Record choices, not progress, findings, or tool calls. Use --by user when the user "
+        "made the call. Anchor the files or symbols the decision governs. Link a decision to "
+        "an earlier one when it builds on, narrows, or replaces it.\n"
+        "Decisions so far this session:\n"
+        f"{decisions.render_ledger(entries)}"
+    )
+
+
+def decision_context(session_id: str) -> str | None:
+    """None unless decision capture is on (`cardinal-decision on` or
+    CARDINAL_DECISIONS=1). Local file reads only — no network."""
+    if not decisions.is_enabled(PATHS.runtime_dir, os.environ.get(decisions.ENABLE_ENV)):
+        return None
+    entries = decisions.read_ledger(PATHS.runtime_dir, session_id)
+    return build_decision_context(str(DECISION_CLI), session_id, entries)
+
+
+def merge_prompt_output(gate_out: dict[str, Any] | None, extra_context: str | None) -> dict[str, Any] | None:
+    """One BeforeAgent stdout JSON object from the spend-limits gate and the
+    decision prompt. A blocked turn carries only the block verdict."""
+    if not extra_context or (gate_out and gate_out.get("decision") == "block"):
+        return gate_out
+    out = dict(gate_out or {})
+    hso = dict(out.get("hookSpecificOutput") or {})
+    hso["hookEventName"] = "BeforeAgent"
+    prior = hso.get("additionalContext")
+    hso["additionalContext"] = f"{prior}\n\n{extra_context}" if prior else extra_context
+    out["hookSpecificOutput"] = hso
+    return out
+
+
 def handle_before_agent(payload: dict[str, Any]) -> None:
     dump_debug_payload("BeforeAgent", payload)
     session_id = session_id_from_payload(payload)
@@ -122,14 +173,23 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
     cwd = str(payload.get("cwd") or os.getcwd())
 
     # Sync gate FIRST — its stdout is the hook's verdict channel and must
-    # not wait on any network call below.
+    # not wait on any network call below. The decision prompt rides the
+    # same stdout object (Gemini parses exactly one JSON document) as
+    # hookSpecificOutput.additionalContext, appended to this turn's prompt.
+    gate_out = None
     try:
         gate_out = limits.gate_output(PATHS, session_id, hook_event_name="BeforeAgent")
-        if gate_out:
-            sys.stdout.write(json.dumps(gate_out))
-            sys.stdout.flush()
     except Exception:
         pass
+    extra_context = None
+    try:
+        extra_context = decision_context(session_id)
+    except Exception:
+        pass
+    prompt_out = merge_prompt_output(gate_out, extra_context)
+    if prompt_out:
+        sys.stdout.write(json.dumps(prompt_out))
+        sys.stdout.flush()
 
     # Turn boundary: user_turn_seq increments; per-turn counters reset.
     state = session.load_progress(PATHS, session_id)
@@ -144,6 +204,16 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
         remote_url = initiative.git(["remote", "get-url", "origin"], cwd)
         repo = initiative.canonical_repo(remote_url)
         initiative_name, initiative_type = initiative.resolve_initiative(branch)
+        # The branch's PR via `gh` (cached per repo+branch). Unresolved →
+        # keys absent (log_record drops None); never fails the record.
+        pr_number = pr_url = None
+        try:
+            pr_number, pr_url = decisions.resolve_pr(
+                cwd, repo, branch, decisions.cache_dir(PATHS.runtime_dir),
+                timeout=PR_RESOLVE_TIMEOUT_SEC,
+            )
+        except Exception:
+            pass
         attrs: dict[str, Any] = {
             "session_id": session_id,
             "cardinal_cwd": cwd,
@@ -154,6 +224,8 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
             "cardinal_initiative_name": initiative_name,
             "cardinal_initiative_type": initiative_type,
             "cardinal_command": initiative.detect_command(payload.get("prompt")),
+            "cardinal_pr_number": pr_number,
+            "cardinal_pr_url": pr_url,
             **session.read_plan_stamp(PATHS),
         }
         emit_records([otlp.log_record("cardinal.git_state", attrs, time.time_ns())])
