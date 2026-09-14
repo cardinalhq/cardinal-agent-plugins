@@ -24,6 +24,8 @@ test("packed artifacts install outside the checkout and contain their Python run
     const env = { ...process.env, [`CARDINAL_${runtime.toUpperCase()}_HOME`]: join(dir, "empty-home") };
     const help = await exec(process.execPath, [join(installed, "bin", `cardinal-${runtime}.js`), "connect", "--help"], { env });
     assert(help.stdout.includes("--telemetry-only"));
+    const decisionHelp = await exec(process.execPath, [join(installed, "bin", `cardinal-${runtime}.js`), "decision", "record", "--help"], { env });
+    assert(decisionHelp.stdout.includes("--supersedes"));
     const py = await exec(process.env.CARDINAL_PYTHON || "python3", [join(installed, "lib", "cardinal_native.py"), "--runtime", runtime, "--help"], { env });
     assert(py.stdout.includes("disconnect"));
     if (runtime === "opencode") {

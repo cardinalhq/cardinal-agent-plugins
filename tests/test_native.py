@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -22,11 +23,25 @@ def unpack(records):
     return [{a["key"]: next(iter(a["value"].values())) for a in record["attributes"]} for record in records]
 
 
+def fake_git(args, cwd, **_):
+    if "--abbrev-ref" in args:
+        return "feat/adapters"
+    return {"HEAD": "abc123", "origin": "https://github.com/cardinalhq/fixture.git", "--show-toplevel": "/fixture"}.get(args[-1])
+
+
 class NativeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.paths = AgentPaths(Path(self.temp.name))
+        environ = patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        os.environ.pop("CARDINAL_DECISIONS", None)
+        # No test may reach the real `gh`.
+        gh = patch.object(native.decisions, "_gh_pr_view", return_value=(None, None))
+        self.gh = gh.start()
+        self.addCleanup(gh.stop)
         self.bundle = {
             "ingest": {"endpoint": "http://localhost:9000", "api_key": "ingest-secret", "key_id": "ik"},
             "mcp": {"url": "http://localhost:9001/mcp", "api_key": "mcp-secret", "key_id": "mk"},
@@ -119,6 +134,98 @@ class NativeTests(unittest.TestCase):
     def test_no_connection_means_no_runtime_files(self):
         native.telemetry("pi", self.paths, [{"session_id": "s", "event_id": "e", "kind": "user"}], "0.1.0")
         self.assertFalse(self.paths.runtime_dir.exists())
+
+    def git_state(self):
+        self.save()
+        progress = native.session.load_progress(self.paths, "s")
+        with patch.object(native.initiative, "git", side_effect=fake_git):
+            records = native.records_for_event("pi", self.paths, {"session_id": "s", "event_id": "s", "kind": "session", "cwd": "/fixture"}, progress)
+        [attrs] = unpack(records)
+        self.assertEqual(attrs["event_name"], "cardinal.git_state")
+        return attrs
+
+    def test_git_state_carries_branch_pr_with_bounded_gh_timeout(self):
+        self.gh.return_value = (42, "https://github.com/cardinalhq/fixture/pull/42")
+        attrs = self.git_state()
+        self.assertEqual(attrs["cardinal_pr_number"], "42")
+        self.assertEqual(attrs["cardinal_pr_url"], "https://github.com/cardinalhq/fixture/pull/42")
+        self.assertEqual(self.gh.call_args.args, ("/fixture", "feat/adapters", native.PR_TIMEOUT_SEC))
+        self.assertLessEqual(native.PR_TIMEOUT_SEC, 1.5)
+        self.git_state()
+        self.assertEqual(self.gh.call_count, 1, "lookups are cached per repo + branch")
+
+    def test_git_state_omits_pr_when_unresolved_or_lookup_fails(self):
+        attrs = self.git_state()
+        self.assertEqual(attrs["cardinal_head_sha"], "abc123")
+        self.assertNotIn("cardinal_pr_number", attrs)
+        self.assertNotIn("cardinal_pr_url", attrs)
+        with patch.object(native.decisions, "resolve_pr", side_effect=RuntimeError("boom")):
+            attrs = self.git_state()
+        self.assertEqual(attrs["cardinal_branch"], "feat/adapters")
+        self.assertNotIn("cardinal_pr_number", attrs)
+
+    def cli(self, *argv, runtime="pi", env=None):
+        out, err = io.StringIO(), io.StringIO()
+        environ = {f"CARDINAL_{runtime.upper()}_HOME": self.temp.name, **(env or {})}
+        argv = ["cardinal_native.py", "--runtime", runtime, "--version", "9.9.9", *argv]
+        with patch.dict(os.environ, environ), patch.object(sys, "argv", argv), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = native.main()
+        return code, out.getvalue(), err.getvalue()
+
+    def test_decision_capture_is_opt_in(self):
+        self.save()
+        code, _, err = self.cli("decision", "record", "--session", "s1", "--choice", "Use SQLite")
+        self.assertEqual(code, native.EXIT_OFF)
+        self.assertIn("cardinal-pi decision on", err)
+        self.assertEqual(self.cli("decision", "context", "--session", "s1")[:2], (0, ""))
+        code, out, _ = self.cli("decision", "status")
+        self.assertIn("Decision capture: off", out)
+        self.assertIn("Cardinal telemetry: connected", out)
+        code, out, _ = self.cli("decision", "context", "--session", "s1", env={"CARDINAL_DECISIONS": "1"})
+        self.assertIn("Cardinal decision capture is on", out)
+
+    def test_decision_record_emits_tagged_event_and_feeds_context(self):
+        self.save()
+        self.assertEqual(self.cli("decision", "on")[0], 0)
+        self.gh.return_value = (7, "https://github.com/cardinalhq/fixture/pull/7")
+        with patch.object(native.initiative, "git", side_effect=fake_git), patch.object(native.otlp, "emit_records") as emit:
+            code, out, err = self.cli("decision", "record", "--session=s1", "--choice=Use SQLite", "--question", "Which store?",
+                                      "--why", "Zero ops", "--alt=-Postgres", "--by", "user")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Recorded decision use-sqlite: Use SQLite (PR #7)", out)
+        records, conn, _resource = emit.call_args.args
+        self.assertIsNotNone(conn)
+        self.assertEqual(emit.call_args.kwargs["scope_name"], "cardinal-pi-plugin")
+        [attrs] = unpack(records)
+        self.assertEqual(attrs["event_name"], "cardinal.decision")
+        self.assertEqual(attrs["session_id"], "s1")
+        self.assertEqual(attrs["agent_runtime"], "pi")
+        self.assertEqual(attrs["cardinal.repo"], "cardinalhq/fixture")
+        self.assertEqual(attrs["cardinal.head_sha"], "abc123")
+        self.assertEqual(attrs["cardinal.pr_number"], "7")
+        self.assertEqual(attrs["cardinal.decision.decided_by"], "user")
+        self.assertEqual(json.loads(attrs["cardinal.decision.alternatives"]), ["-Postgres"])
+
+        _, out, _ = self.cli("decision", "context", "--session", "s1", "--tool", "cardinal_record_decision")
+        self.assertIn("`cardinal_record_decision` tool", out)
+        self.assertIn("- use-sqlite: Use SQLite", out)
+        _, out, _ = self.cli("decision", "context", "--session", "s1")
+        self.assertIn("cardinal-pi.js\" decision record --session s1", out)
+        _, out, _ = self.cli("decision", "status", "--session", "s1", env={"CARDINAL_DECISIONS": "0"})
+        self.assertIn("Decision capture: off (CARDINAL_DECISIONS=0)", out)
+        self.assertIn("- use-sqlite: Use SQLite", out)
+        self.assertEqual(self.cli("decision", "off")[0], 0)
+        self.assertFalse(native.decisions.is_enabled(self.paths.runtime_dir))
+
+    def test_decision_record_without_connection_is_local_and_validates(self):
+        self.cli("decision", "on", runtime="opencode")
+        with patch.object(native.initiative, "git", return_value=None), patch.object(native.otlp, "emit_records") as emit:
+            code, out, _ = self.cli("decision", "record", "--session", "s1", "--choice", "Keep it", runtime="opencode")
+            self.assertEqual(code, 0)
+            self.assertIn("only saved locally (run cardinal-opencode connect)", out)
+            code, _, err = self.cli("decision", "record", "--session", "s1", "--choice", "Other", "--id", "Bad Id!", runtime="opencode")
+            self.assertEqual(code, native.EXIT_USAGE, err)
+        emit.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -70,6 +70,9 @@ settings and other extensions are preserved.
 
 Emits the same five events as the OpenCode adapter: `cardinal.git_state`,
 `api_request`, `cardinal.turn_usage`, `cardinal.turn_tool`, and `tool_result`.
+`cardinal.git_state` carries the branch's PR (`cardinal_pr_number`,
+`cardinal_pr_url`) when `gh pr view` resolves one. The lookup is cached per
+repo + branch, bounded to 1.5s, and never fails the record.
 Model, provider, token/cache usage and runtime-reported cost come from finalized
 assistant messages. Tool events include failures, duration and a coarse shell
 class. Cardinal MCP calls include the remote server and tool identity.
@@ -80,6 +83,19 @@ deduplication prevents repeated terminal messages from inflating usage.
 Telemetry is best-effort with bounded queues and deduplication history; no
 delivery retry is attempted. Prompts, assistant text, tool outputs and raw shell
 commands are not emitted. Unknown cost is omitted; a runtime-reported zero is retained.
+
+## Decision capture
+
+Off by default. `cardinal-pi decision on|off|status [--session ID]` toggles it;
+`CARDINAL_DECISIONS=1/0` in Pi's environment overrides the switch. While it is on,
+the extension's `before_agent_start` handler appends the recording instructions and
+this session's decision ledger to that turn's system prompt, and the agent records
+choices with the `cardinal_record_decision` tool. Each recorded decision is one
+`cardinal.decision` event (repo, branch, head sha, PR, anchors, code clusters) and
+is kept in the ledger under `cardinal/decisions/`. The same record is available as
+`cardinal-pi decision record --session ID --choice …`. The tool is registered in
+every session and returns an error while capture is off. When capture is on, each
+prompt waits up to 1.5s for the ledger lookup.
 
 Spend enforcement, subscription-plan reporting, third-party subagent extension
 attribution, and skill/command attribution are not part of this initial adapter.

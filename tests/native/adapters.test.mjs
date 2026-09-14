@@ -7,7 +7,8 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import openCode from "../../dist/native/opencode/index.js";
 import pi from "../../dist/native/pi/index.ts";
-import { createBridge } from "../../dist/native/opencode/lib/bridge.js";
+import { createBridge, runDecision } from "../../dist/native/opencode/lib/bridge.js";
+import { z } from "zod";
 
 const attributes = record => Object.fromEntries(record.attributes.map(a => [a.key, Object.values(a.value)[0]]));
 const flat = bodies => bodies.flatMap(b => b.resourceLogs.flatMap(r => r.scopeLogs.flatMap(s => s.logRecords)));
@@ -16,6 +17,11 @@ async function fixture(t, runtime) {
   const dir = await mkdtemp(join(tmpdir(), `cardinal-${runtime}-`));
   const key = `CARDINAL_${runtime.toUpperCase()}_HOME`;
   const prior = process.env[key]; process.env[key] = dir;
+  // A fake `gh` keeps PR resolution offline and deterministic.
+  const bin = await mkdtemp(join(tmpdir(), "cardinal-gh-"));
+  await writeFile(join(bin, "gh"), `#!/bin/sh\necho '{"number":42,"url":"https://github.com/cardinalhq/fixture/pull/42"}'\n`, { mode: 0o755 });
+  const priorPath = process.env.PATH; process.env.PATH = `${bin}:${priorPath}`;
+  const priorDecisions = process.env.CARDINAL_DECISIONS; delete process.env.CARDINAL_DECISIONS;
   const bodies = [];
   const server = createServer(async (req, res) => {
     assert.equal(req.headers["x-cardinalhq-api-key"], "test-ingest-key");
@@ -25,7 +31,9 @@ async function fixture(t, runtime) {
   await new Promise(r => server.listen(0, "127.0.0.1", r));
   t.after(async () => {
     prior === undefined ? delete process.env[key] : process.env[key] = prior;
-    await new Promise(r => server.close(r)); await rm(dir, { recursive: true, force: true });
+    process.env.PATH = priorPath;
+    if (priorDecisions !== undefined) process.env.CARDINAL_DECISIONS = priorDecisions;
+    await new Promise(r => server.close(r)); await rm(dir, { recursive: true, force: true }); await rm(bin, { recursive: true, force: true });
   });
   await writeFile(join(dir, "cardinal.json"), JSON.stringify({ ingest_endpoint: `http://127.0.0.1:${server.address().port}`, user_email: "test@example.com", org_slug: "fixture" }));
   await writeFile(join(dir, "cardinal-secrets.json"), JSON.stringify({ ingest_api_key: "test-ingest-key" }), { mode: 0o600 });
@@ -52,7 +60,10 @@ function verifyContract(bodies, runtime) {
   assert.equal(tools[0].bash_class, "test");
   assert.equal(tools[0].turn_seq, "1");
   assert.equal(tools[1].tool_seq, "2");
-  assert.equal(records.find(r => r.event_name === "cardinal.git_state").cardinal_repo, "cardinalhq/fixture");
+  const gitState = records.find(r => r.event_name === "cardinal.git_state");
+  assert.equal(gitState.cardinal_repo, "cardinalhq/fixture");
+  assert.equal(gitState.cardinal_pr_number, "42");
+  assert.equal(gitState.cardinal_pr_url, "https://github.com/cardinalhq/fixture/pull/42");
   assert(!JSON.stringify(bodies).includes("PRIVATE_SENTINEL"), "prompts, command arguments and tool output are not emitted");
 }
 
@@ -118,7 +129,78 @@ test("Pi lifecycle -> Python -> OTLP with tools tied to the model call", async t
   }
   await fire("session_shutdown");
   verifyContract(bodies, "pi");
-  assert.deepEqual([...registered.keys()], ["cardinal_list_tools", "cardinal_call_tool"]);
+  assert.deepEqual([...registered.keys()], ["cardinal_list_tools", "cardinal_call_tool", "cardinal_record_decision"]);
+});
+
+const decisionEvent = bodies => flat(bodies).map(attributes).filter(r => r.event_name === "cardinal.decision");
+
+test("Pi decision capture: opt-in system prompt + native tool -> cardinal.decision with PR", async t => {
+  const { dir, bodies } = await fixture(t, "pi");
+  const handlers = new Map(), registered = new Map();
+  pi({ on: (name, fn) => handlers.set(name, fn), registerTool: tool => registered.set(tool.name, tool) });
+  const ctx = { cwd: dir, sessionManager: { getSessionId: () => "pi-session" } };
+  const start = () => handlers.get("before_agent_start")({ prompt: "PRIVATE_SENTINEL", systemPrompt: "BASE" }, ctx);
+  const tool = registered.get("cardinal_record_decision");
+  assert.equal(await start(), undefined, "capture is off by default");
+  await assert.rejects(tool.execute("c0", { choice: "Use SQLite" }, undefined, undefined, ctx), /cardinal-pi decision on/);
+
+  assert.equal((await runDecision("pi", ["on"])).code, 0);
+  const first = await start();
+  assert(first.systemPrompt.startsWith("BASE\n\n"), "extends the chained system prompt");
+  assert.match(first.systemPrompt, /`cardinal_record_decision` tool/);
+  assert.match(first.systemPrompt, /\(none yet\)/);
+  const result = await tool.execute("c1", { choice: "Use SQLite", question: "Which store?", why: "Zero ops", alt: ["-Postgres"], by: "user", anchor: ["README.md"] }, undefined, undefined, ctx);
+  assert.match(result.content[0].text, /^Recorded decision use-sqlite: Use SQLite \(PR #42\)/);
+  assert.match((await start()).systemPrompt, /- use-sqlite: Use SQLite/);
+  await handlers.get("session_shutdown")();
+
+  const [decision] = decisionEvent(bodies);
+  assert.equal(decision.session_id, "pi-session");
+  assert.equal(decision.agent_runtime, "pi");
+  assert.equal(decision["cardinal.pr_number"], "42");
+  assert.equal(decision["cardinal.repo"], "cardinalhq/fixture");
+  assert.deepEqual(JSON.parse(decision["cardinal.decision.alternatives"]), ["-Postgres"]);
+  assert.equal(JSON.parse(decision["cardinal.decision.anchors"])[0].identifier, "README.md");
+  assert(!JSON.stringify(bodies).includes("PRIVATE_SENTINEL"));
+});
+
+test("OpenCode decision capture: system transform + native tool -> cardinal.decision with PR", async t => {
+  const { dir, bodies } = await fixture(t, "opencode");
+  const client = { app: { log: async () => {} }, session: { get: async ({ path }) => ({ data: { id: path.id, directory: path.id === "foreign" ? "/elsewhere" : dir } }) } };
+  const plugin = await openCode({ client, directory: dir });
+  const system = async (target, sessionID) => {
+    const output = { system: ["BASE"] };
+    await target["experimental.chat.system.transform"]({ sessionID, model: {} }, output);
+    return output.system;
+  };
+  const tool = plugin.tool.cardinal_record_decision;
+  // OpenCode wraps plugin args with z.object and serializes them for the model.
+  assert.equal(z.object(tool.args).safeParse({}).success, false);
+  assert.deepEqual(z.toJSONSchema(z.object(tool.args)).required, ["choice"]);
+
+  assert.deepEqual(await system(plugin, "s1"), ["BASE"], "capture is off by default");
+  assert.equal((await runDecision("opencode", ["on"])).code, 0);
+  assert.deepEqual(await system(plugin, "s1"), ["BASE"], "cached until the next user message");
+  await plugin["chat.message"]({ sessionID: "s1" }, { message: {}, parts: [] });
+  const [, context] = await system(plugin, "s1");
+  assert.match(context, /`cardinal_record_decision` tool/);
+  assert.match(context, /\(none yet\)/);
+  assert.deepEqual(await system(plugin, "foreign"), ["BASE"], "other workspaces are untouched");
+
+  const text = await tool.execute({ choice: "Use SQLite", why: "Zero ops" }, { sessionID: "s1", directory: dir });
+  assert.match(text, /^Recorded decision use-sqlite: Use SQLite \(PR #42\)/);
+  assert.match((await system(plugin, "s1"))[1], /- use-sqlite: Use SQLite/, "recording refreshes the ledger");
+
+  const fallback = await openCode({ client, directory: dir }, { zod: undefined, bridge: { send() {}, async flush() {} } });
+  assert.equal(fallback.tool, undefined);
+  assert.match((await system(fallback, "s1"))[1], /cardinal-opencode\.js" decision record --session s1/);
+  await plugin.dispose();
+
+  const [decision] = decisionEvent(bodies);
+  assert.equal(decision.session_id, "s1");
+  assert.equal(decision.agent_runtime, "opencode");
+  assert.equal(decision["cardinal.pr_url"], "https://github.com/cardinalhq/fixture/pull/42");
+  assert.equal(decision["cardinal.decision.rationale"], "Zero ops");
 });
 
 test("bridge serializes batches, drains on shutdown, and isolates failures", async () => {

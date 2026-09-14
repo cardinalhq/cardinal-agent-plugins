@@ -17,8 +17,16 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from cardinal_core import bashclass, deviceflow, initiative, otlp, session
+from cardinal_core import bashclass, decisions, deviceflow, initiative, otlp, session
 from cardinal_core.paths import AgentPaths, atomic_write_json, atomic_write_secret
+
+# Telemetry batches run in a detached child the host never awaits, but they
+# hold the per-session lock and the bridge kills a child after 10s, so a cache
+# miss on `gh` must stay short.
+PR_TIMEOUT_SEC = 1.5
+DECISION_EMIT_TIMEOUT_SEC = 3.0
+EXIT_USAGE = 2
+EXIT_OFF = 3
 
 
 def agent_paths(runtime: str) -> AgentPaths:
@@ -35,6 +43,14 @@ def number(value):
     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
         return value
     return None
+
+
+def pull_request(cwd, repo, branch, paths, timeout=PR_TIMEOUT_SEC):
+    """The branch's PR as (number, url), or (None, None). Never raises."""
+    try:
+        return decisions.resolve_pr(cwd, repo, branch, decisions.cache_dir(paths.runtime_dir), timeout=timeout)
+    except Exception:
+        return None, None
 
 
 def records_for_event(runtime, paths, event, progress):
@@ -55,11 +71,14 @@ def records_for_event(runtime, paths, event, progress):
                 branch = initiative.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
                 remote = initiative.git(["remote", "get-url", "origin"], cwd)
                 name, category = initiative.resolve_initiative(branch)
+                repo = initiative.canonical_repo(remote)
+                pr_number, pr_url = pull_request(cwd, repo, branch, paths)
                 records.append(otlp.log_record("cardinal.git_state", {
                     **base, "cardinal_cwd": cwd, "cardinal_head_sha": head,
                     "cardinal_branch": branch, "cardinal_remote_url": remote,
-                    "cardinal_repo": initiative.canonical_repo(remote),
+                    "cardinal_repo": repo,
                     "cardinal_initiative_name": name, "cardinal_initiative_type": category,
+                    "cardinal_pr_number": pr_number, "cardinal_pr_url": pr_url,
                 }, ts))
     model_id = event.get("model_call_id")
     calls = progress.setdefault("model_calls", {})
@@ -98,15 +117,19 @@ def records_for_event(runtime, paths, event, progress):
     return records
 
 
+def resource_for(runtime, paths, version):
+    state = paths.read_state()
+    return otlp.resource_attrs(service_name=runtime, agent_runtime=runtime,
+        deployment_environment=state.get("deployment_environment"),
+        user_email=state.get("user_email"),
+        org=state.get("org_slug") or state.get("org_id"), plugin_version=version)
+
+
 def telemetry(runtime, paths, events, version):
     conn = otlp.connection_from_paths(paths)
     if conn is None:
         return
-    resource_state = paths.read_state()
-    resource = otlp.resource_attrs(service_name=runtime, agent_runtime=runtime,
-        deployment_environment=resource_state.get("deployment_environment"),
-        user_email=resource_state.get("user_email"),
-        org=resource_state.get("org_slug") or resource_state.get("org_id"), plugin_version=version)
+    resource = resource_for(runtime, paths, version)
     # Advisory file locks cover multiple OpenCode plugin instances or Pi processes.
     import fcntl
     batch = []
@@ -225,6 +248,144 @@ def disconnect(args, paths):
     return 0
 
 
+def decisions_override():
+    return os.environ.get(decisions.ENABLE_ENV)
+
+
+def decision_context(runtime, session_id, entries, tool=None):
+    """Instructions the host puts in front of the model while capture is on."""
+    if tool:
+        how = (f"call the `{tool}` tool with choice (the option chosen, 2-7 words), question "
+               "(what had to be settled), why (one sentence), and where they apply: alt (rejected "
+               "options), by (\"user\" when the user made the call), anchor (paths or "
+               "path::Symbol the decision governs), follows/refines/supersedes (earlier decision ids).")
+        usage = "Use by=user when the user made the call."
+    else:
+        cli = Path(__file__).resolve().parent.parent / "bin" / f"cardinal-{runtime}.js"
+        how = ("run one shell command:\n"
+               f'node "{cli}" decision record --session {session_id} --choice "<the option chosen, 2-7 words>" '
+               '--question "<what had to be settled>" --why "<one sentence>" '
+               '[--alt "<rejected option>"]... [--by user] [--anchor <path>[::Symbol]]... '
+               "[--follows|--refines|--supersedes <id>]")
+        usage = "Use --by user when the user made the call."
+    return (
+        "Cardinal decision capture is on for this session. When you make a choice that "
+        "constrains later work (picking between approaches, settling an open question, or "
+        f"the user deciding something), record it right away: {how}\n"
+        f"Record choices, not progress, findings, or tool calls. {usage} Anchor the files or "
+        "symbols the decision governs. Link a decision to an earlier one when it builds on, "
+        "narrows, or replaces it.\n"
+        "Decisions so far this session:\n"
+        f"{decisions.render_ledger(entries)}"
+    )
+
+
+def decision_record(args, paths):
+    runtime = args.runtime
+    if not decisions.is_enabled(paths.runtime_dir, decisions_override()):
+        print(f"Decision capture is off. Run `cardinal-{runtime} decision on` to turn it on.", file=sys.stderr)
+        return EXIT_OFF
+    session_id = args.session
+    cwd = os.getcwd()
+    repo_root = initiative.git(["rev-parse", "--show-toplevel"], cwd)
+    head_sha = branch = repo = None
+    if repo_root:
+        head_sha = initiative.git(["rev-parse", "HEAD"], cwd)
+        branch = initiative.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+        repo = initiative.canonical_repo(initiative.git(["remote", "get-url", "origin"], cwd))
+    ledger = decisions.read_ledger(paths.runtime_dir, session_id)
+    try:
+        anchors = [decisions.parse_anchor(spec, repo_root, cwd) for spec in args.anchor]
+        decision = decisions.build_decision(
+            choice=args.choice, question=args.question, rationale=args.why, decided_by=args.by,
+            alternatives=args.alt, follows_from=args.follows, refines=args.refines,
+            supersedes=args.supersedes, anchors=anchors, decision_id=args.id, existing=ledger,
+        )
+    except decisions.DecisionError as err:
+        print(f"cardinal-{runtime} decision: {err}", file=sys.stderr)
+        return EXIT_USAGE
+    cache = decisions.cache_dir(paths.runtime_dir)
+    clusters, scheme = decisions.code_clusters(decision["anchors"], repo_root, head_sha, cache)
+    pr_number, pr_url = pull_request(cwd, repo, branch, paths, timeout=4.0)
+    known = {entry["id"] for entry in ledger}
+    unknown = [link["to"] for link in decision["links"] if link["to"] not in known]
+    decisions.record_in_ledger(paths.runtime_dir, session_id, decision)
+
+    conn = otlp.connection_from_paths(paths)
+    if conn is not None:
+        attrs = decisions.decision_attributes(
+            session_id=session_id, decision=decision, code_clusters=clusters, cluster_scheme=scheme,
+            repo=repo, branch=branch, head_sha=head_sha, pr_number=pr_number, pr_url=pr_url,
+        )
+        attrs["agent_runtime"] = runtime
+        otlp.emit_records([otlp.log_record(decisions.DECISION_EVENT, attrs, time.time_ns())], conn,
+            resource_for(runtime, paths, args.version), scope_name=f"cardinal-{runtime}-plugin",
+            scope_version=args.version, timeout=DECISION_EMIT_TIMEOUT_SEC)
+
+    tags = [f"PR #{pr_number}"] if pr_number else []
+    if clusters:
+        tags.append("clusters " + ", ".join(clusters))
+    detail = f" ({'; '.join(tags)})" if tags else ""
+    print(f"Recorded decision {decision['id']}: {decision['choice']}{detail}")
+    if unknown:
+        print(f"Note: no earlier decision in this session has id {', '.join(unknown)}; the link was kept as given.")
+    if conn is None:
+        print(f"Cardinal telemetry isn't connected, so this decision was only saved locally (run cardinal-{runtime} connect).")
+    return 0
+
+
+def decision(args, paths):
+    runtime, action = args.runtime, args.decision_command
+    if action in ("on", "off"):
+        decisions.set_enabled(paths.runtime_dir, action == "on")
+        print("Decision capture is on. New prompts will ask the agent to record its decisions."
+              if action == "on" else "Decision capture is off.")
+        return 0
+    if action == "record":
+        return decision_record(args, paths)
+    override = decisions_override()
+    enabled = decisions.is_enabled(paths.runtime_dir, override)
+    if action == "context":
+        if enabled:
+            print(decision_context(runtime, args.session, decisions.read_ledger(paths.runtime_dir, args.session), args.tool))
+        return 0
+    source = f" ({decisions.ENABLE_ENV}={override})" if decisions.parse_override(override) is not None else ""
+    print(f"Decision capture: {'on' if enabled else 'off'}{source}")
+    connected = otlp.connection_from_paths(paths) is not None
+    print(f"Cardinal telemetry: {'connected' if connected else f'not connected (run cardinal-{runtime} connect)'}")
+    if args.session:
+        print(f"Decisions in session {args.session}:")
+        print(decisions.render_ledger(decisions.read_ledger(paths.runtime_dir, args.session), limit=50))
+    return 0
+
+
+def add_decision_parser(sub):
+    dec = sub.add_parser("decision", help="Opt-in capture of the decisions the agent makes")
+    dsub = dec.add_subparsers(dest="decision_command", metavar="{record,on,off,status}", required=True)
+    record = dsub.add_parser("record", help="record one decision")
+    record.add_argument("--session", required=True, help="session id (supplied by the plugin)")
+    record.add_argument("--choice", required=True, help="the option chosen, in a few words")
+    record.add_argument("--question", help="the question this decision settles")
+    record.add_argument("--why", help="one sentence on why this option won")
+    record.add_argument("--alt", action="append", default=[], metavar="OPTION",
+                        help="an option that was considered and rejected (repeatable)")
+    record.add_argument("--by", choices=decisions.DECIDED_BY, default="agent", help="who made the call (default: agent)")
+    record.add_argument("--anchor", action="append", default=[], metavar="ANCHOR",
+                        help="file, dir/, file::Symbol, or <kind>:<identifier>[@path] the decision governs (repeatable)")
+    for flag, text in (("--follows", "an earlier decision this one only makes sense because of"),
+                       ("--refines", "an earlier decision this one narrows"),
+                       ("--supersedes", "an earlier decision this one replaces")):
+        record.add_argument(flag, action="append", default=[], metavar="ID", help=text)
+    record.add_argument("--id", help="decision id; reuse an existing id to revise that decision")
+    dsub.add_parser("on", help="turn decision capture on")
+    dsub.add_parser("off", help="turn decision capture off")
+    status_parser = dsub.add_parser("status", help="show whether capture is on")
+    status_parser.add_argument("--session", help="also list this session's decisions")
+    context = dsub.add_parser("context", help=argparse.SUPPRESS)
+    context.add_argument("--session", required=True)
+    context.add_argument("--tool")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Cardinal native agent integration")
     parser.add_argument("--runtime", choices=("opencode", "pi"), required=True)
@@ -237,6 +398,7 @@ def main():
     sub.add_parser("status", help="Probe the saved telemetry and MCP endpoints")
     disc = sub.add_parser("disconnect", help="Revoke credentials and remove the local connection")
     disc.add_argument("--local-only", action="store_true")
+    add_decision_parser(sub)
     sub.add_parser("telemetry", help=argparse.SUPPRESS)
     args = parser.parse_args()
     paths = agent_paths(args.runtime)
@@ -250,6 +412,8 @@ def main():
             return connect(args, paths)
         if args.command == "disconnect":
             return disconnect(args, paths)
+        if args.command == "decision":
+            return decision(args, paths)
         return status(paths)
     except Exception as exc:
         if args.command != "telemetry":
