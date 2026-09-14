@@ -156,10 +156,12 @@ def build_decision_context(cli: str, session_id: str, entries: list[dict[str, An
         "Cardinal decision capture is on for this session. When you make a choice that "
         "constrains later work (picking between approaches, settling an open question, or "
         "the user deciding something), record it right away with one shell command:\n"
-        f'{command} --choice "<the option chosen, 2-7 words>" '
-        '--question "<what had to be settled>" --why "<one sentence>" '
-        '[--alt "<rejected option>"]... [--by user] [--anchor <path>[::Symbol]]... '
+        f"{command} --choice '<the option chosen, 2-7 words>' "
+        "--question '<what had to be settled>' --why '<one sentence>' "
+        "[--alt '<rejected option>']... [--by user] [--anchor <path>[::Symbol]]... "
         "[--follows|--refines|--supersedes <id>]\n"
+        "Wrap every value in single quotes so the shell doesn't expand $ or backticks; "
+        "if the hook sees different text than the command printed, it refuses to record.\n"
         "Record choices, not progress, findings, or tool calls. Use --by user when the user "
         "made the call. Anchor the files or symbols the decision governs. Link a decision to "
         "an earlier one when it builds on, narrows, or replaces it.\n"

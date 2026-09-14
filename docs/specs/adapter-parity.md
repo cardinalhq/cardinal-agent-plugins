@@ -84,7 +84,7 @@ instead of shipping a flow that never fires.
 | Adapter | PR linkage | Decision capture | Caveats |
 |---|---|---|---|
 | claude | `git-state.py` (async hook) | CLI records and emits | Opt-in Bash sandbox prompts to escalate |
-| codex | _pending final review_ | | |
+| codex | `UserPromptSubmit`, cached PR with a detached refresh | Sandboxed CLI prints a marker; `PostToolUse` (Bash) rebuilds the decision from the real argv, writes the ledger, and sends from a detached child | Existing installs need `cardinal-connect --repair-hooks` and a Codex restart; sends are best-effort (no retry) |
 | cursor | `beforeSubmitPrompt`, cached `gh` | Sandboxed CLI prints a marker; `postToolUse` rebuilds the decision from the real argv, writes the ledger, and sends from a detached child | `sessionStart` (instructions) doesn't run in cloud agents; that hooks run unsandboxed is inferred, not verified live |
 | gemini | `BeforeAgent`, network in a detached child | `BeforeAgent` `additionalContext` + CLI | Shipped hooks never loaded; needs Gemini CLI 0.26+ and a `cardinal-connect` re-run; cost is an upper bound; no `subagent_usage` |
 | opencode | shared native bridge | `cardinal_record_decision` tool + `experimental.chat.messages.transform` | Prompt hook is experimental |
