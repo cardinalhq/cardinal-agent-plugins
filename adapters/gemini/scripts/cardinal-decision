@@ -42,6 +42,20 @@ SCOPE_NAME = "cardinal-gemini-plugin"
 EMIT_TIMEOUT_SEC = 3.0
 EXIT_USAGE = 2
 EXIT_OFF = 3
+EXIT_LOCAL_WRITE = 4
+
+
+def _local_write_failed(err: OSError) -> int:
+    """Gemini CLI's optional sandbox (macOS permissive-open profile) blocks
+    writes under ~/.gemini, so the config/ledger write fails there."""
+    print(
+        f"cardinal-decision: could not write under {PATHS.runtime_dir} ({err.strerror or err}). "
+        "If Gemini CLI's sandbox is on (--sandbox / GEMINI_SANDBOX), it blocks writes to ~/.gemini: "
+        "turn the sandbox off for this session or allow writes to that directory, then retry. "
+        "The decision was not recorded.",
+        file=sys.stderr,
+    )
+    return EXIT_LOCAL_WRITE
 
 
 def _override() -> str | None:
@@ -67,13 +81,19 @@ def _resource() -> dict[str, str]:
 
 
 def cmd_on(_args: argparse.Namespace) -> int:
-    decisions.set_enabled(PATHS.runtime_dir, True)
+    try:
+        decisions.set_enabled(PATHS.runtime_dir, True)
+    except OSError as err:
+        return _local_write_failed(err)
     print("Decision capture is on. New prompts will ask the agent to record its decisions.")
     return 0
 
 
 def cmd_off(_args: argparse.Namespace) -> int:
-    decisions.set_enabled(PATHS.runtime_dir, False)
+    try:
+        decisions.set_enabled(PATHS.runtime_dir, False)
+    except OSError as err:
+        return _local_write_failed(err)
     print("Decision capture is off.")
     return 0
 
@@ -134,7 +154,10 @@ def cmd_record(args: argparse.Namespace) -> int:
     pr_number, pr_url = decisions.resolve_pr(cwd, repo, branch, cache)
     known = {entry["id"] for entry in ledger}
     unknown = [link["to"] for link in decision["links"] if link["to"] not in known]
-    decisions.record_in_ledger(PATHS.runtime_dir, session_id, decision)
+    try:
+        decisions.record_in_ledger(PATHS.runtime_dir, session_id, decision)
+    except OSError as err:
+        return _local_write_failed(err)
 
     connection = otlp.connection_from_paths(PATHS)
     if connection is not None:

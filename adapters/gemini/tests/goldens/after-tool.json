@@ -356,7 +356,7 @@
                     {
                       "key": "success",
                       "value": {
-                        "stringValue": "true"
+                        "stringValue": "false"
                       }
                     },
                     {
@@ -704,7 +704,7 @@
                     {
                       "key": "tool_input",
                       "value": {
-                        "stringValue": "{\"path\":\"src/main.py\"}"
+                        "stringValue": "{\"file_path\":\"src/main.py\"}"
                       }
                     }
                   ]
@@ -813,7 +813,7 @@
                     {
                       "key": "tool_name",
                       "value": {
-                        "stringValue": "Read"
+                        "stringValue": "replace"
                       }
                     },
                     {
@@ -854,7 +854,7 @@
                     {
                       "key": "tool_name",
                       "value": {
-                        "stringValue": "Read"
+                        "stringValue": "replace"
                       }
                     },
                     {
@@ -866,7 +866,7 @@
                     {
                       "key": "tool_input",
                       "value": {
-                        "stringValue": "{\"file_path\":\"/etc/hosts\"}"
+                        "stringValue": "{\"file_path\":\"/etc/hosts\",\"old_string\":\"a\",\"new_string\":\"b\"}"
                       }
                     }
                   ]
@@ -1022,13 +1022,13 @@
                     {
                       "key": "success",
                       "value": {
-                        "stringValue": "false"
+                        "stringValue": "true"
                       }
                     },
                     {
                       "key": "tool_input",
                       "value": {
-                        "stringValue": "{\"file_path\":\"out.txt\"}"
+                        "stringValue": "{\"file_path\":\"out.txt\",\"content\":\"x\"}"
                       }
                     }
                   ]

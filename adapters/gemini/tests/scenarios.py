@@ -90,6 +90,28 @@ def write_gh_stub(workdir: Path) -> Path:
     return bin_dir
 
 
+def model_chunk(session_id: str, model: str, usage: dict[str, Any] | None,
+                final: bool = True) -> dict[str, Any]:
+    """An AfterModelInput as Gemini CLI sends it: HookInput base fields +
+    llm_request (LLMRequest) + llm_response (LLMResponse) — see
+    packages/core/src/hooks/types.ts and hookTranslator.ts."""
+    candidate: dict[str, Any] = {"content": {"role": "model", "parts": ["ok"]}, "index": 0}
+    if final:
+        candidate["finishReason"] = "STOP"
+    response: dict[str, Any] = {"text": "ok", "candidates": [candidate]}
+    if usage is not None:
+        response["usageMetadata"] = usage
+    return {
+        "session_id": session_id,
+        "transcript_path": "/tmp/transcript.json",
+        "cwd": "__PLAIN__",
+        "hook_event_name": "AfterModel",
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "llm_request": {"model": model, "messages": [{"role": "user", "content": "hi"}]},
+        "llm_response": response,
+    }
+
+
 def write_connected_state(home: Path, endpoint: str) -> None:
     gemini = home / ".gemini"
     gemini.mkdir(parents=True, exist_ok=True)
@@ -178,39 +200,44 @@ def scenarios() -> list[dict[str, Any]]:
             "steps": [
                 ("BeforeAgent", {"session_id": "s-model", "cwd": "__PLAIN__",
                                  "prompt": "hi"}),
-                # `usage` spelling, priced model, thought tokens bill as output.
-                ("AfterModel", {"session_id": "s-model",
-                                "model": "gemini-2.0-flash",
-                                "usage": {"input_tokens": 1200,
-                                          "output_tokens": 340,
-                                          "thought_tokens": 64,
-                                          "cached_input_tokens": 200}}),
-                # `usageMetadata` spelling, dated SKU → longest-prefix pricing.
-                ("AfterModel", {"session_id": "s-model",
-                                "modelId": "gemini-2.0-pro-2026-03-01",
-                                "usageMetadata": {"promptTokenCount": 5000,
-                                                  "candidatesTokenCount": 800,
-                                                  "thoughtsTokenCount": 1200,
-                                                  "cachedContentTokenCount": 2500,
-                                                  "toolUsePromptTokenCount": 300}}),
+                # Real AfterModelInput shape (hooks/types.ts): one call per
+                # streamed chunk. Non-final chunk (no finishReason) → no-op.
+                ("AfterModel", model_chunk("s-model", "gemini-2.0-flash",
+                                           {"promptTokenCount": 1200}, final=False)),
+                # Final chunk, priced model; total - prompt - candidates = 64
+                # thought tokens (bill as output).
+                ("AfterModel", model_chunk("s-model", "gemini-2.0-flash",
+                                           {"promptTokenCount": 1200,
+                                            "candidatesTokenCount": 340,
+                                            "totalTokenCount": 1604})),
+                # Dated SKU → longest-prefix pricing.
+                ("AfterModel", model_chunk("s-model", "gemini-2.0-pro-2026-03-01",
+                                           {"promptTokenCount": 5000,
+                                            "candidatesTokenCount": 800,
+                                            "totalTokenCount": 7300})),
                 # Unpriced model → no cost_usd attribute.
-                ("AfterModel", {"session_id": "s-model",
-                                "model": "imagen-4-ultra",
-                                "usage": {"input_tokens": 10, "output_tokens": 5}}),
+                ("AfterModel", model_chunk("s-model", "imagen-4-ultra",
+                                           {"promptTokenCount": 10,
+                                            "candidatesTokenCount": 5,
+                                            "totalTokenCount": 15})),
                 # Plan facts surface → plan stamp + cardinal.plan_state.
-                ("AfterModel", {"session_id": "s-model",
-                                "model": "gemini-1.5-flash",
+                ("AfterModel", {**model_chunk("s-model", "gemini-1.5-flash",
+                                              {"promptTokenCount": 700,
+                                               "candidatesTokenCount": 90,
+                                               "totalTokenCount": 790}),
                                 "planType": "gemini-code-assist-standard",
-                                "rateLimitTier": "tier-2",
-                                "usage": {"input_tokens": 700, "output_tokens": 90}}),
+                                "rateLimitTier": "tier-2"}),
                 # Same plan facts again → stamped records, NO new plan_state.
-                ("AfterModel", {"session_id": "s-model",
-                                "model": "gemini-1.5-flash",
-                                "usage": {"input_tokens": 800, "output_tokens": 100}}),
+                ("AfterModel", model_chunk("s-model", "gemini-1.5-flash",
+                                           {"promptTokenCount": 800,
+                                            "candidatesTokenCount": 100,
+                                            "totalTokenCount": 900})),
                 # All-zero usage → suppressed entirely.
-                ("AfterModel", {"session_id": "s-model",
-                                "model": "gemini-2.0-flash",
-                                "usage": {"input_tokens": 0, "output_tokens": 0}}),
+                ("AfterModel", model_chunk("s-model", "gemini-2.0-flash",
+                                           {"promptTokenCount": 0,
+                                            "candidatesTokenCount": 0})),
+                # Final chunk without usageMetadata → suppressed.
+                ("AfterModel", model_chunk("s-model", "gemini-2.0-flash", None)),
             ],
         },
         {
@@ -219,36 +246,47 @@ def scenarios() -> list[dict[str, Any]]:
             "steps": [
                 ("BeforeAgent", {"session_id": "s-tool", "cwd": "__PLAIN__",
                                  "prompt": "run the checks"}),
+                # Real AfterToolInput shape (hooks/types.ts): tool_response =
+                # {llmContent, returnDisplay, error?} (coreToolHookTriggers.ts).
                 # Compound bash → write-risk class wins, bash_multi set.
                 ("AfterTool", {"session_id": "s-tool",
                                "tool_name": "run_shell_command",
                                "tool_input": {"command": "ls -la && rm -rf build"},
-                               "success": True}),
-                # git read + exit_code fallback for success.
+                               "tool_response": {"llmContent": "ok", "returnDisplay": "ok"}}),
+                # git read, tool error → success false.
                 ("AfterTool", {"session_id": "s-tool",
                                "tool_name": "run_shell_command",
                                "tool_input": {"command": "git status"},
-                               "exit_code": 0}),
-                # Qualified MCP tool, arguments as a JSON string, status fallback.
+                               "tool_response": {"llmContent": "fatal", "returnDisplay": "fatal",
+                                                 "error": {"type": "execution_failed",
+                                                           "message": "exit 128"}}}),
+                # MCP tool: Gemini names it mcp_{server}_{tool}
+                # (tools/mcp-tool.ts) and identifies it via mcp_context.
                 ("AfterTool", {"session_id": "s-tool",
-                               "tool_name": "mcp__lakerunner__list_services",
-                               "arguments": "{\"instance\": \"prod\"}",
-                               "status": "ok"}),
-                # read_file with a path target, explicit failure.
+                               "tool_name": "mcp_lakerunner_list_services",
+                               "tool_input": {"instance": "prod"},
+                               "tool_response": {"llmContent": "[]", "returnDisplay": "[]"},
+                               "mcp_context": {"server_name": "lakerunner",
+                                               "tool_name": "list_services",
+                                               "url": "https://mcp.example/"}}),
+                # read_file with a file_path target, tool error → failure.
                 ("AfterTool", {"session_id": "s-tool",
                                "tool_name": "read_file",
-                               "tool_input": {"path": "src/main.py"},
-                               "success": False}),
-                # Claude-style passthrough name with file_path target.
+                               "tool_input": {"file_path": "src/main.py"},
+                               "tool_response": {"llmContent": "", "returnDisplay": "",
+                                                 "error": {"type": "file_not_found",
+                                                           "message": "missing"}}}),
+                # replace (edit) with file_path target, success.
                 ("AfterTool", {"session_id": "s-tool",
-                               "tool_name": "Read",
-                               "toolInput": {"file_path": "/etc/hosts"},
-                               "status": "completed"}),
-                # write_file, exitCode!=0 → success false.
+                               "tool_name": "replace",
+                               "tool_input": {"file_path": "/etc/hosts",
+                                              "old_string": "a", "new_string": "b"},
+                               "tool_response": {"llmContent": "ok", "returnDisplay": "ok"}}),
+                # write_file, success.
                 ("AfterTool", {"session_id": "s-tool",
                                "tool_name": "write_file",
-                               "tool_input": {"file_path": "out.txt"},
-                               "exitCode": 1}),
+                               "tool_input": {"file_path": "out.txt", "content": "x"},
+                               "tool_response": {"llmContent": "ok", "returnDisplay": "ok"}}),
             ],
         },
         {
@@ -272,6 +310,10 @@ def scenarios() -> list[dict[str, Any]]:
                 ("AfterAgent", {"session_id": "s-sub", "prompt": LONG_PROMPT}),
                 # No identifying facet → suppressed.
                 ("AfterAgent", {"session_id": "s-sub", "status": "done"}),
+                # Real AfterAgentInput (hooks/types.ts): main-agent turn end,
+                # not a subagent → suppressed.
+                ("AfterAgent", {"session_id": "s-sub", "prompt": "fix the bug",
+                                "prompt_response": "Fixed.", "stop_hook_active": False}),
             ],
         },
         {
@@ -354,6 +396,9 @@ def run_scenario(hook_script: Path, scenario: dict[str, Any], workdir: Path) -> 
         env = {k: v for k, v in os.environ.items()
                if k not in ("GEMINI_SESSION_ID", "CARDINAL_GEMINI_DEBUG_PAYLOADS",
                             "CARDINAL_DECISIONS")}
+        # Network work normally runs in a detached child; inline keeps the
+        # OTLP batches deterministic and ordered for golden comparison.
+        env["CARDINAL_GEMINI_INLINE_BACKGROUND"] = "1"
         # Stub `gh` first on PATH: no network, deterministic PR linkage.
         env["PATH"] = f"{write_gh_stub(workdir)}{os.pathsep}{env.get('PATH', '')}"
         env["HOME"] = str(home)

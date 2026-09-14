@@ -25,11 +25,17 @@ any hook code. On top of that, plugin-owned hooks emit the Cardinal-specific
 event contract used by the sibling plugins (see `docs/specs/gemini-parity.md`
 at the repository root for the full parity map):
 
-- `cardinal.git_state` from the active Git checkout on `BeforeAgent`, with initiative classification from the branch name (worktree-noise stripped), slash-command detection, and the branch's PR (`cardinal_pr_number` / `cardinal_pr_url`) when `gh pr view` resolves one (cached per repo+branch, bounded to 1.5s; keys absent otherwise).
-- `api_request` + `cardinal.turn_usage` per model call from `AfterModel` — Gemini CLI surfaces per-call token buckets in the hook payload directly, so no transcript scraping is needed.
-- `cardinal.turn_tool` + `tool_result` per tool call from `AfterTool`, with MCP-qualified `tool_name` on `turn_tool` and Bash-verb `bash_class` classification.
-- `cardinal.subagent_usage` from `AfterAgent` payload keys (`subagent_type`, `agent_id`, `subagent_description`, `total_tokens`, `duration_ms`).
-- `cardinal.plan_usage` (context-window slice) from `PreCompress` — `context_tokens`, `context_window_size`, `context_usage_percent`, `trigger`, `messages_to_compact`, `is_first_compaction`. Downstream disambiguates from per-model-call plan_usage on the presence of `plan.compact_trigger`.
+- `cardinal.git_state` from the active Git checkout on `BeforeAgent`, with initiative classification from the branch name (worktree-noise stripped), slash-command detection, and the branch's PR (`cardinal_pr_number` / `cardinal_pr_url`) when `gh pr view` resolves one (cached per repo+branch; keys absent otherwise).
+- `api_request` + `cardinal.turn_usage` per model call from `AfterModel`. Gemini CLI fires `AfterModel` once per streamed chunk; the hook exits immediately on non-final chunks and accounts the final chunk's `llm_response.usageMetadata` (prompt, candidates, total — thought/tool-use-prompt tokens are derived as the remainder; cached-content tokens are not exposed to hooks, so cost ignores cache discounts).
+- `cardinal.turn_tool` + `tool_result` per tool call from `AfterTool`, with `mcp__<server>__<tool>` on `turn_tool` (from `mcp_context`), Bash-verb `bash_class` classification, and success from `tool_response.error`.
+- `cardinal.plan_usage` (compaction trigger) from `PreCompress`; Gemini's payload carries only `trigger`. Downstream disambiguates from per-model-call plan_usage on the presence of `plan.compact_trigger`.
+- No `cardinal.subagent_usage`: Gemini CLI's `AfterAgent` fires once per main-agent turn (not per subagent), so it is not registered.
+
+Hooks never wait on the network: each one does local-file work, prints its
+output, and hands OTLP posts, the `gh` PR lookup and the limits-verdict
+refresh to a detached background process. The one exception is
+`SessionStart`, which makes a single 1.5s-bounded spend-limits fetch per
+session when the backend advertises spend limits.
 
 Claude subscription-specific plan fields that do not exist in Gemini CLI are
 left empty; Gemini plan/rate-limit fields are mapped onto the existing plan
@@ -115,9 +121,32 @@ python3 scripts/cardinal-disconnect --force
 
 ## Requirements
 
-- Gemini CLI with hooks + MCP server + extensions support.
+- Gemini CLI **0.26.0 or newer** (hooks are on by default from 0.26.0 via
+  `hooksConfig.enabled`). On older versions enable hooks yourself in
+  `~/.gemini/settings.json`: `"hooks": {"enabled": true}` on 0.24–0.25,
+  `"tools": {"enableHooks": true}` on 0.21–0.23. Extension hooks need 0.21+.
+  `cardinal-connect` does not set these flags: the key moved between
+  releases, and on 0.26+ writing it would override an explicit opt-out.
+  `cardinal-status` warns when hooks are disabled or the CLI is too old.
 - Python 3.11+.
 - A Cardinal account.
+
+### Upgrading from plugin versions before 0.17
+
+Earlier versions registered hooks that Gemini CLI never ran: the extension
+`hooks/hooks.json` lacked the top-level `hooks` key the extension loader
+requires, and timeouts were written as `5` (Gemini reads milliseconds).
+Re-run `python3 scripts/cardinal-connect` — when Cardinal is already
+connected it rewrites the hook registration in place (no new credentials)
+— then restart Gemini CLI. `cardinal-status` reports a stale registration.
+
+### Sandbox
+
+Gemini CLI's sandbox is off by default. With it on (macOS
+`permissive-open` profile), writes under `~/.gemini` are blocked, so
+`cardinal-decision` exits with status 4 and a message instead of recording.
+Turn the sandbox off for the session or allow writes to
+`~/.gemini/cardinal/` to use decision capture.
 
 ## License
 

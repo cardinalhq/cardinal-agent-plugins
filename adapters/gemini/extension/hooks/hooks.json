@@ -1,5 +1,5 @@
 {
-  "_comment": "Extension-scoped hook registrations. Gemini CLI's extension loader requires the event map under a top-level `hooks` key, and `timeout` is in milliseconds. The `command` string is rewritten by cardinal-connect at install time to reference the plugin's absolute path.",
+  "_comment": "Extension-scoped hook registrations. Gemini CLI's extension loader requires the event map under a top-level `hooks` key, and `timeout` is in milliseconds. AfterAgent is deliberately not registered: Gemini fires it once per main-agent turn, not per subagent. The `command` string is rewritten by cardinal-connect at install time to reference the plugin's absolute path.",
   "hooks": {
     "SessionStart": [
       {
@@ -44,18 +44,6 @@
           {
             "type": "command",
             "command": "python3 __HOOK_SCRIPT__ --event AfterTool # cardinal-gemini-plugin",
-            "timeout": 10000
-          }
-        ]
-      }
-    ],
-    "AfterAgent": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 __HOOK_SCRIPT__ --event AfterAgent # cardinal-gemini-plugin",
             "timeout": 10000
           }
         ]

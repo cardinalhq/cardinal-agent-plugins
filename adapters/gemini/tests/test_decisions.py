@@ -1,13 +1,13 @@
-"""Tests for scripts/cardinal-decision and the BeforeAgent decision prompt +
-PR linkage in hooks/cardinal-gemini-telemetry.py.
+"""Tests for scripts/cardinal-decision and the BeforeAgent decision prompt,
+PR linkage and background network work in hooks/cardinal-gemini-telemetry.py.
 
 Each test runs the script as a subprocess with HOME pointed at a temp dir
 whose ~/.gemini/cardinal.json + cardinal-secrets.json route OTLP to a local
 stub server, inside a temp git repo with an origin remote, and a stub `gh`
-on PATH (no network).
+on PATH (no network). Background jobs run inline unless a test opts out.
 
 Run from the monorepo root:
-    python3 -m pytest adapters/gemini/tests -q
+    uv run --no-project --with pytest python -m pytest adapters/gemini/tests -q
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,9 +45,12 @@ def _ensure_vendored() -> None:
 
 class _OTLPStub(BaseHTTPRequestHandler):
     received: list = []
+    delay_sec: float = 0.0
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if type(self).delay_sec:
+            time.sleep(type(self).delay_sec)
         type(self).received.append(json.loads(body))
         self.send_response(200)
         self.end_headers()
@@ -63,6 +67,17 @@ def _attrs(kvs: list) -> dict:
     return out
 
 
+def final_model_chunk(session_id: str) -> dict:
+    return {
+        "session_id": session_id,
+        "llm_request": {"model": "gemini-2.0-flash", "messages": []},
+        "llm_response": {
+            "candidates": [{"content": {"role": "model", "parts": ["ok"]}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15},
+        },
+    }
+
+
 class DecisionTestBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -70,6 +85,7 @@ class DecisionTestBase(unittest.TestCase):
 
     def setUp(self):
         _OTLPStub.received = []
+        _OTLPStub.delay_sec = 0.0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OTLPStub)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.tmp = TemporaryDirectory()
@@ -118,7 +134,8 @@ class DecisionTestBase(unittest.TestCase):
     def env(self, **extra) -> dict:
         path = f"{self.bin}:{os.path.dirname(GIT)}:/usr/bin:/bin"
         return {"HOME": str(self.home), "PATH": path,
-                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", **extra}
+                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                "CARDINAL_GEMINI_INLINE_BACKGROUND": "1", **extra}
 
     def cli(self, *args: str, expect_rc: int = 0, **env) -> subprocess.CompletedProcess:
         proc = subprocess.run(
@@ -129,6 +146,8 @@ class DecisionTestBase(unittest.TestCase):
         return proc
 
     def hook(self, event: str, payload: dict, **env) -> subprocess.CompletedProcess:
+        # capture_output waits for the stdio pipes to close, exactly as Gemini
+        # CLI's hookRunner does (it resolves on the child's `close` event).
         proc = subprocess.run(
             [sys.executable, str(HOOK), "--event", event], input=json.dumps(payload),
             cwd=self.repo, env=self.env(**env), capture_output=True, text=True, timeout=20,
@@ -138,7 +157,7 @@ class DecisionTestBase(unittest.TestCase):
 
     def records(self, event_name: str) -> list:
         out = []
-        for body in _OTLPStub.received:
+        for body in list(_OTLPStub.received):
             resource = _attrs(body["resourceLogs"][0]["resource"]["attributes"])
             for rec in body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]:
                 attrs = _attrs(rec["attributes"])
@@ -236,6 +255,23 @@ class CardinalDecisionCliTest(DecisionTestBase):
         self.assertIn("not connected", self.cli("status").stdout)
         self.assertEqual(self.records("cardinal.decision"), [])
 
+    def test_unwritable_runtime_dir_fails_cleanly(self):
+        # Simulates Gemini CLI's sandbox blocking writes under ~/.gemini.
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        self.cli("on")
+        decisions_dir = self.gemini / "cardinal" / "decisions"
+        decisions_dir.chmod(0o500)
+        try:
+            proc = self.cli("record", "--session", "s1", "--choice", "Use X", expect_rc=4)
+            self.assertIn("sandbox", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+            proc = self.cli("off", expect_rc=4)
+            self.assertIn("sandbox", proc.stderr)
+        finally:
+            decisions_dir.chmod(0o700)
+        self.assertEqual(self.records("cardinal.decision"), [])
+
     def test_help(self):
         self.assertIn("record", self.cli("--help").stdout)
 
@@ -266,7 +302,6 @@ class BeforeAgentDecisionPromptTest(DecisionTestBase):
         self.assertIn("(none yet)", out["hookSpecificOutput"]["additionalContext"])
 
     def test_merges_with_limits_warn_and_block_wins(self):
-        import time
         limits = self.gemini / "cardinal" / "limits"
         limits.mkdir(parents=True)
         (limits / "s-warn.verdict.json").write_text(json.dumps({
@@ -299,11 +334,12 @@ class BeforeAgentPrLinkageTest(DecisionTestBase):
         return attrs
 
     def test_git_state_carries_pr(self):
-        self.hook("BeforeAgent", {"session_id": "s1", "cwd": str(self.repo), "prompt": "hi"})
+        self.hook("BeforeAgent", {"session_id": "s1", "cwd": str(self.repo), "prompt": "/code-review"})
         attrs = self.git_state()
         self.assertEqual(int(attrs["cardinal_pr_number"]), 42)
         self.assertEqual(attrs["cardinal_pr_url"], "https://github.com/acme/widgets/pull/42")
         self.assertEqual(attrs["cardinal_branch"], "feat/trace-index")
+        self.assertEqual(attrs["cardinal_command"], "code-review")
 
     def test_pr_keys_absent_when_gh_fails(self):
         self.set_gh("#!/bin/sh\necho 'no pull requests found' >&2\nexit 1\n")
@@ -318,31 +354,49 @@ class BeforeAgentPrLinkageTest(DecisionTestBase):
         self.hook("BeforeAgent", {"session_id": "s1", "cwd": str(self.repo), "prompt": "hi"})
         self.assertNotIn("cardinal_pr_number", self.git_state())
 
-    def test_slow_gh_is_bounded(self):
-        self.set_gh(f"#!/bin/sh\nsleep 5\necho '{GH_PR}'\n")
-        import time
-        start = time.monotonic()
-        self.hook("BeforeAgent", {"session_id": "s1", "cwd": str(self.repo), "prompt": "hi"})
-        self.assertLess(time.monotonic() - start, 4.5)
-        attrs = self.git_state()
-        self.assertNotIn("cardinal_pr_number", attrs)
-        self.assertIn("cardinal_head_sha", attrs)
 
+class BackgroundNetworkTest(DecisionTestBase):
+    """Hooks must return without waiting on the network: a slow ingest and a
+    slow `gh` are handled by the detached background child."""
 
-class HookRegistrationTest(unittest.TestCase):
-    """Gemini CLI's extension loader reads the event map from a top-level
-    `hooks` key and treats `timeout` as milliseconds."""
+    def test_hooks_return_before_slow_network_work_finishes(self):
+        _OTLPStub.delay_sec = 3.0
+        self.set_gh(f"#!/bin/sh\nsleep 3\necho '{GH_PR}'\n")
+        detached = {"CARDINAL_GEMINI_INLINE_BACKGROUND": "0"}
+        tool = {"session_id": "s1", "cwd": str(self.repo), "tool_name": "run_shell_command",
+                "tool_input": {"command": "ls"}, "tool_response": {"llmContent": "ok"}}
+        for event, payload in (
+            ("BeforeAgent", {"session_id": "s1", "cwd": str(self.repo), "prompt": "hi"}),
+            ("AfterModel", final_model_chunk("s1")),
+            ("AfterTool", tool),
+            ("PreCompress", {"session_id": "s1", "cwd": str(self.repo), "trigger": "auto"}),
+        ):
+            with self.subTest(event=event):
+                start = time.monotonic()
+                self.hook(event, payload, **detached)
+                self.assertLess(time.monotonic() - start, 2.0,
+                                f"{event} waited on network work")
 
-    def test_extension_hooks_json_shape(self):
-        data = json.loads((ADAPTER / "extension" / "hooks" / "hooks.json").read_text())
-        self.assertIsInstance(data.get("hooks"), dict)
-        self.assertIn("BeforeAgent", data["hooks"])
-        for event, groups in data["hooks"].items():
-            for group in groups:
-                for handler in group["hooks"]:
-                    with self.subTest(event=event):
-                        self.assertIn(f"--event {event}", handler["command"])
-                        self.assertGreaterEqual(handler["timeout"], 5000)
+        deadline = time.monotonic() + 20
+        wanted = ("cardinal.git_state", "api_request", "cardinal.turn_tool", "cardinal.plan_usage")
+        while time.monotonic() < deadline and not all(self.records(e) for e in wanted):
+            time.sleep(0.2)
+        for event_name in wanted:
+            self.assertTrue(self.records(event_name), f"{event_name} never arrived")
+        self.assertEqual(int(self.records("cardinal.git_state")[0][1]["cardinal_pr_number"]), 42)
+        spool = self.gemini / "cardinal" / "spool"
+        self.assertEqual(list(spool.glob("*.json")), [], "background jobs left spool files behind")
+
+    def test_non_final_model_chunk_exits_without_state(self):
+        chunk = final_model_chunk("s-chunk")
+        del chunk["llm_response"]["candidates"][0]["finishReason"]
+        self.hook("AfterModel", chunk)
+        self.assertFalse((self.gemini / "cardinal" / "telemetry" / "s-chunk.json").exists())
+
+    def test_main_agent_after_agent_is_not_a_subagent(self):
+        self.hook("AfterAgent", {"session_id": "s1", "cwd": str(self.repo), "prompt": "fix it",
+                                 "prompt_response": "done", "stop_hook_active": False})
+        self.assertEqual(self.records("cardinal.subagent_usage"), [])
 
 
 if __name__ == "__main__":

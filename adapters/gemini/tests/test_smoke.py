@@ -83,13 +83,16 @@ class HookSmokeTests(unittest.TestCase):
         # Even without a connected state (no ingest post), the hook still
         # advances its per-session progress file — required so turn/tool
         # counters remain monotonic across events.
+        # Real AfterModelInput shape; only the final chunk (finishReason) counts.
         payload = {
             "session_id": "s-test",
-            "model": "gemini-2.0-flash",
-            "usage": {
-                "input_tokens": 100,
-                "output_tokens": 50,
-                "cached_input_tokens": 10,
+            "llm_request": {"model": "gemini-2.0-flash", "messages": []},
+            "llm_response": {
+                "candidates": [{"content": {"role": "model", "parts": ["ok"]},
+                                "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 100,
+                                  "candidatesTokenCount": 50,
+                                  "totalTokenCount": 150},
             },
         }
         result = run_hook("AfterModel", payload, self.home)
