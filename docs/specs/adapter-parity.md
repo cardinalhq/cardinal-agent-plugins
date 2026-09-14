@@ -62,7 +62,7 @@ instead of shipping a flow that never fires.
 | codex | add PR to `git_state` in `cardinal-codex-telemetry.py` | CLI + UserPromptSubmit injection |
 | cursor | add PR to `beforeSubmitPrompt` `git_state` | CLI + whichever Cursor surface can inject context (hook output or rule); cloud-agent gap documented |
 | gemini | add PR to BeforeAgent `git_state` | CLI + BeforeAgent/SessionStart `additionalContext` |
-| opencode + pi | add PR in shared `common/native/cardinal_native.py` | `decision` event kind in the bridge + host-native prompt/tool surface |
+| opencode + pi | add PR in shared `common/native/cardinal_native.py` | `decision` CLI subcommand, a request/response bridge call behind a `cardinal_record_decision` host tool, and host-native prompt injection |
 | omnigent | add head_sha + PR where the server has a local checkout | only if the policy API can reach the model; otherwise documented as unsupported |
 
 ## Verification
