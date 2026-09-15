@@ -84,9 +84,19 @@ class ResolveTests(unittest.TestCase):
         self.assertNotIn(SECRET, str(ctx.exception))
 
     def test_malformed_endpoint(self) -> None:
-        for bad in ("ingest.example", "https://ingest.example/v1/logs"):
-            with self.assertRaises(ingest.IngestConfigError):
+        for bad in ("ingest.example", "https://ingest.example/v1/logs", "https://", "ftp://ingest.example",
+                    "https://ingest.example/?token=x", "https://ingest.example/#frag"):
+            with self.assertRaises(ingest.IngestConfigError, msg=bad) as ctx:
                 ingest.resolve(self.paths, {ingest.ENV_ENDPOINT: bad, ingest.ENV_API_KEY: SECRET})
+            self.assertNotIn(SECRET, str(ctx.exception))
+
+    def test_plain_http_endpoint_warns(self) -> None:
+        with self.assertLogs("cardinal_devin.ingest", level="WARNING") as logs:
+            config = ingest.resolve(self.paths, {ingest.ENV_ENDPOINT: "http://ingest.internal:4318",
+                                                 ingest.ENV_API_KEY: SECRET})
+        self.assertEqual(config.connection.endpoint, "http://ingest.internal:4318")
+        self.assertIn("plain http", "\n".join(logs.output))
+        self.assertNotIn(SECRET, "\n".join(logs.output))
 
 
 class StatusTests(unittest.TestCase):

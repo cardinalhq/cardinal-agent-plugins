@@ -11,6 +11,7 @@ name: Release Devin poller
 #            release untouched.
 # - image:   ghcr.io/cardinalhq/cardinal-devin-poller:vX.Y.Z and :latest
 #            (linux/amd64, linux/arm64); skipped if the version tag exists.
+#            :latest moves only when this is the highest devin-v* tag.
 #
 # Both publishing jobs refuse a tag that differs from
 # cardinal_devin.__version__. workflow_dispatch on a tag re-runs the release
@@ -26,8 +27,8 @@ on:
   pull_request:
     paths:
       - 'build/devin.py'
-      - 'adapters/devin/Dockerfile'
-      - 'adapters/devin/Dockerfile.dockerignore'
+      - 'adapters/devin/**'
+      - 'core/cardinal_core/**'
       - '.github/workflows/devin-release.yml'
   workflow_dispatch: {}
 
@@ -139,6 +140,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Read version
         id: version
@@ -152,9 +155,16 @@ jobs:
             echo "::error::tag $RELEASE_TAG does not match cardinal_devin.__version__ ($VERSION)" >&2
             exit 1
           fi
+          # Re-running an older tag must not move :latest backwards.
+          LATEST=false
+          if [ "$IS_TAG" = true ]; then
+            HIGHEST="$(git tag -l 'devin-v*' | sed 's/^devin-v//' | sort -V | tail -n 1)"
+            if [ "$HIGHEST" = "$VERSION" ]; then LATEST=true; fi
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "push=${IS_TAG}" >> "$GITHUB_OUTPUT"
+          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
 
       - name: Check whether tag already exists in GHCR
         id: exists
@@ -165,11 +175,18 @@ jobs:
           set -euo pipefail
           REF="${REGISTRY}/${IMAGE_NAME}:${{ steps.version.outputs.tag }}"
           echo "$GH_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
-          if docker manifest inspect "$REF" >/dev/null 2>&1; then
+          # Only a definite "not found" means unpublished; any other failure
+          # stops the job so a flaky lookup can't overwrite a published tag.
+          # GHCR answers "denied" for a package that doesn't exist yet (login
+          # above already succeeded).
+          if out="$(docker manifest inspect "$REF" 2>&1)"; then
             echo "exists=true"  >> "$GITHUB_OUTPUT"
             echo "::notice::${REF} already published — skipping build"
-          else
+          elif printf '%s' "$out" | grep -qiE 'manifest unknown|no such manifest|not found|denied'; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not check whether ${REF} exists: ${out}" >&2
+            exit 1
           fi
 
       - name: Set up QEMU
@@ -198,7 +215,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ steps.version.outputs.latest == 'true' && format('{0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}

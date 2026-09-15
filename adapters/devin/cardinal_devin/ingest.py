@@ -18,12 +18,16 @@ slash, `/v1/logs` appended at send time) and the key in the
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional
+from urllib.parse import urlsplit
 
 from cardinal_core import otlp
 from cardinal_core.paths import AgentPaths
+
+log = logging.getLogger(__name__)
 
 ENV_ENDPOINT = "CARDINAL_INGEST_ENDPOINT"
 ENV_API_KEY = "CARDINAL_INGEST_API_KEY"
@@ -64,11 +68,18 @@ def from_env(environ: Optional[Mapping[str, str]] = None) -> Optional[IngestConf
             f"{present} is set but {missing} is not; set both to use environment credentials, "
             "or unset both to use the connection from `cardinal-devin connect`"
         )
-    if not endpoint.startswith(("https://", "http://")):
-        raise IngestConfigError(f"{ENV_ENDPOINT} must be an http(s) URL (the OTLP/HTTP base, without /v1/logs)")
+    parts = urlsplit(endpoint)
+    if parts.scheme not in ("https", "http") or not parts.hostname:
+        raise IngestConfigError(
+            f"{ENV_ENDPOINT} must be an http(s) URL with a host (the OTLP/HTTP base, without /v1/logs)"
+        )
+    if parts.query or parts.fragment:
+        raise IngestConfigError(f"{ENV_ENDPOINT} must not include a query string or fragment")
     endpoint = endpoint.rstrip("/")
     if endpoint.endswith("/v1/logs"):
         raise IngestConfigError(f"{ENV_ENDPOINT} is the OTLP/HTTP base URL; drop the trailing /v1/logs")
+    if parts.scheme == "http":
+        log.warning("%s uses plain http; the ingest key is sent unencrypted", ENV_ENDPOINT)
     state: Dict[str, Any] = {}
     if _get(environ, ENV_ORG):
         state["org_slug"] = _get(environ, ENV_ORG)
