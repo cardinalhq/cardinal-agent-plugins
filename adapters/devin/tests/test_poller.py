@@ -50,6 +50,19 @@ class PollCase(unittest.TestCase):
 class V1PollTests(PollCase):
     api = "v1"
 
+    def test_unparseable_updated_at_is_not_resent(self) -> None:
+        # Pruning an entry whose age is unknown made the session look new
+        # and re-sent it every cycle.
+        self.h.devin.update("devin-v1-finished", updated_at="not-a-time")
+        self.poll()
+        sent = len(by_pr(self.h.records("cardinal.git_state")).get(42, ()))
+        self.assertTrue(sent)
+        posts = len(self.h.ingest.posts)
+        for step in (600, 600, 9 * DAY):
+            self.h.now += step
+            self.poll()
+        self.assertEqual(len(self.h.ingest.posts), posts)
+
     def test_git_state_with_github_token(self) -> None:
         result, _ = self.poll()
         self.assertEqual(result.errors, 0)

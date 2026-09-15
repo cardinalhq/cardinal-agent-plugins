@@ -83,6 +83,9 @@ def to_ns(raw: Any) -> Optional[int]:
     text = text.strip()
     if text.endswith(("Z", "z")):
         text = text[:-1] + "+00:00"
+    # Python 3.9's fromisoformat rejects compact offsets like +0000.
+    if len(text) > 5 and text[-5] in "+-" and text[-4:].isdigit():
+        text = text[:-2] + ":" + text[-2:]
     # Python 3.9's fromisoformat only takes 3- or 6-digit fractions.
     text = _FRACTION_RE.sub(lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
     try:

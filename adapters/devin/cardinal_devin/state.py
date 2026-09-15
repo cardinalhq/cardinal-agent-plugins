@@ -39,7 +39,11 @@ class PollState:
                 "Deleting it re-emits every session in the lookback window."
             ) from None
         if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
-            raise StateError(f"poll state {self.path} has an unknown schema")
+            raise StateError(
+                f"poll state {self.path} is corrupt or from a different poller version; "
+                "move it aside and poll again. Moving it re-emits every session in the "
+                "lookback window."
+            )
         data.setdefault("sessions", {})
         data.setdefault("users", {})
         data.setdefault("hwm", {})

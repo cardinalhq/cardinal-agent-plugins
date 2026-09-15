@@ -18,6 +18,8 @@ class TimestampTests(unittest.TestCase):
         self.assertEqual(to_ns("2026-09-14T10:00:00Z"), ns)
         self.assertEqual(to_ns("2026-09-14T10:00:00.5Z"), ns + 500_000_000)
         self.assertEqual(to_ns("2026-09-14T10:00:00.123456789+00:00"), ns + 123_456_000)
+        self.assertEqual(to_ns("2026-09-14T10:00:00+0000"), ns)
+        self.assertEqual(to_ns("2026-09-14T05:00:00-0500"), ns)
         self.assertEqual(to_ns(TEN_AM), ns)
         self.assertEqual(to_ns(TEN_AM * 1000), ns)
         self.assertEqual(to_ns(ns), ns)

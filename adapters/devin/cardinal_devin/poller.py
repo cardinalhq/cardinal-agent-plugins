@@ -260,7 +260,9 @@ class Poller:
 
         def old(entry: Dict[str, Any], limit_ns: int) -> bool:
             updated = entry.get("updated_ns")
-            return not isinstance(updated, int) or updated < limit_ns
+            # Without a usable timestamp its age is unknown; pruning it would
+            # make the session look new and re-send it next cycle.
+            return isinstance(updated, int) and updated < limit_ns
 
         for sid in list(sessions):
             entry = sessions[sid]
