@@ -5,7 +5,7 @@ This repo ships two independent kinds of artifact. Pick the one you're publishin
 | What you're shipping | Trigger | Workflow |
 | --- | --- | --- |
 | Adapter plugin (`claude`, `codex`, `cursor`, `gemini`) | Bump `plugin.json` → merge to `main` | [`.github/workflows/release-mirrors.yml`](../.github/workflows/release-mirrors.yml) |
-| PyPI package (`cardinal-agent-core`, `cardinal-omnigent-policy`) | Push a `core-vX.Y.Z` or `omnigent-vX.Y.Z` tag | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
+| PyPI package (`cardinal-agent-core`) | Push a `core-vX.Y.Z` tag | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
 
 ---
 
@@ -48,29 +48,21 @@ Merging one commit that changes several `plugin.json`s triggers the matrix over 
 
 ---
 
-## 2. PyPI package (core / omnigent)
+## 2. PyPI package (core)
 
 Trusted publishing via OIDC — no long-lived token. Tag-driven.
 
 ### Steps
 
 ```bash
-# Core (publish first if both are moving — omnigent depends on it)
 git tag core-v0.4.0
 git push origin core-v0.4.0
-
-# Omnigent
-git tag omnigent-v0.2.1
-git push origin omnigent-v0.2.1
 ```
 
-Bump the `version` in the package's `pyproject.toml` in the same commit the tag points at:
+Bump the `version` in `core/pyproject.toml` in the same commit the tag points at. The workflow builds sdist + wheel and publishes `cardinal-agent-core` to PyPI under the pending publisher config (environment `pypi-core`).
 
-- `core/pyproject.toml` → `cardinal-agent-core`
-- `adapters/omnigent/pyproject.toml` → `cardinal-omnigent-policy`
-
-The workflow builds sdist + wheel and publishes to PyPI under the pending publisher config (environment `pypi-core` or `pypi-omnigent`).
+The omnigent policy (`cardinal-omnigent-policy`) is no longer released from this repo; its existing PyPI versions remain published.
 
 ### One-time setup (already done)
 
-Each package has a pending publisher on PyPI bound to this repo, `release.yml`, and the matching environment. Details in the header comment of `release.yml`.
+Core has a pending publisher on PyPI bound to this repo, `release.yml`, and the `pypi-core` environment. Details in the header comment of `release.yml`.

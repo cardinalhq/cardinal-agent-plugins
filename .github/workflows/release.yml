@@ -1,27 +1,22 @@
-# Publishes the two pip-shipped packages in this repo to PyPI via OIDC
-# trusted publishing. No long-lived PYPI_API_TOKEN — PyPI verifies the
-# GitHub Actions identity (owner + repo + workflow filename + environment
-# name) at publish time.
+# Publishes the pip-shipped core package to PyPI via OIDC trusted
+# publishing. No long-lived PYPI_API_TOKEN — PyPI verifies the GitHub
+# Actions identity (owner + repo + workflow filename + environment name)
+# at publish time.
 #
-# Tag scheme (packages release independently):
-#   core-vX.Y.Z      -> publishes cardinal-agent-core       from core/
-#   omnigent-vX.Y.Z  -> publishes cardinal-omnigent-policy  from adapters/omnigent/
+# Tag scheme:
+#   core-vX.Y.Z  -> publishes cardinal-agent-core  from core/
 #
-# Since omnigent depends on cardinal-agent-core, publish core FIRST when
-# both are moving.
-#
-# One-time PyPI setup (per package, done in PyPI web UI as CardinalHQ):
+# One-time PyPI setup (done in PyPI web UI as CardinalHQ):
 #   Account -> Publishing -> Add a new pending publisher
-#     PyPI project name:  cardinal-agent-core         (or cardinal-omnigent-policy)
+#     PyPI project name:  cardinal-agent-core
 #     Owner:              cardinalhq
 #     Repository:         cardinal-agent-plugins
 #     Workflow name:      release.yml
-#     Environment name:   pypi-core                   (or pypi-omnigent)
+#     Environment name:   pypi-core
 #
-# The GitHub Environments (pypi-core, pypi-omnigent) are also created in
-# the repo's Settings -> Environments so the workflow's `environment:`
-# block resolves. Optional protection rules (reviewers, wait timer) go
-# there.
+# The GitHub Environment (pypi-core) is also created in the repo's
+# Settings -> Environments so the workflow's `environment:` block
+# resolves. Optional protection rules (reviewers, wait timer) go there.
 
 name: Release to PyPI
 
@@ -29,7 +24,6 @@ on:
   push:
     tags:
       - "core-v*"
-      - "omnigent-v*"
 
 jobs:
   publish-core:
@@ -54,26 +48,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: core/dist
-
-  publish-omnigent:
-    if: startsWith(github.ref, 'refs/tags/omnigent-v')
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi-omnigent
-      url: https://pypi.org/p/cardinal-omnigent-policy
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build sdist and wheel
-        working-directory: adapters/omnigent
-        run: |
-          python -m pip install --upgrade build
-          python -m build
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: adapters/omnigent/dist
