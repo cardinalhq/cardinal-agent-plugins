@@ -9,7 +9,7 @@ core/cardinal_core/     shared runtime — OTLP emission, initiative
                         resolution, spend limits, device consent,
                         session counters
 adapters/               per-agent surfaces (codex, gemini, cursor,
-                        claude, omnigent, opencode, pi)
+                        claude, opencode, pi)
 build/vendor.py         copies core into each plugin artifact so shipped
                         plugins stay self-contained (no pip for users)
 docs/specs/             the extraction spec and migration plan
@@ -58,33 +58,12 @@ push the built artifact (adapter code + vendored `cardinal_core`) plus a
 offers the update. `release.py` is idempotent — mirrors already at the tag
 no-op.
 
-The two pip packages ship to PyPI separately (`.github/workflows/release.yml`,
-via OIDC trusted publishing) on tags: `core-vX.Y.Z` → `cardinal-agent-core`,
-`omnigent-vX.Y.Z` → `cardinal-omnigent-policy`.
+The shared core ships to PyPI separately (`.github/workflows/release.yml`,
+via OIDC trusted publishing) on `core-vX.Y.Z` tags as `cardinal-agent-core`.
 
-## Omnigent
-
-Unlike the CLI adapters, the omnigent integration ships as a pip
-package (`cardinal-omnigent-policy`) that loads inside the omnigent
-server. Install into the same Python interpreter that runs your
-omnigent server:
-
-```sh
-# venv
-pip install cardinal-omnigent-policy
-
-# pipx-installed omnigent (put the CLI on PATH via --include-apps)
-pipx inject omnigent cardinal-omnigent-policy --include-apps
-
-# then, from anywhere:
-cardinal-omnigent-connect --config /path/to/omnigent-config.yaml
-```
-
-`cardinal-agent-core` is pulled in as a dependency. `cardinal-omnigent-connect`
-runs device-flow auth, mints an ingest credential, and merges a
-`cardinalManaged` block into your server config. See
-[`adapters/omnigent/README.md`](./adapters/omnigent/README.md) for the
-manual-config form and what the policies emit.
+The omnigent policy adapter (`cardinal-omnigent-policy`) was removed on
+2026-09-14. Its published PyPI releases (up to 0.4.0) stay available but get
+no further updates.
 
 ## Development
 

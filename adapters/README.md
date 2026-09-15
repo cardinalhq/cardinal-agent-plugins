@@ -11,7 +11,6 @@ its pre-migration goldens, and proves byte-equal OTLP output.
 | `gemini/` | P2 | **migrated** — 8/8 goldens byte-equal, 11 tests | cardinalhq/cardinal-gemini-plugin |
 | `cursor/` | P3 | **migrated** — 10/10 goldens byte-equal, 43 tests | cardinalhq/cardinal-cursor-plugin |
 | `claude/` | P4 | **migrated** — 12 parity + 124 ported tests | cardinalhq/cardinal-claude-plugin |
-| `omnigent/` | P5 | separate spec; blocked on core 0.2.0 (`docs/specs/core-gaps-followup.md`) | — (pip-installed, not vendored) |
 | `opencode/` | native | npm package; OpenCode 1.18.30; telemetry + native MCP | — (`build/native.py`) |
 | `pi/` | native | Pi package; Pi 0.85.1; telemetry + bundled MCP client | — (`build/native.py`) |
 

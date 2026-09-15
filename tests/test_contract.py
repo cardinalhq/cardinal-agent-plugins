@@ -37,17 +37,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 ADAPTERS = ("claude", "codex", "cursor", "gemini")
 
-# omnigent is deliberately NOT in ADAPTERS (toolkit-hive-mind.md PLG.1):
-# it has no committed adapters/omnigent/tests/goldens/*.json for
-# load_adapter_events' glob to find, its cardinal.git_state structurally
-# lacks 3 REQUIRED_KEYS (no workspace in the policy contract), and its
-# cardinal.subagent_usage has no subagent_type equivalent (see
-# SUBAGENT_TYPE_ADAPTERS below). None of the three is closeable by adding
-# an emit. It keeps its own suite (adapters/omnigent/tests/test_omnigent.py,
-# which imports REQUIRED_KEYS from this module directly) and is covered by
-# the capability-identity fields that DO apply to it there. Full writeup:
-# docs/specs/subagent-telemetry-enrichment.md §8.
-
 # Which Cardinal events each adapter's goldens must contain.
 EXPECTED_EVENTS: dict[str, set[str]] = {
     "claude": {
@@ -95,7 +84,7 @@ REQUIRED_KEYS: dict[str, set[str]] = {
     "cardinal.subagent_usage": {
         # model: the latent-subagent-mining clustering signal — dominant
         # model by worked tokens (claude), payload-probed (codex/cursor/
-        # gemini), engine-injected context.model (omnigent).
+        # gemini).
         "session_id", "subagent_description", "model",
     },
     "cardinal.plan_state": {
@@ -108,8 +97,7 @@ REQUIRED_KEYS: dict[str, set[str]] = {
 
 # Capability-identity fields the lakerunner identity extractor (T1.2, see
 # docs/specs/toolkit-hive-mind.md) keys on. These are NOT folded into
-# REQUIRED_KEYS above because that dict is shared verbatim with
-# adapters/omnigent/tests/test_omnigent.py, and each field below is
+# REQUIRED_KEYS above because each field below is
 # adapter-scoped rather than universal (see docs/specs/
 # subagent-telemetry-enrichment.md §7 for the per-adapter emission
 # evidence and why each asymmetry is deliberate, not a gap).
@@ -125,8 +113,7 @@ MCP_SPLIT_KEYS = {"mcp_server_name", "mcp_tool_name"}
 # subagent_type: emitted by all 4 CLI adapters on cardinal.subagent_usage
 # (probed on codex/cursor/gemini — their SubagentStop-equivalent payload
 # shape is unconfirmed in the wild; see the CARDINAL_*_DEBUG_PAYLOADS
-# capture affordances). Omnigent has no type-taxonomy field to probe for
-# (structural, not a probing gap) and is excluded from this set.
+# capture affordances).
 SUBAGENT_TYPE_ADAPTERS = {"claude", "codex", "cursor", "gemini"}
 
 # cardinal_command on cardinal.git_state, sourced from the shared

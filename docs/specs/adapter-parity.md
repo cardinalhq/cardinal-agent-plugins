@@ -89,7 +89,7 @@ instead of shipping a flow that never fires.
 | gemini | `BeforeAgent`, network in a detached child | `BeforeAgent` `additionalContext` + CLI | Shipped hooks never loaded; needs Gemini CLI 0.26+ and a `cardinal-connect` re-run; cost is an upper bound; no `subagent_usage` |
 | opencode | shared native bridge | `cardinal_record_decision` tool + `experimental.chat.messages.transform` | Prompt hook is experimental |
 | pi | shared native bridge | `cardinal_record_decision` tool + `before_agent_start` `systemPrompt` | — |
-| omnigent | labels or observed `gh pr create` only; no head_sha | Unsupported: policies can't add model context or tools | Known mis-attribution cases in adapter README |
+| omnigent | — | — | Removed from distribution 2026-09-14 (adapter deleted; PyPI releases up to 0.4.0 left published, no further updates). Before removal: PR from labels or observed `gh pr create`; decision capture unsupported |
 
 Only Claude has been exercised in a live host session; the others are
 verified against host source/docs and tests.
