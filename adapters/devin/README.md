@@ -9,7 +9,27 @@ logs. Run one per Devin org. Design: [docs/specs/devin-adapter.md](../../docs/sp
 > (docs.devin.ai, read 2026-09-14) with synthetic fixtures. It has not been
 > run against a live Devin org.
 
-Python 3.9+, standard library only. No packaging yet; run it from a checkout.
+Python 3.9+, standard library only. Ships as a release tarball and a
+container image (see [Install](#install) and [Run in a container](#run-in-a-container));
+it also runs straight from a checkout as `adapters/devin/bin/cardinal-devin`.
+
+## Install
+
+Each `devin-vX.Y.Z` GitHub release carries a self-contained tarball
+(`cardinal_core` vendored, no pip):
+
+```sh
+VERSION=0.1.0
+gh release download "devin-v${VERSION}" --repo cardinalhq/cardinal-agent-plugins \
+  --pattern "cardinal-devin-${VERSION}.tar.gz"
+tar -xzf "cardinal-devin-${VERSION}.tar.gz"
+"./cardinal-devin-${VERSION}/bin/cardinal-devin" --version
+```
+
+Keep the extracted directory intact: `bin/cardinal-devin` loads
+`cardinal_devin/` and `cardinal_core/` from next to it. Put `bin/` on
+`PATH` or call it by path. Build the same tarball from a checkout with
+`python3 build/devin.py` (writes `dist/devin/`).
 
 ## Setup
 
@@ -43,6 +63,23 @@ Python 3.9+, standard library only. No packaging yet; run it from a checkout.
    `CARDINAL_DEVIN_HOME` to change): `cardinal.json`,
    `cardinal-secrets.json` (0600), and `cardinal/devin-poll-state.json`.
 
+   **Or, non-interactively** (containers, Kubernetes), set the ingest
+   credential in the environment instead:
+
+   | Env | |
+   |---|---|
+   | `CARDINAL_INGEST_ENDPOINT` | OTLP/HTTP base URL, without `/v1/logs` (the `ingest_endpoint` that `connect` stores in `cardinal.json`) |
+   | `CARDINAL_INGEST_API_KEY` | an `ingest:write` key (the `ingest_api_key` in `cardinal-secrets.json`), sent as `x-cardinalhq-api-key` |
+   | `CARDINAL_ORG` | optional: `cardinal.org` resource attribute (`connect` stores the org slug); default `unknown` |
+   | `CARDINAL_DEPLOYMENT_ENV` | optional: `deployment.environment` resource attribute; default `unknown` |
+
+   When both `CARDINAL_INGEST_ENDPOINT` and `CARDINAL_INGEST_API_KEY` are
+   set they take precedence over any connect state, and `CARDINAL_ORG` /
+   `CARDINAL_DEPLOYMENT_ENV` are the only source of those attributes.
+   Setting just one of the pair is an error (`poll` exits 2). `status` says
+   which source is in use; the key is never printed or logged. The poll
+   state still lives in the state dir.
+
 4. **Run it:**
 
    ```sh
@@ -63,6 +100,138 @@ Python 3.9+, standard library only. No packaging yet; run it from a checkout.
 
    Also `--devin-base-url` (`DEVIN_API_BASE_URL`), `--retry-updated-after-filter`,
    `--no-decisions`, `-v`.
+
+   `poll` logs to stderr (`--dry-run` bodies go to stdout). It exits 1 when
+   there is no Cardinal credential and 2 on other configuration errors (no
+   Devin key, half-set `CARDINAL_INGEST_*`, unreadable poll state). A failed
+   cycle is logged and retried next interval; SIGTERM stops it cleanly.
+
+## Run in a container
+
+Image: `ghcr.io/cardinalhq/cardinal-devin-poller` (`linux/amd64`,
+`linux/arm64`), tagged `vX.Y.Z` and `latest`. It runs as uid 10001, with
+`CARDINAL_DEVIN_HOME=/data`; mount a volume at `/data` so poll state
+survives restarts. Default command: `poll --interval 300`.
+
+```sh
+export DEVIN_API_KEY=cog_... DEVIN_ORG_ID=... GITHUB_TOKEN=...
+export CARDINAL_INGEST_ENDPOINT=https://... CARDINAL_INGEST_API_KEY=...
+export CARDINAL_ORG=your-org CARDINAL_DEPLOYMENT_ENV=prod
+
+docker volume create cardinal-devin-data
+docker run -d --name cardinal-devin-poller --restart unless-stopped \
+  -e DEVIN_API_KEY -e DEVIN_ORG_ID -e GITHUB_TOKEN \
+  -e CARDINAL_INGEST_ENDPOINT -e CARDINAL_INGEST_API_KEY \
+  -e CARDINAL_ORG -e CARDINAL_DEPLOYMENT_ENV \
+  -v cardinal-devin-data:/data \
+  ghcr.io/cardinalhq/cardinal-devin-poller:v0.1.0
+docker logs -f cardinal-devin-poller
+```
+
+`-e NAME` without a value passes the variable through from your shell, so
+keys stay out of the command line. Other commands work the same way, e.g.
+`docker run --rm -e DEVIN_API_KEY ... -v cardinal-devin-data:/data
+ghcr.io/cardinalhq/cardinal-devin-poller:v0.1.0 status`. To use the device
+flow instead of env credentials, run `connect` once with `-it` and the same
+volume.
+
+Build it locally from the repository root:
+`docker build -f adapters/devin/Dockerfile -t cardinal-devin-poller .`
+
+### Kubernetes
+
+Run **exactly one replica per Devin org**, with its state on a
+PersistentVolumeClaim. Two pollers must never share one state file (they
+would overwrite each other's progress and re-send), so use
+`strategy: Recreate` rather than a rolling update, and don't scale the
+Deployment.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cardinal-devin-poller
+type: Opaque
+stringData:
+  DEVIN_API_KEY: cog_...
+  DEVIN_ORG_ID: "..."
+  GITHUB_TOKEN: ghp_...
+  CARDINAL_INGEST_ENDPOINT: https://...
+  CARDINAL_INGEST_API_KEY: "..."
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cardinal-devin-poller-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cardinal-devin-poller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cardinal-devin-poller
+  template:
+    metadata:
+      labels:
+        app: cardinal-devin-poller
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: poller
+          image: ghcr.io/cardinalhq/cardinal-devin-poller:v0.1.0
+          args: ["poll", "--interval", "300"]
+          envFrom:
+            - secretRef:
+                name: cardinal-devin-poller
+          env:
+            - name: CARDINAL_ORG
+              value: your-org
+            - name: CARDINAL_DEPLOYMENT_ENV
+              value: prod
+          volumeMounts:
+            - name: state
+              mountPath: /data
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: cardinal-devin-poller-state
+```
+
+One Deployment, Secret and PVC per Devin org. Resource figures are a
+starting point, not measured.
+
+## Releasing
+
+Bump `__version__` in `cardinal_devin/__init__.py`, merge, then push a
+matching tag:
+
+```sh
+git tag devin-v0.1.0 && git push origin devin-v0.1.0
+```
+
+[`.github/workflows/devin-release.yml`](../../.github/workflows/devin-release.yml)
+tests, publishes the GitHub release with the tarball, and pushes the image.
+See [docs/RELEASING.md](../../docs/RELEASING.md#3-devin-poller).
 
 ### Decision capture (opt-in per session)
 
@@ -205,6 +374,8 @@ lookback window).
 - **Without a GitHub token, or for PRs on other hosts:** no branch, head
   sha, or initiative; outcomes must join on repo + PR number.
 - **Idle active sessions** stop being polled after `--active-ttl-days` (v3).
+- **One poller per state.** State is a local JSON file with no locking;
+  run a single instance per state directory.
 
 ## Backend requirement
 
@@ -231,5 +402,7 @@ PYTHONPATH=core python3 adapters/devin/tests/capture_goldens.py   # after an int
 
 Fake Devin, GitHub, Cardinal, and OTLP servers run on localhost; fixtures
 in `tests/fixtures/` are synthetic, written from the docs. Goldens in
-`tests/goldens/` feed `tests/test_contract.py`. CI:
-`.github/workflows/devin-adapter.yml` (Python 3.9 and 3.12).
+`tests/goldens/` feed `tests/test_contract.py`. `tests/test_build.py`
+builds the release tarball, extracts it outside the repo, and runs it with a
+clean environment. CI: `.github/workflows/devin-adapter.yml` (Python 3.9 and
+3.12); releases: `.github/workflows/devin-release.yml`.

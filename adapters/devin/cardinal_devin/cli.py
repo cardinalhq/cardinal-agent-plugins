@@ -6,15 +6,15 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
-from cardinal_core import otlp
 from cardinal_core.paths import AgentPaths
 
-from . import __version__
+from . import __version__, ingest
 from .client import (
     API_VERSIONS, DEFAULT_DEVIN_BASE_URL, DEFAULT_GITHUB_API_URL, ApiError, DevinClient, GitHubClient,
 )
@@ -122,12 +122,45 @@ def _paths(args: argparse.Namespace) -> AgentPaths:
     return AgentPaths(home=(args.state_dir or default_state_dir()).expanduser())
 
 
+def _raise_interrupt(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt
+
+
 def cmd_poll(args: argparse.Namespace) -> int:
+    """SIGTERM stops the poller like Ctrl-C. As PID 1 in a container Python
+    has no default SIGTERM action, so without this `docker stop` and pod
+    termination wait out the grace period and SIGKILL."""
+    try:
+        previous = signal.signal(signal.SIGTERM, _raise_interrupt)
+    except ValueError:  # not the main thread
+        previous = None
+    try:
+        return _poll(args)
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _poll(args: argparse.Namespace) -> int:
     paths = _paths(args)
-    connection = otlp.connection_from_paths(paths)
+    try:
+        ingest_config = ingest.resolve(paths)
+    except ingest.IngestConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    connection = ingest_config.connection
     if connection is None and not args.dry_run:
-        print("Not connected. Run: cardinal-devin connect", file=sys.stderr)
+        print(f"Not connected. Run: cardinal-devin connect, or set {ingest.ENV_ENDPOINT} and {ingest.ENV_API_KEY}",
+              file=sys.stderr)
         return 1
+    if ingest_config.source == ingest.SOURCE_ENV:
+        log.info("Cardinal ingest: credentials from environment (%s, endpoint %s)",
+                 ingest.ENV_API_KEY, connection.endpoint if connection else "?")
+    else:
+        ignored = ingest.resource_env_ignored()
+        if ignored:
+            log.warning("%s ignored: only used with %s and %s", ", ".join(ignored),
+                        ingest.ENV_ENDPOINT, ingest.ENV_API_KEY)
     key, _ = resolve_devin_key(args.devin_key_file)
     if not key:
         print("error: no Devin key (set DEVIN_API_KEY or pass --devin-key-file)", file=sys.stderr)
@@ -146,7 +179,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
     if github is None:
         log.info("GITHUB_TOKEN not set: git_state carries repo and PR only (no branch, head sha, initiative)")
     poller = Poller(
-        devin=devin, state=state, connection=connection, connection_state=paths.read_state(), github=github,
+        devin=devin, state=state, connection=connection, connection_state=ingest_config.connection_state,
+        github=github,
         options=PollOptions(
             lookback_days=args.lookback_days, active_ttl_days=args.active_ttl_days,
             state_retention_days=args.state_retention_days, max_state_sessions=args.max_state_sessions,

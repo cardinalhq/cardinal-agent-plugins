@@ -1,0 +1,12 @@
+# Build context is the repository root; send only what the Dockerfile copies.
+*
+!LICENSE
+!adapters/devin/README.md
+!adapters/devin/bin/cardinal-devin
+!adapters/devin/cardinal_devin/
+!adapters/devin/playbook/
+!core/cardinal_core/
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.DS_Store

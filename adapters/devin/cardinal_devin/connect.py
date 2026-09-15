@@ -12,12 +12,12 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from cardinal_core import deviceflow
 from cardinal_core.paths import AgentPaths, atomic_write_json, atomic_write_secret
 
-from . import __version__
+from . import __version__, ingest
 from .state import STATE_FILE, PollState, StateError
 
 CLIENT_ID = "cardinal-devin-poller"
@@ -166,18 +166,44 @@ def run_status(
     api_version: str,
     github_token_set: bool,
     out: Callable[[str], None] = print,
+    environ: Optional[Mapping[str, str]] = None,
 ) -> int:
     state = paths.read_state()
     secrets = paths.read_secrets()
-    connected = bool(state.get("ingest_endpoint") and secrets.get("ingest_api_key"))
+    state_connected = bool(state.get("ingest_endpoint") and secrets.get("ingest_api_key"))
     out(f"State dir: {paths.home}")
-    if connected:
+    config_error = False
+    try:
+        env_config = ingest.from_env(environ)
+    except ingest.IngestConfigError as exc:
+        env_config = None
+        config_error = True
+        out(f"Cardinal: error: {exc}")
+    connected = False
+    if env_config is not None and env_config.connection is not None:
+        connected = True
+        facts = env_config.connection_state
+        # The key itself is never printed, not even a prefix.
+        out(f"Cardinal: credentials from environment ({ingest.ENV_ENDPOINT}, {ingest.ENV_API_KEY}; "
+            "these take precedence over connect state)")
+        out(f"  ingest endpoint: {env_config.connection.endpoint} (key from ${ingest.ENV_API_KEY}, not shown)")
+        out(f"  cardinal.org: {facts.get('org_slug') or 'unknown (set ' + ingest.ENV_ORG + ')'}")
+        out(f"  deployment.environment: "
+            f"{facts.get('deployment_environment') or 'unknown (set ' + ingest.ENV_DEPLOYMENT_ENV + ')'}")
+        if state_connected:
+            out(f"  connect state in {paths.home} is ignored while these are set")
+    elif state_connected and not config_error:
+        connected = True
         out(f"Cardinal: connected to {state.get('host')} "
             f"(org {state.get('org_slug') or state.get('org_id')}, by {state.get('user_email') or 'unknown'})")
         out(f"  ingest endpoint: {state.get('ingest_endpoint')} (key {state.get('ingest_key_prefix') or '?'}...)")
         out(f"  deployment.environment: {state.get('deployment_environment')}")
-    else:
-        out("Cardinal: Not connected. Run: cardinal-devin connect")
+        ignored = ingest.resource_env_ignored(environ)
+        if ignored:
+            out(f"  {', '.join(ignored)} ignored: only used with {ingest.ENV_ENDPOINT} and {ingest.ENV_API_KEY}")
+    elif not config_error:
+        out(f"Cardinal: Not connected. Run: cardinal-devin connect, "
+            f"or set {ingest.ENV_ENDPOINT} and {ingest.ENV_API_KEY}")
 
     resolved = api_version if api_version != "auto" else ("v3" if devin_org_id else "v1")
     out(f"Devin: key {'from ' + devin_key_source if devin_key_source else 'MISSING (set DEVIN_API_KEY)'}; "
@@ -199,4 +225,6 @@ def run_status(
     disabled = poll_state.data.get("v3_filter_disabled")
     if isinstance(disabled, dict):
         out(f"  v3 updated_after filter DISABLED: {disabled.get('reason')}")
+    if config_error:
+        return 2
     return 0 if connected and devin_key_source else 1
