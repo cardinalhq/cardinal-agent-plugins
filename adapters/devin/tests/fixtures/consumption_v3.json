@@ -1,0 +1,28 @@
+{
+  "_source": "SYNTHETIC. Hand-written from the documented ConsumptionResponse schema for GET /v3/organizations/{org_id}/consumption/daily/sessions/{session_id} (docs.devin.ai, read 2026-09-15). Not captured from a live Devin org.",
+  "sessions": {
+    "v3exit": {
+      "total_acus": 3.5,
+      "consumption_by_date": [
+        {"date": "2026-09-13", "acus": 1.0, "acus_by_product": {"cascade": 0.4, "devin": 0.5, "review": 0.1, "terminal": 0.0}},
+        {"date": "2026-09-14", "acus": 2.5, "acus_by_product": {"cascade": 1.1, "devin": 1.0, "review": 0.3, "terminal": 0.1}}
+      ]
+    },
+    "v3running": {
+      "total_acus": 1.25,
+      "consumption_by_date": [
+        {"date": "2026-09-14", "acus": 1.25, "acus_by_product": {"cascade": 0.75, "devin": 0.5}}
+      ]
+    },
+    "v3suspended": {
+      "total_acus": 0.5,
+      "consumption_by_date": [
+        {"date": "2026-09-13", "acus": 0.5}
+      ]
+    },
+    "v3empty": {
+      "total_acus": 0.0,
+      "consumption_by_date": []
+    }
+  }
+}

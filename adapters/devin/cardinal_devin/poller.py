@@ -39,7 +39,9 @@ from cardinal_core import otlp
 
 from . import __version__, telemetry
 from .client import ApiError, DevinClient, GitHubClient
-from .sessions import Session, normalize, primary_pr_url
+from .sessions import (
+    Session, Usage, normalize, normalize_v1_consumption, normalize_v3_consumption, primary_pr_url,
+)
 from .state import PollState
 
 log = logging.getLogger("cardinal_devin")
@@ -66,6 +68,7 @@ class PollOptions:
     overlap_seconds: int = 300
     not_found_limit: int = 3
     emit_decisions: bool = True
+    emit_usage: bool = True
     retry_updated_after_filter: bool = False
     dry_run: bool = False
     emit_timeout: float = 10.0
@@ -78,6 +81,7 @@ class PollResult:
     git_state: int = 0
     decisions: int = 0
     skipped_decisions: int = 0
+    usage: int = 0
     errors: int = 0
     truncated: bool = False
     bodies: List[Dict[str, Any]] = field(default_factory=list)
@@ -86,7 +90,8 @@ class PollResult:
         return (
             f"listed={self.listed} refreshed={self.refreshed} git_state={self.git_state} "
             f"decisions={self.decisions} skipped_decisions={self.skipped_decisions} "
-            f"errors={self.errors}" + (" truncated" if self.truncated else "")
+            f"usage={self.usage} errors={self.errors}"
+            + (" truncated" if self.truncated else "")
         )
 
 
@@ -120,6 +125,8 @@ class Poller:
         api = self.devin.api_version
         floor = int(now - self.options.lookback_days * DAY)
         cutoff_ns = floor * NS
+        self._usage_disabled_this_cycle = False
+        self._touched_sids: set = set()
 
         filter_validated = False
         if api == "v3" and self.options.retry_updated_after_filter and self.state.data.pop(FILTER_DISABLED, None):
@@ -152,6 +159,9 @@ class Poller:
             self._safe_handle(session, from_list=True, result=result)
 
         self._refresh_unlisted(seen, now, result)
+
+        if self.options.emit_usage:
+            self._emit_usage(now, result)
 
         # Only advance past what was actually seen through a filter that checked out.
         if filter_validated and not result.truncated and not result.errors:
@@ -394,6 +404,7 @@ class Poller:
                 telemetry.send_logs(
                     records, self.connection, resource, __version__, timeout=self.options.emit_timeout,
                 )
+            self._touched_sids.add(sid)
 
         result.git_state += len(new_prs)
         result.decisions += len(new_decisions)
@@ -423,6 +434,92 @@ class Poller:
             self.state.sessions[sid] = entry
             if records:
                 self.state.save()  # narrows the crash window to this session
+
+    # -- usage (ACU) ---------------------------------------------------------
+
+    def _emit_usage(self, now: float, result: PollResult) -> None:
+        if self.devin.api_version == "v1":
+            self._emit_usage_v1(now, result)
+        else:
+            self._emit_usage_v3(now, result)
+
+    def _emit_usage_v1(self, now: float, result: PollResult) -> None:
+        try:
+            rows = list(self.devin.iter_v1_enterprise_consumption())
+        except ApiError as exc:
+            if self._handle_usage_scope_error(exc):
+                return
+            log.warning("Devin enterprise consumption fetch failed: %s (will retry next poll)", exc)
+            result.errors += 1
+            return
+        for row in rows:
+            usage = normalize_v1_consumption(row)
+            if usage is None:
+                continue
+            self._send_usage(usage, now, result)
+
+    def _emit_usage_v3(self, now: float, result: PollResult) -> None:
+        for sid in sorted(self._touched_sids):
+            try:
+                resp = self.devin.get_v3_session_consumption(sid)
+            except ApiError as exc:
+                if self._handle_usage_scope_error(exc):
+                    return
+                log.warning(
+                    "Devin v3 consumption fetch failed for %s: %s (will retry next poll)", sid, exc,
+                )
+                result.errors += 1
+                continue
+            if resp is None:
+                continue
+            usage = normalize_v3_consumption(sid, resp)
+            if usage is None:
+                continue
+            entry = self.state.sessions.get(sid) or {}
+            prs = entry.get("prs")
+            usage.pr_urls = list(prs) if isinstance(prs, dict) else []
+            usage.user_email = entry.get("email")
+            self._send_usage(usage, now, result)
+
+    def _handle_usage_scope_error(self, exc: ApiError) -> bool:
+        if exc.status not in (401, 403):
+            return False
+        self._usage_disabled_this_cycle = True
+        if not self.state.data.get("usage_scope_warned"):
+            log.warning("Devin key lacks consumption scope; ACU usage disabled this run")
+            self.state.data["usage_scope_warned"] = True
+        return True
+
+    def _send_usage(self, usage: Usage, now: float, result: PollResult) -> None:
+        if self._usage_disabled_this_cycle:
+            return
+        sid = usage.session_id
+        primary = primary_pr_url(usage.pr_urls)
+        facts = telemetry.pr_facts(primary, self.github) if primary else {}
+        attrs = telemetry.usage_attrs(sid, usage, facts)
+        digest = telemetry.usage_digest(usage, primary)
+        if self.state.usage_digests.get(sid) == digest:
+            return
+        entry = self.state.sessions.get(sid) or {}
+        email = usage.user_email or entry.get("email")
+        ts_ns = usage.period_end_ns or usage.period_start_ns or int(now * NS)
+        record = otlp.log_record(telemetry.EVENT_USAGE, attrs, ts_ns)
+        resource = telemetry.resource(self.connection_state, email, __version__)
+        try:
+            if self.options.dry_run:
+                result.bodies.append(telemetry.otlp_body([record], resource, __version__))
+            else:
+                assert self.connection is not None
+                telemetry.send_logs(
+                    [record], self.connection, resource, __version__, timeout=self.options.emit_timeout,
+                )
+        except telemetry.EmitError as exc:
+            log.warning("session %s: usage emit failed: %s (will retry next poll)", sid, exc)
+            result.errors += 1
+            return
+        self.state.usage_digests[sid] = digest
+        result.usage += 1
+        self.state.save()
 
     def _user_email(self, user_id: str) -> Optional[str]:
         now = self.clock()

@@ -119,6 +119,10 @@ class FakeDevin(FakeServer):
         self.api_key = api_key
         self.rate_limit_remaining = 0
         self.retry_after: Optional[str] = "0"
+        # ACU consumption responses per session_id (v1 rows, v3 detail bodies).
+        self.v1_consumption: List[Dict[str, Any]] = []
+        self.v3_consumption: Dict[str, Dict[str, Any]] = {}
+        self.consumption_status: int = 200
         # v3 only. Sessions are stored in unix seconds; these choose how
         # updated_at/created_at are serialised and how updated_after is read,
         # so tests can model a unit mismatch in either direction.
@@ -155,6 +159,21 @@ class FakeDevin(FakeServer):
             headers = {"Retry-After": self.retry_after} if self.retry_after is not None else {}
             return 429, headers, {"detail": "Too Many Requests"}
         q = {k: v[0] for k, v in req.query.items()}
+        if req.path == "/v1/enterprise/consumption":
+            if self.consumption_status != 200:
+                return self.consumption_status, {}, {"detail": "denied"}
+            return 200, {}, {
+                "cycle": {"start": None, "end": None},
+                "sessions": copy.deepcopy(self.v1_consumption),
+            }
+        v3_consumption_prefix = f"/v3/organizations/{self.org_id}/consumption/daily/sessions/"
+        if req.path.startswith(v3_consumption_prefix):
+            if self.consumption_status != 200:
+                return self.consumption_status, {}, {"detail": "denied"}
+            devin_id = urllib.parse.unquote(req.path[len(v3_consumption_prefix):])
+            bare = devin_id[len("devin-"):] if devin_id.startswith("devin-") else devin_id
+            body = self.v3_consumption.get(bare) or self.v3_consumption.get(devin_id)
+            return (200, {}, copy.deepcopy(body)) if body else (404, {}, {"detail": "Not Found"})
         if self.api == "v1":
             if req.path == "/v1/sessions":
                 limit, offset = int(q.get("limit", "100")), int(q.get("offset", "0"))
