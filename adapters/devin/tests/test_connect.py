@@ -107,7 +107,9 @@ class CliTests(unittest.TestCase):
     def test_poll_requires_connection_and_key(self) -> None:
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        env = {k: v for k, v in os.environ.items() if k not in ("DEVIN_API_KEY", "DEVIN_ORG_ID", "GITHUB_TOKEN")}
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("DEVIN_API_KEY", "DEVIN_ORG_ID", "GITHUB_TOKEN")
+               and not k.startswith("CARDINAL_INGEST_")}
         with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.stderr", io.StringIO()) as err:
             self.assertEqual(cli.main(["poll", "--once", "--state-dir", tmp]), 1)
             self.assertIn("Not connected", err.getvalue())

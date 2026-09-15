@@ -1,0 +1,227 @@
+name: Release Devin poller
+
+# Tag-driven release of the Devin poller (adapters/devin):
+#
+#   git tag devin-v0.1.0 && git push origin devin-v0.1.0
+#
+# - test:    Devin adapter tests (incl. the build/devin.py smoke test) and
+#            the cross-adapter contract test on Python 3.9 and 3.12.
+# - release: GitHub release devin-vX.Y.Z with cardinal-devin-X.Y.Z.tar.gz.
+#            Draft first, upload, then publish; a re-run leaves a published
+#            release untouched.
+# - image:   ghcr.io/cardinalhq/cardinal-devin-poller:vX.Y.Z and :latest
+#            (linux/amd64, linux/arm64); skipped if the version tag exists.
+#            :latest moves only when this is the highest devin-v* tag.
+#
+# Both publishing jobs refuse a tag that differs from
+# cardinal_devin.__version__. workflow_dispatch on a tag re-runs the release
+# (idempotent); on a branch, and on pull requests touching the packaging,
+# it only tests, builds the tarball, and builds the image without pushing.
+#
+# Auth: contents:write for the release and packages:write for GHCR, both on
+# the built-in GITHUB_TOKEN (same as executor-image.yml).
+
+on:
+  push:
+    tags: ['devin-v*']
+  pull_request:
+    paths:
+      - 'build/devin.py'
+      - 'adapters/devin/**'
+      - 'core/cardinal_core/**'
+      - '.github/workflows/devin-release.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: cardinalhq/cardinal-devin-poller
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '${{ matrix.python }}'
+      - name: Devin adapter tests (incl. release tarball smoke test)
+        env:
+          PYTHONPATH: core
+        run: python3 -m unittest discover adapters/devin/tests -v
+      - name: Cross-adapter contracts
+        run: python3 -m unittest discover tests -p test_contract.py -v
+      - name: Build release tarball
+        run: python3 build/devin.py
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/devin-v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify tag matches __version__
+        env:
+          RELEASE_TAG: '${{ github.ref_name }}'
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 build/devin.py --print-version)"
+          if [ "$RELEASE_TAG" != "devin-v${VERSION}" ]; then
+            echo "::error::tag $RELEASE_TAG does not match cardinal_devin.__version__ ($VERSION)" >&2
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "RELEASE_ARTIFACT=cardinal-devin-${VERSION}.tar.gz" >> "$GITHUB_ENV"
+      - name: Build release tarball
+        run: |
+          set -euo pipefail
+          python3 build/devin.py
+          test -f "dist/devin/${RELEASE_ARTIFACT}"
+      - name: Prepare release notes
+        env:
+          RELEASE_TAG: '${{ github.ref_name }}'
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          tag = os.environ['RELEASE_TAG']
+          version = os.environ['VERSION']
+          artifact = os.environ['RELEASE_ARTIFACT']
+          base = f'https://github.com/cardinalhq/cardinal-agent-plugins/blob/{tag}'
+          Path('release-notes.md').write_text(
+              'Cardinal for Devin: a server-side poller that reads the Devin REST API and sends '
+              '`cardinal.git_state` (PR linkage) and, for sessions created with the Cardinal '
+              'structured-output schema, `cardinal.decision`.\n\n'
+              f'- Tarball: `{artifact}` (Python 3.9+, standard library only, `cardinal_core` vendored). '
+              f'Extract and run `bin/cardinal-devin`.\n'
+              f'- Container image: `ghcr.io/cardinalhq/cardinal-devin-poller:v{version}` '
+              '(linux/amd64, linux/arm64).\n\n'
+              f'Setup, container and Kubernetes instructions: [adapters/devin/README.md]({base}/adapters/devin/README.md).\n\n'
+              '**Unvalidated against a live Devin org.** Built and tested against Devin\'s published API '
+              'docs with synthetic fixtures; payload shapes, v1/v3 availability and the v3 timestamp unit '
+              'are unconfirmed.\n\n'
+              '**Backend prerequisite:** Lakerunner must accept `agent.runtime=devin` (runtime `devin`) '
+              'before these sessions appear on Agent Outcomes.\n'
+          )
+          PY
+      - name: Publish GitHub release with the tarball
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_TAG: '${{ github.ref_name }}'
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --json isDraft > release-state.json 2>/dev/null; then
+            if [ "$(python3 -c 'import json; print(json.load(open("release-state.json"))["isDraft"])')" = False ]; then
+              echo "Release already published; leaving its assets unchanged."
+              exit 0
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --notes-file release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" "dist/devin/$RELEASE_ARTIFACT" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        env:
+          IS_TAG: "${{ startsWith(github.ref, 'refs/tags/devin-v') }}"
+          RELEASE_TAG: '${{ github.ref_name }}'
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 build/devin.py --print-version)"
+          if [ "$IS_TAG" = true ] && [ "$RELEASE_TAG" != "devin-v${VERSION}" ]; then
+            echo "::error::tag $RELEASE_TAG does not match cardinal_devin.__version__ ($VERSION)" >&2
+            exit 1
+          fi
+          # Re-running an older tag must not move :latest backwards.
+          LATEST=false
+          if [ "$IS_TAG" = true ]; then
+            HIGHEST="$(git tag -l 'devin-v*' | sed 's/^devin-v//' | sort -V | tail -n 1)"
+            if [ "$HIGHEST" = "$VERSION" ]; then LATEST=true; fi
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "push=${IS_TAG}" >> "$GITHUB_OUTPUT"
+          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether tag already exists in GHCR
+        id: exists
+        if: steps.version.outputs.push == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REF="${REGISTRY}/${IMAGE_NAME}:${{ steps.version.outputs.tag }}"
+          echo "$GH_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          # Only a definite "not found" means unpublished; any other failure
+          # stops the job so a flaky lookup can't overwrite a published tag.
+          # GHCR answers "denied" for a package that doesn't exist yet (login
+          # above already succeeded).
+          if out="$(docker manifest inspect "$REF" 2>&1)"; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+            echo "::notice::${REF} already published — skipping build"
+          elif printf '%s' "$out" | grep -qiE 'manifest unknown|no such manifest|not found|denied'; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not check whether ${REF} exists: ${out}" >&2
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.version.outputs.push == 'true' && steps.exists.outputs.exists == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on a release tag)
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: adapters/devin/Dockerfile
+          push: ${{ steps.version.outputs.push == 'true' }}
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
+            ${{ steps.version.outputs.latest == 'true' && format('{0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.title=cardinal-devin-poller
+            org.opencontainers.image.description=Cardinal telemetry poller for Devin (Cognition)
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

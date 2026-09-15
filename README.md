@@ -44,7 +44,9 @@ filter needed before production session analytics can consume their usage.
 server-side poller over the Devin REST API. It sends `cardinal.git_state`
 with PR linkage and, for sessions created with the Cardinal
 structured-output schema, `cardinal.decision`. It has not yet been run
-against a live Devin org.
+against a live Devin org. It ships as a release tarball and the
+`ghcr.io/cardinalhq/cardinal-devin-poller` image on `devin-vX.Y.Z` tags; see
+[docs/RELEASING.md](docs/RELEASING.md#3-devin-poller).
 
 ## Release flow
 
