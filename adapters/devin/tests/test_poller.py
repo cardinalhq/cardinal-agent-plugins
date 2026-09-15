@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import datetime, timezone
 
 import support
 from support import Harness
@@ -10,10 +11,15 @@ from cardinal_devin.state import PollState, StateError
 
 SHA_42 = "1" * 40
 DAY = 86400
+LIST_V3 = "/v3/organizations/org-test/sessions"
 
 
 def by_pr(records):
     return {attrs["cardinal_pr_number"]: (res, attrs) for res, attrs in records}
+
+
+def iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class PollCase(unittest.TestCase):
@@ -36,6 +42,9 @@ class PollCase(unittest.TestCase):
 
     def state(self):
         return PollState(self.h.state_path).sessions
+
+    def state_data(self):
+        return PollState(self.h.state_path).data
 
 
 class V1PollTests(PollCase):
@@ -109,6 +118,22 @@ class V1PollTests(PollCase):
         revisions = self.decisions("devin-v1-working")
         self.assertEqual(len(revisions), 2)
         self.assertEqual(revisions[1][1]["cardinal.decision.rationale"], "Now with a reason.")
+
+    def test_idless_ids_survive_reorder_and_insert(self) -> None:
+        self.h.devin.update("devin-v1-working", structured_output={"decisions": [
+            {"choice": "Retry"}, {"choice": "retry!"}]})
+        self.poll()
+        self.assertEqual(self.decision_ids("devin-v1-working"), ["retry", "retry-2"])
+        posts = len(self.h.ingest.posts)
+        self.h.devin.update("devin-v1-working", structured_output={"decisions": [
+            {"choice": "retry!"}, {"choice": "Retry"}]})
+        self.poll()
+        self.assertEqual(len(self.h.ingest.posts), posts)  # same ids, same content: nothing re-sent
+        self.h.devin.update("devin-v1-working", structured_output={"decisions": [
+            {"choice": "retry?"}, {"choice": "retry!"}, {"choice": "Retry"}]})
+        self.poll()
+        self.assertEqual(self.decision_ids("devin-v1-working"), ["retry", "retry-2", "retry-3"])
+        self.assertEqual(self.decisions("devin-v1-working")[-1][1]["cardinal.decision.choice"], "retry?")
 
     def test_without_github_token(self) -> None:
         self.poll(github=False)
@@ -191,7 +216,7 @@ class V1PollTests(PollCase):
         self.assertGreater(result.errors, 0)
         self.assertIn("will retry next poll", logs)
         self.assertNotIn("devin-v1-finished", self.state())
-        self.assertIn("devin-v1-blocked", self.state())  # nothing to send, so recorded
+        self.assertIn("devin-v1-blocked", self.state())  # active: tracked even with nothing to send
         self.h.ingest.status = 200
         self.poll()
         self.assertEqual(sorted(by_pr(self.h.records("cardinal.git_state"))), [42, 43])
@@ -218,9 +243,41 @@ class V1PollTests(PollCase):
         with self.assertRaises(StateError):
             PollState(self.h.state_path)
 
+    def test_state_stays_bounded(self) -> None:
+        self.h = Harness(self.addCleanup, api="v1", page_size=100)
+        self.h.devin.sessions = [
+            {
+                "session_id": f"bulk-{i}", "status": "finished", "status_enum": "finished",
+                "created_at": iso(self.h.now - 3600 * (i + 2)), "updated_at": iso(self.h.now - 3600 * (i + 2)),
+                "requesting_user_email": "bulk@example.com",
+                "pull_request": {"url": f"https://github.com/acme/widgets/pull/{1000 + i}"} if i % 2 == 0 else None,
+                "structured_output": None,
+            }
+            for i in range(120)
+        ]
+        _, logs = self.poll(github=False, max_state_sessions=40)
+        self.assertEqual(len(self.state()), 120)  # all inside the lookback window: none evictable
+        self.assertIn("above --max-state-sessions=40", logs)
+        posts = len(self.h.ingest.posts)
+        self.assertEqual(posts, 60)
+
+        self.h.now += 10 * DAY
+        self.poll(github=False, max_state_sessions=40)
+        # Sessions that sent nothing are dropped once past the lookback; the cap
+        # then evicts the oldest of the rest.
+        self.assertEqual(set(self.state()), {f"bulk-{i}" for i in range(0, 80, 2)})
+        self.poll(github=False, max_state_sessions=40)
+        self.assertEqual(len(self.h.ingest.posts), posts)  # evicted sessions are past the lookback: not re-sent
+        self.assertLess(self.h.state_path.stat().st_size, 200 * 40 + 500)
+
 
 class V3PollTests(PollCase):
     api = "v3"
+
+    def list_requests(self):
+        lists = [r for r in self.h.devin.requests if r.path == LIST_V3]
+        return ([r for r in lists if "updated_after" in r.query],
+                [r for r in lists if "updated_after" not in r.query])
 
     def test_v3_poll(self) -> None:
         result, _ = self.poll()
@@ -233,11 +290,11 @@ class V3PollTests(PollCase):
         self.assertEqual(self.decision_ids(), ["retry-backoff"])
         self.assertEqual(json.loads(self.decisions()[0][1]["cardinal.decision.anchors"]),
                          [{"kind": "directory", "identifier": "src/sync", "path": "src/sync"}])
-        lists = [r for r in self.h.devin.requests if r.path == "/v3/organizations/org-test/sessions"]
-        self.assertEqual(len(lists), 2)
-        self.assertIn("updated_after", lists[0].query)
-        self.assertEqual(lists[1].query["after"], ["2"])
-        self.assertIn("/v3/organizations/org-test/sessions/devin-v3exit", {r.path for r in self.h.devin.requests})
+        filtered, unfiltered = self.list_requests()
+        self.assertEqual(len(unfiltered), 1)  # the probe page
+        self.assertEqual(len(filtered), 2)
+        self.assertEqual(filtered[1].query["after"], ["2"])
+        self.assertIn(f"{LIST_V3}/devin-v3exit", {r.path for r in self.h.devin.requests})
 
     def test_v3_high_water_mark_and_refresh(self) -> None:
         self.poll()
@@ -246,28 +303,74 @@ class V3PollTests(PollCase):
         self.h.now += 600
         self.h.devin.requests.clear()
         self.poll()
-        lists = [r for r in self.h.devin.requests if r.path == "/v3/organizations/org-test/sessions"]
-        self.assertEqual(lists[0].query["updated_after"], [str(int(self.h.now - 600) - 300)])
-        refreshed = {r.path.rsplit("/", 1)[-1] for r in self.h.devin.requests
-                     if r.path.startswith("/v3/organizations/org-test/sessions/")}
+        filtered, _ = self.list_requests()
+        self.assertEqual(filtered[0].query["updated_after"], [str(int(self.h.now - 600) - 300)])
+        refreshed = {r.path.rsplit("/", 1)[-1] for r in self.h.devin.requests if r.path.startswith(LIST_V3 + "/")}
         self.assertEqual(refreshed, {"devin-v3running", "devin-v3suspended"})
         self.assertEqual(len(self.h.ingest.posts), posts)
         self.assertEqual(user_lookups, 2)  # alice + bob on the first poll
         self.assertFalse([r for r in self.h.devin.requests if r.path.startswith("/v3beta1/")])  # cached
+        self.assertNotIn("v3_filter_disabled", self.state_data())
 
-    def test_millisecond_timestamps_set_updated_after_unit(self) -> None:
-        for session in self.h.devin.sessions:
-            session["created_at"] *= 1000
-            session["updated_at"] *= 1000
+    def test_consistent_millisecond_timestamps(self) -> None:
+        self.h.devin.response_unit = self.h.devin.filter_unit = "ms"
         self.poll()
         first = int(self.h.now)
         posts = len(self.h.ingest.posts)
         self.h.now += 600
         self.h.devin.requests.clear()
         self.poll()
-        lists = [r for r in self.h.devin.requests if r.path == "/v3/organizations/org-test/sessions"]
-        self.assertEqual(lists[0].query["updated_after"], [str((first - 300) * 1000)])
+        filtered, _ = self.list_requests()
+        self.assertEqual(filtered[0].query["updated_after"], [str((first - 300) * 1000)])
         self.assertEqual(len(self.h.ingest.posts), posts)
+        self.assertNotIn("v3_filter_disabled", self.state_data())
+
+    def test_filter_that_hides_sessions_is_disabled(self) -> None:
+        # updated_at comes back in ms but updated_after is read as seconds, so
+        # the ms value sent is far in the future and the filter returns nothing.
+        self.h.devin.response_unit, self.h.devin.filter_unit = "ms", "s"
+        _, logs = self.poll()
+        self.assertIn("updated_after filter disabled", logs)
+        self.assertIn("missing from the filtered listing", self.state_data()["v3_filter_disabled"]["reason"])
+        self.assertEqual(sorted(by_pr(self.h.records("cardinal.git_state"))), [42, 43])  # fallback listing, same cycle
+        self.assertNotIn("v3", self.state_data()["hwm"])
+        posts = len(self.h.ingest.posts)
+        self.h.now += 600
+        self.h.devin.update("v3running", updated_at=int(self.h.now) - 60, pull_requests=[
+            {"pr_url": "https://github.com/acme/widgets/pull/43", "pr_state": None},
+            {"pr_url": "https://github.com/acme/widgets/pull/42", "pr_state": "open"},
+        ])
+        self.h.devin.requests.clear()
+        _, logs = self.poll()
+        self.assertIn("filter is disabled", logs)
+        filtered, _ = self.list_requests()
+        self.assertEqual(filtered, [])
+        new = self.h.records("cardinal.git_state")[posts:]
+        self.assertEqual([(a["session_id"], a["cardinal_pr_number"]) for _, a in new], [("v3running", 42)])
+
+    def test_filter_that_ignores_the_window_is_disabled(self) -> None:
+        # updated_at in seconds but updated_after read as ms: the filter lets
+        # everything through, which is caught once the window is narrow.
+        self.h.devin.filter_unit = "ms"
+        self.poll()
+        self.assertNotIn("v3_filter_disabled", self.state_data())
+        posts = len(self.h.ingest.posts)
+        self.h.now += 600
+        _, logs = self.poll()
+        self.assertIn("last updated before updated_after", self.state_data()["v3_filter_disabled"]["reason"])
+        self.assertIn("updated_after filter disabled", logs)
+        self.assertEqual(len(self.h.ingest.posts), posts)
+        self.h.devin.filter_unit = "s"
+        self.h.now += 600
+        self.poll(retry_updated_after_filter=True)
+        self.assertNotIn("v3_filter_disabled", self.state_data())
+
+    def test_users_cache_is_pruned(self) -> None:
+        self.poll()
+        self.assertIn("user-alice", self.state_data()["users"])
+        self.h.now += 2 * DAY
+        self.poll()
+        self.assertNotIn("user-alice", self.state_data()["users"])
 
     def test_suspended_session_sends_decisions_once(self) -> None:
         self.h.devin.update("v3suspended", structured_output={"decisions": [{"choice": "Cache in memory"}]})

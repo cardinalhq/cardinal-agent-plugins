@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 log = logging.getLogger("cardinal_devin")
 
@@ -203,21 +203,33 @@ class DevinClient:
             self.max_pages, self.page_size, self.max_pages * self.page_size,
         )
 
+    def _v3_page(self, after: Optional[str], updated_after: Optional[int]) -> Dict[str, Any]:
+        """One v3 list page. The operation declares a single `qs` query object
+        with no style/explode, so OpenAPI's defaults (form, explode) apply:
+        its fields go out as flat query parameters."""
+        params: Dict[str, Any] = {"first": min(self.page_size, V3_MAX_PAGE_SIZE)}
+        if updated_after is not None:
+            params["updated_after"] = int(updated_after)
+        if after:
+            params["after"] = after
+        url = self._url(f"/v3/organizations/{self._org_path()}/sessions", params)
+        data = self.http.get(url, self._headers())
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise ApiError(0, url, "response has no 'items' array")
+        return data
+
+    def first_page(self) -> List[Dict[str, Any]]:
+        """One unfiltered v3 list page, used to check the updated_after filter.
+        Empty for v1, which has no such filter."""
+        if self.api_version != "v3":
+            return []
+        return [item for item in self._v3_page(None, None)["items"] if isinstance(item, dict)]
+
     def _iter_v3(self, updated_after: Optional[int]) -> Iterator[Dict[str, Any]]:
         after: Optional[str] = None
-        path = f"/v3/organizations/{self._org_path()}/sessions"
         for _ in range(self.max_pages):
-            params: Dict[str, Any] = {"first": min(self.page_size, V3_MAX_PAGE_SIZE)}
-            if updated_after is not None:
-                params["updated_after"] = int(updated_after)
-            if after:
-                params["after"] = after
-            url = self._url(path, params)
-            data = self.http.get(url, self._headers())
-            items = data.get("items") if isinstance(data, dict) else None
-            if not isinstance(items, list):
-                raise ApiError(0, url, "response has no 'items' array")
-            for item in items:
+            data = self._v3_page(after, updated_after)
+            for item in data["items"]:
                 if isinstance(item, dict):
                     yield item
             cursor = data.get("end_cursor")
@@ -232,19 +244,28 @@ class DevinClient:
         v1 documents only 422 (validation error) for this route, no 404, so
         a v1 422 is read as not-found. v3's path takes `devin_id`, "the
         session ID prefixed with `devin-`"; the prefix is added when the
-        listed session_id lacks it."""
+        listed session_id lacks it.
+
+        The v1 422 body is only documented as HTTPValidationError, with no
+        shape that distinguishes a missing session from a bad request, so
+        every v1 422 is logged as a warning (with the body) and counted as
+        a not-found miss by the caller."""
         if self.api_version == "v1":
             path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}"
-            not_found = (404, 422)
         else:
             devin_id = session_id if session_id.startswith("devin-") else f"devin-{session_id}"
             path = f"/v3/organizations/{self._org_path()}/sessions/{urllib.parse.quote(devin_id, safe='')}"
-            not_found = (404,)
         url = self._url(path)
         try:
             data = self.http.get(url, self._headers())
         except ApiError as exc:
-            if exc.status in not_found:
+            if exc.status == 404:
+                return None
+            if exc.status == 422 and self.api_version == "v1":
+                log.warning(
+                    "Devin v1 returned 422 for session %s; the docs define no not-found response, so it is "
+                    "counted as not found. Check the response if this persists: %s", session_id, exc,
+                )
                 return None
             raise
         if not isinstance(data, dict):

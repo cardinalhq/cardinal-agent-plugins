@@ -19,6 +19,9 @@ such as running tests, formatting, or following an existing pattern.
 
 For each decision:
 
+- `id` (required): a short, stable id you choose once, e.g. `retry-backoff`.
+  Lowercase letters, digits, `.`, `_`, `-`. Never change it: to revise a
+  decision, keep its `id` and edit the other fields.
 - `choice` (required): the option you chose, in a few words.
 - `question`: the question the work raised.
 - `rationale`: why you chose it, in one or two sentences.
@@ -29,8 +32,6 @@ For each decision:
   `workflow`, `benchmark`) and an `identifier`. For `file` and
   `directory`, the identifier is the repo-relative path. For other kinds,
   it is the name, with `path` set to the file it lives in.
-- `id`: optional. Lowercase letters, digits, `.`, `_`, `-`. Give one when
-  a later decision needs to point at it.
 - `follows_from`, `refines`, `supersedes`: ids of earlier decisions this
   one builds on, narrows, or replaces. If you change your mind, add a new
   decision that supersedes the old one rather than deleting it.

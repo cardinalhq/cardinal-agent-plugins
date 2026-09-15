@@ -7,7 +7,7 @@ import support
 from support import ADAPTER_DIR
 
 from cardinal_core import decisions as core
-from cardinal_devin.telemetry import build_decisions, decision_attrs
+from cardinal_devin.telemetry import build_decisions, build_decisions_stable, decision_attrs
 
 SCHEMA_PATH = ADAPTER_DIR / "playbook" / "decision-output.schema.json"
 PLAYBOOK_PATH = ADAPTER_DIR / "playbook" / "cardinal-decisions.md"
@@ -72,6 +72,21 @@ class BuildDecisionsTests(unittest.TestCase):
             ("cache", "In-process LRU"), ("retry", "Retry"), ("retry-2", "retry!"),
         ])
 
+    def test_derived_ids_are_stable_against_prior_decisions(self) -> None:
+        built, _, _, keys = build_decisions_stable({"decisions": [{"choice": "Retry"}, {"choice": "retry!"}]})
+        self.assertEqual([d["id"] for d in built], ["retry", "retry-2"])
+        prior = dict(keys)
+        swapped, _, _, _ = build_decisions_stable(
+            {"decisions": [{"choice": "retry!"}, {"choice": "Retry"}]}, prior_auto=prior, prior_ids=prior)
+        self.assertEqual({d["id"]: d["choice"] for d in swapped}, {"retry-2": "retry!", "retry": "Retry"})
+        # A new id-less choice never takes an id already sent, explicit or derived.
+        added, _, _, _ = build_decisions_stable(
+            {"decisions": [{"choice": "RETRY?"}]}, prior_auto=prior, prior_ids=list(prior) + ["retry-3"])
+        self.assertEqual(added[0]["id"], "retry-4")
+        # An explicit id in the same output is not taken by a derived one.
+        mixed, _, _, _ = build_decisions_stable({"decisions": [{"choice": "Retry"}, {"id": "retry", "choice": "x"}]})
+        self.assertEqual([d["id"] for d in mixed], ["retry-2", "retry"])
+
     def test_directory_anchor_and_path_cleanup(self) -> None:
         built, _, _ = build_decisions({"decisions": [{"choice": "x", "anchors": [
             {"kind": "directory", "identifier": "./src/sync/"},
@@ -130,7 +145,7 @@ class SchemaTests(unittest.TestCase):
 
     def test_matches_core_limits(self) -> None:
         props = self.item["properties"]
-        self.assertEqual(self.item["required"], ["choice"])
+        self.assertEqual(self.item["required"], ["id", "choice"])
         self.assertEqual(props["question"]["maxLength"], core.MAX_QUESTION)
         self.assertEqual(props["choice"]["maxLength"], core.MAX_CHOICE)
         self.assertEqual(props["rationale"]["maxLength"], core.MAX_RATIONALE)

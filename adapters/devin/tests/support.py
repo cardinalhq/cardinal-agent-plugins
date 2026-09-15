@@ -119,7 +119,20 @@ class FakeDevin(FakeServer):
         self.api_key = api_key
         self.rate_limit_remaining = 0
         self.retry_after: Optional[str] = "0"
+        # v3 only. Sessions are stored in unix seconds; these choose how
+        # updated_at/created_at are serialised and how updated_after is read,
+        # so tests can model a unit mismatch in either direction.
+        self.response_unit = "s"
+        self.filter_unit = "s"
         super().__init__()
+
+    def _v3_out(self, session: Dict[str, Any]) -> Dict[str, Any]:
+        out = copy.deepcopy(session)
+        if self.response_unit == "ms":
+            for key in ("created_at", "updated_at"):
+                if isinstance(out.get(key), int):
+                    out[key] *= 1000
+        return out
 
     def update(self, session_id: str, **fields: Any) -> None:
         for session in self.sessions:
@@ -162,12 +175,13 @@ class FakeDevin(FakeServer):
             start = int(q.get("after", "0"))
             items = self.sessions
             if "updated_after" in q:
-                items = [s for s in items if s["updated_at"] >= int(q["updated_after"])]
+                scale = 1000 if self.filter_unit == "ms" else 1
+                items = [s for s in items if s["updated_at"] * scale >= int(q["updated_after"])]
             page = items[start:start + first]
             end = start + len(page)
             has_next = end < len(items)
             return 200, {}, {
-                "items": copy.deepcopy(page), "end_cursor": str(end) if has_next else None,
+                "items": [self._v3_out(s) for s in page], "end_cursor": str(end) if has_next else None,
                 "has_next_page": has_next, "total": len(items),
             }
         if req.path.startswith(prefix + "/"):
@@ -176,7 +190,7 @@ class FakeDevin(FakeServer):
             found = None
             if devin_id.startswith("devin-"):
                 found = self._find(devin_id[len("devin-"):]) or self._find(devin_id)
-            return (200, {}, found) if found else (404, {}, {"detail": "Not Found"})
+            return (200, {}, self._v3_out(found)) if found else (404, {}, {"detail": "Not Found"})
         users_prefix = f"/v3beta1/organizations/{self.org_id}/members/users/"
         if req.path.startswith(users_prefix):
             user = self.users.get(urllib.parse.unquote(req.path[len(users_prefix):]))

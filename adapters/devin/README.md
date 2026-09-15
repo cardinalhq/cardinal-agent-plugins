@@ -58,9 +58,11 @@ Python 3.9+, standard library only. No packaging yet; run it from a checkout.
    | `--page-size` | | 100 | sessions per page (v3 max 200) |
    | `--active-ttl-days` | | 14 | stop polling an idle active session |
    | `--state-retention-days` | | 90 | keep finished session state |
+   | `--max-state-sessions` | | 20000 | cap on tracked sessions |
    | `--api-version` | | auto | `v3` when an org id is set, else `v1` |
 
-   Also `--devin-base-url` (`DEVIN_API_BASE_URL`), `--no-decisions`, `-v`.
+   Also `--devin-base-url` (`DEVIN_API_BASE_URL`), `--retry-updated-after-filter`,
+   `--no-decisions`, `-v`.
 
 ### Decision capture (opt-in per session)
 
@@ -78,10 +80,17 @@ Cardinal playbook and structured-output schema:
 Each `decisions[]` entry becomes one `cardinal.decision` as soon as the
 poller sees it in `structured_output`, whatever the session's status
 (working, blocked, suspended, finished). A decision is re-sent only if its
-content changes (same `id`) or the PR it attaches to changes. Entries
-without an `id` get one derived from `choice`, so editing a choice creates
-a new decision rather than revising the old one. Invalid entries are
-skipped and logged with a reason.
+content changes (same `id`) or the PR it attaches to changes. Invalid
+entries are skipped and logged with a reason.
+
+The schema requires `id` and the playbook tells Devin to set one and never
+change it. Entries that arrive without one anyway (structured output not
+validated against this schema) get an id derived from `choice`
+(`retry`, `retry-2`, ...). Those ids stay stable across polls when entries
+are reordered or new ones inserted: a choice keeps the id it was first sent
+under, and a new choice never takes an id already sent. Editing the
+`choice` text of an id-less entry still creates a new decision, and the old
+one is not marked superseded.
 
 ## What is captured
 
@@ -105,8 +114,20 @@ the session, `cardinal.org` and `deployment.environment` from `connect`.
 | decisions | `structured_output` | `structured_output` |
 | updated time | `updated_at` (ISO) | `updated_at` (integer, no documented unit; values ≥ 10^11 read as ms, else seconds) |
 | pagination | `limit`/`offset`, until a short page | `first`/`after`, `has_next_page`/`end_cursor` |
-| incremental | none documented: full list each cycle | `updated_after` = last successful cycle − 5 min, in the unit `updated_at` uses |
-| not found | detail documents only 422; read as not-found | 404 |
+| incremental | none documented: full list each cycle | `updated_after` = last verified cycle − 5 min, checked every cycle (below) |
+| not found | detail documents only 422 (`HTTPValidationError`, no not-found shape): logged as a warning with the body and counted as a miss | 404 |
+
+**The v3 `updated_after` filter is an optimisation, not trusted.** Its unit
+isn't documented, and a wrong unit either hides every session (value sent
+too large) or lets everything through. Each cycle the poller first reads
+one unfiltered page, then the filtered listing, and disables the filter if
+the filtered listing returns a session last updated before the value sent,
+or misses a session from the unfiltered page updated after it. When
+disabled (persisted in state, shown by `status`, logged as a warning every
+cycle) the poller lists without the filter, bounded by `--max-pages`, in
+that same cycle, and the high-water mark stops advancing. The check can
+only catch hidden sessions that appear on the unfiltered first page; the
+list order isn't documented. Re-enable with `--retry-updated-after-filter`.
 
 v3's list operation declares one query parameter, `qs`
 (`SessionsQueryParams`), with no `style`/`explode`; OpenAPI's defaults
@@ -126,23 +147,32 @@ one a given org's key accepts is unconfirmed.
 
 ### Idempotency and its limits
 
-The poll state file (atomic writes) records, per session, a fingerprint of
-each PR's `git_state`, each decision, and the last `structured_output`.
+The poll state file (atomic writes, compact JSON) records, per session,
+short fingerprints of each PR's `git_state`, each decision, and the last
+`structured_output`, plus email and user id while the session is active.
 Re-runs and restarts send nothing already accepted. State is updated only
 after ingest returns 2xx, so a failed send is retried next cycle. A corrupt
 state file stops the poller rather than resetting (which would re-send the
 lookback window).
 
-- **Crash window.** A crash after ingest accepts a POST but before the
-  state save re-sends that one session's records once on restart.
+- **Size.** Finished sessions that never sent anything are dropped once
+  past the lookback window. Above `--max-state-sessions`, the oldest
+  finished entries outside the lookback window are evicted first; active
+  entries and entries inside the window are never evicted (a warning is
+  logged if that leaves the state above the cap). The user email cache
+  keeps entries for a day.
+- **Crash window.** State is saved after each session whose records ingest
+  accepted, and once per cycle. A crash between an accepted POST and that
+  save re-sends that one session's records once on restart.
 - **Downtime.** Untracked sessions last updated before `--lookback-days`
   are ignored, so downtime longer than the lookback skips sessions that
   finished during the gap. Raise the lookback before restarting after a
   long outage.
 - **Resumed sessions.** Finished, stale, and gone entries are kept for the
   longest of `--state-retention-days`, lookback + 1 day, and active TTL +
-  1 day. A session resumed within that time re-sends nothing; one resumed
-  later is treated as new and re-sends its `git_state` and decisions.
+  1 day, unless evicted by the cap. A session resumed within that time
+  re-sends nothing; one resumed later is treated as new and re-sends its
+  `git_state` and decisions.
 - **Not found.** An active session whose detail returns not-found is only
   dropped after 3 cycles in a row. Its decisions were already sent when
   first seen.

@@ -31,9 +31,19 @@ Where the implementation differs from the design below:
   session ID prefixed with `devin-` (e.g., `devin-abc123`)", so the detail path
   adds the prefix. The list operation's single `qs` query object declares no
   `style`/`explode`, so OpenAPI defaults (form, explode) mean flat parameters.
-  `updated_after` and `updated_at` are integers with no documented unit; the
-  poller sends `updated_after` in the unit the observed `updated_at` values use.
-  v1 detail documents only 422, which is read as not-found.
+  `updated_after` and `updated_at` are integers with no documented unit. The
+  poller sends `updated_after` in the unit observed `updated_at` values use, but
+  treats the filter as an optimisation: every cycle it compares an unfiltered
+  first page with the filtered listing, and on any sign of a mismatch disables
+  the filter (persisted), lists without it in the same cycle, and stops
+  advancing the high-water mark. v1 detail documents only 422 with no
+  not-found shape; a v1 422 is logged as a warning and counted as a miss.
+- **Decision ids.** The schema requires `id`. For id-less entries the adapter
+  derives ids from the choice and keeps them stable against already-sent
+  decisions, so reordering or inserting entries doesn't shift them.
+- **Bounded state.** Compact entries; finished sessions that sent nothing are
+  dropped past the lookback; a `--max-state-sessions` cap evicts the oldest
+  finished entries outside the lookback window only.
 - **Branch needs GitHub.** Devin reports only the PR URL. Head branch and sha
   come from `GET /repos/{owner}/{repo}/pulls/{number}` when `GITHUB_TOKEN` is
   set and the PR is on the host the configured API serves; otherwise

@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import PurePosixPath
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from cardinal_core import decisions as core_decisions
 from cardinal_core import initiative, otlp
@@ -185,7 +185,7 @@ def _anchors(item: Dict[str, Any]) -> List[Dict[str, str]]:
     return out
 
 
-def _build_one(item: Any, existing: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def _build_one(item: Any, existing: Sequence[Dict[str, Any]], decision_id: Optional[str] = None) -> Dict[str, Any]:
     if not isinstance(item, dict):
         raise InvalidDecision("entry must be an object")
     choice = _optional_text(item, "choice")
@@ -204,40 +204,94 @@ def _build_one(item: Any, existing: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         refines=_string_list(item, "refines"),
         supersedes=_string_list(item, "supersedes"),
         anchors=_anchors(item),
-        decision_id=_optional_text(item, "id"),
+        decision_id=decision_id or _optional_text(item, "id"),
         existing=existing,
     )
+
+
+def choice_key(choice: str) -> Optional[str]:
+    """Short hash of the choice as core would store it; identifies an
+    id-less decision across polls."""
+    text = core_decisions.clip(choice, core_decisions.MAX_CHOICE)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16] if text else None
+
+
+def _stable_auto_id(base: str, key: str, prior_auto: Dict[str, str], blocked: Set[str]) -> str:
+    """An id for an id-less decision that doesn't depend on entry order: reuse
+    the id this choice was sent under before; otherwise the first free
+    `base`, `base-2`, ... never used by anything sent before."""
+    family = [base] + [f"{base[:60]}-{n}" for n in range(2, 100)]
+    for candidate in family:
+        if prior_auto.get(candidate) == key and candidate not in blocked:
+            return candidate
+    for candidate in family:
+        if candidate not in blocked and candidate not in prior_auto:
+            return candidate
+    return f"{base[:40]}-{key[:8]}"
+
+
+def build_decisions_stable(
+    structured_output: Any,
+    *,
+    prior_auto: Optional[Dict[str, str]] = None,
+    prior_ids: Iterable[str] = (),
+) -> Tuple[List[Dict[str, Any]], List[str], Optional[str], Dict[str, str]]:
+    """(decisions, per-entry skip reasons, whole-output problem, auto ids).
+
+    A later entry with the same explicit id revises the earlier one, the
+    rule `cardinal-decision record --id` follows. Entries without an id get
+    one from the choice; `prior_auto` ({id: choice_key} of id-less
+    decisions already sent) keeps those ids stable when entries are
+    reordered or inserted. The last value maps each derived id to its
+    choice key."""
+    if structured_output is None:
+        return [], [], "no structured_output (session not created with the Cardinal decision schema?)", {}
+    if not isinstance(structured_output, dict):
+        return [], [], "structured_output is not an object", {}
+    items = structured_output.get("decisions")
+    if items is None:
+        return [], [], "structured_output has no 'decisions' array", {}
+    if not isinstance(items, list):
+        return [], [], "structured_output.decisions is not an array", {}
+    prior_auto = dict(prior_auto or {})
+    blocked: Set[str] = {i for i in prior_ids if i not in prior_auto}  # explicit ids sent before
+    for item in items[:MAX_DECISIONS]:
+        raw_id = item.get("id") if isinstance(item, dict) else None
+        if isinstance(raw_id, str) and core_decisions.DECISION_ID_RE.match(raw_id.strip().lower()):
+            blocked.add(raw_id.strip().lower())
+    built: List[Dict[str, Any]] = []
+    skipped: List[str] = []
+    auto_keys: Dict[str, str] = {}
+    for index, item in enumerate(items):
+        if index >= MAX_DECISIONS:
+            skipped.append(f"decisions[{index}:]: more than {MAX_DECISIONS} entries")
+            break
+        derived: Optional[str] = None
+        key: Optional[str] = None
+        if isinstance(item, dict) and item.get("id") is None and isinstance(item.get("choice"), str):
+            key = choice_key(item["choice"])
+            if key:
+                base = core_decisions.slugify(core_decisions.clip(item["choice"], core_decisions.MAX_CHOICE) or "")
+                derived = _stable_auto_id(base, key, prior_auto, blocked)
+        try:
+            decision = _build_one(item, built, decision_id=derived)
+        except (InvalidDecision, core_decisions.DecisionError) as exc:
+            skipped.append(f"decisions[{index}]: {exc}")
+            continue
+        blocked.add(decision["id"])
+        if derived and key:
+            auto_keys[decision["id"]] = key
+        built = [d for d in built if d["id"] != decision["id"]] + [decision]
+    return built, skipped, None, auto_keys
 
 
 def build_decisions(
     structured_output: Any,
 ) -> Tuple[List[Dict[str, Any]], List[str], Optional[str]]:
-    """(decisions, per-entry skip reasons, whole-output problem).
-
-    A later entry with the same id revises the earlier one, the same rule
-    `cardinal-decision record --id` follows."""
-    if structured_output is None:
-        return [], [], "no structured_output (session not created with the Cardinal decision schema?)"
-    if not isinstance(structured_output, dict):
-        return [], [], "structured_output is not an object"
-    items = structured_output.get("decisions")
-    if items is None:
-        return [], [], "structured_output has no 'decisions' array"
-    if not isinstance(items, list):
-        return [], [], "structured_output.decisions is not an array"
-    built: List[Dict[str, Any]] = []
-    skipped: List[str] = []
-    for index, item in enumerate(items):
-        if index >= MAX_DECISIONS:
-            skipped.append(f"decisions[{index}:]: more than {MAX_DECISIONS} entries")
-            break
-        try:
-            decision = _build_one(item, built)
-        except (InvalidDecision, core_decisions.DecisionError) as exc:
-            skipped.append(f"decisions[{index}]: {exc}")
-            continue
-        built = [d for d in built if d["id"] != decision["id"]] + [decision]
-    return built, skipped, None
+    """(decisions, per-entry skip reasons, whole-output problem), with no
+    prior decisions."""
+    built, skipped, problem, _ = build_decisions_stable(structured_output)
+    return built, skipped, problem
 
 
 def decision_digest(decision: Dict[str, Any], pr_url: Optional[str]) -> str:

@@ -196,4 +196,7 @@ def run_status(
     last = poll_state.data.get("last_poll")
     last_text = datetime.fromtimestamp(last, timezone.utc).isoformat() if isinstance(last, int) else "never"
     out(f"Poll state: {state_path} — {len(sessions)} tracked, {active} active; last poll {last_text}")
+    disabled = poll_state.data.get("v3_filter_disabled")
+    if isinstance(disabled, dict):
+        out(f"  v3 updated_after filter DISABLED: {disabled.get('reason')}")
     return 0 if connected and devin_key_source else 1

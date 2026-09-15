@@ -116,8 +116,19 @@ class ClientTests(unittest.TestCase):
         server = self.fake("v1", _sessions(1))
         client = self.client(server)
         self.assertEqual(client.get_session("s0")["messages"], [])
-        self.assertIsNone(client.get_session("missing"))
+        with self.assertLogs("cardinal_devin", "WARNING") as logs:
+            self.assertIsNone(client.get_session("missing"))
+        self.assertIn("returned 422 for session missing", logs.output[0])
+        self.assertIn("Session not found", logs.output[0])  # the body is logged so real validation errors show
         self.assertEqual(server.requests[-1].path, "/v1/sessions/missing")
+
+    def test_v3_first_page_is_unfiltered(self) -> None:
+        server = self.fake("v3", _sessions(3, v3=True))
+        client = self.client(server)
+        self.assertEqual([s["session_id"] for s in client.first_page()], ["s0", "s1"])
+        self.assertEqual(server.requests[0].query, {"first": ["2"]})
+        self.assertFalse(client.last_list_truncated)
+        self.assertEqual(self.client(self.fake("v1", _sessions(1))).first_page(), [])
 
     def test_v3_422_is_an_error(self) -> None:
         server = self.fake("v3", [])

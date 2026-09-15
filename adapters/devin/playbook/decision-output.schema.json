@@ -12,11 +12,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["choice"],
+        "required": ["id", "choice"],
         "properties": {
           "id": {
             "$ref": "#/definitions/decisionId",
-            "description": "Optional stable id. Reusing an id revises that decision. Derived from the choice when omitted."
+            "description": "Stable id, set once and never changed. Reusing an id revises that decision; editing the choice under the same id updates it in place."
           },
           "question": {
             "type": "string",

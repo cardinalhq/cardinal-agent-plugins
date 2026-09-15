@@ -89,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Stop polling an active session with no update for this long (default 14).")
     poll.add_argument("--state-retention-days", type=float, default=90.0,
                       help="Keep finished session state this long so a resumed session re-sends nothing (default 90).")
+    poll.add_argument("--max-state-sessions", type=int, default=20_000,
+                      help="Cap on tracked sessions; the oldest finished ones outside the lookback window "
+                           "are evicted first (default 20000).")
+    poll.add_argument("--retry-updated-after-filter", action="store_true",
+                      help="Re-enable the v3 updated_after filter after it was disabled for a mismatch.")
     poll.add_argument("--page-size", type=int, default=100, help="Sessions per list page (v3 max 200).")
     poll.add_argument("--max-pages", type=int, default=_env_number("CARDINAL_DEVIN_MAX_PAGES", 50, int),
                       help="List pages per cycle; v1 has no documented order or filter, so sessions past "
@@ -144,7 +149,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
         devin=devin, state=state, connection=connection, connection_state=paths.read_state(), github=github,
         options=PollOptions(
             lookback_days=args.lookback_days, active_ttl_days=args.active_ttl_days,
-            state_retention_days=args.state_retention_days,
+            state_retention_days=args.state_retention_days, max_state_sessions=args.max_state_sessions,
+            retry_updated_after_filter=args.retry_updated_after_filter,
             emit_decisions=not args.no_decisions, dry_run=args.dry_run,
         ),
     )

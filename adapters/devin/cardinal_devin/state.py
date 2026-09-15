@@ -12,10 +12,10 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from cardinal_core.paths import atomic_write_json
+from cardinal_core.paths import atomic_write
 
 STATE_FILE = "devin-poll-state.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StateError(RuntimeError):
@@ -68,4 +68,4 @@ class PollState:
         if self.readonly:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(self.path, self.data)
+        atomic_write(self.path, json.dumps(self.data, separators=(",", ":"), sort_keys=True) + "\n")

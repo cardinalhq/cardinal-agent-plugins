@@ -9,14 +9,23 @@ Per session:
   session's status. Decisions attach to the primary PR
   (sessions.primary_pr_url).
 
-State is updated only after ingest accepts the records, so a failed POST
-is retried on the next cycle. A crash between a successful POST and the
-state save can re-send that one session's records once.
+State is saved after every session whose records ingest accepted, and
+once at the end of the cycle. A crash between a successful POST and that
+save can re-send that one session's records once.
 
-Untracked sessions last updated before the lookback window are ignored.
-Finished, stale, and gone entries are kept for the longest of
-state_retention_days, lookback + 1 day, and active TTL + 1 day, so a
-session resumed within that time is recognised and re-sends nothing.
+v3's `updated_after` filter is an optimisation, never trusted blindly:
+each cycle an unfiltered first page is compared with the filtered
+listing. If the filter hides a session updated after the value sent, or
+returns sessions older than it (a unit mismatch in either direction), it
+is disabled for this poller (persisted) and the cycle falls back to the
+lookback listing bounded by --max-pages.
+
+State stays bounded: entries are small; finished sessions that never sent
+anything are dropped once past the lookback window; finished entries
+that did send are kept for the longest of state_retention_days, lookback
++ 1 day, and active TTL + 1 day, so a resumed session re-sends nothing;
+above max_state_sessions the oldest finished entries outside the lookback
+window are evicted (never one inside it, which could re-send).
 """
 
 from __future__ import annotations
@@ -24,7 +33,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from cardinal_core import otlp
 
@@ -40,6 +49,12 @@ DAY = 86_400
 USER_CACHE_TTL = DAY
 USER_NEGATIVE_TTL = 3_600
 MS_THRESHOLD = 10 ** 11  # integer timestamps at or above this are milliseconds
+DIGEST_LEN = 16
+FILTER_DISABLED = "v3_filter_disabled"
+
+
+def _short(value: Any) -> str:
+    return telemetry.fingerprint(value)[:DIGEST_LEN]
 
 
 @dataclass
@@ -47,9 +62,11 @@ class PollOptions:
     lookback_days: float = 7.0
     active_ttl_days: float = 14.0
     state_retention_days: float = 90.0
+    max_state_sessions: int = 20_000
     overlap_seconds: int = 300
     not_found_limit: int = 3
     emit_decisions: bool = True
+    retry_updated_after_filter: bool = False
     dry_run: bool = False
     emit_timeout: float = 10.0
 
@@ -104,19 +121,24 @@ class Poller:
         floor = int(now - self.options.lookback_days * DAY)
         cutoff_ns = floor * NS
 
-        updated_after = None
-        if api == "v3":
-            since = max(self.state.hwm(api) or floor, floor)
-            # The docs type updated_after as an integer with no unit. Send it in
-            # the unit the API's own updated_at values use (seconds until seen
-            # otherwise); a wrong guess only widens the window.
-            updated_after = since * 1000 if self.state.data.get("v3_timestamp_unit") == "ms" else since
+        filter_validated = False
+        if api == "v3" and self.options.retry_updated_after_filter and self.state.data.pop(FILTER_DISABLED, None):
+            log.info("re-enabling the v3 updated_after filter")
+        disabled = self.state.data.get(FILTER_DISABLED) if api == "v3" else None
+        if api == "v3" and not disabled:
+            listed, filter_validated = self._list_v3_filtered(floor, now)
+        else:
+            if disabled:
+                log.warning(
+                    "v3 updated_after filter is disabled (%s); listing sessions without it, bounded by "
+                    "--max-pages. Retry with --retry-updated-after-filter.", disabled.get("reason"),
+                )
+            listed = list(self.devin.iter_sessions())
+        result.truncated = self.devin.last_list_truncated
 
         seen = set()
-        for raw in self.devin.iter_sessions(updated_after=updated_after):
+        for raw in listed:
             result.listed += 1
-            if api == "v3":
-                self._observe_timestamp_unit(raw)
             session = normalize(raw, api)
             if session is None:
                 continue
@@ -128,21 +150,67 @@ class Poller:
             ):
                 continue
             self._safe_handle(session, from_list=True, result=result)
-        result.truncated = self.devin.last_list_truncated
 
         self._refresh_unlisted(seen, now, result)
 
-        if api == "v3" and not result.truncated and not result.errors:
+        # Only advance past what was actually seen through a filter that checked out.
+        if filter_validated and not result.truncated and not result.errors:
             self.state.set_hwm(api, int(now) - self.options.overlap_seconds)
-        self._prune(now)
+        self._prune(now, cutoff_ns)
         self.state.data["last_poll"] = int(now)
         self.state.save()
         return result
+
+    # -- v3 updated_after filter ---------------------------------------------
+
+    def _list_v3_filtered(self, floor: int, now: float) -> Tuple[List[Dict[str, Any]], bool]:
+        since = max(self.state.hwm("v3") or floor, floor)
+        probe = self.devin.first_page()  # before the filtered listing, so a later update can't race it
+        for raw in probe:
+            self._observe_timestamp_unit(raw)
+        sent = since * 1000 if self.state.data.get("v3_timestamp_unit") == "ms" else since
+        listed = list(self.devin.iter_sessions(updated_after=sent))
+        for raw in listed:
+            self._observe_timestamp_unit(raw)
+        problem = self._filter_problem(since, sent, probe, listed, self.devin.last_list_truncated)
+        if problem is None:
+            return listed, True
+        self.state.data[FILTER_DISABLED] = {"reason": problem, "at": int(now), "updated_after_sent": sent}
+        log.warning(
+            "v3 updated_after filter disabled: %s. Falling back to listing sessions without it, bounded by "
+            "--max-pages; retry with --retry-updated-after-filter.", problem,
+        )
+        return list(self.devin.iter_sessions()), False
+
+    @staticmethod
+    def _filter_problem(
+        since: int, sent: int, probe: List[Dict[str, Any]], listed: List[Dict[str, Any]], truncated: bool,
+    ) -> Optional[str]:
+        since_ns = since * NS
+        listed_sessions = [s for s in (normalize(r, "v3") for r in listed) if s is not None]
+        for session in listed_sessions:
+            if session.updated_ns is not None and session.updated_ns < since_ns - NS:
+                return (f"filtered listing returned session {session.session_id} last updated before "
+                        f"updated_after={sent}")
+        if not truncated:
+            listed_ids = {s.session_id for s in listed_sessions}
+            for session in (normalize(r, "v3") for r in probe):
+                if (
+                    session is not None
+                    and session.updated_ns is not None
+                    and session.updated_ns > since_ns
+                    and session.session_id not in listed_ids
+                ):
+                    return (f"session {session.session_id} was updated after updated_after={sent} "
+                            "but is missing from the filtered listing")
+        return None
 
     def _observe_timestamp_unit(self, raw: Any) -> None:
         value = raw.get("updated_at") if isinstance(raw, dict) else None
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             self.state.data["v3_timestamp_unit"] = "ms" if value >= MS_THRESHOLD else "s"
+
+    # -- tracked sessions ----------------------------------------------------
 
     def _refresh_unlisted(self, seen: set, now: float, result: PollResult) -> None:
         """Active sessions the listing did not return (v3's updated_after
@@ -178,19 +246,51 @@ class Poller:
                 result.refreshed += 1
                 self._safe_handle(session, from_list=False, result=result)
 
-    def _prune(self, now: float) -> None:
+    def _prune(self, now: float, cutoff_ns: int) -> None:
+        sessions = self.state.sessions
         keep_days = max(
             self.options.state_retention_days,
             self.options.lookback_days + 1,
             self.options.active_ttl_days + 1,
         )
         horizon_ns = int((now - keep_days * DAY) * NS)
-        for sid in list(self.state.sessions):
-            entry = self.state.sessions[sid]
+
+        def done(entry: Dict[str, Any]) -> bool:
+            return bool(entry.get("terminal") or entry.get("stale") or entry.get("gone"))
+
+        def old(entry: Dict[str, Any], limit_ns: int) -> bool:
             updated = entry.get("updated_ns")
-            done = entry.get("terminal") or entry.get("stale") or entry.get("gone")
-            if done and isinstance(updated, int) and updated < horizon_ns:
-                del self.state.sessions[sid]
+            return not isinstance(updated, int) or updated < limit_ns
+
+        for sid in list(sessions):
+            entry = sessions[sid]
+            if not done(entry):
+                continue
+            sent_nothing = not entry.get("prs") and not entry.get("decisions")
+            # Past the lookback an untracked session is ignored, so an entry
+            # that never sent anything protects nothing once it is that old.
+            if old(entry, horizon_ns) or (sent_nothing and old(entry, cutoff_ns)):
+                del sessions[sid]
+
+        excess = len(sessions) - self.options.max_state_sessions
+        if excess > 0:
+            evictable = sorted(
+                (sid for sid, e in sessions.items() if done(e) and old(e, cutoff_ns)),
+                key=lambda sid: sessions[sid].get("updated_ns") or 0,
+            )
+            for sid in evictable[:excess]:
+                del sessions[sid]
+            if len(sessions) > self.options.max_state_sessions:
+                log.warning(
+                    "poll state tracks %d sessions, above --max-state-sessions=%d; active sessions and "
+                    "sessions inside the lookback window are never evicted",
+                    len(sessions), self.options.max_state_sessions,
+                )
+
+        for user_id in list(self.state.users):
+            cached = self.state.users[user_id]
+            if not isinstance(cached, dict) or now - float(cached.get("at") or 0) >= USER_CACHE_TTL:
+                del self.state.users[user_id]
 
     # -- one session ---------------------------------------------------------
 
@@ -207,9 +307,9 @@ class Poller:
         if (
             session.terminal
             and prior.get("terminal")
-            and prior.get("finalized_ns") is not None
-            and prior.get("finalized_ns") == session.updated_ns
-            and (not self.options.emit_decisions or prior.get("output_digest") is not None)
+            and prior.get("finalized")
+            and prior.get("updated_ns") == session.updated_ns
+            and (not self.options.emit_decisions or prior.get("output_digest"))
         ):
             return  # finished, unchanged since we finalized it, decisions already processed
 
@@ -245,7 +345,7 @@ class Poller:
             if url in sent_prs and not finalize:
                 continue
             attrs = telemetry.git_state_attrs(sid, facts_for(url))
-            digest = telemetry.fingerprint(attrs)
+            digest = _short(attrs)
             if sent_prs.get(url) == digest:
                 continue
             records.append(otlp.log_record(telemetry.EVENT_GIT_STATE, attrs, ts_ns))
@@ -253,7 +353,7 @@ class Poller:
 
         primary = primary_pr_url(session.pr_urls)
         output = session.structured_output if session.has_structured_output else None
-        output_digest = telemetry.fingerprint({"structured_output": output, "primary_pr": primary})
+        output_digest = _short({"structured_output": output, "primary_pr": primary})
         new_decisions: Dict[str, str] = {}
         skipped = 0
         if self.options.emit_decisions:
@@ -261,19 +361,27 @@ class Poller:
                 log.info("session %s: no structured_output (session not created with the Cardinal "
                          "decision schema?)", sid)
             if session.has_structured_output and output_digest != prior.get("output_digest"):
-                built, reasons, problem = telemetry.build_decisions(output)
+                # Stored per decision: "<content digest>" for explicit ids,
+                # "<content digest>:<choice key>" for ids derived from the choice.
+                prior_auto = {i: v.split(":", 1)[1] for i, v in sent_decisions.items() if ":" in v}
+                built, reasons, problem, auto_keys = telemetry.build_decisions_stable(
+                    output, prior_auto=prior_auto, prior_ids=sent_decisions.keys(),
+                )
                 if problem:
                     log.info("session %s: %s", sid, problem)
                 for reason in reasons:
                     log.warning("session %s: skipped %s", sid, reason)
                 skipped = len(reasons)
                 for decision in built:
-                    digest = telemetry.decision_digest(decision, primary)
-                    if sent_decisions.get(decision["id"]) == digest:
+                    ident = decision["id"]
+                    marker = telemetry.decision_digest(decision, primary)[:DIGEST_LEN]
+                    if ident in auto_keys:
+                        marker = f"{marker}:{auto_keys[ident]}"
+                    if sent_decisions.get(ident) == marker:
                         continue
                     attrs = telemetry.decision_attrs(sid, decision, facts_for(primary))
                     records.append(otlp.log_record(telemetry.EVENT_DECISION, attrs, ts_ns))
-                    new_decisions[decision["id"]] = digest
+                    new_decisions[ident] = marker
 
         if records:
             resource = telemetry.resource(self.connection_state, email, __version__)
@@ -290,21 +398,29 @@ class Poller:
         result.skipped_decisions += skipped
         sent_prs.update(new_prs)
         sent_decisions.update(new_decisions)
-        entry: Dict[str, Any] = {
-            "status": session.status,
-            "terminal": session.terminal,
-            "updated_ns": session.updated_ns,
-            "email": email,
-            "user_id": session.user_id,
-            "prs": sent_prs,
-            "decisions": sent_decisions,
-            "output_digest": output_digest if self.options.emit_decisions else prior.get("output_digest"),
-        }
-        if finalize:
-            entry["finalized_ns"] = session.updated_ns
+
+        entry: Dict[str, Any] = {"updated_ns": session.updated_ns}
+        if session.terminal:
+            entry["terminal"] = True
+            if finalize:
+                entry["finalized"] = True
+        else:
+            # Only needed while the session is still polled.
+            if email:
+                entry["email"] = email
+            if session.user_id:
+                entry["user_id"] = session.user_id
+        if sent_prs:
+            entry["prs"] = sent_prs
+        if sent_decisions:
+            entry["decisions"] = sent_decisions
+        kept_digest = output_digest if self.options.emit_decisions else prior.get("output_digest")
+        if kept_digest:
+            entry["output_digest"] = kept_digest
         if entry != prior:
             self.state.sessions[sid] = entry
-            self.state.save()
+            if records:
+                self.state.save()  # narrows the crash window to this session
 
     def _user_email(self, user_id: str) -> Optional[str]:
         now = self.clock()
