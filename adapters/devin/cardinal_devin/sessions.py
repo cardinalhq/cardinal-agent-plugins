@@ -34,6 +34,20 @@ _FRACTION_RE = re.compile(r"\.(\d+)")
 
 
 @dataclass
+class Usage:
+    session_id: str
+    acu_total: float
+    acu_cascade: Optional[float]
+    acu_devin: Optional[float]
+    acu_review: Optional[float]
+    acu_terminal: Optional[float]
+    period_start_ns: Optional[int]
+    period_end_ns: Optional[int]
+    pr_urls: List[str] = field(default_factory=list)
+    user_email: Optional[str] = None
+
+
+@dataclass
 class Session:
     session_id: str
     api: str
@@ -162,6 +176,100 @@ def primary_pr_url(urls: List[str]) -> Optional[str]:
         return (ref.number if ref else -1, url)
 
     return max(urls, key=rank)
+
+
+def _num(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def normalize_v1_consumption(row: Any) -> Optional[Usage]:
+    """One `sessions[]` entry from `/v1/enterprise/consumption`. The v1
+    surface reports only the aggregate `acu_used`, so per-product totals
+    are None."""
+    if not isinstance(row, dict):
+        return None
+    session_id = _str(row.get("session_name"))
+    if session_id is None:
+        return None
+    total = _num(row.get("acu_used")) or 0.0
+    prs = row.get("pull_requests")
+    urls: List[str] = []
+    if isinstance(prs, list):
+        for entry in prs:
+            if isinstance(entry, dict):
+                url = _str(entry.get("pr_url"))
+                if url:
+                    urls.append(url)
+    created_ns = to_ns(row.get("created_at"))
+    return Usage(
+        session_id=session_id,
+        acu_total=total,
+        acu_cascade=None,
+        acu_devin=None,
+        acu_review=None,
+        acu_terminal=None,
+        period_start_ns=created_ns,
+        period_end_ns=None,
+        pr_urls=_unique(urls),
+        user_email=_str(row.get("user_email")),
+    )
+
+
+def normalize_v3_consumption(session_id: str, resp: Any) -> Optional[Usage]:
+    """`/v3/.../consumption/daily/sessions/{devin_id}`. Sums the daily
+    rows into aggregate totals; per-product totals are None when every
+    contribution is missing so they never fingerprint as zero."""
+    if not isinstance(resp, dict):
+        return None
+    days = resp.get("consumption_by_date")
+    if not isinstance(days, list):
+        days = []
+    total = _num(resp.get("total_acus"))
+    if total is None:
+        total = 0.0
+    products = {"cascade": None, "devin": None, "review": None, "terminal": None}
+    period_start_ns: Optional[int] = None
+    period_end_ns: Optional[int] = None
+    aggregate = 0.0
+    aggregate_seen = False
+    for day in days:
+        if not isinstance(day, dict):
+            continue
+        day_total = _num(day.get("acus"))
+        if day_total is not None:
+            aggregate += day_total
+            aggregate_seen = True
+        split = day.get("acus_by_product")
+        if isinstance(split, dict):
+            for key in products:
+                value = _num(split.get(key))
+                if value is None:
+                    continue
+                products[key] = (products[key] or 0.0) + value
+        stamp = to_ns(day.get("date"))
+        if stamp is not None:
+            if period_start_ns is None or stamp < period_start_ns:
+                period_start_ns = stamp
+            if period_end_ns is None or stamp > period_end_ns:
+                period_end_ns = stamp
+    if aggregate_seen and total == 0.0:
+        total = aggregate
+    return Usage(
+        session_id=session_id,
+        acu_total=total,
+        acu_cascade=products["cascade"],
+        acu_devin=products["devin"],
+        acu_review=products["review"],
+        acu_terminal=products["terminal"],
+        period_start_ns=period_start_ns,
+        period_end_ns=period_end_ns,
+        pr_urls=[],
+        user_email=None,
+    )
 
 
 _GITHUB_PR_RE = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)(?:[/?#].*)?$")

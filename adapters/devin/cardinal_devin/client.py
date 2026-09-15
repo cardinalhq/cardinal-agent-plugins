@@ -272,6 +272,61 @@ class DevinClient:
             raise ApiError(0, url, "session detail is not an object")
         return data
 
+    def iter_v1_enterprise_consumption(
+        self, start: Optional[str] = None, end: Optional[str] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """One `GET /v1/enterprise/consumption` call yields every session in
+        the current cycle. `start`/`end` are ISO-8601; None asks the API for
+        its default cycle. Every documented query alias is sent so the API
+        can pick whichever it accepts."""
+        params: Dict[str, Any] = {}
+        if start:
+            params["start_date"] = start
+            params["start"] = start
+        if end:
+            params["end_date"] = end
+            params["end"] = end
+        url = self._url("/v1/enterprise/consumption", params or None)
+        data = self.http.get(url, self._headers())
+        sessions = data.get("sessions") if isinstance(data, dict) else None
+        if not isinstance(sessions, list):
+            raise ApiError(0, url, "response has no 'sessions' array")
+        for item in sessions:
+            if isinstance(item, dict):
+                yield item
+
+    def get_v3_session_consumption(
+        self,
+        session_id: str,
+        time_after: Optional[int] = None,
+        time_before: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """One session's ACU consumption. Returns None on 404, raises
+        ApiError for other statuses. 401/403 bubble up so the poller can
+        turn usage off for this run."""
+        if not self.org_id:
+            raise ValueError("v3 consumption needs an org id")
+        devin_id = session_id if session_id.startswith("devin-") else f"devin-{session_id}"
+        params: Dict[str, Any] = {}
+        if time_after is not None:
+            params["time_after"] = int(time_after)
+        if time_before is not None:
+            params["time_before"] = int(time_before)
+        url = self._url(
+            f"/v3/organizations/{self._org_path()}/consumption/daily/sessions/"
+            f"{urllib.parse.quote(devin_id, safe='')}",
+            params or None,
+        )
+        try:
+            data = self.http.get(url, self._headers())
+        except ApiError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        if not isinstance(data, dict):
+            raise ApiError(0, url, "consumption response is not an object")
+        return data
+
     def get_user_email(self, user_id: str) -> Optional[str]:
         """v3 sessions carry `user_id`, not an email. The org user lookup is
         documented as beta (`/v3beta1/...`) and needs ViewOrgMembership."""

@@ -47,11 +47,15 @@ class PollState:
         data.setdefault("sessions", {})
         data.setdefault("users", {})
         data.setdefault("hwm", {})
+        data.setdefault("usage_digests", {})
         return data
 
     @staticmethod
     def _fresh() -> Dict[str, Any]:
-        return {"schema_version": SCHEMA_VERSION, "sessions": {}, "users": {}, "hwm": {}}
+        return {
+            "schema_version": SCHEMA_VERSION, "sessions": {}, "users": {}, "hwm": {},
+            "usage_digests": {},
+        }
 
     @property
     def sessions(self) -> Dict[str, Dict[str, Any]]:
@@ -60,6 +64,10 @@ class PollState:
     @property
     def users(self) -> Dict[str, Dict[str, Any]]:
         return self.data["users"]
+
+    @property
+    def usage_digests(self) -> Dict[str, str]:
+        return self.data["usage_digests"]
 
     def hwm(self, api: str) -> Optional[int]:
         value = self.data["hwm"].get(api)

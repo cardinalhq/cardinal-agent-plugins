@@ -22,12 +22,13 @@ from cardinal_core import initiative, otlp
 
 from . import AGENT_RUNTIME, SCOPE_NAME, SERVICE_NAME
 from .client import ApiError, GitHubClient
-from .sessions import parse_pr_url
+from .sessions import Usage, parse_pr_url
 
 log = logging.getLogger("cardinal_devin")
 
 EVENT_GIT_STATE = "cardinal.git_state"
 EVENT_DECISION = core_decisions.DECISION_EVENT
+EVENT_USAGE = "cardinal.turn_usage"
 MAX_DECISIONS = 50
 
 
@@ -312,6 +313,44 @@ def decision_attrs(session_id: str, decision: Dict[str, Any], facts: Dict[str, A
         pr_number=facts.get("cardinal_pr_number"),
         pr_url=facts.get("cardinal_pr_url"),
     )
+
+
+# --- usage (ACU) ------------------------------------------------------------
+
+
+def usage_attrs(session_id: str, usage: Usage, facts: Dict[str, Any]) -> Dict[str, Any]:
+    """Attributes for one cardinal.turn_usage record. cardinal_billing_unit
+    distinguishes ACU rows from token-based ones. None/empty values are
+    dropped by otlp.log_record; leaving them here keeps the shape stable."""
+    attrs: Dict[str, Any] = {
+        "session_id": session_id,
+        "cardinal_billing_unit": "acu",
+        "cardinal_acu_total": usage.acu_total,
+        "cardinal_acu_cascade": usage.acu_cascade,
+        "cardinal_acu_devin": usage.acu_devin,
+        "cardinal_acu_review": usage.acu_review,
+        "cardinal_acu_terminal": usage.acu_terminal,
+        "period_start_ns": usage.period_start_ns,
+        "period_end_ns": usage.period_end_ns,
+    }
+    for key in (
+        "cardinal_repo", "cardinal_branch", "cardinal_pr_number", "cardinal_pr_url",
+        "cardinal_initiative_name", "cardinal_initiative_type",
+    ):
+        if key in facts:
+            attrs[key] = facts[key]
+    return {k: v for k, v in attrs.items() if v is not None}
+
+
+def usage_digest(usage: Usage, pr_url: Optional[str]) -> str:
+    return fingerprint({
+        "acu_total": usage.acu_total,
+        "acu_cascade": usage.acu_cascade,
+        "acu_devin": usage.acu_devin,
+        "acu_review": usage.acu_review,
+        "acu_terminal": usage.acu_terminal,
+        "pr_url": pr_url,
+    })
 
 
 # --- OTLP -------------------------------------------------------------------

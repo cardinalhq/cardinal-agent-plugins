@@ -99,6 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="List pages per cycle; v1 has no documented order or filter, so sessions past "
                            "the cap are not seen (default: $CARDINAL_DEVIN_MAX_PAGES or 50).")
     poll.add_argument("--no-decisions", action="store_true", help="Do not emit cardinal.decision.")
+    poll.add_argument("--no-usage", action="store_true",
+                      default=bool(os.environ.get("CARDINAL_DEVIN_USAGE_DISABLED", "").strip()),
+                      help="Do not fetch or emit ACU usage (cardinal.turn_usage). "
+                           "Default: off unless CARDINAL_DEVIN_USAGE_DISABLED is set.")
     poll.add_argument("--dry-run", action="store_true",
                       help="Print OTLP bodies to stdout; send nothing and leave poll state untouched.")
 
@@ -185,7 +189,8 @@ def _poll(args: argparse.Namespace) -> int:
             lookback_days=args.lookback_days, active_ttl_days=args.active_ttl_days,
             state_retention_days=args.state_retention_days, max_state_sessions=args.max_state_sessions,
             retry_updated_after_filter=args.retry_updated_after_filter,
-            emit_decisions=not args.no_decisions, dry_run=args.dry_run,
+            emit_decisions=not args.no_decisions, emit_usage=not args.no_usage,
+            dry_run=args.dry_run,
         ),
     )
     log.info("polling Devin %s API at %s", devin.api_version, devin.base_url)

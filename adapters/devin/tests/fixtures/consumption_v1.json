@@ -1,0 +1,43 @@
+{
+  "_source": "SYNTHETIC. Hand-written from the documented EnterpriseConsumptionResponse schema for GET /v1/enterprise/consumption (docs.devin.ai, read 2026-09-15). Not captured from a live Devin org. session_name doubles as the session id here since v1 sessions have no devin- prefix.",
+  "cycle": {"start": "2026-09-01T00:00:00Z", "end": "2026-09-30T23:59:59Z"},
+  "sessions": [
+    {
+      "session_name": "devin-v1-finished",
+      "created_at": "2026-09-14T08:00:00Z",
+      "acu_used": 4.75,
+      "url": "https://app.devin.ai/sessions/devin-v1-finished",
+      "org_id": "org-test",
+      "org_name": "Acme",
+      "pull_requests": [
+        {"pr_url": "https://github.com/acme/widgets/pull/42", "pr_status": "merged"}
+      ],
+      "user_email": "alice@example.com",
+      "user_name": "Alice"
+    },
+    {
+      "session_name": "devin-v1-working",
+      "created_at": "2026-09-14T09:00:00Z",
+      "acu_used": 2.0,
+      "url": "https://app.devin.ai/sessions/devin-v1-working",
+      "org_id": "org-test",
+      "org_name": "Acme",
+      "pull_requests": [
+        {"pr_url": "https://github.com/acme/widgets/pull/43", "pr_status": "open"}
+      ],
+      "user_email": "bob@example.com",
+      "user_name": "Bob"
+    },
+    {
+      "session_name": "devin-v1-blocked",
+      "created_at": "2026-09-14T07:00:00Z",
+      "acu_used": 0.25,
+      "url": "https://app.devin.ai/sessions/devin-v1-blocked",
+      "org_id": "org-test",
+      "org_name": "Acme",
+      "pull_requests": [],
+      "user_email": "dave@example.com",
+      "user_name": "Dave"
+    }
+  ]
+}
