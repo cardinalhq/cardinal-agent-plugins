@@ -5,10 +5,6 @@ surface. This adapter is a small **server-side poller** instead: it reads
 the Devin REST API with an org service-user key and sends Cardinal OTLP
 logs. Run one per Devin org. Design: [docs/specs/devin-adapter.md](../../docs/specs/devin-adapter.md).
 
-> **Unvalidated.** Built and tested against Devin's published docs
-> (docs.devin.ai, read 2026-09-14) with synthetic fixtures. It has not been
-> run against a live Devin org.
-
 Python 3.9+, standard library only. Ships as a release tarball and a
 container image (see [Install](#install) and [Run in a container](#run-in-a-container));
 it also runs straight from a checkout as `adapters/devin/bin/cardinal-devin`.
