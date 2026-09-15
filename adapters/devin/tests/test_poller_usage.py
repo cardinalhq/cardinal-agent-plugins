@@ -149,6 +149,23 @@ class V3UsageTests(UsagePollCase):
         self.assertIn("consumption scope", logs)
         self.assertGreater(result.decisions, 0)
 
+    def test_v3_persisted_scope_denial_skips_fetch(self) -> None:
+        self._seed_v3()
+        self.h.devin.consumption_status = 403
+        self.poll()
+        self.assertTrue(self.state_data().get("usage_scope_warned"))
+        # Second cycle: the persisted flag must skip the consumption endpoint
+        # entirely — no request at all, and no scope warning re-emitted.
+        self.h.devin.consumption_status = 200
+        before = len([r for r in self.h.devin.requests
+                      if "/consumption/daily/sessions/" in r.path])
+        _, logs2 = self.poll()
+        after = len([r for r in self.h.devin.requests
+                     if "/consumption/daily/sessions/" in r.path])
+        self.assertEqual(after, before)
+        self.assertNotIn("consumption scope", logs2)
+        self.assertEqual(self.usage_records(), [])
+
     def test_v3_unchanged_digest_does_not_reemit(self) -> None:
         self._seed_v3()
         self.poll()
@@ -158,6 +175,43 @@ class V3UsageTests(UsagePollCase):
         self.h.now += 600
         self.poll()
         self.assertEqual(len(self.usage_records()), before)
+
+    def test_v3_quiet_session_still_gets_usage_fetched(self) -> None:
+        self._seed_v3()
+        self.poll()
+        running_before = len(self.usage_records("v3running"))
+        self.assertGreater(running_before, 0)
+        # second cycle: v3running is unchanged (no new decisions or git_state
+        # facts) so it would not be in _touched_sids, but its ACU total climbs.
+        # The fan-out must fetch consumption for all active tracked sessions.
+        self.h.devin.v3_consumption["v3running"] = {
+            "total_acus": 4.5,
+            "consumption_by_date": [
+                {"date": "2026-09-14", "acus": 4.5,
+                 "acus_by_product": {"cascade": 2.5, "devin": 2.0}},
+            ],
+        }
+        self.h.now += 600
+        self.poll()
+        running_after = self.usage_records("v3running")
+        self.assertEqual(len(running_after), running_before + 1)
+        self.assertEqual(running_after[-1][1]["cardinal_acu_total"], 4.5)
+
+    def test_v3_stale_session_skipped_in_fanout(self) -> None:
+        self._seed_v3()
+        self.poll()
+        s = PollState(self.h.state_path)
+        s.data["sessions"]["v3running"]["stale"] = True
+        s.save()
+        before = len([r.path for r in self.h.devin.requests
+                      if r.path.endswith("/devin-v3running")
+                      and "/consumption/daily/sessions/" in r.path])
+        self.h.now += 600
+        self.poll()
+        after = len([r.path for r in self.h.devin.requests
+                     if r.path.endswith("/devin-v3running")
+                     and "/consumption/daily/sessions/" in r.path])
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

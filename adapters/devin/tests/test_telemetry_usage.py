@@ -87,6 +87,21 @@ class UsageDigestTests(unittest.TestCase):
         b = usage_digest(_usage(acu_cascade=2.0), None)
         self.assertNotEqual(a, b)
 
+    def test_changes_with_period_start(self) -> None:
+        a = usage_digest(_usage(period_start_ns=1000), None)
+        b = usage_digest(_usage(period_start_ns=2000), None)
+        self.assertNotEqual(a, b)
+
+    def test_changes_with_period_end(self) -> None:
+        a = usage_digest(_usage(period_end_ns=2000), None)
+        b = usage_digest(_usage(period_end_ns=3000), None)
+        self.assertNotEqual(a, b)
+
+    def test_same_totals_new_period_reemits(self) -> None:
+        old_period = usage_digest(_usage(period_start_ns=1000, period_end_ns=2000), None)
+        new_period = usage_digest(_usage(period_start_ns=3000, period_end_ns=4000), None)
+        self.assertNotEqual(old_period, new_period)
+
 
 if __name__ == "__main__":
     unittest.main()

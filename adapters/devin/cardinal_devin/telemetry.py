@@ -349,6 +349,8 @@ def usage_digest(usage: Usage, pr_url: Optional[str]) -> str:
         "acu_devin": usage.acu_devin,
         "acu_review": usage.acu_review,
         "acu_terminal": usage.acu_terminal,
+        "period_start_ns": usage.period_start_ns,
+        "period_end_ns": usage.period_end_ns,
         "pr_url": pr_url,
     })
 
