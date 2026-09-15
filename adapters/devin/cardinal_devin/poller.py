@@ -438,6 +438,9 @@ class Poller:
     # -- usage (ACU) ---------------------------------------------------------
 
     def _emit_usage(self, now: float, result: PollResult) -> None:
+        if self.state.data.get("usage_scope_warned"):
+            log.debug("Devin usage disabled by prior denial; skipping consumption fetch this cycle")
+            return
         if self.devin.api_version == "v1":
             self._emit_usage_v1(now, result)
         else:
@@ -459,7 +462,11 @@ class Poller:
             self._send_usage(usage, now, result)
 
     def _emit_usage_v3(self, now: float, result: PollResult) -> None:
-        for sid in sorted(self._touched_sids):
+        active = {
+            sid for sid, entry in self.state.sessions.items()
+            if not (entry.get("terminal") or entry.get("stale") or entry.get("gone"))
+        }
+        for sid in sorted(self._touched_sids | active):
             try:
                 resp = self.devin.get_v3_session_consumption(sid)
             except ApiError as exc:
