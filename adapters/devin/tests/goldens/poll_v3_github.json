@@ -74,7 +74,7 @@
                     {
                       "key": "session_id",
                       "value": {
-                        "stringValue": "devin-v3-exit"
+                        "stringValue": "v3exit"
                       }
                     },
                     {
@@ -145,7 +145,7 @@
                     {
                       "key": "session_id",
                       "value": {
-                        "stringValue": "devin-v3-exit"
+                        "stringValue": "v3exit"
                       }
                     },
                     {
@@ -296,7 +296,7 @@
                     {
                       "key": "session_id",
                       "value": {
-                        "stringValue": "devin-v3-running"
+                        "stringValue": "v3running"
                       }
                     },
                     {

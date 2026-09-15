@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import support  # noqa: F401  (sets import paths)
 from support import FakeDevin, FakeGitHub
 
-from cardinal_devin.client import ApiError, DevinClient, GitHubClient, JsonHttp, parse_retry_after
+from cardinal_devin.client import (
+    ApiError, DevinClient, GitHubClient, JsonHttp, github_web_host, parse_retry_after,
+)
 
 
 def _sessions(n: int, *, v3: bool = False):
@@ -109,11 +112,28 @@ class ClientTests(unittest.TestCase):
             list(DevinClient("cog_test", base_url=server.url, http=http).iter_sessions())
         self.assertEqual(sleeps, [30.0])
 
-    def test_get_session_and_404(self) -> None:
+    def test_v1_missing_session_422_is_not_found(self) -> None:
         server = self.fake("v1", _sessions(1))
         client = self.client(server)
         self.assertEqual(client.get_session("s0")["messages"], [])
         self.assertIsNone(client.get_session("missing"))
+        self.assertEqual(server.requests[-1].path, "/v1/sessions/missing")
+
+    def test_v3_422_is_an_error(self) -> None:
+        server = self.fake("v3", [])
+        with mock.patch.object(server, "handle", return_value=(422, {}, {"detail": []})):
+            with self.assertRaises(ApiError) as ctx:
+                self.client(server).get_session("abc")
+        self.assertEqual(ctx.exception.status, 422)
+
+    def test_v3_detail_path_uses_devin_prefix(self) -> None:
+        server = self.fake("v3", [{"session_id": "abc123", "status": "running", "updated_at": 1789380000}])
+        client = self.client(server)
+        self.assertEqual(client.get_session("abc123")["session_id"], "abc123")
+        self.assertEqual(client.get_session("devin-abc123")["session_id"], "abc123")
+        self.assertIsNone(client.get_session("zzz"))
+        self.assertEqual([r.path.rsplit("/", 1)[-1] for r in server.requests],
+                         ["devin-abc123", "devin-abc123", "devin-zzz"])
 
     def test_bad_key_raises(self) -> None:
         server = self.fake("v1", _sessions(1), api_key="other")
@@ -127,6 +147,14 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.get_user_email("u1"), "u1@example.com")
         self.assertIsNone(client.get_user_email("u2"))
         self.assertEqual(server.requests[0].path, "/v3beta1/organizations/org-test/members/users/u1")
+
+    def test_github_web_host(self) -> None:
+        self.assertEqual(github_web_host("https://api.github.com"), "github.com")
+        self.assertEqual(github_web_host("https://ghe.corp/api/v3"), "ghe.corp")
+        self.assertEqual(github_web_host("https://api.acme.ghe.com"), "acme.ghe.com")
+        self.assertTrue(GitHubClient("t").serves("GitHub.com"))
+        self.assertFalse(GitHubClient("t").serves("ghe.corp"))
+        self.assertTrue(GitHubClient("t", base_url="https://ghe.corp/api/v3").serves("ghe.corp"))
 
     def test_github_get_pull(self) -> None:
         server = FakeGitHub({"acme/w/7": {"number": 7, "head": {"ref": "fix/x", "sha": "abc"}}})

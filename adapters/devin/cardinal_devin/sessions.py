@@ -147,6 +147,20 @@ def normalize(raw: Any, api: str, *, email: Optional[str] = None) -> Optional[Se
     )
 
 
+def primary_pr_url(urls: List[str]) -> Optional[str]:
+    """The PR decisions attach to. `pull_requests[]` has no documented
+    order, so pick deterministically: the highest PR number, then the
+    greatest URL; unparseable URLs rank last."""
+    if not urls:
+        return None
+
+    def rank(url: str):
+        ref = parse_pr_url(url)
+        return (ref.number if ref else -1, url)
+
+    return max(urls, key=rank)
+
+
 _GITHUB_PR_RE = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)(?:[/?#].*)?$")
 _GITLAB_MR_RE = re.compile(r"^https?://([^/]+)/(.+)/([^/]+)/-/merge_requests/(\d+)(?:[/?#].*)?$")
 

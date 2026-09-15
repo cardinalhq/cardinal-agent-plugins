@@ -193,8 +193,15 @@ class DevinClient:
             if len(items) < self.page_size:
                 return
             offset += len(items)
+        self._truncated()
+
+    def _truncated(self) -> None:
         self.last_list_truncated = True
-        log.warning("stopped listing Devin sessions after %d pages", self.max_pages)
+        log.warning(
+            "Devin session listing stopped at the page cap (%d pages x %d = %d sessions); sessions past it "
+            "were not seen this cycle. Raise --max-pages or CARDINAL_DEVIN_MAX_PAGES.",
+            self.max_pages, self.page_size, self.max_pages * self.page_size,
+        )
 
     def _iter_v3(self, updated_after: Optional[int]) -> Iterator[Dict[str, Any]]:
         after: Optional[str] = None
@@ -217,21 +224,27 @@ class DevinClient:
             if not data.get("has_next_page") or not isinstance(cursor, str) or not cursor:
                 return
             after = cursor
-        self.last_list_truncated = True
-        log.warning("stopped listing Devin sessions after %d pages", self.max_pages)
+        self._truncated()
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Session detail, or None when the API says it does not exist."""
-        sid = urllib.parse.quote(session_id, safe="")
+        """Session detail, or None when the API says it does not exist.
+
+        v1 documents only 422 (validation error) for this route, no 404, so
+        a v1 422 is read as not-found. v3's path takes `devin_id`, "the
+        session ID prefixed with `devin-`"; the prefix is added when the
+        listed session_id lacks it."""
         if self.api_version == "v1":
-            path = f"/v1/sessions/{sid}"
+            path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}"
+            not_found = (404, 422)
         else:
-            path = f"/v3/organizations/{self._org_path()}/sessions/{sid}"
+            devin_id = session_id if session_id.startswith("devin-") else f"devin-{session_id}"
+            path = f"/v3/organizations/{self._org_path()}/sessions/{urllib.parse.quote(devin_id, safe='')}"
+            not_found = (404,)
         url = self._url(path)
         try:
             data = self.http.get(url, self._headers())
         except ApiError as exc:
-            if exc.status == 404:
+            if exc.status in not_found:
                 return None
             raise
         if not isinstance(data, dict):
@@ -255,19 +268,39 @@ class DevinClient:
         return email_value if isinstance(email_value, str) and email_value else None
 
 
+def github_web_host(api_base_url: str) -> str:
+    """The web host whose PR URLs an API base serves.
+
+    https://api.github.com -> github.com; https://api.<name>.ghe.com ->
+    <name>.ghe.com; GitHub Enterprise Server https://ghe.corp/api/v3 ->
+    ghe.corp."""
+    host = (urllib.parse.urlsplit(api_base_url).hostname or "").lower()
+    if host == "api.github.com":
+        return "github.com"
+    if host.startswith("api.") and host.endswith(".ghe.com"):
+        return host[len("api."):]
+    return host
+
+
 class GitHubClient:
-    """`GET /repos/{owner}/{repo}/pulls/{pull_number}` with a token."""
+    """`GET /repos/{owner}/{repo}/pulls/{pull_number}` with a token, for PRs
+    on the one web host this API base serves."""
 
     def __init__(
         self,
         token: str,
         *,
         base_url: str = DEFAULT_GITHUB_API_URL,
+        web_host: Optional[str] = None,
         http: Optional[JsonHttp] = None,
     ) -> None:
         self.token = token
         self.base_url = base_url.rstrip("/")
+        self.web_host = (web_host or github_web_host(self.base_url)).lower()
         self.http = http or JsonHttp(timeout=10.0, max_retries=2)
+
+    def serves(self, host: str) -> bool:
+        return host.lower() == self.web_host
 
     def get_pull(self, owner: str, repo: str, number: int) -> Optional[Dict[str, Any]]:
         path = "/repos/{}/{}/pulls/{}".format(

@@ -1,9 +1,9 @@
 {
-  "_source": "SYNTHETIC. Hand-written from the documented SessionResponse schema for GET /v3/organizations/{org_id}/sessions and .../sessions/{devin_id}, and the org user schema for GET /v3beta1/organizations/{org_id}/members/users/{user_id} (docs.devin.ai/api-reference/v3/sessions/organizations-sessions, get-organizations-session, v3/users/get-organization-user; read 2026-09-14). Not captured from a live Devin org. Timestamps are integers as documented; unix seconds is an assumption.",
+  "_source": "SYNTHETIC. Hand-written from the documented SessionResponse schema for GET /v3/organizations/{org_id}/sessions and .../sessions/{devin_id}, and the org user schema for GET /v3beta1/organizations/{org_id}/members/users/{user_id} (docs.devin.ai/api-reference/v3/sessions/organizations-sessions, get-organizations-session, v3/users/get-organization-user; read 2026-09-14). Not captured from a live Devin org. session_id values carry no devin- prefix: the get-session docs say devin_id is the session ID prefixed with devin-. Timestamps are integers as documented; unix seconds is an assumption (the docs give no unit).",
   "sessions": [
     {
-      "session_id": "devin-v3-exit",
-      "url": "https://app.devin.ai/sessions/devin-v3-exit",
+      "session_id": "v3exit",
+      "url": "https://app.devin.ai/sessions/devin-v3exit",
       "status": "exit",
       "status_detail": "finished",
       "tags": ["cardinal"],
@@ -38,8 +38,8 @@
       }
     },
     {
-      "session_id": "devin-v3-running",
-      "url": "https://app.devin.ai/sessions/devin-v3-running",
+      "session_id": "v3running",
+      "url": "https://app.devin.ai/sessions/devin-v3running",
       "status": "running",
       "status_detail": "working",
       "tags": [],
@@ -63,8 +63,8 @@
       "structured_output": null
     },
     {
-      "session_id": "devin-v3-suspended",
-      "url": "https://app.devin.ai/sessions/devin-v3-suspended",
+      "session_id": "v3suspended",
+      "url": "https://app.devin.ai/sessions/devin-v3suspended",
       "status": "suspended",
       "status_detail": "inactivity",
       "tags": [],

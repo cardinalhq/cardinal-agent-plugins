@@ -149,7 +149,9 @@ class FakeDevin(FakeServer):
             if req.path.startswith("/v1/sessions/"):
                 found = self._find(urllib.parse.unquote(req.path[len("/v1/sessions/"):]))
                 if found is None:
-                    return 404, {}, {"detail": "Not Found"}
+                    # v1 documents only 422 (HTTPValidationError) for this route.
+                    return 422, {}, {"detail": [{"loc": ["path", "session_id"], "msg": "Session not found",
+                                                 "type": "value_error"}]}
                 found.pop("requesting_user_email", None)  # not on the detail schema
                 found.setdefault("messages", [])
                 return 200, {}, found
@@ -169,7 +171,11 @@ class FakeDevin(FakeServer):
                 "has_next_page": has_next, "total": len(items),
             }
         if req.path.startswith(prefix + "/"):
-            found = self._find(urllib.parse.unquote(req.path[len(prefix) + 1:]))
+            # The path takes devin_id: "the session ID prefixed with `devin-`".
+            devin_id = urllib.parse.unquote(req.path[len(prefix) + 1:])
+            found = None
+            if devin_id.startswith("devin-"):
+                found = self._find(devin_id[len("devin-"):]) or self._find(devin_id)
             return (200, {}, found) if found else (404, {}, {"detail": "Not Found"})
         users_prefix = f"/v3beta1/organizations/{self.org_id}/members/users/"
         if req.path.startswith(users_prefix):
@@ -338,8 +344,8 @@ class Harness:
             "cog_test", base_url=self.devin.url, org_id="org-test" if self.api == "v3" else None,
             page_size=self.page_size, http=http,
         )
-        gh = GitHubClient("gh-test", base_url=self.github.url, http=JsonHttp(timeout=5.0, sleep=self.sleeps.append)) \
-            if github else None
+        gh = GitHubClient("gh-test", base_url=self.github.url, web_host="github.com",
+                          http=JsonHttp(timeout=5.0, sleep=self.sleeps.append)) if github else None
         return Poller(
             devin=devin,
             state=PollState(self.state_path, readonly=dry_run),

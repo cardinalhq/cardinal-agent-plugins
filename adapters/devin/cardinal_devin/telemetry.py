@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -41,10 +42,12 @@ def pr_facts(pr_url: str, github: Optional[GitHubClient]) -> Dict[str, Any]:
     """git_state facts for one PR URL, in emission order.
 
     From the URL alone: repo, remote URL, PR number, PR URL. With a GitHub
-    token: head branch and head sha from the pull, the base repo's
-    clone_url, and the initiative classified from the head branch. Without
-    a branch there is no initiative (resolving None would claim
-    "research", which is wrong for a PR)."""
+    client whose API serves this PR's web host: head branch and head sha
+    from the pull, the base repo's clone_url (only if it is on the same
+    host), and the initiative classified from the head branch. PRs on any
+    other host are never looked up, so a GHE PR can't pick up facts from a
+    same-named github.com repo. Without a branch there is no initiative
+    (resolving None would claim "research", which is wrong for a PR)."""
     facts: Dict[str, Any] = {
         "cardinal_head_sha": None,
         "cardinal_branch": None,
@@ -64,6 +67,9 @@ def pr_facts(pr_url: str, github: Optional[GitHubClient]) -> Dict[str, Any]:
     facts["cardinal_pr_number"] = ref.number
     if ref.kind != "github" or github is None:
         return facts
+    if not github.serves(ref.host):
+        log.debug("not looking up %s: GitHub API serves %s", pr_url, github.web_host)
+        return facts
     try:
         pull = github.get_pull(ref.owner, ref.repo, ref.number)
     except ApiError as exc:
@@ -76,7 +82,11 @@ def pr_facts(pr_url: str, github: Optional[GitHubClient]) -> Dict[str, Any]:
     base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
     base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
     clone_url = base_repo.get("clone_url")
-    if isinstance(clone_url, str) and initiative.canonical_repo(clone_url):
+    if (
+        isinstance(clone_url, str)
+        and (urllib.parse.urlsplit(clone_url).hostname or "").lower() == ref.host
+        and initiative.canonical_repo(clone_url)
+    ):
         facts["cardinal_remote_url"] = clone_url
         facts["cardinal_repo"] = initiative.canonical_repo(clone_url)
     branch = head.get("ref")
@@ -228,6 +238,12 @@ def build_decisions(
             continue
         built = [d for d in built if d["id"] != decision["id"]] + [decision]
     return built, skipped, None
+
+
+def decision_digest(decision: Dict[str, Any], pr_url: Optional[str]) -> str:
+    """What makes a decision worth re-sending: its content, or the PR it is
+    attached to. A later head sha alone does not re-send it."""
+    return fingerprint({"decision": decision, "pr_url": pr_url})
 
 
 def decision_attrs(session_id: str, decision: Dict[str, Any], facts: Dict[str, Any]) -> Dict[str, Any]:

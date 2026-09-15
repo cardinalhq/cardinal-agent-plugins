@@ -1,0 +1,38 @@
+name: Devin adapter
+
+on:
+  pull_request:
+    paths:
+      - 'adapters/devin/**'
+      - 'core/**'
+      - 'tests/test_contract.py'
+      - '.github/workflows/devin-adapter.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'adapters/devin/**'
+      - 'core/**'
+      - 'tests/test_contract.py'
+      - '.github/workflows/devin-adapter.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '${{ matrix.python }}'
+      - name: Devin adapter tests (fake Devin, GitHub, Cardinal and OTLP servers)
+        env:
+          PYTHONPATH: core
+        run: python3 -m unittest discover adapters/devin/tests -v
+      - name: Cross-adapter contracts
+        run: python3 -m unittest discover tests -p test_contract.py -v

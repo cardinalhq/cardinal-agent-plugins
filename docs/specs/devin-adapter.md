@@ -20,12 +20,32 @@ Where the implementation differs from the design below:
   pagination, `updated_after`, `user_id` resolved through the beta org user
   route). `auto` picks v3 when an org id is set.
 - **Terminal states.** v1 `status_enum` ∈ {finished, expired}; v3 `status` ∈
-  {exit, error} or `status_detail` = finished.
+  {exit, error} or `status_detail` = finished. Terminal status triggers the
+  detail read and the final `git_state` comparison.
+- **Decisions at any status.** A session can stop at blocked or suspended and
+  never finish, so decisions are sent as soon as they appear in
+  `structured_output`, idempotent per decision id and content, not only at the
+  end. They attach to the highest-numbered PR (`pull_requests[]` has no
+  documented order).
+- **v3 ids and parameters.** The get-session page says "The `devin_id` is the
+  session ID prefixed with `devin-` (e.g., `devin-abc123`)", so the detail path
+  adds the prefix. The list operation's single `qs` query object declares no
+  `style`/`explode`, so OpenAPI defaults (form, explode) mean flat parameters.
+  `updated_after` and `updated_at` are integers with no documented unit; the
+  poller sends `updated_after` in the unit the observed `updated_at` values use.
+  v1 detail documents only 422, which is read as not-found.
 - **Branch needs GitHub.** Devin reports only the PR URL. Head branch and sha
   come from `GET /repos/{owner}/{repo}/pulls/{number}` when `GITHUB_TOKEN` is
-  set; without it `git_state` carries repo + PR only and no initiative.
+  set and the PR is on the host the configured API serves; otherwise
+  `git_state` carries repo + PR only and no initiative.
 - **Idempotency** is per session fingerprints of each PR's `git_state` and each
-  decision, not `session_id` + `event_id`.
+  decision, not `session_id` + `event_id`. State is retained long enough that a
+  resumed session re-sends nothing (default 90 days); a crash between POST and
+  state save can re-send one session's records; downtime longer than the
+  lookback skips sessions finished in the gap. v1 lists at most `--max-pages` ×
+  `--page-size` sessions per cycle.
+- **CI.** `.github/workflows/devin-adapter.yml` runs the adapter and contract
+  tests on Python 3.9 and 3.12.
 - **Contract test.** devin is in `tests/test_contract.py` with two documented
   exemptions: no `cardinal_cwd`, no `cardinal_command`.
 

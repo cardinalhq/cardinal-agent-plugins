@@ -9,7 +9,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from cardinal_core import otlp
 from cardinal_core.paths import AgentPaths
@@ -32,6 +32,16 @@ PLAYBOOK_PATH = ADAPTER_ROOT / "playbook" / "cardinal-decisions.md"
 def default_state_dir() -> Path:
     env = os.environ.get("CARDINAL_DEVIN_HOME")
     return Path(env).expanduser() if env else Path.home() / ".cardinal-devin"
+
+
+def _env_number(name: str, default: Any, kind: Callable[[str], Any]) -> Any:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return kind(raw)
+    except ValueError:
+        raise SystemExit(f"error: {name}={raw!r} is not a number")
 
 
 def _devin_options(parser: argparse.ArgumentParser) -> None:
@@ -72,12 +82,17 @@ def build_parser() -> argparse.ArgumentParser:
     _devin_options(poll)
     poll.add_argument("--once", action="store_true", help="Run one cycle and exit.")
     poll.add_argument("--interval", type=int, default=300, help="Seconds between cycles (default 300).")
-    poll.add_argument("--lookback-days", type=float, default=7.0,
-                      help="Ignore sessions last updated before this window (default 7).")
+    poll.add_argument("--lookback-days", type=float, default=_env_number("CARDINAL_DEVIN_LOOKBACK_DAYS", 7.0, float),
+                      help="Ignore sessions last updated before this window. Downtime longer than this "
+                           "skips sessions that finished in the gap (default: $CARDINAL_DEVIN_LOOKBACK_DAYS or 7).")
     poll.add_argument("--active-ttl-days", type=float, default=14.0,
                       help="Stop polling an active session with no update for this long (default 14).")
+    poll.add_argument("--state-retention-days", type=float, default=90.0,
+                      help="Keep finished session state this long so a resumed session re-sends nothing (default 90).")
     poll.add_argument("--page-size", type=int, default=100, help="Sessions per list page (v3 max 200).")
-    poll.add_argument("--max-pages", type=int, default=50, help="List pages per cycle (default 50).")
+    poll.add_argument("--max-pages", type=int, default=_env_number("CARDINAL_DEVIN_MAX_PAGES", 50, int),
+                      help="List pages per cycle; v1 has no documented order or filter, so sessions past "
+                           "the cap are not seen (default: $CARDINAL_DEVIN_MAX_PAGES or 50).")
     poll.add_argument("--no-decisions", action="store_true", help="Do not emit cardinal.decision.")
     poll.add_argument("--dry-run", action="store_true",
                       help="Print OTLP bodies to stdout; send nothing and leave poll state untouched.")
@@ -129,6 +144,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
         devin=devin, state=state, connection=connection, connection_state=paths.read_state(), github=github,
         options=PollOptions(
             lookback_days=args.lookback_days, active_ttl_days=args.active_ttl_days,
+            state_retention_days=args.state_retention_days,
             emit_decisions=not args.no_decisions, dry_run=args.dry_run,
         ),
     )

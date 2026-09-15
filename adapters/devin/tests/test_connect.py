@@ -98,6 +98,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(["decision-schema"]), 0)
         self.assertIn("decisions", json.loads(buf.getvalue())["properties"])
 
+    def test_page_cap_and_lookback_from_env(self) -> None:
+        with mock.patch.dict(os.environ, {"CARDINAL_DEVIN_MAX_PAGES": "7", "CARDINAL_DEVIN_LOOKBACK_DAYS": "30"}):
+            args = cli.build_parser().parse_args(["poll"])
+        self.assertEqual((args.max_pages, args.lookback_days), (7, 30.0))
+        self.assertEqual(cli.build_parser().parse_args(["poll", "--max-pages", "9"]).max_pages, 9)
+
     def test_poll_requires_connection_and_key(self) -> None:
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)

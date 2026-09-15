@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-import support  # noqa: F401
+import support
+from support import FakeGitHub
 
-from cardinal_devin.sessions import normalize, parse_pr_url, to_ns
+from cardinal_devin.client import GitHubClient, JsonHttp
+from cardinal_devin.sessions import normalize, parse_pr_url, primary_pr_url, to_ns
 from cardinal_devin.telemetry import fingerprint, git_state_attrs, pr_facts
 
 TEN_AM = 1789380000  # 2026-09-14T10:00:00Z
@@ -96,9 +98,55 @@ class PullRequestTests(unittest.TestCase):
         other = pr_facts("https://example.com/x", None)
         self.assertEqual({k: v for k, v in other.items() if v is not None}, {"cardinal_pr_url": "https://example.com/x"})
 
+    def test_primary_pr_is_highest_number(self) -> None:
+        self.assertIsNone(primary_pr_url([]))
+        urls = ["https://github.com/o/r/pull/9", "https://github.com/o/r/pull/12", "https://example.com/x"]
+        self.assertEqual(primary_pr_url(urls), "https://github.com/o/r/pull/12")
+        self.assertEqual(primary_pr_url(list(reversed(urls))), "https://github.com/o/r/pull/12")
+        self.assertEqual(primary_pr_url(["https://example.com/b", "https://example.com/a"]), "https://example.com/b")
+
     def test_fingerprint_ignores_empty_values(self) -> None:
         self.assertEqual(fingerprint({"a": 1, "b": None}), fingerprint({"a": 1}))
         self.assertNotEqual(fingerprint({"a": 1}), fingerprint({"a": 2}))
+
+
+class PullRequestHostTests(unittest.TestCase):
+    def setUp(self) -> None:
+        pull = {
+            "number": 7,
+            "head": {"ref": "feat/ghe-thing", "sha": "a" * 40},
+            "base": {"repo": {"full_name": "acme/app", "clone_url": "https://ghe.corp/acme/app.git"}},
+        }
+        self.server = FakeGitHub({"acme/app/7": pull})
+        self.addCleanup(self.server.close)
+
+    def client(self, web_host=None) -> GitHubClient:
+        return GitHubClient("gh-test", base_url=self.server.url, web_host=web_host, http=JsonHttp(timeout=5.0))
+
+    def test_other_host_is_not_looked_up(self) -> None:
+        facts = pr_facts("https://ghe.corp/acme/app/pull/7", self.client(web_host="github.com"))
+        self.assertEqual(self.server.requests, [])
+        self.assertIsNone(facts["cardinal_branch"])
+        self.assertEqual(facts["cardinal_remote_url"], "https://ghe.corp/acme/app.git")
+        self.assertEqual((facts["cardinal_repo"], facts["cardinal_pr_number"]), ("acme/app", 7))
+
+    def test_default_api_does_not_serve_ghe(self) -> None:
+        with support.captured_logs():
+            facts = pr_facts("https://ghe.corp/acme/app/pull/7", GitHubClient("gh-test"))  # no request is made
+        self.assertIsNone(facts["cardinal_branch"])
+
+    def test_matching_ghe_host_is_looked_up(self) -> None:
+        facts = pr_facts("https://ghe.corp/acme/app/pull/7", self.client(web_host="ghe.corp"))
+        self.assertEqual(len(self.server.requests), 1)
+        self.assertEqual(facts["cardinal_branch"], "feat/ghe-thing")
+        self.assertEqual(facts["cardinal_remote_url"], "https://ghe.corp/acme/app.git")
+
+    def test_response_cannot_move_repo_to_another_host(self) -> None:
+        self.server.pulls["acme/app/7"]["base"]["repo"]["clone_url"] = "https://github.com/other/app.git"
+        facts = pr_facts("https://ghe.corp/acme/app/pull/7", self.client(web_host="ghe.corp"))
+        self.assertEqual(facts["cardinal_remote_url"], "https://ghe.corp/acme/app.git")
+        self.assertEqual(facts["cardinal_repo"], "acme/app")
+        self.assertEqual(facts["cardinal_branch"], "feat/ghe-thing")
 
 
 if __name__ == "__main__":

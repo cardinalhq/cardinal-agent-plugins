@@ -437,6 +437,77 @@
                       }
                     }
                   ]
+                },
+                {
+                  "timeUnixNano": "1789379100000000000",
+                  "observedTimeUnixNano": "1789379100000000000",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.decision"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.decision"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "devin-v1-working"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.id",
+                      "value": {
+                        "stringValue": "recorded-while-the-session-is-still-working"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.choice",
+                      "value": {
+                        "stringValue": "Recorded while the session is still working"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.decided_by",
+                      "value": {
+                        "stringValue": "agent"
+                      }
+                    },
+                    {
+                      "key": "cardinal.repo",
+                      "value": {
+                        "stringValue": "acme/widgets"
+                      }
+                    },
+                    {
+                      "key": "cardinal.branch",
+                      "value": {
+                        "stringValue": "fix/worker-crash"
+                      }
+                    },
+                    {
+                      "key": "cardinal.head_sha",
+                      "value": {
+                        "stringValue": "3333333333333333333333333333333333333333"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_number",
+                      "value": {
+                        "intValue": "43"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/acme/widgets/pull/43"
+                      }
+                    }
+                  ]
                 }
               ]
             }

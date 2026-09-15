@@ -27,7 +27,11 @@ Python 3.9+, standard library only. No packaging yet; run it from a checkout.
 2. **GitHub token (recommended).** Devin reports only a PR URL. With
    `GITHUB_TOKEN` (read access to pull requests) the poller looks up the
    PR's head branch and head sha, which initiative attribution needs.
-   GitHub Enterprise: `--github-api-url` or `GITHUB_API_URL`.
+   Lookups only go to PRs on the web host the API serves:
+   `https://api.github.com` serves `github.com`; for GitHub Enterprise set
+   `GITHUB_API_URL` (or `--github-api-url`) to e.g.
+   `https://ghe.corp/api/v3`, which serves `ghe.corp`. PRs on any other
+   host get repo and PR keys from the URL only. One API host per poller.
 
 3. **Connect to Cardinal** (device flow; mints an `ingest:write` key):
 
@@ -47,9 +51,16 @@ Python 3.9+, standard library only. No packaging yet; run it from a checkout.
    adapters/devin/bin/cardinal-devin poll --interval 300     # run continuously
    ```
 
-   Useful flags: `--lookback-days` (default 7), `--active-ttl-days`
-   (default 14), `--api-version auto|v1|v3`, `--devin-base-url`,
-   `--no-decisions`, `-v`.
+   | Flag | Env | Default | |
+   |---|---|---|---|
+   | `--lookback-days` | `CARDINAL_DEVIN_LOOKBACK_DAYS` | 7 | untracked sessions last updated earlier are ignored |
+   | `--max-pages` | `CARDINAL_DEVIN_MAX_PAGES` | 50 | list pages per cycle |
+   | `--page-size` | | 100 | sessions per page (v3 max 200) |
+   | `--active-ttl-days` | | 14 | stop polling an idle active session |
+   | `--state-retention-days` | | 90 | keep finished session state |
+   | `--api-version` | | auto | `v3` when an org id is set, else `v1` |
+
+   Also `--devin-base-url` (`DEVIN_API_BASE_URL`), `--no-decisions`, `-v`.
 
 ### Decision capture (opt-in per session)
 
@@ -64,17 +75,20 @@ Cardinal playbook and structured-output schema:
   `structured_output_schema` on `POST /v3/organizations/{org_id}/sessions`
   (or `POST /v1/sessions`).
 
-When the session reaches a terminal status, each `decisions[]` entry
-becomes one `cardinal.decision`, tagged with the session's PR, repo,
-branch, and head sha. Invalid entries are skipped and logged with a
-reason.
+Each `decisions[]` entry becomes one `cardinal.decision` as soon as the
+poller sees it in `structured_output`, whatever the session's status
+(working, blocked, suspended, finished). A decision is re-sent only if its
+content changes (same `id`) or the PR it attaches to changes. Entries
+without an `id` get one derived from `choice`, so editing a choice creates
+a new decision rather than revising the old one. Invalid entries are
+skipped and logged with a reason.
 
 ## What is captured
 
 | Event | When | Attributes |
 |---|---|---|
-| `cardinal.git_state` | A PR first appears on a session; again at terminal only if something changed | `session_id`, `cardinal_repo`, `cardinal_remote_url`, `cardinal_pr_number`, `cardinal_pr_url`; with `GITHUB_TOKEN` also `cardinal_branch`, `cardinal_head_sha`, `cardinal_initiative_name`, `cardinal_initiative_type` |
-| `cardinal.decision` | Session terminal, from `structured_output.decisions` | the `cardinal.decision.*` set from `cardinal_core.decisions`, plus `cardinal.repo/branch/head_sha/pr_number/pr_url` |
+| `cardinal.git_state` | A PR first appears on a session; again at terminal only if something changed | `session_id`, `cardinal_repo`, `cardinal_remote_url`, `cardinal_pr_number`, `cardinal_pr_url`; with a matching GitHub API also `cardinal_branch`, `cardinal_head_sha`, `cardinal_initiative_name`, `cardinal_initiative_type` |
+| `cardinal.decision` | A new or changed entry in `structured_output.decisions` | the `cardinal.decision.*` set from `cardinal_core.decisions`, plus `cardinal.repo/branch/head_sha/pr_number/pr_url` of the primary PR |
 
 Resource: `service.name` and `agent.runtime` = `devin`, `user.email` from
 the session, `cardinal.org` and `deployment.environment` from `connect`.
@@ -83,40 +97,65 @@ the session, `cardinal.org` and `deployment.environment` from `connect`.
 
 | Cardinal | v1 (`/v1/sessions`) | v3 (`/v3/organizations/{org_id}/sessions`) |
 |---|---|---|
-| session id | `session_id` | `session_id` (used as the `{devin_id}` path value; the docs don't confirm they're the same) |
+| session id | `session_id` | `session_id`; the detail path takes `devin_id`, which the docs define as "the session ID prefixed with `devin-`", so the prefix is added when missing |
 | terminal | `status_enum` in `finished`, `expired` | `status` in `exit`, `error`, or `status_detail` = `finished` |
 | user.email | `requesting_user_email` (list items only; carried to detail) | `user_id` → `GET /v3beta1/organizations/{org_id}/members/users/{user_id}` → `email` (beta; cached 24h, misses 1h) |
-| PR | `pull_request.url` | `pull_requests[].pr_url` (one `git_state` per PR; decisions use the first) |
+| PR | `pull_request.url` | `pull_requests[].pr_url`: one `git_state` per PR |
+| primary PR (decisions) | the one PR | highest PR number, then greatest URL (`pull_requests[]` has no documented order) |
 | decisions | `structured_output` | `structured_output` |
-| updated time | `updated_at` (ISO) | `updated_at` (integer; read as unix seconds) |
+| updated time | `updated_at` (ISO) | `updated_at` (integer, no documented unit; values ≥ 10^11 read as ms, else seconds) |
 | pagination | `limit`/`offset`, until a short page | `first`/`after`, `has_next_page`/`end_cursor` |
-| incremental | none documented: full list each cycle | `updated_after` = last successful cycle − 5 min |
+| incremental | none documented: full list each cycle | `updated_after` = last successful cycle − 5 min, in the unit `updated_at` uses |
+| not found | detail documents only 422; read as not-found | 404 |
+
+v3's list operation declares one query parameter, `qs`
+(`SessionsQueryParams`), with no `style`/`explode`; OpenAPI's defaults
+for query objects (form, explode) serialise it as flat parameters
+(`first=…&after=…&updated_after=…`), which is what is sent.
 
 Repo and remote come from the PR URL (GitHub `/{owner}/{repo}/pull/{n}`,
-GitLab `/{group}/{repo}/-/merge_requests/{n}`); the GitHub lookup replaces
-the remote with the base repo's `clone_url` and adds `head.ref` / `head.sha`.
-Initiative is classified from `head.ref` with `cardinal_core.initiative`.
-Without a branch, no initiative is sent (classifying "no branch" would
-wrongly claim `research`).
+GitLab `/{group}/{repo}/-/merge_requests/{n}`). A GitHub lookup adds
+`head.ref` / `head.sha` and may replace the remote with the base repo's
+`clone_url`, but only when that URL is on the PR's own host. Initiative is
+classified from `head.ref` with `cardinal_core.initiative`. Without a
+branch, no initiative is sent (classifying "no branch" would wrongly claim
+`research`).
 
-The docs show v1 (deprecated) and v3 (current). `auto` picks v3 when an
-org id is set. Both are handled; which one a given org's key accepts is
-unconfirmed.
+The docs show v1 (deprecated) and v3 (current). Both are handled; which
+one a given org's key accepts is unconfirmed.
 
-### Idempotency
+### Idempotency and its limits
 
 The poll state file (atomic writes) records, per session, a fingerprint of
-each PR's `git_state` and each decision's attributes. Re-runs and restarts
-send nothing that was already accepted. State is updated only after
-ingest returns 2xx, so a failed send is retried next cycle. A corrupt
-state file stops the poller rather than resetting (which would re-send
-the lookback window). Sessions last updated before `--lookback-days` are
-ignored unless already tracked, and finished entries are pruned a day
-after that window. HTTP 429 from Devin is retried with `Retry-After`
-(seconds or HTTP-date) or exponential backoff, capped at 60s.
+each PR's `git_state`, each decision, and the last `structured_output`.
+Re-runs and restarts send nothing already accepted. State is updated only
+after ingest returns 2xx, so a failed send is retried next cycle. A corrupt
+state file stops the poller rather than resetting (which would re-send the
+lookback window).
+
+- **Crash window.** A crash after ingest accepts a POST but before the
+  state save re-sends that one session's records once on restart.
+- **Downtime.** Untracked sessions last updated before `--lookback-days`
+  are ignored, so downtime longer than the lookback skips sessions that
+  finished during the gap. Raise the lookback before restarting after a
+  long outage.
+- **Resumed sessions.** Finished, stale, and gone entries are kept for the
+  longest of `--state-retention-days`, lookback + 1 day, and active TTL +
+  1 day. A session resumed within that time re-sends nothing; one resumed
+  later is treated as new and re-sends its `git_state` and decisions.
+- **Not found.** An active session whose detail returns not-found is only
+  dropped after 3 cycles in a row. Its decisions were already sent when
+  first seen.
+- **Rate limits.** HTTP 429 from Devin is retried with `Retry-After`
+  (seconds or HTTP-date) or exponential backoff, capped at 60s.
 
 ## Gaps
 
+- **v1 listing cap.** v1 has no documented order or `updated_after`
+  filter, so every cycle lists from offset 0 up to `--max-pages` ×
+  `--page-size` sessions (5,000 by default). Sessions past the cap are not
+  seen, and a warning is logged every cycle it happens. Use v3, or raise
+  the cap.
 - **No cost.** Devin has no API for spend. v3 returns `acus_consumed`, but
   no contract event carries it, so it isn't sent.
 - **Polling latency.** No webhooks or streaming; data lags by up to one
@@ -126,20 +165,16 @@ after that window. HTTP 429 from Devin is retried with `Retry-After`
   enumerated, so nothing is sent. No session start/end events either; the
   session appears via `git_state`.
 - **Sessions without a PR send no `git_state`.** The session schema has no
-  repo or branch fields.
-- **Decisions only at session end,** and only for sessions created with
-  the schema (Devin has no org-wide playbook auto-attach). A session that
-  resumes and finishes again re-sends only decisions whose content changed.
-  No D18 code clusters (no checkout to read the tree from).
+  repo or branch fields. Their decisions go out without repo/PR keys.
+- **Decisions need the schema.** Only sessions created with it (Devin has
+  no org-wide playbook auto-attach). No D18 code clusters (no checkout).
 - **Attribution by email.** v1 gives `requesting_user_email`; v3 needs the
   beta user lookup and `ViewOrgMembership`. Sessions started by a service
   user, or users the lookup can't resolve, go out as `user.email=unknown`.
   The ingest key belongs to whoever ran `connect`.
-- **Without `GITHUB_TOKEN`:** no branch, head sha, or initiative; outcomes
-  must join on repo + PR number.
-- **Active sessions** with no update for `--active-ttl-days` stop being
-  polled (v3). On v1 every session is re-listed each cycle, bounded by
-  `--max-pages`.
+- **Without a GitHub token, or for PRs on other hosts:** no branch, head
+  sha, or initiative; outcomes must join on repo + PR number.
+- **Idle active sessions** stop being polled after `--active-ttl-days` (v3).
 
 ## Backend requirement
 
@@ -150,9 +185,8 @@ and Pi need; see [docs/RELEASING-NATIVE.md](../../docs/RELEASING-NATIVE.md).
 ## Unverified
 
 - Everything against a live org: payload shapes, v1 vs v3 availability,
-  whether v3's `qs` query object is sent as flat parameters (assumed),
-  `devin_id` = `session_id`, integer timestamps being seconds, and whether
-  `updated_at` moves when a PR is added.
+  the v3 timestamp unit, and whether `updated_at` moves when a PR is added
+  or `structured_output` changes.
 - Rate limits: the docs list 429 with no numbers or headers.
 - Whether Cardinal's device flow accepts client id `cardinal-devin-poller`.
 - Terminal semantics: `suspended` with `status_detail` other than
@@ -167,4 +201,5 @@ PYTHONPATH=core python3 adapters/devin/tests/capture_goldens.py   # after an int
 
 Fake Devin, GitHub, Cardinal, and OTLP servers run on localhost; fixtures
 in `tests/fixtures/` are synthetic, written from the docs. Goldens in
-`tests/goldens/` feed `tests/test_contract.py`.
+`tests/goldens/` feed `tests/test_contract.py`. CI:
+`.github/workflows/devin-adapter.yml` (Python 3.9 and 3.12).

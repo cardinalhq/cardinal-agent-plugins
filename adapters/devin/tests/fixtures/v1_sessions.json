@@ -57,7 +57,7 @@
       "snapshot_id": null,
       "pull_request": {"url": "https://github.com/acme/widgets/pull/43"},
       "structured_output": {
-        "decisions": [{"choice": "Not emitted until the session is terminal"}]
+        "decisions": [{"choice": "Recorded while the session is still working"}]
       }
     },
     {
