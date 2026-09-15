@@ -9,7 +9,7 @@ core/cardinal_core/     shared runtime — OTLP emission, initiative
                         resolution, spend limits, device consent,
                         session counters
 adapters/               per-agent surfaces (codex, gemini, cursor,
-                        claude, opencode, pi)
+                        claude, opencode, pi, devin)
 build/vendor.py         copies core into each plugin artifact so shipped
                         plugins stay self-contained (no pip for users)
 docs/specs/             the extraction spec and migration plan
@@ -39,6 +39,12 @@ them with `python3 build/native.py`; test with `npm ci --ignore-scripts` and
 `npm run test:native`. See [native package releases](docs/RELEASING-NATIVE.md)
 for installable artifacts, compatibility targets, and the backend runtime
 filter needed before production session analytics can consume their usage.
+
+[Devin](adapters/devin/README.md) has no plugin surface, so its adapter is a
+server-side poller over the Devin REST API. It sends `cardinal.git_state`
+with PR linkage and, for sessions created with the Cardinal
+structured-output schema, `cardinal.decision`. It has not yet been run
+against a live Devin org.
 
 ## Release flow
 

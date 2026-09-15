@@ -1,0 +1,519 @@
+{
+  "posts": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "devin"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "devin"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "test"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "alice@example.com"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "acme"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              },
+              {
+                "key": "cardinal.core_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-devin-poller",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "1789380000000000000",
+                  "observedTimeUnixNano": "1789380000000000000",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.git_state"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.git_state"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "devin-v1-finished"
+                      }
+                    },
+                    {
+                      "key": "cardinal_head_sha",
+                      "value": {
+                        "stringValue": "1111111111111111111111111111111111111111"
+                      }
+                    },
+                    {
+                      "key": "cardinal_branch",
+                      "value": {
+                        "stringValue": "feat/widget-sync-retry"
+                      }
+                    },
+                    {
+                      "key": "cardinal_repo",
+                      "value": {
+                        "stringValue": "acme/widgets"
+                      }
+                    },
+                    {
+                      "key": "cardinal_remote_url",
+                      "value": {
+                        "stringValue": "https://github.com/acme/widgets.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_number",
+                      "value": {
+                        "intValue": "42"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/acme/widgets/pull/42"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_name",
+                      "value": {
+                        "stringValue": "widget-sync-retry"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_type",
+                      "value": {
+                        "stringValue": "feature"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789380000000000000",
+                  "observedTimeUnixNano": "1789380000000000000",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.decision"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.decision"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "devin-v1-finished"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.id",
+                      "value": {
+                        "stringValue": "retry-backoff"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.question",
+                      "value": {
+                        "stringValue": "How should the sync client retry on HTTP 429?"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.choice",
+                      "value": {
+                        "stringValue": "Exponential backoff capped at 60 seconds"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.rationale",
+                      "value": {
+                        "stringValue": "The upstream API rate-limits under load; the cap bounds worst-case latency."
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.decided_by",
+                      "value": {
+                        "stringValue": "agent"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.alternatives",
+                      "value": {
+                        "stringValue": "[\"Fixed 5 second delay\",\"No retry\"]"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.anchors",
+                      "value": {
+                        "stringValue": "[{\"kind\":\"file\",\"identifier\":\"src/sync/retry.py\",\"path\":\"src/sync/retry.py\"},{\"kind\":\"symbol\",\"identifier\":\"SyncClient.fetch\",\"path\":\"src/sync/client.py\"}]"
+                      }
+                    },
+                    {
+                      "key": "cardinal.repo",
+                      "value": {
+                        "stringValue": "acme/widgets"
+                      }
+                    },
+                    {
+                      "key": "cardinal.branch",
+                      "value": {
+                        "stringValue": "feat/widget-sync-retry"
+                      }
+                    },
+                    {
+                      "key": "cardinal.head_sha",
+                      "value": {
+                        "stringValue": "1111111111111111111111111111111111111111"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_number",
+                      "value": {
+                        "intValue": "42"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/acme/widgets/pull/42"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789380000000000000",
+                  "observedTimeUnixNano": "1789380000000000000",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.decision"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.decision"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "devin-v1-finished"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.id",
+                      "value": {
+                        "stringValue": "environment-variables"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.question",
+                      "value": {
+                        "stringValue": "Where should retry settings live?"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.choice",
+                      "value": {
+                        "stringValue": "Environment variables"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.decided_by",
+                      "value": {
+                        "stringValue": "user"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.links",
+                      "value": {
+                        "stringValue": "[{\"relation\":\"follows_from\",\"to\":\"retry-backoff\"}]"
+                      }
+                    },
+                    {
+                      "key": "cardinal.repo",
+                      "value": {
+                        "stringValue": "acme/widgets"
+                      }
+                    },
+                    {
+                      "key": "cardinal.branch",
+                      "value": {
+                        "stringValue": "feat/widget-sync-retry"
+                      }
+                    },
+                    {
+                      "key": "cardinal.head_sha",
+                      "value": {
+                        "stringValue": "1111111111111111111111111111111111111111"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_number",
+                      "value": {
+                        "intValue": "42"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/acme/widgets/pull/42"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "devin"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "devin"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "test"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "bob@example.com"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "acme"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              },
+              {
+                "key": "cardinal.core_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-devin-poller",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "1789379100000000000",
+                  "observedTimeUnixNano": "1789379100000000000",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.git_state"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.git_state"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "devin-v1-working"
+                      }
+                    },
+                    {
+                      "key": "cardinal_head_sha",
+                      "value": {
+                        "stringValue": "3333333333333333333333333333333333333333"
+                      }
+                    },
+                    {
+                      "key": "cardinal_branch",
+                      "value": {
+                        "stringValue": "fix/worker-crash"
+                      }
+                    },
+                    {
+                      "key": "cardinal_repo",
+                      "value": {
+                        "stringValue": "acme/widgets"
+                      }
+                    },
+                    {
+                      "key": "cardinal_remote_url",
+                      "value": {
+                        "stringValue": "https://github.com/acme/widgets.git"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_number",
+                      "value": {
+                        "intValue": "43"
+                      }
+                    },
+                    {
+                      "key": "cardinal_pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/acme/widgets/pull/43"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_name",
+                      "value": {
+                        "stringValue": "worker-crash"
+                      }
+                    },
+                    {
+                      "key": "cardinal_initiative_type",
+                      "value": {
+                        "stringValue": "bugfix"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789379100000000000",
+                  "observedTimeUnixNano": "1789379100000000000",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.decision"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.decision"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "devin-v1-working"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.id",
+                      "value": {
+                        "stringValue": "recorded-while-the-session-is-still-working"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.choice",
+                      "value": {
+                        "stringValue": "Recorded while the session is still working"
+                      }
+                    },
+                    {
+                      "key": "cardinal.decision.decided_by",
+                      "value": {
+                        "stringValue": "agent"
+                      }
+                    },
+                    {
+                      "key": "cardinal.repo",
+                      "value": {
+                        "stringValue": "acme/widgets"
+                      }
+                    },
+                    {
+                      "key": "cardinal.branch",
+                      "value": {
+                        "stringValue": "fix/worker-crash"
+                      }
+                    },
+                    {
+                      "key": "cardinal.head_sha",
+                      "value": {
+                        "stringValue": "3333333333333333333333333333333333333333"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_number",
+                      "value": {
+                        "intValue": "43"
+                      }
+                    },
+                    {
+                      "key": "cardinal.pr_url",
+                      "value": {
+                        "stringValue": "https://github.com/acme/widgets/pull/43"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

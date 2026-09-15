@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""cardinal-devin launcher.
+
+Finds cardinal_core from a vendored copy next to cardinal_devin/ when one
+is present (adapters/devin/cardinal_core/), otherwise from this repo's
+core/, then runs the CLI.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ADAPTER_ROOT = Path(__file__).resolve().parent.parent
+REPO_CORE = ADAPTER_ROOT.parent.parent / "core"
+
+if not (ADAPTER_ROOT / "cardinal_core" / "__init__.py").is_file() and (
+    REPO_CORE / "cardinal_core" / "__init__.py"
+).is_file():
+    sys.path.insert(0, str(REPO_CORE))
+sys.path.insert(0, str(ADAPTER_ROOT))
+
+from cardinal_devin.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

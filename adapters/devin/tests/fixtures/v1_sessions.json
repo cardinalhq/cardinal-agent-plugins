@@ -1,0 +1,106 @@
+{
+  "_source": "SYNTHETIC. Hand-written from the documented response schemas for GET /v1/sessions and GET /v1/sessions/{session_id} (docs.devin.ai/api-reference/v1/sessions/list-sessions and .../retrieve-details-about-an-existing-session, read 2026-09-14). Not captured from a live Devin org. The fake server serves these as list items; detail responses drop requesting_user_email and add messages[], as the detail schema does.",
+  "sessions": [
+    {
+      "session_id": "devin-v1-finished",
+      "status": "finished",
+      "status_enum": "finished",
+      "created_at": "2026-09-14T08:00:00Z",
+      "updated_at": "2026-09-14T10:00:00Z",
+      "title": "Add retry to widget sync",
+      "tags": ["cardinal"],
+      "requesting_user_email": "alice@example.com",
+      "playbook_id": "playbook-cardinal-decisions",
+      "snapshot_id": null,
+      "pull_request": {"url": "https://github.com/acme/widgets/pull/42"},
+      "structured_output": {
+        "decisions": [
+          {
+            "id": "retry-backoff",
+            "question": "How should the sync client retry on HTTP 429?",
+            "choice": "Exponential backoff capped at 60 seconds",
+            "rationale": "The upstream API rate-limits under load; the cap bounds worst-case latency.",
+            "decided_by": "agent",
+            "alternatives": ["Fixed 5 second delay", "No retry"],
+            "anchors": [
+              {"kind": "file", "identifier": "src/sync/retry.py"},
+              {"kind": "symbol", "identifier": "SyncClient.fetch", "path": "src/sync/client.py"}
+            ]
+          },
+          {
+            "question": "Where should retry settings live?",
+            "choice": "Environment variables",
+            "decided_by": "user",
+            "follows_from": ["retry-backoff"]
+          },
+          {
+            "question": "An entry with no choice",
+            "rationale": "Invalid on purpose."
+          },
+          {
+            "choice": "An entry with an unknown anchor kind",
+            "anchors": [{"kind": "module", "identifier": "sync"}]
+          }
+        ]
+      }
+    },
+    {
+      "session_id": "devin-v1-working",
+      "status": "working",
+      "status_enum": "working",
+      "created_at": "2026-09-14T09:00:00Z",
+      "updated_at": "2026-09-14T09:45:00Z",
+      "title": "Fix worker crash",
+      "tags": [],
+      "requesting_user_email": "bob@example.com",
+      "playbook_id": "playbook-cardinal-decisions",
+      "snapshot_id": null,
+      "pull_request": {"url": "https://github.com/acme/widgets/pull/43"},
+      "structured_output": {
+        "decisions": [{"choice": "Recorded while the session is still working"}]
+      }
+    },
+    {
+      "session_id": "devin-v1-expired-no-output",
+      "status": "expired",
+      "status_enum": "expired",
+      "created_at": "2026-09-13T08:00:00Z",
+      "updated_at": "2026-09-13T12:00:00Z",
+      "title": "Investigate flaky test",
+      "tags": null,
+      "requesting_user_email": "carol@example.com",
+      "playbook_id": null,
+      "snapshot_id": null,
+      "pull_request": null,
+      "structured_output": null
+    },
+    {
+      "session_id": "devin-v1-blocked",
+      "status": "blocked",
+      "status_enum": "blocked",
+      "created_at": "2026-09-14T07:00:00Z",
+      "updated_at": "2026-09-14T07:30:00Z",
+      "title": "Waiting on the user",
+      "tags": [],
+      "requesting_user_email": "dave@example.com",
+      "playbook_id": null,
+      "snapshot_id": null,
+      "pull_request": null,
+      "structured_output": null
+    },
+    {
+      "session_id": "devin-v1-old",
+      "status": "finished",
+      "status_enum": "finished",
+      "created_at": "2026-08-01T08:00:00Z",
+      "updated_at": "2026-08-01T09:00:00Z",
+      "title": "Outside the lookback window",
+      "tags": [],
+      "requesting_user_email": "erin@example.com",
+      "playbook_id": null,
+      "snapshot_id": null,
+      "pull_request": {"url": "https://github.com/acme/widgets/pull/44"},
+      "structured_output": null
+    }
+  ]
+}

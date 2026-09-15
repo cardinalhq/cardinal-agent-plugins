@@ -13,6 +13,7 @@ its pre-migration goldens, and proves byte-equal OTLP output.
 | `claude/` | P4 | **migrated** — 12 parity + 124 ported tests | cardinalhq/cardinal-claude-plugin |
 | `opencode/` | native | npm package; OpenCode 1.18.30; telemetry + native MCP | — (`build/native.py`) |
 | `pi/` | native | Pi package; Pi 0.85.1; telemetry + bundled MCP client | — (`build/native.py`) |
+| `devin/` | poller | server-side Devin API poller; `git_state` + `decision`; unvalidated against a live org | — (not packaged) |
 
 Migration is code-complete; the mirror repos still ship the pre-migration
 releases until the release-mirror CI lands and each adapter is cut as a
