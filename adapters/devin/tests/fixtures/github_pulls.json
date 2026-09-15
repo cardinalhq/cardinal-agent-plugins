@@ -1,0 +1,35 @@
+{
+  "_source": "SYNTHETIC. A subset of GitHub REST 'Get a pull request' (GET /repos/{owner}/{repo}/pulls/{pull_number}) response fields: number, html_url, state, head.ref, head.sha, head.repo, base.ref, base.repo. Keyed owner/repo/number.",
+  "pulls": {
+    "acme/widgets/42": {
+      "number": 42,
+      "html_url": "https://github.com/acme/widgets/pull/42",
+      "state": "open",
+      "head": {
+        "ref": "feat/widget-sync-retry",
+        "sha": "1111111111111111111111111111111111111111",
+        "repo": {"full_name": "acme/widgets", "clone_url": "https://github.com/acme/widgets.git"}
+      },
+      "base": {
+        "ref": "main",
+        "sha": "2222222222222222222222222222222222222222",
+        "repo": {"full_name": "acme/widgets", "clone_url": "https://github.com/acme/widgets.git"}
+      }
+    },
+    "acme/widgets/43": {
+      "number": 43,
+      "html_url": "https://github.com/acme/widgets/pull/43",
+      "state": "open",
+      "head": {
+        "ref": "fix/worker-crash",
+        "sha": "3333333333333333333333333333333333333333",
+        "repo": {"full_name": "acme/widgets", "clone_url": "https://github.com/acme/widgets.git"}
+      },
+      "base": {
+        "ref": "main",
+        "sha": "2222222222222222222222222222222222222222",
+        "repo": {"full_name": "acme/widgets", "clone_url": "https://github.com/acme/widgets.git"}
+      }
+    }
+  }
+}

@@ -21,6 +21,11 @@ product surface, see docs/specs/agent-core.md §Adapter variance table):
   the compact slice only.
 - gemini: thought_tokens on usage events; plan_usage is the compact slice.
 - codex: transcript-derived; plan_usage is the rate-limit slice.
+- devin: a server-side poller over Devin's REST API (docs/specs/devin-adapter.md),
+  not a CLI plugin. Only git_state and decision; git_state has no
+  cardinal_cwd (no local checkout) and no cardinal_command (no slash
+  commands). Its goldens come from synthetic fixtures modelled on
+  Devin's published API docs.
 
 Run from repo root:  python3 -m unittest discover tests
 """
@@ -35,7 +40,7 @@ from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-ADAPTERS = ("claude", "codex", "cursor", "gemini")
+ADAPTERS = ("claude", "codex", "cursor", "gemini", "devin")
 
 # Which Cardinal events each adapter's goldens must contain.
 EXPECTED_EVENTS: dict[str, set[str]] = {
@@ -58,6 +63,7 @@ EXPECTED_EVENTS: dict[str, set[str]] = {
         "cardinal.subagent_usage", "cardinal.plan_state", "cardinal.plan_usage",
         "api_request", "tool_result",
     },
+    "devin": {"cardinal.git_state", "cardinal.decision"},
 }
 
 # Keys that MUST be present (post dot→underscore normalization) in every
@@ -95,6 +101,13 @@ REQUIRED_KEYS: dict[str, set[str]] = {
     },
 }
 
+# Required keys an adapter cannot derive, by (adapter, event). Keep this
+# tiny and justified: every entry is a documented product gap.
+REQUIRED_KEY_EXEMPTIONS: dict[tuple[str, str], set[str]] = {
+    # Devin runs in Cognition's cloud; the poller has no working directory.
+    ("devin", "cardinal.git_state"): {"cardinal_cwd"},
+}
+
 # Capability-identity fields the lakerunner identity extractor (T1.2, see
 # docs/specs/toolkit-hive-mind.md) keys on. These are NOT folded into
 # REQUIRED_KEYS above because each field below is
@@ -123,7 +136,8 @@ SUBAGENT_TYPE_ADAPTERS = {"claude", "codex", "cursor", "gemini"}
 # checked as present-somewhere-in-the-goldens, matching how
 # test_shared_events_agree_on_initiative_keys already treats it as
 # allowed-optional rather than required-on-every-record.
-COMMAND_IDENTITY_ADAPTERS = set(ADAPTERS)
+# devin is excluded: Devin sessions have no slash commands.
+COMMAND_IDENTITY_ADAPTERS = set(ADAPTERS) - {"devin"}
 
 
 def _walk_records(node):
@@ -197,6 +211,7 @@ class ContractTests(unittest.TestCase):
                 required = REQUIRED_KEYS.get(event)
                 if required is None:
                     continue
+                required = required - REQUIRED_KEY_EXEMPTIONS.get((adapter, event), set())
                 with self.subTest(adapter=adapter, event=event):
                     missing = required - keys
                     self.assertFalse(

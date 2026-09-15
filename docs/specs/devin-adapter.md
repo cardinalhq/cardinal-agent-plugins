@@ -1,7 +1,33 @@
 # Devin adapter (design)
 
-Status: design, not built. Research done 2026-09-14 against Devin's public
-docs; nothing below has been checked against a live Devin org.
+Status: built, unvalidated. `adapters/devin/` (2026-09-14) implements this
+design against Devin's public docs with synthetic fixtures; nothing has been
+checked against a live Devin org. See [adapters/devin/README.md](../../adapters/devin/README.md)
+for setup, the field mapping, and gaps.
+
+## As built
+
+Where the implementation differs from the design below:
+
+- **No `cardinal.turn` / `cardinal.turn_tool`.** Neither maps to Devin's
+  `messages[]` under the existing contract (`cardinal.turn` is not a contract
+  event; `turn_tool` needs tool calls the docs don't expose), so messages are
+  not fetched or emitted.
+- **No session start/end event.** The session appears via `cardinal.git_state`,
+  which is only sent when a PR exists.
+- **Both API versions.** v1 (`/v1/sessions`, offset pagination,
+  `requesting_user_email`) and v3 (`/v3/organizations/{org_id}/sessions`, cursor
+  pagination, `updated_after`, `user_id` resolved through the beta org user
+  route). `auto` picks v3 when an org id is set.
+- **Terminal states.** v1 `status_enum` ∈ {finished, expired}; v3 `status` ∈
+  {exit, error} or `status_detail` = finished.
+- **Branch needs GitHub.** Devin reports only the PR URL. Head branch and sha
+  come from `GET /repos/{owner}/{repo}/pulls/{number}` when `GITHUB_TOKEN` is
+  set; without it `git_state` carries repo + PR only and no initiative.
+- **Idempotency** is per session fingerprints of each PR's `git_state` and each
+  decision, not `session_id` + `event_id`.
+- **Contract test.** devin is in `tests/test_contract.py` with two documented
+  exemptions: no `cardinal_cwd`, no `cardinal_command`.
 
 ## Why
 

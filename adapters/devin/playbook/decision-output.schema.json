@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Cardinal decisions",
+  "description": "Material decisions made during this Devin session. Each entry becomes one cardinal.decision event when the session finishes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decisions"],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["choice"],
+        "properties": {
+          "id": {
+            "$ref": "#/definitions/decisionId",
+            "description": "Optional stable id. Reusing an id revises that decision. Derived from the choice when omitted."
+          },
+          "question": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "The question the work raised."
+          },
+          "choice": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "The option chosen, in a few words."
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "Why this option was chosen."
+          },
+          "decided_by": {
+            "type": "string",
+            "enum": ["user", "agent"],
+            "description": "Who made the call. Defaults to agent."
+          },
+          "alternatives": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"type": "string", "maxLength": 200},
+            "description": "Options considered and rejected."
+          },
+          "anchors": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"$ref": "#/definitions/anchor"},
+            "description": "The code the decision concerns."
+          },
+          "follows_from": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"$ref": "#/definitions/decisionId"},
+            "description": "Ids of earlier decisions this one follows from."
+          },
+          "refines": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"$ref": "#/definitions/decisionId"},
+            "description": "Ids of earlier decisions this one refines."
+          },
+          "supersedes": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"$ref": "#/definitions/decisionId"},
+            "description": "Ids of earlier decisions this one replaces."
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "decisionId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identifier"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["symbol", "interface", "schema", "config", "workflow", "benchmark", "directory", "file"]
+        },
+        "identifier": {
+          "type": "string",
+          "minLength": 1,
+          "description": "For file/directory: the repo-relative path. Otherwise the name, e.g. a function or config key."
+        },
+        "path": {
+          "type": "string",
+          "description": "Repo-relative file the identifier lives in."
+        }
+      }
+    }
+  }
+}
