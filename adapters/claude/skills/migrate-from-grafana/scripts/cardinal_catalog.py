@@ -68,13 +68,15 @@ COPY_HINT = ("Copy a fresh one: reload Cardinal, dev tools > Network, right-clic
 
 def connect_info():
     """What `/cardinal:connect` saved: {host, org_id, user_email, mcp_url, mcp_key,
-    act_key, act_endpoint} (missing keys absent), or {} when not connected. The MCP
-    key reads data and can enable/disable alert rules; the act key can list the
-    user's orgs. Neither can write dashboards, so writes need a login token/API key."""
+    act_key, act_endpoint, act_scopes} (missing keys absent), or {} when not
+    connected. The MCP key reads data and can enable/disable alert rules; the act
+    key can list the user's orgs, and — when connected with `dashboards:write` /
+    `alerts:write` / `telemetry:query` — create and update dashboards / alert
+    rules and run the catalog and validation queries."""
     info = {}
     try:
         state = json.load(open(CONNECT_STATE))
-        info.update({k: state[k] for k in ("host", "org_id", "user_email") if state.get(k)})
+        info.update({k: state[k] for k in ("host", "org_id", "user_email", "act_scopes") if state.get(k)})
     except (OSError, ValueError):
         return {}
     try:
@@ -90,6 +92,11 @@ def connect_info():
     except (OSError, ValueError, AttributeError):
         pass
     return info
+
+
+def connect_can(conn, scopes):
+    """Does the /cardinal:connect act token carry every scope in `scopes`?"""
+    return bool(conn.get("act_key")) and set(scopes) <= set(conn.get("act_scopes") or [])
 
 
 def list_orgs(conn):
@@ -141,23 +148,36 @@ def mcp_for(org_id):
 
 
 class Cardinal:
-    """Maestro client. Auth is either an org API key (admin:all scope, sent as
-    X-CardinalHQ-API-Key) or the user's own login token (sent as Bearer), which
-    carries their org role: Member can write dashboards, Owner also alert rules.
+    """Maestro client. Auth is an org API key (admin:all scope) or the
+    `/cardinal:connect` act token (dashboards:write / alerts:write /
+    telemetry:query scopes), both
+    sent as X-CardinalHQ-API-Key, or the user's own login token (sent as Bearer).
+    The act token and login token carry the user's org role: Member (or Owner)
+    can write dashboards and alert rules.
     CARDINAL_URL / CARDINAL_ORG_ID default to the `/cardinal:connect` org."""
 
     def __init__(self, url, key, org, token=None):
         self.url, self.key, self.org, self.token = url.rstrip("/"), key, org, token
 
     @classmethod
-    def from_env(cls):
+    def from_env(cls, connect_scopes=None):
+        """connect_scopes: the `/cardinal:connect` act-token scopes that cover every
+        request the caller will make (e.g. ["dashboards:write"]; lakerunner
+        instance/metric/query routes need "telemetry:query"). When given and the
+        connect token carries them all, it is used if no login token / API key
+        is set."""
         url, key, token, org = (os.environ.get(k) for k in
                                 ("CARDINAL_URL", "CARDINAL_API_KEY", "CARDINAL_TOKEN", "CARDINAL_ORG_ID"))
         conn = connect_info()
         url, org = url or conn.get("host"), org or conn.get("org_id")
+        if not (key or token) and connect_scopes and connect_can(conn, connect_scopes):
+            key, url = conn["act_key"], url or conn.get("act_endpoint")
+            print(f"using the /cardinal:connect token ({', '.join(connect_scopes)})", file=sys.stderr)
         if not (key or token):
-            sys.exit("no Cardinal login token: put CARDINAL_TOKEN (or CARDINAL_API_KEY) in .env.cardinal. "
-                     "Writing dashboards and alert rules needs it; /cardinal:connect keys can't.")
+            hint = (f" or reconnect with `cardinal-connect --rotate {' '.join(connect_scopes)}`"
+                    if connect_scopes else "")
+            sys.exit("no Cardinal login token: put CARDINAL_TOKEN (or CARDINAL_API_KEY) in .env.cardinal"
+                     f"{hint}. Writing dashboards and alert rules needs it.")
         if not url or not org:
             sys.exit("CARDINAL_URL and CARDINAL_ORG_ID must be set (or run /cardinal:connect to fill them in)")
         if token and token.lower().startswith("bearer "):
@@ -490,7 +510,10 @@ def main():
             print(f"  {n}. {o['name']} ({o['slug']})  id={o['id']}  role={o['role']}{mark}")
         return
     target_org = os.environ.get("CARDINAL_ORG_ID") or conn.get("org_id")
-    has_token = os.environ.get("CARDINAL_TOKEN") or os.environ.get("CARDINAL_API_KEY")
+    # A connect token with telemetry:query reaches every org the user is in, so it
+    # counts as a token here: the REST path below works for any target org.
+    has_token = (os.environ.get("CARDINAL_TOKEN") or os.environ.get("CARDINAL_API_KEY")
+                 or connect_can(conn, ["telemetry:query"]))
     if args.check and not has_token and conn.get("mcp_key") and target_org != conn.get("org_id"):
         print(f"org {target_org} isn't the /cardinal:connect org, so its data can only be checked with "
               "the login token: add CARDINAL_TOKEN to .env.cardinal and re-run with --env-file",
@@ -502,7 +525,7 @@ def main():
                   + ": run cardinal-connect" + (" --rotate" if conn else ""), file=sys.stderr)
             sys.exit(EXIT_CONNECT_REJECTED if conn else EXIT_NOT_CONNECTED)
         return check_via_mcp(conn, args.instance)
-    c = Cardinal.from_env()
+    c = Cardinal.from_env(connect_scopes=["telemetry:query"])
     if not args.check:
         os.makedirs(args.out, exist_ok=True)
 

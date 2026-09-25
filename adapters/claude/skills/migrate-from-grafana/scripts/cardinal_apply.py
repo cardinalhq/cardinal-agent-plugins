@@ -8,8 +8,10 @@ so re-running after fixing the mapping does not create duplicates.
 The skill migrates one item at a time (--dashboard / --alert) and validates each
 with cardinal_verify.py before moving on; --list prints the plan in that order.
 
-Reads CARDINAL_TOKEN or CARDINAL_API_KEY (env or --env-file); CARDINAL_URL and
-CARDINAL_ORG_ID default to the /cardinal:connect org.
+Reads CARDINAL_TOKEN or CARDINAL_API_KEY (env or --env-file); without either it
+uses the /cardinal:connect token when that was connected with dashboards:write /
+alerts:write (whichever this run writes). CARDINAL_URL and CARDINAL_ORG_ID default
+to the /cardinal:connect org.
 
 Usage:
   cardinal_apply.py --plan ./plan --list
@@ -107,7 +109,8 @@ def main():
     alert_sel = select(alerts, args.alert, lambda it: it["name"], "alert rule") if do_alerts else []
 
     load_env_file(args.env_file)
-    c = Cardinal.from_env()
+    c = Cardinal.from_env(connect_scopes=[s for s, on in (("dashboards:write", bool(dash_sel)),
+                                                          ("alerts:write", bool(alert_sel))) if on])
     org = c.org
     lakes = json.load(open(os.path.join(args.catalog, "instance.json")))
     instance = lakes["chosen"]
@@ -135,8 +138,8 @@ def main():
         code, existing = c.req("GET", f"/api/orgs/{org}/dashboards")
         if code != 200:
             sys.exit(f"cannot list Cardinal dashboards ({code}): {existing}. Writing dashboards needs a "
-                     "login token of a Member/Owner of the org (CARDINAL_TOKEN), or an org API key with "
-                     "admin:all scope.")
+                     "Member/Owner of the org: a login token (CARDINAL_TOKEN), /cardinal:connect with "
+                     "dashboards:write, or an org API key with admin:all scope.")
         by_name = {d["name"]: d for d in existing}
         for n, (uid, d) in dash_sel:
             name = args.name_prefix + d["name"]
@@ -163,8 +166,9 @@ def main():
     if alert_sel:
         code, existing = c.req("GET", f"/api/orgs/{org}/alert-rules")
         if code != 200:
-            sys.exit(f"cannot list Cardinal alert rules ({code}): {existing}. Alert rules need the "
-                     "Owner role (login token) or an org API key with admin:all scope.")
+            sys.exit(f"cannot list Cardinal alert rules ({code}): {existing}. Alert rules need a "
+                     "Member/Owner of the org: a login token (CARDINAL_TOKEN), /cardinal:connect with "
+                     "alerts:write, or an org API key with admin:all scope.")
         rules = existing if isinstance(existing, list) else existing.get("rules", existing.get("data", []))
         by_name = {}
         for r in rules:

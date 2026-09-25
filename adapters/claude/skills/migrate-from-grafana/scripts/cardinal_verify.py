@@ -65,7 +65,11 @@ def main():
     alert_sel = select(alerts, args.alert, lambda it: it["name"], "alert rule") \
         if not picking or args.alert is not None else []
 
-    c = Cardinal.from_env()
+    # Queries need telemetry:query; the presence checks list dashboards / alert
+    # rules, which only the matching write scope's routes admit.
+    c = Cardinal.from_env(connect_scopes=["telemetry:query"]
+                          + (["dashboards:write"] if dash_sel else [])
+                          + (["alerts:write"] if alert_sel else []))
     lakes = json.load(open(os.path.join(args.catalog, "instance.json")))
     inst = lakes["chosen"]
     nq = NativeQuery(c, inst["id"], window_ms(args.window))

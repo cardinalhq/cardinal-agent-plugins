@@ -19,9 +19,9 @@ authoring and `manage_alert_rules` MCP tool are the right path for them.
 
 | Item | Why | Notes |
 |---|---|---|
-| Cardinal connection (`/cardinal:connect`) | lists their orgs; "is Cardinal receiving data?" check; switches alert rules on/off | Step 0 starts it for the user if they aren't connected; they only approve an `app.cardinalhq.io` link in the browser. Its keys **cannot write dashboards or create alert rules**, so it doesn't replace the login token. |
+| Cardinal connection (`/cardinal:connect`) | lists their orgs; "is Cardinal receiving data?" check; switches alert rules on/off | Step 0 starts it for the user if they aren't connected; they only approve an `app.cardinalhq.io` link in the browser. Connected with `dashboards:write alerts:write telemetry:query` (step 0 asks for them), its token also **reads the catalog, creates and updates dashboards and alert rules, and runs validation** — every script uses it when no login token is set, for any org the user belongs to. |
 | Which Cardinal org | where everything goes | **Always ask** (step 0) — many users have several orgs, and the connected org is not necessarily the target. |
-| Cardinal login token | create + validate dashboards and alert rules | `CARDINAL_TOKEN` in `.env.cardinal`. Carries the user's org role: **Member** can create dashboards, **Owner** also alert rules. **Lives only ~5 minutes** — see below. Alternative that doesn't expire: an org API key with `admin:all` scope (`CARDINAL_API_KEY`; only a Cardinal superadmin can mint one). |
+| Cardinal login token (fallback) | only when `/cardinal:connect` isn't available, or is connected without the three scopes (older Cardinal) | `CARDINAL_TOKEN` in `.env.cardinal`. Carries the user's org role: **Member** (or Owner) can create dashboards and alert rules. **Lives only ~5 minutes** — see below. Alternative that doesn't expire: an org API key with `admin:all` scope (`CARDINAL_API_KEY`; only a Cardinal superadmin can mint one). |
 | Grafana URL + service account token | read dashboards, alert rules, datasources | **Viewer** role is enough. Administration → Users and access → Service accounts → Add → Viewer → Add token (`glsa_…`). |
 | Which dashboards/alerts | scope | a folder, a tag, specific dashboard UIDs, or "everything" |
 | Alert rules on or off | whether migrated rules evaluate immediately | ask at the dry run (step 4) |
@@ -45,6 +45,10 @@ CARDINAL_API_KEY=
 # only when not using /cardinal:connect:
 # CARDINAL_URL=https://app.cardinalhq.io
 ```
+
+**Skip the login token when step 0 connected with all three scopes** — `/cardinal:status`
+lists them under Actions, and the scripts print `using the /cardinal:connect token`.
+Only fall back to it when a script exits asking for `CARDINAL_TOKEN`.
 
 **The login token lives about 5 minutes**, and a migration takes longer, so expect to
 ask for a fresh one several times. How to copy it so it isn't cut off (the Headers
@@ -87,8 +91,9 @@ separately:
    ~/.claude/plugins -path '*/bin/cardinal-connect' 2>/dev/null | head -1)`. If there
    is none (the Cardinal plugin isn't installed), fall back to the `.env.cardinal`
    route at the end of this step.
-2. `rm -f ~/.claude/cardinal-pending.json`, then run `"$CONNECT"` (exit 3) or
-   `"$CONNECT" --rotate` (exit 4) with the Bash tool's **`run_in_background: true`** —
+2. `rm -f ~/.claude/cardinal-pending.json`, then run
+   `"$CONNECT" dashboards:write alerts:write telemetry:query` (exit 3) or
+   `"$CONNECT" --rotate dashboards:write alerts:write telemetry:query` (exit 4) with the Bash tool's **`run_in_background: true`** —
    it blocks for up to 10 minutes waiting for approval, and its stdout only arrives
    when it exits. Add `--host <their Cardinal URL>` for a self-hosted Cardinal.
 3. Within a few seconds it writes `~/.claude/cardinal-pending.json`; read
@@ -116,9 +121,10 @@ scripts use it.
 python3 $SCRIPTS/cardinal_catalog.py --env-file .env.cardinal --check
 ```
 
-For the connected org this uses the `/cardinal:connect` key (no login token needed).
-For another org it exits 6: the check needs the login token, so run it again right
-after the user adds the token (before step 2). If it says Cardinal isn't receiving
+With a `telemetry:query` connection this works for any of the user's orgs (no login
+token). Connected without it, only the connected org can be checked; for another org it
+exits 6 — either reconnect with the three scopes (`--rotate`) or run it again right
+after the user adds the login token (before step 2). If it says Cardinal isn't receiving
 data, stop: the user's services need to send OTLP to Cardinal first (a
 data-onboarding step, not a migration one); migrated dashboards would all be empty.
 
@@ -268,7 +274,7 @@ Rules for the loop:
   command and carry on from that item. Expected several times per migration.
 - **Apply error (403/422):** stop the loop — it will fail for every remaining item.
   403 on dashboards: the token can't write (Viewer role, or an API key without
-  `admin:all`). 403 on alerts: the user is a Member, not Owner. 422 *"Alerting is not
+  `admin:all`). 403 on alerts: the user is a Viewer (or the Cardinal host predates Member-level alert writes, where only Owners can). `insufficient_scope`: the connect token lacks a scope this step needs — reconnect with `--rotate dashboards:write alerts:write telemetry:query`. 422 *"Alerting is not
   connected for this integration (status='disabled')"*: alerting is switched off on
   that data lake. The error lists the org's other data lakes: if one of them holds the
   same data (check with the user), continue the alerts there with `--instance <slug>`

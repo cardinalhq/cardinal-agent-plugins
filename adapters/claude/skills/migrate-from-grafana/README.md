@@ -15,8 +15,13 @@ Claude follows.
 
 ## 1. Get your tokens ready
 
-**Cardinal login token** (for creating the dashboards and alert rules). You need
-the **Member** role for dashboards, or **Owner** to also migrate alerts.
+**Cardinal:** usually nothing to copy. Claude connects you with
+`/cardinal:connect dashboards:write alerts:write telemetry:query` (you approve
+one link in the browser), and that connection does the whole migration. You
+need the **Member** (or Owner) role in the target org.
+
+**Cardinal login token**, only if Claude asks for one (no Cardinal plugin, or an
+older Cardinal that doesn't offer those scopes):
 
 1. Sign in to Cardinal, switch to the org you're migrating into, and reload the page.
 2. Open browser dev tools → **Network** and click **Dashboards**.
@@ -124,7 +129,7 @@ rule, everything skipped and why, and follow-ups. It can save this as
 | The connect link expired or you clicked Deny | Tell Claude to try again; it shows a fresh link |
 | "the login token expired" / "is cut off" | Normal: tokens last ~5 minutes. Copy a fresh one (Copy as cURL) into `.env.cardinal` and tell Claude to continue; it picks up where it stopped. |
 | `403` on dashboards | Your Cardinal role in that org is Viewer |
-| `403` on alerts | You're a Member; alerts need **Owner** |
+| `403` on alerts | Your Cardinal role in that org is Viewer (older Cardinal versions also required **Owner**) |
 | "Alerting is not connected…" | Alerting is switched off on that Cardinal data lake. Claude offers another data lake in your org if one has the same data; otherwise ask your admin to switch alerting on. Dashboards are unaffected. |
 | Panels show "No data" | The metric isn't reaching Cardinal yet, or its name was mapped wrong |
 
