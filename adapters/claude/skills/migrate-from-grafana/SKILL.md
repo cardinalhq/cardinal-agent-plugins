@@ -19,36 +19,47 @@ authoring and `manage_alert_rules` MCP tool are the right path for them.
 
 | Item | Why | Notes |
 |---|---|---|
+| Cardinal connection (`/cardinal:connect`) | lists their orgs; "is Cardinal receiving data?" check; switches alert rules on/off | Step 0 starts it for the user if they aren't connected; they only approve an `app.cardinalhq.io` link in the browser. Its keys **cannot write dashboards or create alert rules**, so it doesn't replace the login token. |
+| Which Cardinal org | where everything goes | **Always ask** (step 0) — many users have several orgs, and the connected org is not necessarily the target. |
+| Cardinal login token | create + validate dashboards and alert rules | `CARDINAL_TOKEN` in `.env.cardinal`. Carries the user's org role: **Member** can create dashboards, **Owner** also alert rules. **Lives only ~5 minutes** — see below. Alternative that doesn't expire: an org API key with `admin:all` scope (`CARDINAL_API_KEY`; only a Cardinal superadmin can mint one). |
 | Grafana URL + service account token | read dashboards, alert rules, datasources | **Viewer** role is enough. Administration → Users and access → Service accounts → Add → Viewer → Add token (`glsa_…`). |
 | Which dashboards/alerts | scope | a folder, a tag, specific dashboard UIDs, or "everything" |
-| Cardinal URL | target | `https://app.cardinalhq.io` or their self-hosted Cardinal UI |
-| Cardinal org ID | target org | UUID of the org to migrate into |
-| Cardinal credential | write dashboards + alerts | Either the user's **login token** (`CARDINAL_TOKEN`) or an **org API key with `admin:all` scope** (`CARDINAL_API_KEY`, only a Cardinal superadmin can mint one). The login token carries the user's org role: **Member** can create dashboards, **Owner** also alert rules, Viewer neither. The plugin's `/cardinal:connect` key (`mcp:invoke`) cannot write dashboards. |
-| Data lake instance | which lakerunner the alerts run on | only if the org has more than one; the default is used otherwise |
+| Alert rules on or off | whether migrated rules evaluate immediately | ask at the dry run (step 4) |
 
 Credentials are secrets: have the user put them in env files (below) instead of
 pasting them into chat. Create the files for them with empty values, `chmod 600`,
 and open them in an editor (`open -e <file>` on macOS). Never echo token values
 back — when checking a file, mask them (e.g. `sed -E 's/(TOKEN|KEY)=(.{6}).*/\1=\2…/'`).
+Never print `~/.claude/settings.json` or `~/.claude/cardinal*.json` either; the
+scripts read what they need from them.
 
 ```
 # .env.grafana-migrate
 GRAFANA_URL=https://<stack>.grafana.net
 GRAFANA_TOKEN=
 
-# .env.cardinal  (fill ONE of CARDINAL_TOKEN / CARDINAL_API_KEY)
-CARDINAL_URL=https://app.cardinalhq.io
-CARDINAL_ORG_ID=
+# .env.cardinal
+CARDINAL_ORG_ID=<the org chosen in step 0 — fill this in yourself>
 CARDINAL_TOKEN=
 CARDINAL_API_KEY=
+# only when not using /cardinal:connect:
+# CARDINAL_URL=https://app.cardinalhq.io
 ```
 
-To get the login token and org ID: sign in to Cardinal with their own account, switch
-to the target org, open browser dev tools → Network, click Dashboards, and pick any
-`/api/orgs/<org-id>/...` request — the org ID is in the URL, the token is the value after
-`Authorization: Bearer `. It expires in about an hour; a 401 from the scripts means
-"copy a fresh one". If the header says `CardinalDemo` instead of `Bearer`, they're in
-Cardinal's public demo, which is read-only for everyone — they need a real login.
+**The login token lives about 5 minutes**, and a migration takes longer, so expect to
+ask for a fresh one several times. How to copy it so it isn't cut off (the Headers
+pane in dev tools truncates long values): sign in to Cardinal, switch to the target
+org, reload, open dev tools → Network, click Dashboards, **right-click** any
+`/api/orgs/...` request → **Copy → Copy as cURL**, paste that anywhere and take
+everything after `Bearer ` up to the closing quote. If the header says `CardinalDemo`
+instead of `Bearer`, they're in Cardinal's public demo, which is read-only — they need
+a real login.
+
+Every script checks the token before sending anything and **exits 5** when it is
+expired or cut off (it prints the reason and how long a valid one has left). On exit
+5: say which step you're on, ask the user to save a fresh token and reply, then re-run
+the same command — every step is safe to re-run. Ask for the token right before
+step 2, and once they're in, keep moving between steps without waiting on the user.
 
 Keep all migration files in one working directory (e.g. `./grafana-migration/`).
 The scripts ship with this skill and need only Python 3.9+ (standard library).
@@ -62,6 +73,58 @@ SCRIPTS=$(dirname "$(find ~/.claude/plugins ~/.claude/skills . -name convert.py 
 ```
 
 ## Workflow
+
+### 0. Connect, pick the org, confirm Cardinal is receiving data
+
+Do this first, before asking for anything Grafana-side.
+
+**a. Connected?** Run `python3 $SCRIPTS/cardinal_catalog.py --orgs`. It lists the
+user's Cardinal orgs and marks the connected one. If it exits 3 (not connected) or 4
+(needs renewing), connect for the user — don't make them run `/cardinal:connect`
+separately:
+
+1. Find the connect script — `CONNECT=$(command -v cardinal-connect || find
+   ~/.claude/plugins -path '*/bin/cardinal-connect' 2>/dev/null | head -1)`. If there
+   is none (the Cardinal plugin isn't installed), fall back to the `.env.cardinal`
+   route at the end of this step.
+2. `rm -f ~/.claude/cardinal-pending.json`, then run `"$CONNECT"` (exit 3) or
+   `"$CONNECT" --rotate` (exit 4) with the Bash tool's **`run_in_background: true`** —
+   it blocks for up to 10 minutes waiting for approval, and its stdout only arrives
+   when it exits. Add `--host <their Cardinal URL>` for a self-hosted Cardinal.
+3. Within a few seconds it writes `~/.claude/cardinal-pending.json`; read
+   `verification_uri` from it (retry a few times, 1 s apart) and show it:
+   "To connect Claude Code to Cardinal, open this link, log in, pick an org, and click
+   **Approve**: `<verification_uri>`". Mention in the same message that approving also
+   sends this Claude Code's usage telemetry to that Cardinal org, and that
+   `/cardinal:disconnect` undoes it.
+4. Wait for the background command to finish. On success, run `--orgs` again. On
+   failure (denied, expired, "already connected"), show its error verbatim; for
+   "already connected", run it again with `--rotate`.
+
+The migration scripts read the new connection straight from disk, so there is no
+need to restart Claude Code now. The connect script's own "restart Claude Code"
+advice only concerns the Cardinal MCP tools in chat — pass it on in the report.
+
+**b. Which org?** Show the `--orgs` list and **ask which org to migrate into**, even
+when there is only one (then just confirm it). Never assume the connected org. Write
+the chosen org's id into `.env.cardinal` as `CARDINAL_ORG_ID` when you create it; all
+scripts use it.
+
+**c. Is it receiving data?**
+
+```bash
+python3 $SCRIPTS/cardinal_catalog.py --env-file .env.cardinal --check
+```
+
+For the connected org this uses the `/cardinal:connect` key (no login token needed).
+For another org it exits 6: the check needs the login token, so run it again right
+after the user adds the token (before step 2). If it says Cardinal isn't receiving
+data, stop: the user's services need to send OTLP to Cardinal first (a
+data-onboarding step, not a migration one); migrated dashboards would all be empty.
+
+If the user can't or won't connect: ask for the org ID (it's in the
+`/api/orgs/<org-id>/...` request URL) and `CARDINAL_URL`, put both in `.env.cardinal`
+with the token, and run the `--check` above.
 
 ### 1. Export from Grafana
 
@@ -81,6 +144,11 @@ export fails (older Grafana, or no permission), continue with dashboards and say
 python3 $SCRIPTS/cardinal_catalog.py --env-file .env.cardinal --export export --out catalog \
     [--instance <slug>]
 ```
+
+If the org has more than one data lake, the script says so and uses the first; ask
+the user which one holds the data (names are in `catalog/instance.json`) and re-run
+with `--instance <slug>` if it's another. The alert rules are created on this data
+lake too.
 
 This lists Cardinal's real metric and label names and writes
 `catalog/mapping.suggested.json`: for every metric the Grafana queries use, the
@@ -123,46 +191,94 @@ dropped — read it when a result looks surprising or the user asks why somethin
 changed.
 
 Summarise the report for the user before writing anything: counts per status, and
-every **adapted** item whose meaning changed (the important one: `histogram_quantile`
-p95/p99 panels become *averages* when Cardinal doesn't support quantiles — the title
-still says "p95", so call these out and offer to rename them) and every **skipped**
-item with its reason.
+every **adapted** item whose meaning changed (the important one: when Cardinal doesn't
+support `histogram_quantile`, p50/p95/p99 panels and alerts use the histogram's own
+value instead of a true percentile — the title still says "p95", so call these out and
+offer to rename them) and every **skipped** item with its reason.
 
-### 4. Dry run, then apply
+### 4. Dry run
 
 ```bash
 python3 $SCRIPTS/cardinal_apply.py --env-file .env.cardinal --plan plan --catalog catalog
-python3 $SCRIPTS/cardinal_apply.py --env-file .env.cardinal --plan plan --catalog catalog --apply
 ```
 
-The dry run shows what would be created vs updated (same-name objects are updated in
-place, so re-running is safe). Get an explicit go-ahead before `--apply`: it writes
-into the customer's Cardinal org, and alert rules start evaluating and can notify
-people immediately. If the org already has objects with the same names that are not
-from a previous migration run, use `--name-prefix "Grafana - "` to avoid overwriting
-them. Use `--only dashboards` / `--only alerts` to do one side.
+Shows every dashboard and alert rule that would be created or updated (same-name
+objects are updated in place, so re-running is safe). Migrated objects keep their
+Grafana names — **don't add a name prefix** by default. Only if the dry run shows an
+*update* of something that isn't from an earlier run of this migration (it would be
+overwritten), ask the user whether to overwrite it or use `--name-prefix "<prefix>"`
+(then on every apply/verify call below).
 
-A 403 on dashboards means the credential can't write (Viewer role, or an API key without `admin:all`); a 403 on alerts with a login token means the user is a Member, not Owner; a 422 on alerts
-saying *"Alerting is not connected for this integration (status='disabled')"* means
-alerting is switched off for that data-lake instance — an org admin has to enable it
-(it's not a migration error); dashboards can still be migrated with `--only dashboards`.
-Report such messages verbatim and don't retry blindly.
+Before step 5, get an explicit go-ahead, and in the same question ask whether the
+alert rules should be created **enabled** (they start evaluating immediately, as in
+Grafana) or **disabled** (created and validated, switched on later in Cardinal's
+Alerts page). Rules that were paused in Grafana are always created disabled. It
+writes into the user's Cardinal org, so don't start without the answer.
 
-Login tokens expire after roughly an hour, and a migration can outlast one. Run the
-Cardinal steps back to back once the token is fresh, and if a script says the token
-expired, ask for a new one and resume from that step — every step is re-runnable.
+### 5. Migrate and validate, one item at a time
 
-### 5. Verify
+The user should watch the migration happen item by item: migrate dashboard 1,
+validate dashboard 1, migrate dashboard 2, validate dashboard 2, … then the alert
+rules the same way. Each step is its own command, so each shows up in the session
+as it happens. Get the order first:
 
 ```bash
-python3 $SCRIPTS/cardinal_verify.py --env-file .env.cardinal --plan plan --catalog catalog
+python3 $SCRIPTS/cardinal_apply.py --plan plan --list
 ```
 
-Runs every migrated panel and alert query through Cardinal's query API (variables
-set to "All") and prints, per dashboard, how many queries return data. An **ERROR**
-is a translation problem — fix the query or mapping, re-run convert + apply (it
-updates in place) and verify again. **No data** while Grafana has data usually means
-a wrong metric/label mapping or data that isn't flowing to Cardinal.
+Then, for each dashboard `i` of `N` in that order (`<uid>` from the list):
+
+1. Say one line: **Dashboard i/N — "<name>": migrating…**
+2. Migrate it (Bash description: `Migrate dashboard i/N: <name>`):
+   ```bash
+   python3 $SCRIPTS/cardinal_apply.py --env-file .env.cardinal --plan plan --catalog catalog --apply --dashboard <uid>
+   ```
+3. Say one line: **Dashboard i/N — "<name>": validating…**
+4. Validate it (Bash description: `Validate dashboard i/N: <name>`):
+   ```bash
+   python3 $SCRIPTS/cardinal_verify.py --env-file .env.cardinal --plan plan --catalog catalog --dashboard <uid>
+   ```
+   It checks the dashboard exists in Cardinal and runs every panel query (variables
+   set to "All"), ending with `RESULT: PASS | WARN | FAIL`.
+5. Say one line with the outcome and the link, e.g.
+   `✓ PASS — 8/8 panels have data → <link>` or
+   `⚠ WARN — 4/5 panels have data ("Refund p99": no data) → <link>`,
+   then go straight on to the next dashboard.
+
+Then the alert rules, the same way, with `--alert <number>` (from `--list`) and
+"Alert rule i/N" in the lines and descriptions — adding `--disable-alerts` to the
+apply command if the user chose disabled:
+
+```bash
+python3 $SCRIPTS/cardinal_apply.py --env-file .env.cardinal --plan plan --catalog catalog --apply --alert <n> [--disable-alerts]
+python3 $SCRIPTS/cardinal_verify.py --env-file .env.cardinal --plan plan --catalog catalog --alert <n>
+```
+
+Validation reads the rule back from Cardinal: it must exist, be enabled/disabled as
+chosen, and its query must return data. Switching a rule off goes through the
+`/cardinal:connect` MCP key (a plain REST update is accepted but doesn't take effect),
+so when the target org isn't the connected one the apply line says the switch
+failed — tell the user to switch those rules off in Cardinal's Alerts page.
+
+Keep the between-step lines to one line each; save explanations for the report.
+Rules for the loop:
+
+- **WARN / validation FAIL:** note it and keep going. Fix these after the loop (below).
+- **Exit 5 (token expired or cut off):** ask for a fresh token, then re-run the same
+  command and carry on from that item. Expected several times per migration.
+- **Apply error (403/422):** stop the loop — it will fail for every remaining item.
+  403 on dashboards: the token can't write (Viewer role, or an API key without
+  `admin:all`). 403 on alerts: the user is a Member, not Owner. 422 *"Alerting is not
+  connected for this integration (status='disabled')"*: alerting is switched off on
+  that data lake. The error lists the org's other data lakes: if one of them holds the
+  same data (check with the user), continue the alerts there with `--instance <slug>`
+  on both apply and verify; otherwise an org admin has to switch alerting on, and the
+  alerts wait. Report these messages verbatim and don't retry blindly.
+
+After the loop, for items with problems: a query **ERROR** is a translation problem —
+fix the mapping or query, re-run `convert.py`, then migrate + validate just that item
+again (it updates in place). **No data** while Grafana has data usually means a wrong
+metric/label mapping or data that isn't flowing to Cardinal; say which.
 
 Note: Cardinal's query API is not the Prometheus HTTP API. Queries go to
 `POST /api/lakerunner/<instance>/query/{metrics|logs}/query` with `{q, s, e, step}`
@@ -171,14 +287,18 @@ wraps this if you need to test a query by hand.
 
 ### 6. Report
 
-Give the user a short migration report:
+Give the user a short migration report, built from `plan/applied.json`,
+`plan/verify.json` and `plan/report.json`:
 
 - Dashboards: name → Cardinal link (`{CARDINAL_URL}/dashboards/{id}`), panels migrated/adapted/skipped
-- Alerts: name → created/updated, with any meaning changes
+- Alerts: name → created/updated, enabled or disabled, which data lake, and any meaning changes
 - Everything skipped, and why
-- Panels that returned no data in verification
+- Validation result per item (PASS / WARN / FAIL) and the panels that returned no data
 - Follow-ups: rotate/delete the Grafana token if it was created for this; alert
   notification routing (Grafana contact points / policies do **not** carry over —
   the user sets up Cardinal notification groups, then attaches them to the rules)
+- If step 0 connected them just now: restart Claude Code to get the Cardinal MCP
+  tools (querying data, managing alerts) in chat; `/cardinal:disconnect` undoes the
+  connection
 
 Offer to write the report into a file (`migration-report.md`) in the working directory.

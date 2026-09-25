@@ -8,9 +8,20 @@ underscores. This script finds, for every metric/label referenced by the export,
 the name Cardinal actually has, so queries keep returning data after migration.
 
 Reads CARDINAL_URL, CARDINAL_ORG_ID and CARDINAL_API_KEY or CARDINAL_TOKEN (env or --env-file).
+CARDINAL_URL / CARDINAL_ORG_ID default to the /cardinal:connect org; --check without a
+token uses the /cardinal:connect MCP key.
 
 Usage:
+  cardinal_catalog.py --check [--instance <id-or-slug>] [--env-file .env.cardinal]
   cardinal_catalog.py --export ./export --out ./catalog [--instance <id-or-slug>] [--env-file .env.cardinal]
+
+  cardinal_catalog.py --orgs
+
+--orgs lists the user's Cardinal orgs (via the /cardinal:connect token) so they can pick one.
+--check only confirms Cardinal is receiving data and writes nothing. Without a token it
+exits 3 when /cardinal:connect hasn't been run, 4 when its key needs --rotate, and 6 when
+the chosen org isn't the connected one (then it needs the login token). Any script exits
+5 when the login token is expired or cut off.
 
 Writes:
   catalog/instance.json          chosen lakerunner instance {id, slug, name}
@@ -35,7 +46,8 @@ HIST_SUFFIXES = ["_bucket", "_sum", "_count"]
 
 
 def load_env_file(path):
-    if path:
+    # A missing file is fine: with /cardinal:connect there is no .env.cardinal.
+    if path and os.path.exists(path):
         for line in open(path):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
@@ -43,10 +55,96 @@ def load_env_file(path):
                 os.environ.setdefault(k.strip(), v.strip())
 
 
+CONNECT_STATE = os.path.expanduser("~/.claude/cardinal.json")
+# --check exit codes the skill branches on: connect, or reconnect with --rotate.
+EXIT_NOT_CONNECTED, EXIT_CONNECT_REJECTED, EXIT_NEEDS_TOKEN = 3, 4, 6
+CLAUDE_SETTINGS = os.path.expanduser("~/.claude/settings.json")
+CONNECT_SECRETS = os.path.expanduser("~/.claude/cardinal-secrets.json")
+EXIT_BAD_TOKEN = 5  # login token expired / truncated: ask for a fresh one, resume the same step
+COPY_HINT = ("Copy a fresh one: reload Cardinal, dev tools > Network, right-click an /api/orgs/... "
+             "request > Copy > Copy as cURL, and take everything after 'Bearer ' (the Headers pane "
+             "cuts long tokens off).")
+
+
+def connect_info():
+    """What `/cardinal:connect` saved: {host, org_id, user_email, mcp_url, mcp_key,
+    act_key, act_endpoint} (missing keys absent), or {} when not connected. The MCP
+    key reads data and can enable/disable alert rules; the act key can list the
+    user's orgs. Neither can write dashboards, so writes need a login token/API key."""
+    info = {}
+    try:
+        state = json.load(open(CONNECT_STATE))
+        info.update({k: state[k] for k in ("host", "org_id", "user_email") if state.get(k)})
+    except (OSError, ValueError):
+        return {}
+    try:
+        env = json.load(open(CLAUDE_SETTINGS)).get("env", {})
+        if env.get("CARDINAL_MCP_URL") and env.get("CARDINAL_MCP_API_KEY"):
+            info.update(mcp_url=env["CARDINAL_MCP_URL"], mcp_key=env["CARDINAL_MCP_API_KEY"])
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        sec = json.load(open(CONNECT_SECRETS))
+        if sec.get("act_api_key") and sec.get("act_endpoint"):
+            info.update(act_key=sec["act_api_key"], act_endpoint=sec["act_endpoint"])
+    except (OSError, ValueError, AttributeError):
+        pass
+    return info
+
+
+def list_orgs(conn):
+    """The user's Cardinal orgs [{id, name, slug, role}] via the connect act key, or None."""
+    if not conn.get("act_key"):
+        return None
+    r = urllib.request.Request(conn["act_endpoint"].rstrip("/") + "/api/me",
+                               headers={"X-CardinalHQ-API-Key": conn["act_key"]})
+    try:
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            me = json.loads(resp.read())
+    except (urllib.error.URLError, ValueError):
+        return None
+    return [{"id": o.get("orgId") or o.get("id"), "name": o.get("name"), "slug": o.get("slug"),
+             "role": o.get("role")} for o in me.get("orgs", [])]
+
+
+def token_problem(token):
+    """Why a login token (JWT) can't work, or None. Also reports time left on stderr."""
+    import base64
+    import time
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None  # not a JWT; let the server decide
+    try:
+        pad = lambda x: x + "=" * (-len(x) % 4)  # noqa: E731
+        head = json.loads(base64.urlsafe_b64decode(pad(parts[0])))
+        claims = json.loads(base64.urlsafe_b64decode(pad(parts[1])))
+        sig = base64.urlsafe_b64decode(pad(parts[2]))
+    except (ValueError, TypeError):
+        return "the login token is garbled (copied incompletely?)"
+    if head.get("alg", "").startswith(("RS", "PS")) and len(sig) not in (256, 384, 512):
+        return "the login token is cut off (its signature is incomplete)"
+    left = int(claims.get("exp", 0) - time.time()) if claims.get("exp") else None
+    if left is not None and left <= 0:
+        return f"the login token expired {-left}s ago (they only last ~5 minutes)"
+    if left is not None:
+        print(f"login token valid for {left // 60}m{left % 60:02d}s", file=sys.stderr)
+    return None
+
+
+def mcp_for(org_id):
+    """A CardinalMCP client when /cardinal:connect is connected to org_id, else None
+    (its key is bound to the org approved at connect time)."""
+    conn = connect_info()
+    if conn.get("mcp_key") and conn.get("org_id") == org_id:
+        return CardinalMCP(conn["mcp_url"], conn["mcp_key"])
+    return None
+
+
 class Cardinal:
     """Maestro client. Auth is either an org API key (admin:all scope, sent as
     X-CardinalHQ-API-Key) or the user's own login token (sent as Bearer), which
-    carries their org role: Member can write dashboards, Owner also alert rules."""
+    carries their org role: Member can write dashboards, Owner also alert rules.
+    CARDINAL_URL / CARDINAL_ORG_ID default to the `/cardinal:connect` org."""
 
     def __init__(self, url, key, org, token=None):
         self.url, self.key, self.org, self.token = url.rstrip("/"), key, org, token
@@ -55,11 +153,21 @@ class Cardinal:
     def from_env(cls):
         url, key, token, org = (os.environ.get(k) for k in
                                 ("CARDINAL_URL", "CARDINAL_API_KEY", "CARDINAL_TOKEN", "CARDINAL_ORG_ID"))
-        if not url or not (key or token):
-            sys.exit("CARDINAL_URL and one of CARDINAL_API_KEY / CARDINAL_TOKEN must be set (env or --env-file)")
+        conn = connect_info()
+        url, org = url or conn.get("host"), org or conn.get("org_id")
+        if not (key or token):
+            sys.exit("no Cardinal login token: put CARDINAL_TOKEN (or CARDINAL_API_KEY) in .env.cardinal. "
+                     "Writing dashboards and alert rules needs it; /cardinal:connect keys can't.")
+        if not url or not org:
+            sys.exit("CARDINAL_URL and CARDINAL_ORG_ID must be set (or run /cardinal:connect to fill them in)")
         if token and token.lower().startswith("bearer "):
             token = token[7:]
-        return cls(url, key, org, token)
+        if token and not key:
+            problem = token_problem(token.strip())
+            if problem:
+                print(f"{problem}. {COPY_HINT}", file=sys.stderr)
+                sys.exit(EXIT_BAD_TOKEN)
+        return cls(url, key, org, token.strip() if token else token)
 
     def req(self, method, path, params=None, body=None):
         if params:
@@ -83,8 +191,8 @@ class Cardinal:
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")[:500]
             if e.code == 401 and self.token and not self.key:
-                sys.exit("Cardinal rejected the login token (401) - it has probably expired. "
-                         "Copy a fresh one from the browser and re-run.")
+                print(f"Cardinal rejected the login token (401). {COPY_HINT}", file=sys.stderr)
+                sys.exit(EXIT_BAD_TOKEN)
             return e.code, body
         except urllib.error.URLError as e:
             return 0, str(e.reason)
@@ -141,6 +249,116 @@ class NativeQuery:
         if errs:
             return 0, json.dumps(errs[0].get("data", errs[0]))[:200]
         return sum(1 for e in ev if e.get("type") == "result"), None
+
+
+class CardinalMCP:
+    """Minimal client for the Cardinal MCP server `/cardinal:connect` wires up
+    (streamable HTTP, JSON-RPC). Used for the pre-flight data check, which then
+    needs no login token."""
+
+    def __init__(self, url, key):
+        self.url, self.key, self.session, self.next_id = url, key, None, 1
+        self._rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                 "clientInfo": {"name": "migrate-from-grafana", "version": "1"}})
+        self._rpc("notifications/initialized", {}, notify=True)
+
+    def _rpc(self, method, params, notify=False):
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                   "X-CardinalHQ-API-Key": self.key}
+        if self.session:
+            headers["Mcp-Session-Id"] = self.session
+        msg = {"jsonrpc": "2.0", "method": method, "params": params}
+        if not notify:
+            msg["id"], self.next_id = self.next_id, self.next_id + 1
+        r = urllib.request.Request(self.url, data=json.dumps(msg).encode(), headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(r, timeout=120) as resp:
+                self.session = resp.headers.get("Mcp-Session-Id") or self.session
+                raw = resp.read().decode(errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                print(f"the /cardinal:connect MCP key was rejected ({e.code}); reconnect with "
+                      "cardinal-connect --rotate", file=sys.stderr)
+                sys.exit(EXIT_CONNECT_REJECTED)
+            sys.exit(f"Cardinal MCP call {method} failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
+        except urllib.error.URLError as e:
+            sys.exit(f"cannot reach Cardinal MCP at {self.url}: {e.reason}")
+        if notify:
+            return None
+        if not raw.lstrip().startswith("{"):  # SSE framing
+            raw = "".join(line[5:] for line in raw.splitlines() if line.startswith("data:"))
+        return json.loads(raw) if raw.strip() else {}
+
+    def call(self, tool, args):
+        """Return (text, is_error)."""
+        resp = self._rpc("tools/call", {"name": tool, "arguments": args})
+        if "error" in resp:
+            return str(resp["error"].get("message", resp["error"])), True
+        res = resp.get("result", {})
+        text = "".join(c.get("text", "") for c in res.get("content", []) if c.get("type") == "text")
+        return text, bool(res.get("isError"))
+
+
+def rule_states(c, instance_slug):
+    """{rule id: True/False (enabled)} as Cardinal reports it now, or None if unknown.
+    Read back through the MCP tool when connected to this org (it states enabled/
+    disabled per rule), else from the REST listing's `enabled` field."""
+    mcp = mcp_for(c.org)
+    if mcp:
+        text, err = mcp.call("lakerunner__manage_alert_rules", {"instance": instance_slug, "action": "list"})
+        if not err:
+            return {m.group(1): m.group(2) == "enabled"
+                    for m in re.finditer(r"id=([0-9a-f-]+),[^)]*\b(enabled|disabled)\)", text)}
+    code, body = c.req("GET", f"/api/orgs/{c.org}/alert-rules")
+    rules = body if isinstance(body, list) else (body or {}).get("rules", []) if isinstance(body, dict) else []
+    states = {r.get("id"): r["enabled"] for r in rules if isinstance(r.get("enabled"), bool)}
+    return states if code == 200 and states else None
+
+
+def set_rule_enabled(c, instance_slug, rule_id, enabled):
+    """Switch a rule on/off. Returns an error message, or None when Cardinal confirms it.
+    Uses the MCP enable/disable action: a REST PUT of {"enabled": false} is accepted
+    but leaves the rule enabled."""
+    mcp = mcp_for(c.org)
+    if not mcp:
+        return ("can't switch it " + ("on" if enabled else "off") + " without /cardinal:connect to this org; "
+                "do it in Cardinal's Alerts page")
+    text, err = mcp.call("lakerunner__manage_alert_rules",
+                         {"instance": instance_slug, "action": "enable" if enabled else "disable", "rule_id": rule_id})
+    if err:
+        return text[:200]
+    state = (rule_states(c, instance_slug) or {}).get(rule_id)
+    return None if state is enabled else f"Cardinal still reports it {'enabled' if state else 'disabled'}"
+
+
+def check_via_mcp(conn, want_instance):
+    """Pre-flight with the /cardinal:connect MCP key: is the org receiving metrics?"""
+    mcp = CardinalMCP(conn["mcp_url"], conn["mcp_key"])
+    print(f"using /cardinal:connect ({conn.get('user_email', 'unknown user')}, org {conn.get('org_id')})")
+    text, err = mcp.call("lakerunner__list_instances", {})
+    try:
+        instances = json.loads(text).get("instances", []) if not err else []
+    except ValueError:
+        instances = []
+    if not instances:
+        sys.exit(f"this Cardinal org has no lakerunner (data lake) instance: {text[:300]}")
+    inst = instances[0]
+    if want_instance:
+        match = [i for i in instances if want_instance in (i.get("slug"), i.get("name"))]
+        if not match:
+            sys.exit(f"instance '{want_instance}' not found; available: {[i.get('slug') for i in instances]}")
+        inst = match[0]
+    elif len(instances) > 1:
+        print(f"note: {len(instances)} instances; checked the default '{inst['slug']}'. "
+              f"Pass --instance to choose: {[i.get('slug') for i in instances]}")
+    text, err = mcp.call("lakerunner__discover_metrics",
+                         {"instance": inst["slug"], "question": "request rate, latency, errors, cpu, memory"})
+    found = re.findall(r"^\s*\d+\.\s+\*\*([^*]+)\*\*", text, re.M)
+    if err or not found:
+        sys.exit(f"Cardinal isn't receiving metrics on '{inst.get('name') or inst['slug']}' yet"
+                 + (f": {text[:300]}" if err else ""))
+    print(f"Cardinal is receiving data: instance '{inst['slug']}' ({inst.get('name')}), "
+          f"metrics found e.g. {', '.join(found[:5])}")
 
 
 def norm(name):
@@ -249,14 +467,44 @@ def referenced_names(export, with_histograms=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--export", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--export")
+    ap.add_argument("--out")
     ap.add_argument("--instance")
     ap.add_argument("--env-file")
+    ap.add_argument("--check", action="store_true", help="only confirm Cardinal is receiving data")
+    ap.add_argument("--orgs", action="store_true", help="list the user's Cardinal orgs and exit")
     args = ap.parse_args()
+    if not (args.check or args.orgs) and not (args.export and args.out):
+        ap.error("--export and --out are required (or pass --check / --orgs)")
     load_env_file(args.env_file)
+    conn = connect_info()
+    if args.orgs:
+        orgs = list_orgs(conn)
+        if orgs is None:
+            print("can't list orgs: " + ("not connected; run cardinal-connect" if not conn
+                                         else "no control-plane token; run cardinal-connect --rotate"), file=sys.stderr)
+            sys.exit(EXIT_CONNECT_REJECTED if conn else EXIT_NOT_CONNECTED)
+        print(f"Cardinal orgs for {conn.get('user_email', 'this user')}:")
+        for n, o in enumerate(orgs, 1):
+            mark = "  <- connected" if o["id"] == conn.get("org_id") else ""
+            print(f"  {n}. {o['name']} ({o['slug']})  id={o['id']}  role={o['role']}{mark}")
+        return
+    target_org = os.environ.get("CARDINAL_ORG_ID") or conn.get("org_id")
+    has_token = os.environ.get("CARDINAL_TOKEN") or os.environ.get("CARDINAL_API_KEY")
+    if args.check and not has_token and conn.get("mcp_key") and target_org != conn.get("org_id"):
+        print(f"org {target_org} isn't the /cardinal:connect org, so its data can only be checked with "
+              "the login token: add CARDINAL_TOKEN to .env.cardinal and re-run with --env-file",
+              file=sys.stderr)
+        sys.exit(EXIT_NEEDS_TOKEN)
+    if args.check and not has_token:
+        if not conn.get("mcp_key"):
+            print("not connected to Cardinal" + (" (connected for telemetry only)" if conn else "")
+                  + ": run cardinal-connect" + (" --rotate" if conn else ""), file=sys.stderr)
+            sys.exit(EXIT_CONNECT_REJECTED if conn else EXIT_NOT_CONNECTED)
+        return check_via_mcp(conn, args.instance)
     c = Cardinal.from_env()
-    os.makedirs(args.out, exist_ok=True)
+    if not args.check:
+        os.makedirs(args.out, exist_ok=True)
 
     code, body = c.req("GET", "/api/lakerunner/instances")
     if code != 200:
@@ -273,7 +521,8 @@ def main():
     elif len(instances) > 1:
         print(f"note: {len(instances)} instances; using the default '{inst.get('slug')}'. "
               f"Pass --instance to choose: {[i.get('slug') for i in instances]}", file=sys.stderr)
-    json.dump({"chosen": inst, "all": instances}, open(os.path.join(args.out, "instance.json"), "w"), indent=2)
+    if not args.check:
+        json.dump({"chosen": inst, "all": instances}, open(os.path.join(args.out, "instance.json"), "w"), indent=2)
     prom = f"/api/lakerunner/{inst['id']}/prometheus/api/v1"
 
     # Metric names come from the Prometheus-compatible metadata route; everything
@@ -285,6 +534,10 @@ def main():
     cardinal_metrics = body.get("data", []) if isinstance(body, dict) else []
     if not cardinal_metrics:
         sys.exit("Cardinal returned no metrics for this instance: it isn't receiving data yet")
+    if args.check:
+        print(f"Cardinal is receiving data: instance '{inst.get('slug') or inst['id']}', "
+              f"{len(cardinal_metrics)} metric names, e.g. {', '.join(sorted(cardinal_metrics)[:5])}")
+        return
     native = NativeQuery(c, inst["id"])
 
     by_norm = {}
