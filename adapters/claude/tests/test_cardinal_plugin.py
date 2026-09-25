@@ -76,6 +76,7 @@ class StubMaestro:
         # partial/malformed grant (metadata, no plaintext) the client must not
         # stamp into state or claim it wrote.
         self.bundle_act_no_api_key = False
+        self.echo_act_scopes = True
         # Spend-limits status endpoint: the verdict to serve (None → 404,
         # simulating a maestro without the limits feature) + call count.
         self.limits_verdict: dict | None = None
@@ -143,6 +144,13 @@ class StubMaestro:
                         "key_prefix": "ACTPLAIN",
                         "created_at": "2026-07-17T00:00:00Z",
                     }
+                    if outer.echo_act_scopes:
+                        # Current maestro echoes what the user key was stamped with.
+                        bundle["act"]["scopes"] = [
+                            s for s in outer.last_scopes
+                            if s in ("maestro:act", "dashboards:write", "alerts:write",
+                                     "telemetry:query")
+                        ]
                     if outer.bundle_act_no_api_key:
                         del bundle["act"]["api_key"]
                 if "mcp:invoke" in outer.last_scopes:
@@ -394,6 +402,54 @@ class ConnectTests(unittest.TestCase):
         self.assertTrue(secrets.exists())
         state = read_json(self.state)
         self.assertIn("act_key_id", state)
+
+    def test_connect_accepts_dashboards_and_alerts_write(self):
+        res = run_plugin(
+            CONNECT,
+            ["--host", self.stub.url(), "dashboards:write", "alerts:write"],
+            self.home,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(
+            self.stub.last_scopes,
+            ["ingest:write", "mcp:invoke", "maestro:act", "dashboards:write", "alerts:write"],
+        )
+        state = read_json(self.state)
+        self.assertEqual(state["act_scopes"], ["maestro:act", "dashboards:write", "alerts:write"])
+        self.assertNotIn("Not granted", res.stdout)
+
+    def test_connect_accepts_telemetry_query(self):
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "telemetry:query"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.stub.last_scopes[-1], "telemetry:query")
+        self.assertIn("read logs, metrics and", res.stdout)
+        self.assertEqual(read_json(self.state)["act_scopes"], ["maestro:act", "telemetry:query"])
+
+    def test_connect_scopes_comma_separated_and_deduped(self):
+        res = run_plugin(
+            CONNECT,
+            ["--host", self.stub.url(), "alerts:write,dashboards:write", "alerts:write"],
+            self.home,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.stub.last_scopes[-2:], ["alerts:write", "dashboards:write"])
+        self.assertEqual(self.stub.last_scopes.count("alerts:write"), 1)
+
+    def test_connect_rejects_unknown_scope_before_any_request(self):
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "admin:all"], self.home)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("unknown scope", res.stderr)
+        self.assertEqual(self.stub.last_scopes, [])
+        self.assertFalse(self.state.exists())
+
+    def test_connect_scopes_without_echo_warns_not_granted(self):
+        # An act block without `scopes` means the server only minted
+        # maestro:act — state must not claim capabilities it lacks.
+        self.stub.echo_act_scopes = False
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "dashboards:write"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Not granted: dashboards:write", res.stdout)
+        self.assertEqual(read_json(self.state)["act_scopes"], ["maestro:act"])
 
     def test_connect_writes_0600_secret_not_settings(self):
         # --enable-actions is a legacy no-op; keep it here to prove it still parses.
