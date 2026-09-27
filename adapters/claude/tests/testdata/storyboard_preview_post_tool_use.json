@@ -17,7 +17,195 @@
    "shipping"
   ]
  },
- "tool_response": "{\"error_count\":4,\"errors\":[],\"local_preview\":{\"contract\":\"GET each scene's preview_bundle (url, or path on this maestro) with your API key; load it in a local Chromium launched with the Canvas network lock; await cardinalPreview.reveal(n) per step; screenshot #cv. describe_grammar rules.local_preview.\",\"max_bundle_bytes\":33554432,\"ready_timeout_ms\":10000,\"settle_timeout_ms\":5000,\"viewport\":{\"device_scale_factor\":2,\"height\":800,\"width\":1280}},\"materialization\":[],\"ok\":false,\"revision\":17,\"scenes\":[{\"bindings\":{},\"errors\":[{\"binding\":\"rate_good_n\",\"code\":\"derive_error\",\"message\":\"identity: left operand is string \\\"0.05\\\", not a finite number\",\"path\":\"derive\"}],\"id\":\"sawtooth\",\"ok\":false,\"presentation\":\"canvas:sawtooth\",\"preview_bundle\":{\"unavailable\":\"the scene has errors; fix them and preview again\"},\"title\":\"PuppyPay breaks for part of every hour\",\"warnings\":[]},{\"bindings\":{},\"errors\":[{\"binding\":\"min_fix_n\",\"code\":\"derive_error\",\"message\":\"identity: left operand is string \\\"25\\\", not a finite number\",\"path\":\"derive\"},{\"binding\":\"rate_fix_n\",\"code\":\"derive_error\",\"message\":\"identity: left operand is string \\\"0.05\\\", not a finite number\",\"path\":\"derive\"},{\"binding\":\"rate_break_n\",\"code\":\"derive_error\",\"message\":\"identity: left operand is string \\\"5\\\", not a finite number\",\"path\":\"derive\"}],\"id\":\"cause\",\"ok\":false,\"presentation\":\"canvas:cause\",\"preview_bundle\":{\"unavailable\":\"the scene has errors; fix them and preview again\"},\"title\":\"Root cause: a CronJob sets PuppyPay's failure_rate to 5\",\"warnings\":[]},{\"bindings\":{\"fail_av\":{\"bytes\":4,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_ac9ca5987fcd2e2feda80e8b\",\"representation\":\"model\",\"selector\":\"/data_points/859/metrics/value\"},\"value\":2466},\"fail_cat\":{\"bytes\":4,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_ac9ca5987fcd2e2feda80e8b\",\"representation\":\"model\",\"selector\":\"/data_points/860/metrics/value\"},\"value\":6200},\"fail_pony\":{\"bytes\":4,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_ac9ca5987fcd2e2feda80e8b\",\"representation\":\"model\",\"selector\":\"/data_points/861/metrics/value\"},\"value\":1239},\"rate_av\":{\"bytes\":19,\"kind\":\"scalar\",\"provenance\":{\"derived\":\"divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/859/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/864/metrics/value)\"},\"value\":0.09816488197125911},\"rate_cat\":{\"bytes\":19,\"kind\":\"scalar\",\"provenance\":{\"derived\":\"divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/860/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/865/metrics/value)\"},\"value\":0.24861656909134655},\"rate_pony\":{\"bytes\":19,\"kind\":\"scalar\",\"provenance\":{\"derived\":\"divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/861/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/866/metrics/value)\"},\"value\":0.04985313644228061},\"req_av\":{\"bytes\":5,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_9de0eb2ce8ebe2b9dfb9089e\",\"representation\":\"model\",\"selector\":\"/data_points/864/metrics/value\"},\"value\":25121},\"req_cat\":{\"bytes\":5,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_9de0eb2ce8ebe2b9dfb9089e\",\"representation\":\"model\",\"selector\":\"/data_points/865/metrics/value\"},\"value\":24938},\"req_pony\":{\"bytes\":5,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_9de0eb2ce8ebe2b9dfb9089e\",\"representation\":\"model\",\"selector\":\"/data_points/866/metrics/value\"},\"value\":24853},\"ship_hourly\":{\"bytes\":2569,\"kind\":\"array\",\"provenance\":{\"receipt_id\":\"rcpt_913b595fd0cd822291dda42a\",\"representation\":\"model\",\"selector\":\"/services/2/timeseries\"},\"row_count\":24}},\"errors\":[],\"id\":\"shipping\",\"ok\":true,\"presentation\":\"canvas:carriers\",\"preview_bundle\":{\"bytes\":420913,\"path\":\"/api/orgs/00000000-0000-4000-8000-00000000c0de/storyboards/sb_29ec61d324cb7c3bad43c6dc/scenes/shipping/preview.html?revision=17\",\"revision\":17,\"sha256\":\"a708069b125bcde6439da1f88a191643221b8da5ed530a2e94b33af5140217d5\",\"url\":\"https://app.cardinalhq.io/api/orgs/00000000-0000-4000-8000-00000000c0de/storyboards/sb_29ec61d324cb7c3bad43c6dc/scenes/shipping/preview.html?revision=17\"},\"title\":\"Still open: shipping fails steadily, by carrier\",\"warnings\":[]}],\"status\":\"draft\",\"storyboard_id\":\"sb_29ec61d324cb7c3bad43c6dc\",\"view_url\":\"https://app.cardinalhq.io/storyboards/sb_29ec61d324cb7c3bad43c6dc?org=00000000-0000-4000-8000-00000000c0de\",\"warning_count\":0,\"warnings\":[]}",
+ "tool_response": {
+  "content": "{\"error_count\":4,\"errors\":[],\"local_preview\":{\"contract\":\"GET each scene's preview_bundle (url, or path on this maestro) with your API key; load it in a local Chromium launched with the Canvas network lock; await cardinalPreview.reveal(n) per step; screenshot #cv. describe_grammar rules.local_preview.\",\"max_bundle_bytes\":33554432,\"ready_timeout_ms\":10000,\"settle_timeout_ms\":5000,\"viewport\":{\"device_scale_factor\":2,\"height\":800,\"width\":1280}},\"materialization\":[],\"ok\":false,\"revision\":17,\"scenes\":[{\"bindings\":{},\"errors\":[{\"binding\":\"rate_good_n\",\"code\":\"derive_error\",\"message\":\"identity: left operand is string \\\"0.05\\\", not a finite number\",\"path\":\"derive\"}],\"id\":\"sawtooth\",\"ok\":false,\"presentation\":\"canvas:sawtooth\",\"preview_bundle\":{\"unavailable\":\"the scene has errors; fix them and preview again\"},\"title\":\"PuppyPay breaks for part of every hour\",\"warnings\":[]},{\"bindings\":{},\"errors\":[{\"binding\":\"min_fix_n\",\"code\":\"derive_error\",\"message\":\"identity: left operand is string \\\"25\\\", not a finite number\",\"path\":\"derive\"},{\"binding\":\"rate_fix_n\",\"code\":\"derive_error\",\"message\":\"identity: left operand is string \\\"0.05\\\", not a finite number\",\"path\":\"derive\"},{\"binding\":\"rate_break_n\",\"code\":\"derive_error\",\"message\":\"identity: left operand is string \\\"5\\\", not a finite number\",\"path\":\"derive\"}],\"id\":\"cause\",\"ok\":false,\"presentation\":\"canvas:cause\",\"preview_bundle\":{\"unavailable\":\"the scene has errors; fix them and preview again\"},\"title\":\"Root cause: a CronJob sets PuppyPay's failure_rate to 5\",\"warnings\":[]},{\"bindings\":{\"fail_av\":{\"bytes\":4,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_ac9ca5987fcd2e2feda80e8b\",\"representation\":\"model\",\"selector\":\"/data_points/859/metrics/value\"},\"value\":2466},\"fail_cat\":{\"bytes\":4,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_ac9ca5987fcd2e2feda80e8b\",\"representation\":\"model\",\"selector\":\"/data_points/860/metrics/value\"},\"value\":6200},\"fail_pony\":{\"bytes\":4,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_ac9ca5987fcd2e2feda80e8b\",\"representation\":\"model\",\"selector\":\"/data_points/861/metrics/value\"},\"value\":1239},\"rate_av\":{\"bytes\":19,\"kind\":\"scalar\",\"provenance\":{\"derived\":\"divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/859/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/864/metrics/value)\"},\"value\":0.09816488197125911},\"rate_cat\":{\"bytes\":19,\"kind\":\"scalar\",\"provenance\":{\"derived\":\"divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/860/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/865/metrics/value)\"},\"value\":0.24861656909134655},\"rate_pony\":{\"bytes\":19,\"kind\":\"scalar\",\"provenance\":{\"derived\":\"divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/861/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/866/metrics/value)\"},\"value\":0.04985313644228061},\"req_av\":{\"bytes\":5,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_9de0eb2ce8ebe2b9dfb9089e\",\"representation\":\"model\",\"selector\":\"/data_points/864/metrics/value\"},\"value\":25121},\"req_cat\":{\"bytes\":5,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_9de0eb2ce8ebe2b9dfb9089e\",\"representation\":\"model\",\"selector\":\"/data_points/865/metrics/value\"},\"value\":24938},\"req_pony\":{\"bytes\":5,\"kind\":\"scalar\",\"provenance\":{\"receipt_id\":\"rcpt_9de0eb2ce8ebe2b9dfb9089e\",\"representation\":\"model\",\"selector\":\"/data_points/866/metrics/value\"},\"value\":24853},\"ship_hourly\":{\"bytes\":2569,\"kind\":\"array\",\"provenance\":{\"receipt_id\":\"rcpt_913b595fd0cd822291dda42a\",\"representation\":\"model\",\"selector\":\"/services/2/timeseries\"},\"row_count\":24}},\"errors\":[],\"id\":\"shipping\",\"ok\":true,\"presentation\":\"canvas:carriers\",\"preview_bundle\":{\"bytes\":420913,\"path\":\"/api/orgs/00000000-0000-4000-8000-00000000c0de/storyboards/sb_29ec61d324cb7c3bad43c6dc/scenes/shipping/preview.html?revision=17\",\"revision\":17,\"sha256\":\"a708069b125bcde6439da1f88a191643221b8da5ed530a2e94b33af5140217d5\",\"url\":\"https://app.cardinalhq.io/api/orgs/00000000-0000-4000-8000-00000000c0de/storyboards/sb_29ec61d324cb7c3bad43c6dc/scenes/shipping/preview.html?revision=17\"},\"title\":\"Still open: shipping fails steadily, by carrier\",\"warnings\":[]}],\"status\":\"draft\",\"storyboard_id\":\"sb_29ec61d324cb7c3bad43c6dc\",\"view_url\":\"https://app.cardinalhq.io/storyboards/sb_29ec61d324cb7c3bad43c6dc?org=00000000-0000-4000-8000-00000000c0de\",\"warning_count\":0,\"warnings\":[]}",
+  "structuredContent": {
+   "error_count": 4,
+   "errors": [],
+   "local_preview": {
+    "contract": "GET each scene's preview_bundle (url, or path on this maestro) with your API key; load it in a local Chromium launched with the Canvas network lock; await cardinalPreview.reveal(n) per step; screenshot #cv. describe_grammar rules.local_preview.",
+    "max_bundle_bytes": 33554432,
+    "ready_timeout_ms": 10000,
+    "settle_timeout_ms": 5000,
+    "viewport": {
+     "device_scale_factor": 2,
+     "height": 800,
+     "width": 1280
+    }
+   },
+   "materialization": [],
+   "ok": false,
+   "revision": 17,
+   "scenes": [
+    {
+     "bindings": {},
+     "errors": [
+      {
+       "binding": "rate_good_n",
+       "code": "derive_error",
+       "message": "identity: left operand is string \"0.05\", not a finite number",
+       "path": "derive"
+      }
+     ],
+     "id": "sawtooth",
+     "ok": false,
+     "presentation": "canvas:sawtooth",
+     "preview_bundle": {
+      "unavailable": "the scene has errors; fix them and preview again"
+     },
+     "title": "PuppyPay breaks for part of every hour",
+     "warnings": []
+    },
+    {
+     "bindings": {},
+     "errors": [
+      {
+       "binding": "min_fix_n",
+       "code": "derive_error",
+       "message": "identity: left operand is string \"25\", not a finite number",
+       "path": "derive"
+      },
+      {
+       "binding": "rate_fix_n",
+       "code": "derive_error",
+       "message": "identity: left operand is string \"0.05\", not a finite number",
+       "path": "derive"
+      },
+      {
+       "binding": "rate_break_n",
+       "code": "derive_error",
+       "message": "identity: left operand is string \"5\", not a finite number",
+       "path": "derive"
+      }
+     ],
+     "id": "cause",
+     "ok": false,
+     "presentation": "canvas:cause",
+     "preview_bundle": {
+      "unavailable": "the scene has errors; fix them and preview again"
+     },
+     "title": "Root cause: a CronJob sets PuppyPay's failure_rate to 5",
+     "warnings": []
+    },
+    {
+     "bindings": {
+      "fail_av": {
+       "bytes": 4,
+       "kind": "scalar",
+       "provenance": {
+        "receipt_id": "rcpt_ac9ca5987fcd2e2feda80e8b",
+        "representation": "model",
+        "selector": "/data_points/859/metrics/value"
+       },
+       "value": 2466
+      },
+      "fail_cat": {
+       "bytes": 4,
+       "kind": "scalar",
+       "provenance": {
+        "receipt_id": "rcpt_ac9ca5987fcd2e2feda80e8b",
+        "representation": "model",
+        "selector": "/data_points/860/metrics/value"
+       },
+       "value": 6200
+      },
+      "fail_pony": {
+       "bytes": 4,
+       "kind": "scalar",
+       "provenance": {
+        "receipt_id": "rcpt_ac9ca5987fcd2e2feda80e8b",
+        "representation": "model",
+        "selector": "/data_points/861/metrics/value"
+       },
+       "value": 1239
+      },
+      "rate_av": {
+       "bytes": 19,
+       "kind": "scalar",
+       "provenance": {
+        "derived": "divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/859/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/864/metrics/value)"
+       },
+       "value": 0.09816488197125911
+      },
+      "rate_cat": {
+       "bytes": 19,
+       "kind": "scalar",
+       "provenance": {
+        "derived": "divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/860/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/865/metrics/value)"
+       },
+       "value": 0.24861656909134655
+      },
+      "rate_pony": {
+       "bytes": 19,
+       "kind": "scalar",
+       "provenance": {
+        "derived": "divide(rcpt_ac9ca5987fcd2e2feda80e8b/data_points/861/metrics/value, rcpt_9de0eb2ce8ebe2b9dfb9089e/data_points/866/metrics/value)"
+       },
+       "value": 0.04985313644228061
+      },
+      "req_av": {
+       "bytes": 5,
+       "kind": "scalar",
+       "provenance": {
+        "receipt_id": "rcpt_9de0eb2ce8ebe2b9dfb9089e",
+        "representation": "model",
+        "selector": "/data_points/864/metrics/value"
+       },
+       "value": 25121
+      },
+      "req_cat": {
+       "bytes": 5,
+       "kind": "scalar",
+       "provenance": {
+        "receipt_id": "rcpt_9de0eb2ce8ebe2b9dfb9089e",
+        "representation": "model",
+        "selector": "/data_points/865/metrics/value"
+       },
+       "value": 24938
+      },
+      "req_pony": {
+       "bytes": 5,
+       "kind": "scalar",
+       "provenance": {
+        "receipt_id": "rcpt_9de0eb2ce8ebe2b9dfb9089e",
+        "representation": "model",
+        "selector": "/data_points/866/metrics/value"
+       },
+       "value": 24853
+      },
+      "ship_hourly": {
+       "bytes": 2569,
+       "kind": "array",
+       "provenance": {
+        "receipt_id": "rcpt_913b595fd0cd822291dda42a",
+        "representation": "model",
+        "selector": "/services/2/timeseries"
+       },
+       "row_count": 24
+      }
+     },
+     "errors": [],
+     "id": "shipping",
+     "ok": true,
+     "presentation": "canvas:carriers",
+     "preview_bundle": {
+      "bytes": 420913,
+      "path": "/api/orgs/00000000-0000-4000-8000-00000000c0de/storyboards/sb_29ec61d324cb7c3bad43c6dc/scenes/shipping/preview.html?revision=17",
+      "revision": 17,
+      "sha256": "a708069b125bcde6439da1f88a191643221b8da5ed530a2e94b33af5140217d5",
+      "url": "https://app.cardinalhq.io/api/orgs/00000000-0000-4000-8000-00000000c0de/storyboards/sb_29ec61d324cb7c3bad43c6dc/scenes/shipping/preview.html?revision=17"
+     },
+     "title": "Still open: shipping fails steadily, by carrier",
+     "warnings": []
+    }
+   ],
+   "status": "draft",
+   "storyboard_id": "sb_29ec61d324cb7c3bad43c6dc",
+   "view_url": "https://app.cardinalhq.io/storyboards/sb_29ec61d324cb7c3bad43c6dc?org=00000000-0000-4000-8000-00000000c0de",
+   "warning_count": 0,
+   "warnings": []
+  }
+ },
  "tool_use_id": "toolu_01WD3phgudXXCspTEwEg19wA",
  "duration_ms": 1873,
  "mcp_server": {

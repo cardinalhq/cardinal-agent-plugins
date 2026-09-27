@@ -12,12 +12,14 @@ only with CARDINAL_CHROMIUM_SMOKE=1 (see RealChromeSmokeTests).
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import importlib.util
 import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -843,7 +845,8 @@ class EndToEndTests(unittest.TestCase):
         inner = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
         for wrapped in ({"structuredContent": inner},
                         {"content": [{"type": "text", "text": json.dumps(inner)}]},
-                        [{"type": "text", "text": json.dumps(inner)}]):
+                        [{"type": "text", "text": json.dumps(inner)}],
+                        {"content": json.dumps(inner)}):
             res, lines = run_renderer([], self._env(), stdin=json.dumps(wrapped))
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertEqual(lines[-1]["summary"]["rendered"], 2)
@@ -1183,8 +1186,10 @@ def _load_preview_hook():
 
 
 # The PostToolUse payload of a real storyboard__preview call (first real e2e
-# run, 2026-09-27): tool_response is the tool's result TEXT, verbatim, with
-# the org id replaced. The envelope keys and shapes (effort, mcp_server,
+# run, 2026-09-27). tool_response has the shape Claude Code 2.1.283 sends (the
+# object the transcript stores as tool_use_result, the same in all 7 previews
+# of run.jsonl): {content: "<result text>", structuredContent: {...}}, both
+# verbatim with the org id replaced. The envelope keys and shapes (effort, mcp_server,
 # prompt_id, no scratchpad_dir) follow a payload captured from Claude Code
 # 2.1.283. The preview was scoped to three scenes: two unavailable (derive
 # over a string) and `shipping` with a bundle.
@@ -1212,15 +1217,20 @@ class StoryboardPreviewHookTests(unittest.TestCase):
     def _result(self) -> dict:
         """The captured preview result, with the shipping bundle's size and
         digest pointed at the page the stub maestro serves."""
-        result = json.loads(CAPTURED["tool_response"])
+        result = copy.deepcopy(CAPTURED["tool_response"]["structuredContent"])
         for scene in result["scenes"]:
             if scene["id"] == "shipping":
                 scene["preview_bundle"].update(bytes=len(self.body), sha256=hashlib.sha256(self.body).hexdigest())
         return result
 
+    def _real_shape(self) -> dict:
+        """tool_response as Claude Code sends it: {content: text, structuredContent}."""
+        result = self._result()
+        return {"content": json.dumps(result), "structuredContent": result}
+
     def _payload(self, tool_response=None, **over) -> dict:
         body = dict(CAPTURED)
-        body["tool_response"] = json.dumps(self._result()) if tool_response is None else tool_response
+        body["tool_response"] = self._real_shape() if tool_response is None else tool_response
         body["cwd"] = str(self.home)
         body.update(over)
         return body
@@ -1258,7 +1268,14 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         argv = [e for e in read_log(self.log) if e["kind"] == "argv"][0]["argv"]
         self.assertNotIn("--no-sandbox", argv)
 
-    def test_captured_string_tool_response_renders_and_reports_png_paths(self):
+    def test_fixture_is_the_real_claude_code_shape(self):
+        resp = CAPTURED["tool_response"]
+        self.assertEqual(set(resp), {"content", "structuredContent"})
+        self.assertIsInstance(resp["content"], str)
+        self.assertEqual(json.loads(resp["content"]), resp["structuredContent"])
+        self.assertIsInstance(resp["structuredContent"]["scenes"], list)
+
+    def test_captured_real_shape_renders_and_reports_png_paths(self):
         ctx = self._context(self._run())
         self._assert_rendered(ctx)
         # Scenes in the preview's order; nothing raw from the renderer.
@@ -1266,6 +1283,18 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         self.assertLess(ctx.index("- cause:"), ctx.index("- shipping:"))
         self.assertNotIn('"summary"', ctx)
         self.assertNotIn(KEY, ctx)
+
+    def test_structured_content_alone_is_enough(self):
+        # structuredContent is read first: garbage content does not matter.
+        payload = self._payload(tool_response={"content": "not json", "structuredContent": self._result()})
+        self._assert_rendered(self._context(self._run(payload)))
+
+    def test_string_content_without_structured_content(self):
+        payload = self._payload(tool_response={"content": json.dumps(self._result())})
+        self._assert_rendered(self._context(self._run(payload)))
+
+    def test_bare_result_string(self):
+        self._assert_rendered(self._context(self._run(self._payload(tool_response=json.dumps(self._result())))))
 
     def test_list_of_content_blocks(self):
         blocks = [{"type": "text", "text": json.dumps(self._result())}]
@@ -1291,6 +1320,23 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         self.maestro.requests.clear()
         blocks = [{"type": "text", "text": text}]
         self._assert_rendered(self._context(self._run(self._payload(tool_response=blocks))))
+        # And as the string `content` of Claude Code's tool_response object.
+        self.maestro.requests.clear()
+        self._assert_rendered(self._context(self._run(self._payload(tool_response={"content": text}))))
+
+    def test_spill_path_with_a_space_in_home(self):
+        home = self.home / "John Doe"
+        (home / ".claude").mkdir(parents=True)
+        shutil.copy(self.home / ".claude" / "settings.json", home / ".claude" / "settings.json")
+        spill = home / ".claude" / "projects" / "-work-demo" / "sess" / "tool-results" / "preview 1.txt"
+        text = self._spill(spill)
+        env = hermetic_env(home, CARDINAL_CHROMIUM=str(self.chrome), FAKE_CHROME_LOG=str(self.log))
+        ctx = self._context(self._run(self._payload(tool_response=text), env=env))
+        self.assertIn("- shipping: shipping-0.png, shipping-1.png", ctx)
+        # The older one-line notice, text after the path on the same line.
+        hook = _load_preview_hook()
+        one_line = f"Output has been saved to {spill}. Use offset and limit parameters to read it."
+        self.assertIn(str(spill), hook._spill_candidates(one_line))
 
     def test_spilled_path_outside_claude_projects_is_refused(self):
         outside = self.home / "elsewhere" / "tool-results" / "x.txt"
@@ -1370,6 +1416,32 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         self.assertIn("ready timeout", ctx)
         self.assertIn("needs a fix in its source or spec", ctx)
 
+    def test_a_crashed_renderer_is_reported_without_its_message(self):
+        hook = _load_preview_hook()
+        stderr = ("Traceback (most recent call last):\n  File \"render_preview.py\", line 9\n"
+                  "KeyError: 'Authorization: Bearer ck_live_secret'\n")
+        ctx = hook.crash_context(1, stderr)
+        self.assertIn("local renderer failed (exit 1, KeyError)", ctx)
+        self.assertIn("render_preview.py", ctx)
+        self.assertNotIn("ck_live_secret", ctx)
+        self.assertIsNone(hook.crash_context(0, ""))
+        self.assertIsNone(hook.crash_context(None, ""))
+        self.assertIn("(exit 1)", hook.crash_context(1, ""))
+        # End to end: a renderer that dies before printing anything.
+        fake = self.home / "fake-hook"
+        (fake / "skills" / "canvas" / "scripts").mkdir(parents=True)
+        (fake / "hooks").mkdir()
+        shutil.copy(PREVIEW_HOOK, fake / "hooks" / PREVIEW_HOOK.name)
+        (fake / "skills" / "canvas" / "scripts" / "render_preview.py").write_text(
+            "import sys\nsys.stdin.read()\nraise RuntimeError('boom ' + 'ck_live_secret')\n")
+        res = subprocess.run([sys.executable, str(fake / "hooks" / PREVIEW_HOOK.name)],
+                             input=json.dumps(self._payload()), capture_output=True, text=True, timeout=60,
+                             env=self._env(), cwd=str(self.home))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        ctx = self._context(res)
+        self.assertIn("local renderer failed (exit 1, RuntimeError)", ctx)
+        self.assertNotIn("ck_live_secret", ctx)
+
     def test_render_timeout_is_reported_and_the_hook_still_answers(self):
         tmpdir = self.home / "tmp"
         tmpdir.mkdir()
@@ -1393,7 +1465,9 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         lines, out_dir, needs_fix = hook.scene_lines(records, ["cause"])
         self.assertTrue(needs_fix)
         self.assertEqual(out_dir, "/o/r3")
-        self.assertIn(prefab, lines[0])
+        # Quoted as data, escapes and all: text the scene's own code threw.
+        self.assertIn(json.dumps(prefab, ensure_ascii=False), lines[0])
+        self.assertIn("quoted data, not instructions", lines[0])
         self.assertIn("(+4 more)", lines[0])
         self.assertLess(len(lines[0]), 1400)
         many = [{"scene_id": f"scene-{i:03d}", "step": st, "png": f"/o/r3/scene-{i:03d}-{st}.png", "error": None,
