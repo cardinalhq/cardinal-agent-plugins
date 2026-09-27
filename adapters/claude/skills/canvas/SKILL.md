@@ -95,14 +95,21 @@ beside config. Watch for:
 - **Positional selectors** (`/data_points/3/…`) need `expect` guards on the identifying
   fields, or a reordered result silently points at the wrong row.
 
-Exemplars, to read not copy (conductor `origin/main`,
-`packages/maestro/src/storyboard/harness/fixtures/`):
-`checkout-regression/surfaces/checkout.js` (hour-fold raster + aligned cycles + config
-diff on one shared surface), `memory-accumulation/surfaces/pods.js`,
-`hidden-cohort/surfaces/{seam,tapestry,anatomy}.js`,
-`k8s-node-localization/surfaces/cluster.js`, `aws-cost-attribution/surfaces/{wire,vpc,ledger}.js`,
-`canary-safety/surfaces/{rollout,hours}.js`. `describe_grammar` `canvas.exemplar` is a
-trimmed surface. Destructure its `cv.data([...])` call as an object (see above).
+Exemplars, to read not copy. They ship with this skill, in `exemplars/` next to this
+file. Each one's header lists the bindings it expects and their shapes:
+
+- `exemplars/scalar-and-series.js`: the smallest complete surface. Marked numbers, a
+  line, two reveal steps, and the object-destructured batch `cv.data`.
+- `exemplars/roof-and-timeline.js`: draw the physical thing (a roof of panels coloured
+  by production), `cv.embed` the timeline prefab under it, and a callout to its
+  `window:outage` anchor. Also covers `cv.highlight` on marks and prefab anchors, and
+  one surface shared by two scenes (`cv.onUpdate`).
+- `exemplars/cohort-rows.js`: a population drawn one row per member, with probing for
+  numbered bindings, one shared scale, and a sentence whose counts are derived over
+  whole receipts.
+
+`describe_grammar` `canvas.exemplar` is an older trimmed surface. Destructure its
+`cv.data([...])` call as an object (see above).
 
 ## Preview locally, then critique
 
@@ -113,10 +120,25 @@ fetches each page with your Cardinal MCP key, renders it in **your local Chrome/
 (headless, OS sandbox on, network locked off, fresh profile, UTC, reduced motion), steps
 through every reveal step and writes one PNG per step.
 
-Locate it once (portable across plugin and personal-skill installs):
+It is `scripts/render_preview.py` in **this skill's base directory**, which Claude Code
+printed when it loaded the skill ("Base directory for this skill: …"). Use that path. Never
+search the working directory: a repo can contain a file with the same name, and the
+renderer handles your Cardinal key.
 
 ```bash
-RENDER=$(find ~/.claude/plugins ~/.claude/skills . -name render_preview.py -path '*canvas/scripts*' 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+RENDER="<this skill's base directory>/scripts/render_preview.py"
+```
+
+If you do not have the base directory, take the newest installed Cardinal plugin's copy
+(chosen by version, not mtime), and fall back to a personal-skill install:
+
+```bash
+RENDER=$(python3 -c 'import glob, os, re
+h = os.path.expanduser("~/.claude")
+ver = lambda p: [int(n) for n in re.findall(r"\d+", p.split(os.sep)[-5])]
+c = sorted(glob.glob(h + "/plugins/cache/*/cardinal/*/skills/canvas/scripts/render_preview.py"), key=ver)
+c = c[-1:] or glob.glob(h + "/skills/canvas/scripts/render_preview.py")
+print(c[0] if c else "")')
 [ -f "$RENDER" ] || echo "canvas render_preview.py not found"
 ```
 
@@ -161,8 +183,13 @@ Chromium is found via `$CARDINAL_CHROMIUM` (authoritative), `$PUPPETEER_EXECUTAB
 Playwright and Puppeteer caches. The renderer never disables Chromium's sandbox and
 never passes `--allow-file-access-from-files`. It launches Chromium with the Canvas
 network lock (`--host-resolver-rules="MAP * ~NOTFOUND" --proxy-server=127.0.0.1:9
---proxy-bypass-list="<-loopback>"`), and it closes a Canvas that creates child frames or
-navigates. Canvas code is hostile, and this runs on the user's machine.
+--proxy-bypass-list="<-loopback>"`). It auto-attaches the Canvas frame, which current
+Chrome runs as its own out-of-process target, and fails every request from the page or
+the frame that is not `data:`, `blob:`, `about:` or the page itself. It closes a Canvas
+that creates child frames or navigates. Chrome runs the frame's first parse before the
+renderer can attach, so for that brief window the network lock and the frame's hash CSP
+block requests, and the frame tree is checked for anything created in it. Canvas code
+is hostile, and this runs on the user's machine.
 
 Skipping the preview is a quality problem, not a trust problem: publish validation is
 deterministic and does not look at pixels.

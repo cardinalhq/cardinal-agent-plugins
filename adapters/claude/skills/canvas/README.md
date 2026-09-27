@@ -5,6 +5,9 @@ scene's Canvas: free-form HTML/SVG/d3 or Cardinal's prefabs, in a sandboxed fram
 only ever receives evidence Cardinal resolved. Claude then **renders every scene on your
 machine** to check that the point is obvious before publishing.
 
+`exemplars/` holds three worked Canvas surfaces from Cardinal's own spike. Each one's
+header lists the bindings it expects. Claude reads them for technique and does not copy them.
+
 ## Local preview
 
 `scripts/render_preview.py` (Python 3.9+, standard library only) takes the result of

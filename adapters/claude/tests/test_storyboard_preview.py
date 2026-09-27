@@ -16,6 +16,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -91,8 +92,26 @@ FAKE_CHROMIUM = textwrap.dedent('''\
             m, p, sid = msg["method"], msg.get("params", {{}}), msg.get("sessionId")
             log("cmd", method=m, params=p, session=sid)
             res = {{}}
+            err = None
             events = []
-            if m == "Browser.getVersion":
+            ev = lambda method, params, s=sid: events.append({{"method": method, "params": params, "sessionId": s}})
+            if sid == "S2":
+                # The Canvas frame: an out-of-process iframe with its own
+                # session, as in real Chrome (IsolateSandboxedIframes).
+                if m == "Fetch.enable" and MODE == "child_lock_error":
+                    err = {{"code": -32000, "message": "Fetch.enable failed"}}
+                elif m == "Page.getFrameTree":
+                    frame = {{"id": "CV", "parentId": "MAIN", "url": "about:srcdoc"}}
+                    tree = {{"frame": frame}}
+                    if MODE == "early_grandchild":
+                        tree["childFrames"] = [{{"frame": {{"id": "G", "parentId": "CV", "url": "about:blank"}}}}]
+                    if MODE == "early_hash":
+                        frame["urlFragment"] = "#x"
+                    res = {{"frameTree": tree}}
+                elif m == "Runtime.runIfWaitingForDebugger":
+                    ev("Fetch.requestPaused", {{"requestId": "r-child-evil", "request": {{"url": "https://evil-child.example/leak"}}}})
+                    ev("Fetch.requestPaused", {{"requestId": "r-child-data", "request": {{"url": "data:image/png;base64,AA"}}}})
+            elif m == "Browser.getVersion":
                 res = {{"product": "HeadlessChrome/150.0.7000.1"}}
             elif m == "Target.createBrowserContext":
                 res = {{"browserContextId": "CTX"}}
@@ -105,21 +124,35 @@ FAKE_CHROMIUM = textwrap.dedent('''\
             elif m == "Page.navigate":
                 page_url = p["url"].split("#", 1)[0]
                 res = {{"frameId": "MAIN"}}
-                ev = lambda method, params: events.append({{"method": method, "params": params, "sessionId": sid}})
                 ev("Fetch.requestPaused", {{"requestId": "r-own", "request": {{"url": page_url}}}})
                 ev("Fetch.requestPaused", {{"requestId": "r-evil", "request": {{"url": "https://evil.example/leak"}}}})
                 ev("Fetch.requestPaused", {{"requestId": "r-data", "request": {{"url": "data:image/png;base64,AA"}}}})
                 ev("Page.frameAttached", {{"frameId": "CV", "parentFrameId": "MAIN"}})
                 ev("Page.frameNavigated", {{"frame": {{"id": "CV", "parentId": "MAIN", "url": "about:srcdoc"}}}})
+                ev("Target.attachedToTarget", {{"sessionId": "S2", "waitingForDebugger": True, "targetInfo": {{
+                    "targetId": "CV", "type": "iframe", "url": "about:srcdoc", "parentFrameId": "MAIN"}}}})
+                ev("Page.frameDetached", {{"frameId": "CV", "reason": "swap"}})
                 ev("Page.domContentEventFired", {{}})
             elif m == "Runtime.evaluate":
                 expr = p.get("expression", "")
                 if "abort(" in expr:
                     res = {{"result": {{"type": "undefined"}}}}
                 elif "reveal(" in expr:
-                    if MODE == "grandchild":
-                        send({{"method": "Page.frameAttached", "params": {{"frameId": "G", "parentFrameId": "CV"}}, "sessionId": sid}})
-                        continue  # never answer: the lock must stop the wait
+                    # Hostile Canvas moves: each arrives the way real Chrome
+                    # sends it (on the Canvas frame's own session, S2, except
+                    # the in-process variant), and reveal never answers, so
+                    # only the lock can stop the wait.
+                    hostile = {{
+                        "grandchild": ("S2", "Page.frameAttached", {{"frameId": "G", "parentFrameId": "CV"}}),
+                        "grandchild_inproc": ("S1", "Page.frameAttached", {{"frameId": "G", "parentFrameId": "CV"}}),
+                        "hashnav": ("S2", "Page.navigatedWithinDocument", {{"frameId": "CV", "url": "about:srcdoc#x"}}),
+                        "nested_target": ("S2", "Target.attachedToTarget", {{"sessionId": "S3", "waitingForDebugger": True,
+                                          "targetInfo": {{"targetId": "G", "type": "iframe", "url": "about:blank"}}}}),
+                    }}.get(MODE)
+                    if hostile or MODE in ("early_grandchild", "early_hash", "child_lock_error", "hang"):
+                        if hostile:
+                            send({{"method": hostile[1], "params": hostile[2], "sessionId": hostile[0]}})
+                        continue
                     if MODE == "reveal_error":
                         res = {{"result": {{"type": "object", "value": {{"ok": False, "error": "ready timeout"}}}}}}
                     else:
@@ -138,7 +171,8 @@ FAKE_CHROMIUM = textwrap.dedent('''\
             elif m == "Browser.close":
                 send({{"id": msg["id"], "result": {{}}}})
                 sys.exit(0)
-            send({{"id": msg["id"], "result": res, **({{"sessionId": sid}} if sid else {{}})}})
+            reply = {{"id": msg["id"], **({{"error": err}} if err else {{"result": res}})}}
+            send({{**reply, **({{"sessionId": sid}} if sid else {{}})}})
             for e in events:
                 send(e)
 ''')
@@ -419,6 +453,29 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(data, self.body)
         self.assertEqual(waits, [7])
 
+    def test_429_waits_never_pass_the_run_deadline(self):
+        self.maestro.script.append((429, {"Retry-After": "30"}, b'{"error":"validation_busy"}'))
+        waits = []
+        now = [100.0]
+        with self.assertRaises(rp.FetchError) as cm:
+            rp.fetch_bundle(self.conn, bundle_ref("s1", self.body), 1 << 20, sleep=waits.append,
+                            deadline=120.0, clock=lambda: now[0])
+        self.assertIn("busy", str(cm.exception))
+        self.assertEqual(waits, [], "a wait past the deadline is not taken")
+        with self.assertRaises(rp.FetchError) as cm:
+            rp.fetch_bundle(self.conn, bundle_ref("s1", self.body), 1 << 20, deadline=100.5,
+                            clock=lambda: now[0])
+        self.assertIn("time budget", str(cm.exception))
+        self.assertEqual(len(self.maestro.requests), 1, "no request once the budget is spent")
+
+    def test_revision_must_be_an_int_matching_the_path(self):
+        ref = bundle_ref("s1", self.body)
+        for bad in (4, "3", "/../../x", None, True):
+            with self.assertRaises(rp.FetchError, msg=repr(bad)) as cm:
+                rp.fetch_bundle(self.conn, dict(ref, revision=bad), 1 << 20)
+            self.assertIn("revision", str(cm.exception))
+        self.assertEqual(self.maestro.requests, [])
+
     def test_status_codes_become_plain_language(self):
         cases = [
             (409, {"error": "revision_mismatch"}, "storyboard__preview again"),
@@ -623,11 +680,23 @@ class EndToEndTests(unittest.TestCase):
         nav = [c for c in cmds if c["method"] == "Page.navigate"][0]
         self.assertTrue(nav["params"]["url"].startswith("file://"))
         self.assertTrue(nav["params"]["url"].endswith("rhythm.html#theme=light"))
-        # Request interception: own page and data: continue, the rest fail.
-        cont = [c["params"]["requestId"] for c in cmds if c["method"] == "Fetch.continueRequest"]
-        fail = [c["params"]["requestId"] for c in cmds if c["method"] == "Fetch.failRequest"]
-        self.assertEqual(sorted(cont), ["r-data", "r-own"])
-        self.assertEqual(fail, ["r-evil"])
+        # Request interception: own page and data: continue, the rest fail,
+        # on the page AND on the Canvas frame's own (out-of-process) session.
+        cont = sorted((c["session"], c["params"]["requestId"]) for c in cmds if c["method"] == "Fetch.continueRequest")
+        fail = sorted((c["session"], c["params"]["requestId"]) for c in cmds if c["method"] == "Fetch.failRequest")
+        self.assertEqual(cont, [("S1", "r-data"), ("S1", "r-own"), ("S2", "r-child-data")])
+        self.assertEqual(fail, [("S1", "r-evil"), ("S2", "r-child-evil")])
+        # The page auto-attaches frame targets before it loads; the Canvas
+        # frame gets the filter and the locks before it is resumed.
+        auto = [i for i, c in enumerate(cmds) if c["method"] == "Target.setAutoAttach" and c["session"] == "S1"]
+        self.assertTrue(auto and auto[0] < methods.index("Page.navigate"))
+        self.assertEqual(cmds[auto[0]]["params"], {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True})
+        child = [c["method"] for c in cmds if c["session"] == "S2"]
+        for m in ("Fetch.enable", "Page.enable", "Target.setAutoAttach", "Emulation.setEmulatedMedia",
+                  "Page.getFrameTree"):
+            self.assertLess(child.index(m), child.index("Runtime.runIfWaitingForDebugger"), m)
+        # abort() only ever runs in the host page, never in the Canvas frame.
+        self.assertFalse([c for c in cmds if c["session"] == "S2" and c["method"] == "Runtime.evaluate"])
         shot = [c for c in cmds if c["method"] == "Page.captureScreenshot"][0]
         self.assertEqual(shot["params"]["clip"]["height"], 900)
         self.assertTrue(shot["params"]["captureBeyondViewport"])
@@ -637,6 +706,52 @@ class EndToEndTests(unittest.TestCase):
         self.assertFalse(Path(nav["params"]["url"][len("file://"):].split("#")[0]).exists())
         # The key went to the stub maestro only.
         self.assertEqual([r["key"] for r in self.maestro.requests], [KEY])
+
+    def test_a_non_int_revision_never_names_the_output_directory(self):
+        result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
+        result["revision"] = "/../../../../Desktop"
+        del result["scenes"][0]["preview_bundle"]["revision"]
+        res, lines = run_renderer([], self._env(), stdin=json.dumps(result))
+        self.assertIn("revision", [ln for ln in lines if ln.get("scene_id") == "rhythm"][0]["error"])
+        self.assertEqual(self.maestro.requests, [])
+        self.assertFalse((self.home / "Desktop").exists())
+        # A good ref and a bad top-level revision: the ref's revision wins.
+        result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
+        result["revision"] = "/../../../../Desktop"
+        res, lines = run_renderer([], self._env(), stdin=json.dumps(result))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(lines[-1]["summary"]["out_dir"],
+                         str(self.home / ".claude" / "cardinal" / "storyboards" / SB_ID / "r3"))
+
+    def test_explicit_out_keeps_its_mode_and_dpr_is_clamped(self):
+        out = self.home / "shared-out"
+        out.mkdir(mode=0o755)
+        os.chmod(str(out), 0o755)
+        result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
+        res, _ = run_renderer(["--out", str(out), "--dpr", "3"], self._env(), stdin=json.dumps(result))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o755, "an existing --out is not chmod'ed")
+        metrics = [e for e in read_log(self.log) if e.get("method") == "Emulation.setDeviceMetricsOverride"][0]
+        self.assertEqual(metrics["params"]["deviceScaleFactor"], rp.MAX_DPR)
+
+    def test_sigterm_removes_the_temp_dir(self):
+        result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
+        env = dict(self._env(FAKE_CHROME_MODE="hang"), TMPDIR=str(self.home / "tmp"))
+        (self.home / "tmp").mkdir()
+        proc = subprocess.Popen([sys.executable, str(RENDER_PREVIEW)], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
+        proc.stdin.write(json.dumps(result))
+        proc.stdin.close()
+        for _ in range(200):  # until the page is fetched and the reveal hangs
+            if any(e.get("method") == "Runtime.evaluate" for e in read_log(self.log)):
+                break
+            threading.Event().wait(0.05)
+        self.assertTrue(list((self.home / "tmp").glob("cardinal-preview-*")))
+        proc.terminate()
+        proc.wait(timeout=30)
+        proc.stdout.close()
+        proc.stderr.close()
+        self.assertEqual(list((self.home / "tmp").glob("cardinal-preview-*")), [], "temp dir removed on SIGTERM")
 
     def test_stale_pngs_of_a_scene_are_replaced(self):
         out = self.home / "out"
@@ -654,18 +769,47 @@ class EndToEndTests(unittest.TestCase):
         nav = [e for e in read_log(self.log) if e.get("method") == "Page.navigate"]
         self.assertTrue(nav[0]["params"]["url"].endswith("#theme=dark"))
 
-    def test_child_frame_closes_the_canvas(self):
+    def _closed(self, mode: str, needle: str) -> list:
+        """Render one scene in `mode`; assert the Canvas was closed for `needle`."""
         result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
-        res, lines = run_renderer([], self._env(FAKE_CHROME_MODE="grandchild"), stdin=json.dumps(result))
+        res, lines = run_renderer([], self._env(FAKE_CHROME_MODE=mode), stdin=json.dumps(result))
         self.assertEqual(res.returncode, 0, res.stderr)
         rec = [ln for ln in lines if ln.get("scene_id") == "rhythm"][0]
-        self.assertIsNone(rec["png"])
-        self.assertIn("child frame", rec["error"])
-        self.assertTrue(any("child frame" in p for p in rec["protocol_errors"]))
-        aborts = [e for e in read_log(self.log)
-                  if e.get("method") == "Runtime.evaluate" and "abort(" in e["params"]["expression"]]
-        self.assertEqual(len(aborts), 1)
+        self.assertIsNone(rec["png"], mode)
+        self.assertIn(needle, rec["error"], mode)
+        self.assertTrue(any(needle in p for p in rec["protocol_errors"]), mode)
+        cmds = [e for e in read_log(self.log) if e["kind"] == "cmd"]
+        aborts = [c for c in cmds if c["method"] == "Runtime.evaluate" and "abort(" in c["params"]["expression"]]
+        self.assertEqual(len(aborts), 1, mode)
+        self.assertEqual(aborts[0]["session"], "S1", "abort runs in the host page, not the Canvas frame")
         self.assertNotIn("contextId", aborts[0]["params"], "abort runs in the host page's main world")
+        return cmds
+
+    def test_child_frame_in_the_canvas_process_closes_the_canvas(self):
+        # Real Chrome reports the Canvas's grandchild on the Canvas frame's
+        # own session (the frame is out of process), not the page's.
+        self._closed("grandchild", "child frame")
+
+    def test_child_frame_of_an_in_process_canvas_closes_the_canvas(self):
+        self._closed("grandchild_inproc", "child frame")
+
+    def test_hash_navigation_in_the_canvas_process_closes_the_canvas(self):
+        self._closed("hashnav", "navigated within its document")
+
+    def test_frames_made_before_the_canvas_session_attached_close_the_canvas(self):
+        # Chrome runs a srcdoc OOPIF's first parse before its session exists
+        # (waitingForDebugger is false): the frame tree catches it.
+        self._closed("early_grandchild", "child frame")
+        self.log.unlink()
+        self._closed("early_hash", "navigated within its document")
+
+    def test_a_target_spawned_by_the_canvas_closes_it_and_stays_paused(self):
+        cmds = self._closed("nested_target", "child frame")
+        self.assertIn("Fetch.enable", [c["method"] for c in cmds if c["session"] == "S3"])
+        self.assertNotIn("Runtime.runIfWaitingForDebugger", [c["method"] for c in cmds if c["session"] == "S3"])
+
+    def test_a_canvas_frame_the_locks_cannot_reach_is_closed(self):
+        self._closed("child_lock_error", "could not put its request filter on the Canvas frame")
 
     def test_reveal_error_is_reported_per_scene(self):
         result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
@@ -804,15 +948,28 @@ class RealChromeSmokeTests(unittest.TestCase):
             env["CARDINAL_CHROMIUM"] = os.environ["CARDINAL_CHROMIUM"]
         return run_renderer(args + ["--out", str(self.dir / "out")], env, timeout=600)
 
+    def _canvas_page(self, name: str, srcdoc: str, extra: str = "") -> Path:
+        """A host page whose Canvas frame is sandboxed like the real bundle's
+        (sandbox="allow-scripts" makes it an out-of-process iframe in current
+        Chrome, so these exercise the auto-attached Canvas session)."""
+        page = self.dir / f"{name}.html"
+        page.write_text(f'<!doctype html><body style="margin:0">{SMOKE_HOST}<iframe id="cv" sandbox="allow-scripts" '
+                        f'style="border:0;width:1280px;height:800px;background:#c00" srcdoc="{srcdoc}"></iframe>'
+                        f'{extra}</body>')
+        return page
+
     def test_synthetic_page_and_locks(self):
-        ok = self.dir / "ok.html"
-        ok.write_text(f'<!doctype html><body style="margin:0">{SMOKE_HOST}<iframe id="cv" '
-                      f'style="border:0;width:1280px;height:800px;background:#c00" srcdoc="hi"></iframe>'
-                      f'<img src="https://example.com/x.png"></body>')
-        nested = self.dir / "nested.html"
-        nested.write_text(f'<!doctype html><body>{SMOKE_HOST}<iframe id="cv" srcdoc="<script>setTimeout(()=>'
-                          f'document.body.appendChild(document.createElement(\'iframe\')),50)</script>"></iframe></body>')
-        res, lines = self._run([ok, nested])
+        later = "<script>setTimeout(()=>{%s},50)</script>x"
+        pages = [
+            self._canvas_page("ok", "hi", '<img src="https://example.com/x.png">'),
+            self._canvas_page("net", later % "new Image().src='https://host-b.example/child.png'"),
+            self._canvas_page("nested", later % "document.body.appendChild(document.createElement('iframe'))"),
+            self._canvas_page("nested-early",
+                              "<script>document.documentElement.appendChild(document.createElement('iframe'))</script>"),
+            self._canvas_page("hash", later % "location.hash='abc'"),
+            self._canvas_page("hash-early", "<script>location.hash='abc'</script>"),
+        ]
+        res, lines = self._run(pages)
         self.assertEqual(res.returncode, 0, res.stderr)
         by = {}
         for ln in lines:
@@ -820,8 +977,14 @@ class RealChromeSmokeTests(unittest.TestCase):
                 by.setdefault(ln["scene_id"], []).append(ln)
         self.assertEqual([r["step"] for r in by["ok"]], [0, 1])
         self.assertTrue(Path(by["ok"][0]["png"]).read_bytes().startswith(b"\x89PNG"))
-        self.assertIn("child frame", by["nested"][-1]["error"])
-        self.assertIn("blocked 1 network request", res.stderr)
+        self.assertIn("ok: blocked 1 network request", res.stderr)
+        # The Canvas frame's own request is paused and failed on its session.
+        self.assertIsNone(by["net"][-1]["error"])
+        self.assertIn("net: blocked 1 network request", res.stderr)
+        for name in ("nested", "nested-early"):
+            self.assertIn("child frame", by[name][-1]["error"] or "", name)
+        for name in ("hash", "hash-early"):
+            self.assertIn("navigated within its document", by[name][-1]["error"] or "", name)
 
     def test_real_bundles(self):
         root = os.environ.get("CARDINAL_PREVIEW_SMOKE_BUNDLES")
@@ -834,6 +997,58 @@ class RealChromeSmokeTests(unittest.TestCase):
         problems = [ln for ln in lines if "scene_id" in ln and ln["error"]]
         self.assertEqual(problems, [])
         self.assertTrue(all(ln["state"] == "settled" for ln in lines if "scene_id" in ln))
+
+
+# ---------------------------------------------------------------------------
+# canvas SKILL.md: how Claude finds the renderer, and the shipped exemplars
+# ---------------------------------------------------------------------------
+
+CANVAS_SKILL = PLUGIN_ROOT / "skills" / "canvas" / "SKILL.md"
+
+
+class CanvasSkillTests(unittest.TestCase):
+    def test_renderer_locator_never_searches_the_working_directory(self):
+        text = CANVAS_SKILL.read_text()
+        self.assertNotRegex(text, r"find [^\n]*\s\.\s", "the renderer is never looked up under the cwd")
+        self.assertNotIn("ls -t", text, "never pick the renderer by mtime")
+        self.assertIn("<this skill's base directory>/scripts/render_preview.py", text)
+
+    def test_locator_fallback_picks_the_newest_plugin_version_not_a_planted_copy(self):
+        m = re.search(r"^(RENDER=\$\(python3 -c .*?'\))$", CANVAS_SKILL.read_text(), re.S | re.M)
+        self.assertIsNotNone(m, "fallback locator snippet not found in SKILL.md")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            for v in ("0.9.0", "0.32.0", "0.10.1"):
+                d = home / ".claude/plugins/cache/mkt place/cardinal" / v / "skills/canvas/scripts"
+                d.mkdir(parents=True)
+                (d / "render_preview.py").write_text("")
+            # The oldest version is the most recently touched: mtime must not win.
+            old = home / ".claude/plugins/cache/mkt place/cardinal/0.9.0/skills/canvas/scripts/render_preview.py"
+            os.utime(old, (2_000_000_000, 2_000_000_000))
+            planted = root / "repo/tools/canvas/scripts"
+            planted.mkdir(parents=True)
+            (planted / "render_preview.py").write_text("")
+            res = subprocess.run(["bash", "-c", m.group(1) + '\nprintf %s "$RENDER"'], cwd=str(root / "repo"),
+                                 env={"HOME": str(home), "PATH": os.environ.get("PATH", "")},
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(res.stdout, str(home / ".claude/plugins/cache/mkt place/cardinal/0.32.0/skills/canvas/"
+                                                    "scripts/render_preview.py"))
+
+    def test_exemplars_ship_with_the_skill_and_follow_the_frame_rules(self):
+        text = CANVAS_SKILL.read_text()
+        names = re.findall(r"`exemplars/([a-z-]+\.js)`", text)
+        self.assertGreaterEqual(len(set(names)), 2)
+        for name in set(names):
+            src = (CANVAS_SKILL.parent / "exemplars" / name).read_text()
+            self.assertLessEqual(len(src.encode()), 64 * 1024, name)
+            for banned in (r"\bimport\b", r"\beval\b", r"\bfetch\b", r"\bparent\b", r"postMessage",
+                           r"\bFunction\(", r"\bXMLHttpRequest\b", r"\bWebSocket\b", r"localStorage"):
+                self.assertNotRegex(src, banned, f"{name}: {banned}")
+            # The batch cv.data resolves to an object keyed by binding key.
+            self.assertNotRegex(src, r"const\s*\[[^\]]*\]\s*=\s*await\s+cv\.data", name)
+            self.assertIn("cv.mark(", src, name)
 
 
 # ---------------------------------------------------------------------------

@@ -127,6 +127,9 @@ DEFAULT_MAX_BUNDLE_BYTES = 32 * 1024 * 1024
 # frame's name can cross CDP at up to ~256 MB, so anything bigger than this is
 # dropped and closes the Canvas.
 MAX_CDP_MESSAGE_BYTES = 64 * 1024 * 1024
+# A screenshot is one CDP message: at DPR 2 a tall, noisy Canvas already
+# nears MAX_CDP_MESSAGE_BYTES, so --dpr is clamped.
+MIN_DPR, MAX_DPR = 0.5, 2.0
 DEFAULT_RUN_TIMEOUT_S = 540  # under the Bash tool's 10-minute ceiling
 MAX_429_RETRIES = 4
 
@@ -176,8 +179,10 @@ def _write_private(path: Path, data: bytes) -> None:
     os.replace(str(tmp), str(path))
 
 
-def _mkdir_private(path: Path) -> None:
-    """Create `path` and any missing parents with mode 0700."""
+def _mkdir_private(path: Path, own_leaf: bool = False) -> None:
+    """Create `path` and any missing parents with mode 0700. Directories that
+    already existed keep their mode (an explicit --out may be any directory),
+    except the leaf when `own_leaf` says it is ours (the default PNG dir)."""
     missing = []
     p = path
     while not p.exists() and p != p.parent:
@@ -187,11 +192,16 @@ def _mkdir_private(path: Path) -> None:
         try:
             d.mkdir(mode=0o700)
         except FileExistsError:
+            continue
+        try:
+            os.chmod(str(d), 0o700)  # mkdir's mode is masked by the umask
+        except OSError:
             pass
-    try:
-        os.chmod(str(path), 0o700)
-    except OSError:
-        pass
+    if own_leaf:
+        try:
+            os.chmod(str(path), 0o700)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -407,13 +417,26 @@ def explain_status(status: int, body: dict) -> str:
     return f"maestro answered HTTP {status}" + (f" ({code})" if code else "") + (f": {msg}" if msg else "")
 
 
-def fetch_bundle(conn: dict, ref: dict, max_bytes: int, opener=None, sleep=time.sleep) -> bytes:
+def bundle_revision(ref: dict):
+    """preview_bundle.revision when it is a plain int, else None. It names an
+    output directory, so nothing else is accepted."""
+    rev = ref.get("revision")
+    return rev if isinstance(rev, int) and not isinstance(rev, bool) and rev >= 0 else None
+
+
+def fetch_bundle(conn: dict, ref: dict, max_bytes: int, opener=None, sleep=time.sleep,
+                 deadline: float | None = None, clock=time.monotonic) -> bytes:
     """GET one scene's bundle page and check it against the tool result.
-    Only ever sends the key to the connected maestro's bundle route."""
+    Only ever sends the key to the connected maestro's bundle route. Never
+    runs past `deadline` (a time.monotonic() value): socket timeouts, reads
+    and 429 waits are all cut to what is left of it."""
     path = ref.get("path")
     if not isinstance(path, str) or not BUNDLE_PATH_RE.match(path):
         raise FetchError(f"preview_bundle.path is not a preview-bundle route: {str(path)[:200]!r}")
-    org = urllib.parse.unquote(BUNDLE_PATH_RE.match(path).group(1))
+    route = BUNDLE_PATH_RE.match(path)
+    org = urllib.parse.unquote(route.group(1))
+    if bundle_revision(ref) != int(route.group(4)):
+        raise FetchError("preview_bundle.revision does not match its path: call storyboard__preview again")
     if conn.get("org") and org != conn["org"]:
         raise FetchError(
             f"this preview is for org {org}, but Claude Code is connected to org {conn['org']}: "
@@ -427,14 +450,30 @@ def fetch_bundle(conn: dict, ref: dict, max_bytes: int, opener=None, sleep=time.
     url = conn["origin"] + path
     opener = opener or _opener()
     attempt = 0
+
+    def left(cap: float) -> float:
+        if deadline is None:
+            return cap
+        remaining = deadline - clock()
+        if remaining < 1:
+            raise FetchError("not fetched: this run's time budget is spent; render the rest with --scene")
+        return min(cap, remaining)
+
     while True:
         req = urllib.request.Request(url, method="GET", headers={
             "X-CardinalHQ-API-Key": conn["key"],
             "Accept": "text/html",
         })
         try:
-            with opener.open(req, timeout=120) as resp:
-                data = resp.read(expect_bytes + 1)
+            with opener.open(req, timeout=left(120)) as resp:
+                # Chunked, so a server trickling bytes cannot outlast the run.
+                data = b""
+                while len(data) <= expect_bytes:
+                    left(120)
+                    chunk = resp.read(min(1 << 20, expect_bytes + 1 - len(data)))
+                    if not chunk:
+                        break
+                    data += chunk
             break
         except urllib.error.HTTPError as err:
             body = _error_body(err)
@@ -445,7 +484,10 @@ def fetch_bundle(conn: dict, ref: dict, max_bytes: int, opener=None, sleep=time.
                     wait = int(err.headers.get("Retry-After") or 10)
                 except (TypeError, ValueError):
                     wait = 10
-                sleep(max(1, min(wait, 30)))
+                wait = max(1, min(wait, 30))
+                if deadline is not None and clock() + wait > deadline - 1:
+                    raise FetchError(explain_status(429, body), status=429)
+                sleep(wait)
                 continue
             if 300 <= err.code < 400:
                 raise FetchError(f"maestro redirected the bundle request (HTTP {err.code}); not following it with your key",
@@ -493,6 +535,7 @@ class PipeCDP:
         self._next_id = 0
         self._responses: dict = {}
         self._waiting: set = set()
+        self._callbacks: dict = {}
         self._handlers: list = []
         self._fatal: dict = {}
         self._sessions: set = set()
@@ -587,6 +630,12 @@ class PipeCDP:
                 if msg["id"] in self._waiting:
                     self._responses[msg["id"]] = msg
                     self._cv.notify_all()
+                callback = self._callbacks.pop(msg["id"], None)
+            if callback is not None:
+                try:
+                    callback(msg)
+                except Exception:  # a callback bug must not kill the reader
+                    pass
             return
         for handler in list(self._handlers):
             try:
@@ -609,14 +658,23 @@ class PipeCDP:
             self._next_id += 1
             return self._next_id
 
-    def post(self, method: str, params: dict | None = None, session: str | None = None) -> None:
-        msg = {"id": self._new_id(), "method": method, "params": params or {}}
+    def post(self, method: str, params: dict | None = None, session: str | None = None,
+             on_reply=None) -> None:
+        """Send without waiting. `on_reply(msg)`, if given, runs on the reader
+        thread with the raw response (check msg.get("error")); like event
+        handlers it may only post(), never send()."""
+        mid = self._new_id()
+        msg = {"id": mid, "method": method, "params": params or {}}
         if session:
             msg["sessionId"] = session
+        if on_reply is not None:
+            with self._cv:
+                self._callbacks[mid] = on_reply
         try:
             self._write(msg)
         except CDPClosed:
-            pass
+            with self._cv:
+                self._callbacks.pop(mid, None)
 
     def send(self, method: str, params: dict | None = None, session: str | None = None,
              timeout: float = 30.0) -> dict:
@@ -806,6 +864,27 @@ SNAP_JS = """(() => {
 
 REPORT_JS = "window.cardinalPreview ? window.cardinalPreview.report() : null"
 
+# The Canvas iframe (sandbox="allow-scripts", srcdoc) is an out-of-process
+# iframe in current Chrome (IsolateSandboxedIframes): its own renderer, its
+# own DevTools target. The page session's Fetch interception and Page events
+# do not cover it, so every frame target is auto-attached and gets the same
+# request filter and frame locks on its own session. Chrome does not hold a
+# srcdoc OOPIF for the debugger (waitingForDebugger is false), so the frame's
+# initial parse can run before its session is set up: Page.getFrameTree
+# catches a child frame or navigation made in that window, and the network
+# flags plus the frame's hash CSP stay the barrier for its requests.
+# (--disable-features=IsolateSandboxedIframes would close that window but
+# would put hostile Canvas code in the file:// host page's process.)
+AUTO_ATTACH = {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True}
+REDUCED_MOTION = {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]}
+FETCH_ALL = {"patterns": [{"urlPattern": "*"}]}
+CANVAS_FRAME_URL = "about:srcdoc"
+MSG_CHILD_FRAME = ("the Canvas created a child frame (<iframe>/<frame>/<object>); a Canvas cannot "
+                   "embed frames — the Canvas is closed")
+MSG_HASH_NAV = ("a frame navigated within its document (location.hash / history); a Canvas cannot "
+                "navigate — the Canvas is closed")
+MSG_NAVIGATED = "a frame navigated; a Canvas cannot navigate — the Canvas is closed"
+
 
 def _clip_list(xs, n=20, width=500) -> list:
     out = []
@@ -839,7 +918,10 @@ def render_page(cdp: PipeCDP, page_path: Path, scene_id: str, out_dir: Path, opt
     fragment = "#theme=" + opts["theme"]
     width, height = opts["viewport"]
     ready_s, settle_s = opts["ready_ms"] / 1000.0, opts["settle_ms"] / 1000.0
-    state = {"blocked": 0, "main": None, "loaded": threading.Event()}
+    # children: DevTools sessions of the Canvas frame targets (OOPIFs) and
+    # anything they spawn, auto-attached below. Only the reader thread
+    # touches it.
+    state = {"blocked": 0, "main": None, "loaded": threading.Event(), "children": {}}
     result = {"ok": False, "steps": None, "pngs": [], "records": [], "error": None,
               "frame_errors": [], "protocol_errors": [], "blocked": 0}
     ctx = target = sess = None
@@ -847,32 +929,97 @@ def render_page(cdp: PipeCDP, page_path: Path, scene_id: str, out_dir: Path, opt
     def allowed(url: str) -> bool:
         return url.startswith(("data:", "blob:", "about:")) or url.split("#", 1)[0] == file_url
 
+    def trip(reason: str) -> None:
+        # Always the page session: abort() runs in the host page's main
+        # world, never in the (hostile) Canvas frame's.
+        cdp.trip(sess, reason)
+
+    def filter_request(session: str, p: dict) -> None:
+        url = str((p.get("request") or {}).get("url") or "")
+        if allowed(url):
+            cdp.post("Fetch.continueRequest", {"requestId": p.get("requestId")}, session)
+        else:
+            state["blocked"] += 1
+            cdp.post("Fetch.failRequest", {"requestId": p.get("requestId"), "errorReason": "BlockedByClient"},
+                     session)
+
+    def lock_failed(what: str):
+        def on_reply(reply: dict) -> None:
+            if reply.get("error"):
+                err = (reply.get("error") or {}).get("message") or reply.get("error")
+                trip(f"the preview could not put its {what} on the Canvas frame ({err}); the Canvas is closed")
+        return on_reply
+
+    def check_frame_tree(reply: dict) -> None:
+        # What the Canvas did before its session was attached.
+        if reply.get("error"):
+            lock_failed("frame locks")(reply)
+            return
+        tree = (reply.get("result") or {}).get("frameTree") or {}
+        frame = tree.get("frame") or {}
+        if tree.get("childFrames"):
+            trip(MSG_CHILD_FRAME)
+        elif frame.get("urlFragment"):  # Chrome reports "#…" apart from url
+            trip(MSG_HASH_NAV)
+        elif frame.get("url") != CANVAS_FRAME_URL:
+            trip(MSG_NAVIGATED)
+
+    def adopt(child: str, info: dict, resume: bool) -> None:
+        kind = info.get("type")
+        state["children"][child] = kind
+        if kind == "iframe":
+            # Posted in order on one session, so the filter and the locks are
+            # in place before the target resumes (when it waited at all).
+            cdp.post("Fetch.enable", FETCH_ALL, child, on_reply=lock_failed("request filter"))
+            cdp.post("Page.enable", None, child, on_reply=lock_failed("frame locks"))
+            cdp.post("Target.setAutoAttach", AUTO_ATTACH, child, on_reply=lock_failed("frame locks"))
+            cdp.post("Emulation.setEmulatedMedia", REDUCED_MOTION, child)
+            cdp.post("Page.getFrameTree", None, child, on_reply=check_frame_tree)
+        else:
+            # A worker: its requests are filtered where Chrome allows it.
+            cdp.post("Fetch.enable", FETCH_ALL, child)
+        if resume:
+            cdp.post("Runtime.runIfWaitingForDebugger", None, child)
+
+    def check_navigation(p: dict, in_canvas: bool) -> None:
+        frame = p.get("frame") or {}
+        if (frame.get("parentId") or in_canvas) and frame.get("url") not in ("about:srcdoc", "about:blank", "", None):
+            trip(MSG_NAVIGATED)
+
     def on_event(msg: dict) -> None:
-        if msg.get("sessionId") != sess:
+        sid = msg.get("sessionId")
+        if sid is None:
+            return
+        in_canvas = sid in state["children"]
+        if sid != sess and not in_canvas:
             return
         method = msg.get("method")
         p = msg.get("params") or {}
         if method == "Fetch.requestPaused":
-            url = str((p.get("request") or {}).get("url") or "")
-            if allowed(url):
-                cdp.post("Fetch.continueRequest", {"requestId": p.get("requestId")}, sess)
+            filter_request(sid, p)
+        elif method == "Target.attachedToTarget":
+            child = p.get("sessionId")
+            if not child:
+                return
+            if in_canvas:
+                # Something the Canvas itself spawned in another process
+                # (a grandchild frame): filter it, keep it paused, close.
+                adopt(child, p.get("targetInfo") or {}, resume=False)
+                trip(MSG_CHILD_FRAME)
             else:
-                state["blocked"] += 1
-                cdp.post("Fetch.failRequest", {"requestId": p.get("requestId"), "errorReason": "BlockedByClient"}, sess)
+                adopt(child, p.get("targetInfo") or {}, resume=True)
+        elif method == "Target.detachedFromTarget":
+            state["children"].pop(p.get("sessionId"), None)
         elif method == "Page.frameAttached":
             parent = p.get("parentFrameId")
-            if parent and state["main"] and parent != state["main"]:
-                cdp.trip(sess, "the Canvas created a child frame (<iframe>/<frame>/<object>); a Canvas cannot "
-                               "embed frames — the Canvas is closed")
+            if in_canvas or (parent and state["main"] and parent != state["main"]):
+                trip(MSG_CHILD_FRAME)
         elif method == "Page.navigatedWithinDocument":
-            if p.get("frameId") and p.get("frameId") != state["main"]:
-                cdp.trip(sess, "a frame navigated within its document (location.hash / history); a Canvas cannot "
-                               "navigate — the Canvas is closed")
+            if in_canvas or (p.get("frameId") and p.get("frameId") != state["main"]):
+                trip(MSG_HASH_NAV)
         elif method == "Page.frameNavigated":
-            frame = p.get("frame") or {}
-            if frame.get("parentId") and frame.get("url") not in ("about:srcdoc", "about:blank", "", None):
-                cdp.trip(sess, "a frame navigated; a Canvas cannot navigate — the Canvas is closed")
-        elif method in ("Page.domContentEventFired", "Page.loadEventFired"):
+            check_navigation(p, in_canvas)
+        elif method in ("Page.domContentEventFired", "Page.loadEventFired") and not in_canvas:
             state["loaded"].set()
 
     def evaluate(expr: str, timeout: float):
@@ -896,9 +1043,9 @@ def render_page(cdp: PipeCDP, page_path: Path, scene_id: str, out_dir: Path, opt
         cdp.send("Emulation.setDeviceMetricsOverride",
                  {"width": width, "height": height, "deviceScaleFactor": opts["dpr"], "mobile": False}, sess)
         cdp.send("Emulation.setTimezoneOverride", {"timezoneId": "UTC"}, sess)
-        cdp.send("Emulation.setEmulatedMedia",
-                 {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]}, sess)
-        cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*"}]}, sess)
+        cdp.send("Emulation.setEmulatedMedia", REDUCED_MOTION, sess)
+        cdp.send("Target.setAutoAttach", AUTO_ATTACH, sess)
+        cdp.send("Fetch.enable", FETCH_ALL, sess)
         nav = cdp.send("Page.navigate", {"url": file_url + fragment}, sess, timeout=ready_s + 10)
         if nav.get("errorText"):
             raise CDPError("the page did not load: " + str(nav["errorText"]))
@@ -1066,7 +1213,8 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--html", metavar="FILE", action="append", help="render a local bundle page instead (repeatable)")
     ap.add_argument("--scene", action="append", metavar="ID", help="only this scene (repeatable)")
     ap.add_argument("--theme", choices=("light", "dark"), default="light")
-    ap.add_argument("--dpr", type=float, default=1.0, help="device pixel ratio (default 1, fine for critique)")
+    ap.add_argument("--dpr", type=float, default=1.0,
+                    help=f"device pixel ratio, {MIN_DPR:g}–{MAX_DPR:g} (default 1, fine for critique)")
     ap.add_argument("--out", metavar="DIR", help="PNG directory (default ~/.claude/cardinal/storyboards/<id>/r<rev>)")
     ap.add_argument("--chromium", metavar="PATH", help="Chrome/Chromium binary (else discovered)")
     ap.add_argument("--timeout", type=int, default=DEFAULT_RUN_TIMEOUT_S, help="whole-run wall clock, seconds")
@@ -1126,8 +1274,9 @@ def main(argv: list | None = None) -> int:
         fetch, problems, upgrade = plan_scenes(result, args.scene)
         if upgrade:
             return finish(EXIT_FETCH, UPGRADE_MESSAGE)
-        revs = {r.get("revision") for _, r in fetch if isinstance(r.get("revision"), int)}
-        revision = revs.pop() if len(revs) == 1 else result.get("revision")
+        revs = {bundle_revision(r) for _, r in fetch} - {None}
+        top = bundle_revision(result)
+        revision = revs.pop() if len(revs) == 1 else (top if not revs else None)
         pages = [(sid, None, ref) for sid, ref in fetch]
     summary["revision"] = revision
     for sid, reason in problems:
@@ -1171,7 +1320,7 @@ def main(argv: list | None = None) -> int:
                         summary["scenes"][rest] = "not fetched"
                     break
                 try:
-                    data = fetch_bundle(conn, ref, max_bytes)
+                    data = fetch_bundle(conn, ref, max_bytes, deadline=deadline - 15)
                 except FetchError as e:
                     fetch_failures += 1
                     first_failure = first_failure or str(e)
@@ -1196,9 +1345,9 @@ def main(argv: list | None = None) -> int:
         # -- render ---------------------------------------------------------------------
         out_dir = Path(args.out) if args.out else (
             home / ".claude" / "cardinal" / "storyboards" / sb_id / (f"r{revision}" if revision is not None else "local"))
-        _mkdir_private(out_dir)
+        _mkdir_private(out_dir, own_leaf=not args.out)
         summary["out_dir"] = str(out_dir)
-        opts = {"theme": args.theme, "viewport": viewport, "dpr": args.dpr, "ready_ms": ready_ms,
+        opts = {"theme": args.theme, "viewport": viewport, "dpr": max(MIN_DPR, min(args.dpr, MAX_DPR)), "ready_ms": ready_ms,
                 "settle_ms": settle_ms}
         browser = Browser(found["path"], workdir)
         watchdog = threading.Timer(max(5.0, deadline - time.monotonic()), browser.kill)
@@ -1246,5 +1395,12 @@ def main(argv: list | None = None) -> int:
             shutil.rmtree(str(workdir), ignore_errors=True)
 
 
+def _exit_on_sigterm(signum, frame):  # noqa: ARG001
+    # SystemExit unwinds main()'s finally blocks: Chromium is closed and the
+    # temp dir (bundle pages, profile) removed when the Bash tool times out.
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     sys.exit(main())
