@@ -39,10 +39,14 @@ turns an investigation into an evidence-bound, scene-by-scene storyboard
 through the `storyboard__*` MCP tools, and
 [`/cardinal:canvas`](adapters/claude/skills/canvas/README.md) draws each
 scene's visual and previews it. `storyboard__preview` returns one
-self-contained page per scene. `canvas/scripts/render_preview.py` renders it
-in the user's own Chrome/Chromium, over the DevTools pipe, with the sandbox
-on and the network locked. Nothing is rendered server-side, and publish trust
-is deterministic. Local preview supports macOS and Linux, not Windows. A
+self-contained page per scene. A synchronous `PostToolUse` hook on
+`storyboard__preview` (`hooks/storyboard-preview.py`) passes the result to
+`canvas/scripts/render_preview.py`, which renders each page in the user's own
+Chrome/Chromium, over the DevTools pipe, with the sandbox on and the network
+locked; the hook hands Claude the PNG paths (and any per-scene render errors)
+to Read. `render_preview.py` stays the manual fallback (dark theme, a subset,
+a timed-out run). Nothing is rendered server-side, and publish trust is
+deterministic. Local preview supports macOS and Linux, not Windows. A
 synchronous `SessionStart` hook (`hooks/storyboard-session.py`) puts the
 session id in context for `storyboard__create`. The skills are Claude-only
 for now.

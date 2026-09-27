@@ -1,6 +1,7 @@
 """Storyboard skills: the local preview renderer (skills/canvas/scripts/
-render_preview.py) and the SessionStart session-id hook
-(hooks/storyboard-session.py).
+render_preview.py), the SessionStart session-id hook
+(hooks/storyboard-session.py) and the PostToolUse auto-preview hook
+(hooks/storyboard-preview.py).
 
 The renderer is driven end to end against a fake "chromium" that speaks the
 --remote-debugging-pipe protocol (fd 3 in, fd 4 out, NUL-framed JSON) and a
@@ -11,12 +12,14 @@ only with CARDINAL_CHROMIUM_SMOKE=1 (see RealChromeSmokeTests).
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import importlib.util
 import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -32,6 +35,8 @@ from unittest import mock
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 RENDER_PREVIEW = PLUGIN_ROOT / "skills" / "canvas" / "scripts" / "render_preview.py"
 SESSION_HOOK = PLUGIN_ROOT / "hooks" / "storyboard-session.py"
+PREVIEW_HOOK = PLUGIN_ROOT / "hooks" / "storyboard-preview.py"
+TESTDATA = Path(__file__).resolve().parent / "testdata"
 
 SB_ID = "sb_0123456789abcdef01234567"
 ORG = "org-1"
@@ -840,7 +845,8 @@ class EndToEndTests(unittest.TestCase):
         inner = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
         for wrapped in ({"structuredContent": inner},
                         {"content": [{"type": "text", "text": json.dumps(inner)}]},
-                        [{"type": "text", "text": json.dumps(inner)}]):
+                        [{"type": "text", "text": json.dumps(inner)}],
+                        {"content": json.dumps(inner)}):
             res, lines = run_renderer([], self._env(), stdin=json.dumps(wrapped))
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertEqual(lines[-1]["summary"]["rendered"], 2)
@@ -1166,6 +1172,328 @@ class StoryboardSessionHookTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertFalse(entries[0].get("async"), "additionalContext needs a synchronous hook")
         self.assertTrue(os.access(SESSION_HOOK, os.X_OK))
+
+
+# ---------------------------------------------------------------------------
+# PostToolUse: storyboard-preview.py (auto-preview)
+# ---------------------------------------------------------------------------
+
+def _load_preview_hook():
+    spec = importlib.util.spec_from_file_location("storyboard_preview_hook_under_test", PREVIEW_HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# The PostToolUse payload of a real storyboard__preview call (first real e2e
+# run, 2026-09-27). tool_response has the shape Claude Code 2.1.283 sends (the
+# object the transcript stores as tool_use_result, the same in all 7 previews
+# of run.jsonl): {content: "<result text>", structuredContent: {...}}, both
+# verbatim with the org id replaced. The envelope keys and shapes (effort, mcp_server,
+# prompt_id, no scratchpad_dir) follow a payload captured from Claude Code
+# 2.1.283. The preview was scoped to three scenes: two unavailable (derive
+# over a string) and `shipping` with a bundle.
+CAPTURED = json.loads((TESTDATA / "storyboard_preview_post_tool_use.json").read_text())
+CAPTURED_ORG = "00000000-0000-4000-8000-00000000c0de"
+CAPTURED_SB = "sb_29ec61d324cb7c3bad43c6dc"
+
+
+class StoryboardPreviewHookTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        (self.home / "empty-bin").mkdir()
+        self.chrome = make_fake_chromium(self.home)
+        self.log = self.home / "chrome.log"
+        self.body = b"<!doctype html><html data-cv-state=loading>shipping</html>"
+        self.maestro = StubMaestro({"shipping": self.body})
+        write_settings(self.home, self.maestro.origin, org=CAPTURED_ORG)
+        self.out_dir = self.home / ".claude" / "cardinal" / "storyboards" / CAPTURED_SB / "r17"
+
+    def tearDown(self):
+        self.maestro.close()
+        self.tmp.cleanup()
+
+    def _result(self) -> dict:
+        """The captured preview result, with the shipping bundle's size and
+        digest pointed at the page the stub maestro serves."""
+        result = copy.deepcopy(CAPTURED["tool_response"]["structuredContent"])
+        for scene in result["scenes"]:
+            if scene["id"] == "shipping":
+                scene["preview_bundle"].update(bytes=len(self.body), sha256=hashlib.sha256(self.body).hexdigest())
+        return result
+
+    def _real_shape(self) -> dict:
+        """tool_response as Claude Code sends it: {content: text, structuredContent}."""
+        result = self._result()
+        return {"content": json.dumps(result), "structuredContent": result}
+
+    def _payload(self, tool_response=None, **over) -> dict:
+        body = dict(CAPTURED)
+        body["tool_response"] = self._real_shape() if tool_response is None else tool_response
+        body["cwd"] = str(self.home)
+        body.update(over)
+        return body
+
+    def _env(self, **extra):
+        return hermetic_env(self.home, CARDINAL_CHROMIUM=str(self.chrome), FAKE_CHROME_LOG=str(self.log), **extra)
+
+    def _run(self, payload=None, env=None, raw: str | None = None, timeout: int = 60):
+        stdin = raw if raw is not None else json.dumps(payload if payload is not None else self._payload())
+        res = subprocess.run([sys.executable, str(PREVIEW_HOOK)], input=stdin, capture_output=True, text=True,
+                             timeout=timeout, env=env or self._env(), cwd=str(self.home))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res
+
+    def _context(self, res) -> str:
+        body = json.loads(res.stdout)
+        self.assertEqual(body["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+        ctx = body["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(ctx), 6000)
+        return ctx
+
+    def _assert_rendered(self, ctx: str):
+        self.assertIn(f"storyboard {CAPTURED_SB}, revision 17", ctx)
+        self.assertIn(f"PNGs are in {self.out_dir}/", ctx)
+        self.assertIn("- shipping: shipping-0.png, shipping-1.png", ctx)
+        for step in (0, 1):
+            self.assertEqual((self.out_dir / f"shipping-{step}.png").read_bytes(), TINY_PNG)
+        self.assertIn("- sawtooth: not rendered (unavailable: the scene has errors; fix them and preview again)", ctx)
+        self.assertIn("- cause: not rendered (unavailable:", ctx)
+        self.assertIn("Read every PNG, first and last step included", ctx)
+        self.assertIn("needs a fix in its source or spec", ctx)
+        # scene_ids scoped the preview, so earlier scenes' PNGs live elsewhere.
+        self.assertIn("Only the scenes in this preview were rendered", ctx)
+        self.assertEqual([r["key"] for r in self.maestro.requests], [KEY])
+        argv = [e for e in read_log(self.log) if e["kind"] == "argv"][0]["argv"]
+        self.assertNotIn("--no-sandbox", argv)
+
+    def test_fixture_is_the_real_claude_code_shape(self):
+        resp = CAPTURED["tool_response"]
+        self.assertEqual(set(resp), {"content", "structuredContent"})
+        self.assertIsInstance(resp["content"], str)
+        self.assertEqual(json.loads(resp["content"]), resp["structuredContent"])
+        self.assertIsInstance(resp["structuredContent"]["scenes"], list)
+
+    def test_captured_real_shape_renders_and_reports_png_paths(self):
+        ctx = self._context(self._run())
+        self._assert_rendered(ctx)
+        # Scenes in the preview's order; nothing raw from the renderer.
+        self.assertLess(ctx.index("- sawtooth:"), ctx.index("- cause:"))
+        self.assertLess(ctx.index("- cause:"), ctx.index("- shipping:"))
+        self.assertNotIn('"summary"', ctx)
+        self.assertNotIn(KEY, ctx)
+
+    def test_structured_content_alone_is_enough(self):
+        # structuredContent is read first: garbage content does not matter.
+        payload = self._payload(tool_response={"content": "not json", "structuredContent": self._result()})
+        self._assert_rendered(self._context(self._run(payload)))
+
+    def test_string_content_without_structured_content(self):
+        payload = self._payload(tool_response={"content": json.dumps(self._result())})
+        self._assert_rendered(self._context(self._run(payload)))
+
+    def test_bare_result_string(self):
+        self._assert_rendered(self._context(self._run(self._payload(tool_response=json.dumps(self._result())))))
+
+    def test_list_of_content_blocks(self):
+        blocks = [{"type": "text", "text": json.dumps(self._result())}]
+        self._assert_rendered(self._context(self._run(self._payload(tool_response=blocks))))
+
+    def test_unscoped_preview_has_no_scope_note(self):
+        payload = self._payload(tool_input={"storyboard_id": CAPTURED_SB})
+        self.assertNotIn("Only the scenes in this preview", self._context(self._run(payload)))
+
+    def _spill(self, where: Path) -> str:
+        where.parent.mkdir(parents=True, exist_ok=True)
+        where.write_text(json.dumps(self._result()))
+        return (f"Error: result (71,204 characters) exceeds maximum allowed tokens. Output has been saved to "
+                f"{where}.\nFormat: JSON with schema: {{error_count: number, scenes: [...]}}\nUse offset and "
+                f"limit parameters to read specific portions of the file.")
+
+    def test_spilled_result_under_claude_projects_is_read(self):
+        spill = (self.home / ".claude" / "projects" / "-work-demo" / "sess" / "tool-results" /
+                 "mcp-plugin_cardinal_cardinal-storyboard__preview-1790494777541.txt")
+        text = self._spill(spill)
+        self._assert_rendered(self._context(self._run(self._payload(tool_response=text))))
+        # The same notice inside a content block.
+        self.maestro.requests.clear()
+        blocks = [{"type": "text", "text": text}]
+        self._assert_rendered(self._context(self._run(self._payload(tool_response=blocks))))
+        # And as the string `content` of Claude Code's tool_response object.
+        self.maestro.requests.clear()
+        self._assert_rendered(self._context(self._run(self._payload(tool_response={"content": text}))))
+
+    def test_spill_path_with_a_space_in_home(self):
+        home = self.home / "John Doe"
+        (home / ".claude").mkdir(parents=True)
+        shutil.copy(self.home / ".claude" / "settings.json", home / ".claude" / "settings.json")
+        spill = home / ".claude" / "projects" / "-work-demo" / "sess" / "tool-results" / "preview 1.txt"
+        text = self._spill(spill)
+        env = hermetic_env(home, CARDINAL_CHROMIUM=str(self.chrome), FAKE_CHROME_LOG=str(self.log))
+        ctx = self._context(self._run(self._payload(tool_response=text), env=env))
+        self.assertIn("- shipping: shipping-0.png, shipping-1.png", ctx)
+        # The older one-line notice, text after the path on the same line.
+        hook = _load_preview_hook()
+        one_line = f"Output has been saved to {spill}. Use offset and limit parameters to read it."
+        self.assertIn(str(spill), hook._spill_candidates(one_line))
+
+    def test_spilled_path_outside_claude_projects_is_refused(self):
+        outside = self.home / "elsewhere" / "tool-results" / "x.txt"
+        res = self._run(self._payload(tool_response=self._spill(outside)))
+        self.assertEqual(res.stdout, "")
+        # A link planted under projects/ that resolves outside it, too.
+        link = self.home / ".claude" / "projects" / "p" / "link.txt"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(outside)
+        res = self._run(self._payload(tool_response=f"Output has been saved to {link}."))
+        self.assertEqual(res.stdout, "")
+        res = self._run(self._payload(tool_response="Output has been saved to ../../etc/passwd."))
+        self.assertEqual(res.stdout, "")
+        self.assertEqual(read_log(self.log), [], "no browser without a preview result")
+        self.assertEqual(self.maestro.requests, [])
+
+    def test_error_and_non_preview_results_are_silent(self):
+        for text in ('Error: MCP error 429: {"error":"validation_busy","retry_after_s":3}',
+                     '{"error":"invalid_request","issues":[{"path":"scene_ids","message":"unknown scene"}]}',
+                     '{"error":"published","message":"storyboard is published"}',
+                     "", [], {"content": []}, 42, None):
+            res = self._run(self._payload(tool_response=text) if text is not None else
+                            {k: v for k, v in self._payload().items() if k != "tool_response"})
+            self.assertEqual(res.stdout, "", text)
+            self.assertEqual(res.stderr, "", text)
+        self.assertEqual(read_log(self.log), [])
+
+    def test_other_tools_are_ignored(self):
+        for name in ("mcp__plugin_cardinal_cardinal__storyboard__publish", "Bash", "", 7):
+            res = self._run(self._payload(tool_name=name))
+            self.assertEqual(res.stdout, "", name)
+        self.assertEqual(read_log(self.log), [])
+
+    def test_hand_registered_cardinal_server_name_works(self):
+        payload = self._payload(tool_name="mcp__cardinal__storyboard__preview")
+        self._assert_rendered(self._context(self._run(payload)))
+
+    def test_garbage_stdin_fails_open(self):
+        for raw in ("{not json", "[1, 2]", "null", ""):
+            res = self._run(raw=raw)
+            self.assertEqual(res.stdout, "", raw)
+            self.assertEqual(res.stderr, "", raw)
+
+    def test_no_chromium_is_said_once_per_session(self):
+        env = hermetic_env(self.home, CARDINAL_CHROMIUM=str(self.home / "no-such-chrome"))
+        ctx = self._context(self._run(env=env))
+        self.assertIn("not rendered locally", ctx)
+        self.assertIn("not a publish requirement", ctx)
+        self.assertEqual(self._run(env=env).stdout, "", "second preview in the session stays quiet")
+        # Chromium present but its sandbox cannot start: the same notice, once,
+        # for a new session; the sandbox is never turned off.
+        env = self._env(FAKE_CHROME_MODE="nosandbox")
+        ctx = self._context(self._run(self._payload(session_id="other-session-2"), env=env))
+        self.assertIn("sandbox", ctx)
+        self.assertEqual(self._run(self._payload(session_id="other-session-2"), env=env).stdout, "")
+        for launch in [e for e in read_log(self.log) if e["kind"] == "argv"]:
+            self.assertNotIn("--no-sandbox", launch["argv"])
+
+    def test_not_connected_relays_the_renderer_message(self):
+        (self.home / ".claude" / "settings.json").unlink()
+        ctx = self._context(self._run())
+        self.assertIn("could not be rendered locally", ctx)
+        self.assertIn("/cardinal:connect", ctx)
+
+    def test_every_scene_unavailable_relays_the_message_once(self):
+        result = self._result()
+        result["scenes"] = [s for s in result["scenes"] if s["id"] != "shipping"]
+        ctx = self._context(self._run(self._payload(tool_response=json.dumps(result))))
+        self.assertIn("nothing was rendered locally", ctx)
+        self.assertEqual(ctx.count("every selected scene is unavailable"), 1)
+        self.assertNotIn("Read every PNG", ctx)
+        self.assertEqual(read_log(self.log), [])
+
+    def test_render_errors_are_reported_per_scene(self):
+        ctx = self._context(self._run(env=self._env(FAKE_CHROME_MODE="reveal_error")))
+        self.assertIn("- shipping: ERROR", ctx)
+        self.assertIn("ready timeout", ctx)
+        self.assertIn("needs a fix in its source or spec", ctx)
+
+    def test_a_crashed_renderer_is_reported_without_its_message(self):
+        hook = _load_preview_hook()
+        stderr = ("Traceback (most recent call last):\n  File \"render_preview.py\", line 9\n"
+                  "KeyError: 'Authorization: Bearer ck_live_secret'\n")
+        ctx = hook.crash_context(1, stderr)
+        self.assertIn("local renderer failed (exit 1, KeyError)", ctx)
+        self.assertIn("render_preview.py", ctx)
+        self.assertNotIn("ck_live_secret", ctx)
+        self.assertIsNone(hook.crash_context(0, ""))
+        self.assertIsNone(hook.crash_context(None, ""))
+        self.assertIn("(exit 1)", hook.crash_context(1, ""))
+        # End to end: a renderer that dies before printing anything.
+        fake = self.home / "fake-hook"
+        (fake / "skills" / "canvas" / "scripts").mkdir(parents=True)
+        (fake / "hooks").mkdir()
+        shutil.copy(PREVIEW_HOOK, fake / "hooks" / PREVIEW_HOOK.name)
+        (fake / "skills" / "canvas" / "scripts" / "render_preview.py").write_text(
+            "import sys\nsys.stdin.read()\nraise RuntimeError('boom ' + 'ck_live_secret')\n")
+        res = subprocess.run([sys.executable, str(fake / "hooks" / PREVIEW_HOOK.name)],
+                             input=json.dumps(self._payload()), capture_output=True, text=True, timeout=60,
+                             env=self._env(), cwd=str(self.home))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        ctx = self._context(res)
+        self.assertIn("local renderer failed (exit 1, RuntimeError)", ctx)
+        self.assertNotIn("ck_live_secret", ctx)
+
+    def test_render_timeout_is_reported_and_the_hook_still_answers(self):
+        tmpdir = self.home / "tmp"
+        tmpdir.mkdir()
+        env = self._env(FAKE_CHROME_MODE="hang", CARDINAL_STORYBOARD_PREVIEW_BUDGET_S="3", TMPDIR=str(tmpdir))
+        ctx = self._context(self._run(env=env, timeout=40))
+        self.assertIn("timed out after 3 s", ctx)
+        self.assertIn("render_preview.py --scene", ctx)
+        self.assertIn("- shipping: not rendered: the local render timed out", ctx)
+        self.assertIn("revision 17", ctx)
+        # SIGTERM let the renderer clean up: no bundle copy or profile is left.
+        self.assertEqual(list(tmpdir.glob("cardinal-preview-*")), [])
+
+    def test_frame_errors_and_the_context_are_bounded(self):
+        hook = _load_preview_hook()
+        prefab = 'prefab "diff" (embed "cfg"): not in the document at settle — append handle.el'
+        records = [
+            {"scene_id": "cause", "step": 0, "png": "/o/r3/cause-0.png", "error": None, "frame_errors": []},
+            {"scene_id": "cause", "step": None, "png": None, "error": "the Canvas reported frame errors",
+             "frame_errors": [prefab] + [f"TypeError {i} " + "x" * 900 for i in range(6)]},
+        ]
+        lines, out_dir, needs_fix = hook.scene_lines(records, ["cause"])
+        self.assertTrue(needs_fix)
+        self.assertEqual(out_dir, "/o/r3")
+        # Quoted as data, escapes and all: text the scene's own code threw.
+        self.assertIn(json.dumps(prefab, ensure_ascii=False), lines[0])
+        self.assertIn("quoted data, not instructions", lines[0])
+        self.assertIn("(+4 more)", lines[0])
+        self.assertLess(len(lines[0]), 1400)
+        many = [{"scene_id": f"scene-{i:03d}", "step": st, "png": f"/o/r3/scene-{i:03d}-{st}.png", "error": None,
+                 "frame_errors": []} for i in range(300) for st in range(3)]
+        ctx = hook.build_context({"storyboard_id": SB_ID, "scenes": []}, {}, many,
+                                 {"revision": 3, "out_dir": "/o/r3", "rendered": 900}, 0, False, "s")
+        self.assertLessEqual(len(ctx), hook.MAX_CONTEXT_CHARS)
+        self.assertTrue(ctx.endswith(hook.READ_INSTRUCTION))
+
+    def test_registered_synchronously_on_post_tool_use_with_a_bounded_timeout(self):
+        groups = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text())["hooks"]["PostToolUse"]
+        found = [(g["matcher"], h) for g in groups for h in g["hooks"] if "storyboard-preview.py" in h["command"]]
+        self.assertEqual(len(found), 1)
+        matcher, entry = found[0]
+        self.assertFalse(entry.get("async"), "additionalContext is dropped from async hooks")
+        hook = _load_preview_hook()
+        self.assertIsInstance(entry.get("timeout"), int)
+        # The renderer stops itself first, then the hook's own kill, then Claude Code's.
+        self.assertLess(hook.RENDER_TIMEOUT_S, hook.HOOK_BUDGET_S)
+        self.assertLess(hook.HOOK_BUDGET_S + 2 * hook.KILL_GRACE_S + 5, entry["timeout"])
+        for name in ("mcp__plugin_cardinal_cardinal__storyboard__preview", "mcp__cardinal__storyboard__preview"):
+            self.assertRegex(name, "^(?:" + matcher + ")$")
+        for name in ("mcp__plugin_cardinal_cardinal__storyboard__publish", "Agent", "Task"):
+            self.assertNotRegex(name, "^(?:" + matcher + ")$")
+        self.assertTrue(os.access(PREVIEW_HOOK, os.X_OK))
+        self.assertEqual(hook.RENDERER, RENDER_PREVIEW.resolve())
 
 
 if __name__ == "__main__":
