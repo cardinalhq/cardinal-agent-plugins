@@ -4,6 +4,9 @@
 // whose call to payment got no HTTP answer at all (EOF). The dominant mark is
 // what separates them; duration is drawn small on one shared scale, because
 // it does NOT separate them. From the conductor spike's hidden-cohort fixture.
+// One SVG row (and one cv.mark) per member suits tens of rows. Past a few
+// thousand, paint the dataset onto a <canvas> and cv.mark the canvas once,
+// or bind a reduce/derive and draw the summary.
 //
 // Surface libraries: ["d3"].
 // Bindings. Rows are numbered, and the surface probes until a key is missing,

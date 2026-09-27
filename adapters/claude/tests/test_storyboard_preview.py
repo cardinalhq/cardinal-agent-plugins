@@ -495,6 +495,24 @@ class FetchTests(unittest.TestCase):
             self.assertIn(needle, str(cm.exception), (status, body))
             self.assertEqual(cm.exception.status, status)
 
+    def test_a_truncated_or_garbled_response_is_a_fetch_error_not_a_crash(self):
+        # http.client.HTTPException is not an OSError: it must still become
+        # FetchError (exit 2), not a traceback (exit 1).
+        import http.client
+
+        class Opener:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def open(self, req, timeout=None):
+                raise self.exc
+
+        for exc in (http.client.IncompleteRead(b"<!doc", 30), http.client.BadStatusLine("garbage"),
+                    http.client.RemoteDisconnected("closed")):
+            with self.assertRaises(rp.FetchError, msg=repr(exc)) as cm:
+                rp.fetch_bundle(self.conn, bundle_ref("s1", self.body), 1 << 20, opener=Opener(exc))
+            self.assertIn(self.maestro.origin, str(cm.exception))
+
     def test_connect_info_prefers_settings_then_environ(self):
         with TemporaryDirectory() as t:
             home = Path(t)
@@ -968,6 +986,8 @@ class RealChromeSmokeTests(unittest.TestCase):
                               "<script>document.documentElement.appendChild(document.createElement('iframe'))</script>"),
             self._canvas_page("hash", later % "location.hash='abc'"),
             self._canvas_page("hash-early", "<script>location.hash='abc'</script>"),
+            self._canvas_page("blanknav", later % "location='about:blank'"),
+            self._canvas_page("worker", later % "new Worker(URL.createObjectURL(new Blob(['1'])))"),
         ]
         res, lines = self._run(pages)
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -985,6 +1005,8 @@ class RealChromeSmokeTests(unittest.TestCase):
             self.assertIn("child frame", by[name][-1]["error"] or "", name)
         for name in ("hash", "hash-early"):
             self.assertIn("navigated within its document", by[name][-1]["error"] or "", name)
+        self.assertIn("a frame navigated", by["blanknav"][-1]["error"] or "")
+        self.assertIn("started a worker", by["worker"][-1]["error"] or "")
 
     def test_real_bundles(self):
         root = os.environ.get("CARDINAL_PREVIEW_SMOKE_BUNDLES")
@@ -1014,7 +1036,7 @@ class CanvasSkillTests(unittest.TestCase):
         self.assertIn("<this skill's base directory>/scripts/render_preview.py", text)
 
     def test_locator_fallback_picks_the_newest_plugin_version_not_a_planted_copy(self):
-        m = re.search(r"^(RENDER=\$\(python3 -c .*?'\))$", CANVAS_SKILL.read_text(), re.S | re.M)
+        m = re.search(r"^(RENDER=\$\(python3 -I -c .*?'\))$", CANVAS_SKILL.read_text(), re.S | re.M)
         self.assertIsNotNone(m, "fallback locator snippet not found in SKILL.md")
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1029,12 +1051,31 @@ class CanvasSkillTests(unittest.TestCase):
             planted = root / "repo/tools/canvas/scripts"
             planted.mkdir(parents=True)
             (planted / "render_preview.py").write_text("")
+            # The snippet runs in the user's repo: stdlib names planted there
+            # must not be imported (python3 -c puts the cwd on sys.path).
+            for mod in ("glob", "os", "re"):
+                (root / "repo" / f"{mod}.py").write_text("raise SystemExit('PLANTED ' + __name__)\n")
             res = subprocess.run(["bash", "-c", m.group(1) + '\nprintf %s "$RENDER"'], cwd=str(root / "repo"),
                                  env={"HOME": str(home), "PATH": os.environ.get("PATH", "")},
                                  capture_output=True, text=True, timeout=30)
             self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertNotIn("PLANTED", res.stdout + res.stderr)
             self.assertEqual(res.stdout, str(home / ".claude/plugins/cache/mkt place/cardinal/0.32.0/skills/canvas/"
                                                     "scripts/render_preview.py"))
+
+    def test_every_python_invocation_in_the_skill_is_isolated(self):
+        # A bare `python3 -c` / `python3 <script>` imports from the cwd or
+        # honours PYTHONPATH; the skill runs inside the user's repo.
+        text = CANVAS_SKILL.read_text()
+        calls = re.findall(r"python3\b[^\n]*", text)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertRegex(call, r"^python3 -I\b", call)
+
+    def test_skill_steers_large_populations_to_canvas(self):
+        text = CANVAS_SKILL.read_text()
+        self.assertIn("few thousand marks", text)
+        self.assertIn("`<canvas>`", text)
 
     def test_exemplars_ship_with_the_skill_and_follow_the_frame_rules(self):
         text = CANVAS_SKILL.read_text()

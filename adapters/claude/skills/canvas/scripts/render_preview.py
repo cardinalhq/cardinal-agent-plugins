@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -496,6 +497,11 @@ def fetch_bundle(conn: dict, ref: dict, max_bytes: int, opener=None, sleep=time.
         except (urllib.error.URLError, OSError) as err:
             reason = getattr(err, "reason", err)
             raise FetchError(f"could not reach {conn['origin']}: {reason}")
+        except http.client.HTTPException as err:
+            # A truncated chunked body (IncompleteRead), a bad status line:
+            # not OSError, and still a fetch problem (exit 2), not a crash.
+            raise FetchError(f"could not read the bundle from {conn['origin']}: {type(err).__name__}: "
+                             f"{str(err)[:200]}; call storyboard__preview again")
     if len(data) != expect_bytes:
         raise FetchError(f"bundle size mismatch: preview said {expect_bytes} bytes, maestro sent "
                          f"{'more than that' if len(data) > expect_bytes else len(data)}; call storyboard__preview again")
@@ -881,6 +887,7 @@ FETCH_ALL = {"patterns": [{"urlPattern": "*"}]}
 CANVAS_FRAME_URL = "about:srcdoc"
 MSG_CHILD_FRAME = ("the Canvas created a child frame (<iframe>/<frame>/<object>); a Canvas cannot "
                    "embed frames — the Canvas is closed")
+MSG_WORKER = "the Canvas started a worker; a Canvas cannot run workers — the Canvas is closed"
 MSG_HASH_NAV = ("a frame navigated within its document (location.hash / history); a Canvas cannot "
                 "navigate — the Canvas is closed")
 MSG_NAVIGATED = "a frame navigated; a Canvas cannot navigate — the Canvas is closed"
@@ -983,7 +990,14 @@ def render_page(cdp: PipeCDP, page_path: Path, scene_id: str, out_dir: Path, opt
 
     def check_navigation(p: dict, in_canvas: bool) -> None:
         frame = p.get("frame") or {}
-        if (frame.get("parentId") or in_canvas) and frame.get("url") not in ("about:srcdoc", "about:blank", "", None):
+        url = frame.get("url")
+        if in_canvas:
+            # The Canvas frame's own session attaches after its first commit
+            # (about:srcdoc), so any other commit there is the Canvas
+            # navigating itself, about:blank included.
+            if url not in (CANVAS_FRAME_URL, "", None):
+                trip(MSG_NAVIGATED)
+        elif frame.get("parentId") and url not in ("about:srcdoc", "about:blank", "", None):
             trip(MSG_NAVIGATED)
 
     def on_event(msg: dict) -> None:
@@ -1004,8 +1018,9 @@ def render_page(cdp: PipeCDP, page_path: Path, scene_id: str, out_dir: Path, opt
             if in_canvas:
                 # Something the Canvas itself spawned in another process
                 # (a grandchild frame): filter it, keep it paused, close.
-                adopt(child, p.get("targetInfo") or {}, resume=False)
-                trip(MSG_CHILD_FRAME)
+                info = p.get("targetInfo") or {}
+                adopt(child, info, resume=False)
+                trip(MSG_CHILD_FRAME if info.get("type") == "iframe" else MSG_WORKER)
             else:
                 adopt(child, p.get("targetInfo") or {}, resume=True)
         elif method == "Target.detachedFromTarget":

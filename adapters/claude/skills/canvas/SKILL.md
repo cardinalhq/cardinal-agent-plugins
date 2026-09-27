@@ -78,6 +78,13 @@ Rules that bite:
   presentational only: a y-domain or threshold is data, so bind it.
 - Consecutive scenes that name the same surface share one frame. Use `cv.onUpdate` to
   transform the world rather than redraw it.
+- **Past a few thousand marks, draw on a `<canvas>`, not in SVG.** A dataset binding can
+  hold up to 100k rows. One SVG node (and one `cv.mark`) per row blows the frame's ready
+  and per-step settle budgets, so the preview reports an error and no PNG, and the viewer
+  then lays out and hit-tests every node. Paint the population onto a `<canvas>` (d3
+  scales work unchanged) and `cv.mark` the canvas element once with the dataset Evidence,
+  or bind a `reduce`/`derive` and draw the summary. Keep per-element SVG and `cv.mark` for
+  the few marks the argument points at.
 
 ## What worked in the spike (conductor PR 1.3)
 
@@ -106,7 +113,8 @@ file. Each one's header lists the bindings it expects and their shapes:
   one surface shared by two scenes (`cv.onUpdate`).
 - `exemplars/cohort-rows.js`: a population drawn one row per member, with probing for
   numbered bindings, one shared scale, and a sentence whose counts are derived over
-  whole receipts.
+  whole receipts. One SVG row per member suits tens of rows; for thousands, use a
+  `<canvas>` (see above).
 
 `describe_grammar` `canvas.exemplar` is an older trimmed surface. Destructure its
 `cv.data([...])` call as an object (see above).
@@ -130,10 +138,12 @@ RENDER="<this skill's base directory>/scripts/render_preview.py"
 ```
 
 If you do not have the base directory, take the newest installed Cardinal plugin's copy
-(chosen by version, not mtime), and fall back to a personal-skill install:
+(chosen by version, not mtime), and fall back to a personal-skill install. Keep the `-I`:
+without it Python imports `glob`/`os`/`re` from the working directory first, so a repo's
+own `glob.py` would run here:
 
 ```bash
-RENDER=$(python3 -c 'import glob, os, re
+RENDER=$(python3 -I -c 'import glob, os, re
 h = os.path.expanduser("~/.claude")
 ver = lambda p: [int(n) for n in re.findall(r"\d+", p.split(os.sep)[-5])]
 c = sorted(glob.glob(h + "/plugins/cache/*/cardinal/*/skills/canvas/scripts/render_preview.py"), key=ver)
@@ -149,7 +159,7 @@ After each `storyboard__preview`:
    **exactly**, since `sha256` is checked. If Claude Code saved the tool result to a file,
    pass that file.
    ```bash
-   python3 "$RENDER" --from-json <preview.json> [--scene <id>]… [--theme dark]
+   python3 -I "$RENDER" --from-json <preview.json> [--scene <id>]… [--theme dark]
    ```
    Give the Bash call a 10-minute timeout (`600000`). Scenes render one after another,
    usually 1–3 s each. The run stops itself at 9 minutes, so render a storyboard with
@@ -186,10 +196,11 @@ network lock (`--host-resolver-rules="MAP * ~NOTFOUND" --proxy-server=127.0.0.1:
 --proxy-bypass-list="<-loopback>"`). It auto-attaches the Canvas frame, which current
 Chrome runs as its own out-of-process target, and fails every request from the page or
 the frame that is not `data:`, `blob:`, `about:` or the page itself. It closes a Canvas
-that creates child frames or navigates. Chrome runs the frame's first parse before the
-renderer can attach, so for that brief window the network lock and the frame's hash CSP
-block requests, and the frame tree is checked for anything created in it. Canvas code
-is hostile, and this runs on the user's machine.
+that creates child frames, starts workers or navigates (`about:blank` included). Chrome
+runs the frame's first parse before the renderer can attach, so for that brief window
+the network lock and the frame's hash CSP block requests, and the frame tree catches
+frames and navigations still present when the renderer attaches. Canvas code is
+hostile, and this runs on the user's machine.
 
 Skipping the preview is a quality problem, not a trust problem: publish validation is
 deterministic and does not look at pixels.
