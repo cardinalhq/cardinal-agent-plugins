@@ -33,6 +33,20 @@ Claude also ships opt-in decision capture (`cardinal-decision on`): a
 tagged with engineer, session, repo, branch, PR, anchors, and D18 code
 clusters. See [docs/specs/decision-telemetry.md](docs/specs/decision-telemetry.md).
 
+Claude also ships two model-invocable skills for Cardinal's Investigation
+Storyboards: [`/cardinal:storyboard`](adapters/claude/skills/storyboard/README.md)
+turns an investigation into an evidence-bound, scene-by-scene storyboard
+through the `storyboard__*` MCP tools, and
+[`/cardinal:canvas`](adapters/claude/skills/canvas/README.md) draws each
+scene's visual and previews it. `storyboard__preview` returns one
+self-contained page per scene. `canvas/scripts/render_preview.py` renders it
+in the user's own Chrome/Chromium, over the DevTools pipe, with the sandbox
+on and the network locked. Nothing is rendered server-side, and publish trust
+is deterministic. Local preview supports macOS and Linux, not Windows. A
+synchronous `SessionStart` hook (`hooks/storyboard-session.py`) puts the
+session id in context for `storyboard__create`. The skills are Claude-only
+for now.
+
 Native [OpenCode](adapters/opencode/README.md) and [Pi](adapters/pi/README.md)
 packages provide session/tool/usage telemetry and Cardinal MCP access. Build
 them with `python3 build/native.py`; test with `npm ci --ignore-scripts` and

@@ -22,6 +22,7 @@ on:
       - "adapters/*/hooks/**"
       - "adapters/*/bin/cardinal-*"
       - "adapters/*/scripts/cardinal-*"
+      - "adapters/*/skills/*/scripts/**"
       - ".github/workflows/py39-support.yml"
   push:
     branches: [main]
@@ -30,6 +31,7 @@ on:
       - "adapters/*/hooks/**"
       - "adapters/*/bin/cardinal-*"
       - "adapters/*/scripts/cardinal-*"
+      - "adapters/*/skills/*/scripts/**"
       - ".github/workflows/py39-support.yml"
 
 permissions:
@@ -114,4 +116,20 @@ jobs:
           done < <(find adapters -type f \
             \( -path '*/bin/cardinal-*' -o -path '*/scripts/cardinal-*' \) \
             ! -name '*.py' ! -name '*.pyc')
+          exit $fail
+
+      # Skill helper scripts (e.g. canvas/scripts/render_preview.py,
+      # migrate-from-grafana/scripts/*.py) are run by the agent with the
+      # user's python3, so they carry the same 3.9 bar. Standard library only.
+      - name: skill scripts --help under 3.9
+        run: |
+          set -e
+          fail=0
+          while IFS= read -r f; do
+            if ! out=$(python3 "$f" --help 2>&1); then
+              echo "FAIL: $f: --help under 3.9:"
+              head -5 <<<"$out" | sed 's/^/    /'
+              fail=1
+            fi
+          done < <(find adapters -type f -path '*/skills/*/scripts/*.py')
           exit $fail
