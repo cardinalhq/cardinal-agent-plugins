@@ -64,16 +64,19 @@ rules on or off. It also sends your Claude Code usage telemetry to that org;
 Claude then shows your Cardinal orgs and **asks which one to migrate into**. It
 doesn't have to be the one you approved.
 
-## 4. Fill in the files Claude creates
+## 4. Fill in the Grafana file Claude creates
 
-Claude creates two files and opens them in your editor:
+Claude creates one file for you and opens it in your editor:
 
 ```
 .env.grafana-migrate   → GRAFANA_URL, GRAFANA_TOKEN
-.env.cardinal          → CARDINAL_TOKEN
 ```
 
-Fill them in and save. Don't paste tokens into the chat.
+Fill it in and save. Don't paste tokens into the chat.
+
+Claude also creates `.env.cardinal`, but fills it in itself (the org you picked) —
+you don't need to touch it. Only if you aren't using `/cardinal:connect` will Claude
+open it and ask you for a `CARDINAL_TOKEN`.
 
 ## 5. Answer Claude's questions as it works
 

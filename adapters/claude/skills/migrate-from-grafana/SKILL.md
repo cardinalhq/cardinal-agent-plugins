@@ -27,8 +27,12 @@ authoring and `manage_alert_rules` MCP tool are the right path for them.
 | Alert rules on or off | whether migrated rules evaluate immediately | ask at the dry run (step 4) |
 
 Credentials are secrets: have the user put them in env files (below) instead of
-pasting them into chat. Create the files for them with empty values, `chmod 600`,
-and open them in an editor (`open -e <file>` on macOS). Never echo token values
+pasting them into chat. Create the files for them with empty values and `chmod 600`,
+but **open in an editor (`open -e <file>` on macOS) only a file the user actually has
+to fill in**. Normally that is just `.env.grafana-migrate` (`GRAFANA_URL`,
+`GRAFANA_TOKEN`). `.env.cardinal` is yours to fill (`CARDINAL_ORG_ID` from step 0), so
+don't open it — unless a script exits asking for `CARDINAL_TOKEN` (the fallback
+below), and only then. Never echo token values
 back — when checking a file, mask them (e.g. `sed -E 's/(TOKEN|KEY)=(.{6}).*/\1=\2…/'`).
 Never print `~/.claude/settings.json` or `~/.claude/cardinal*.json` either; the
 scripts read what they need from them.
@@ -75,6 +79,15 @@ SCRIPTS=$(dirname "$(find ~/.claude/plugins ~/.claude/skills . -name convert.py 
   -path '*migrate-from-grafana/scripts*' 2>/dev/null | head -1)")
 [ -f "$SCRIPTS/convert.py" ] || { echo "migrate-from-grafana scripts not found"; exit 1; }
 ```
+
+**Never modify the scripts while running a migration** — nothing under `$SCRIPTS`
+(or any other copy of this skill) gets edited, patched or rewritten, even when a
+script looks buggy. Running the migration and changing its code are separate jobs.
+If a script fails or misbehaves: stop that item, show the error verbatim, explain
+the likely cause, and offer the user options (a manual workaround in Cardinal's UI,
+skipping the item, or reporting the bug to the skill maintainers). The only files
+you change are the migration's own working files (`.env.*`, `mapping.json`, and
+what the scripts write under `export/`, `catalog/`, `plan/`).
 
 ## Workflow
 
