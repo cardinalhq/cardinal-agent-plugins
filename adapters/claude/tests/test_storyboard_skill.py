@@ -136,6 +136,32 @@ class StoryboardSkillTextTests(unittest.TestCase):
         self.assertNotIn("Positional selectors need `expect` guards", text)
         self.assertNotIn("value_preview_rule", text)
 
+    def test_skills_match_conductor_1961(self):
+        # conductor #1961: SQL execute_sql reads get receipts; one duration rule
+        # (PROSE_NUMBER_RULES); select/ref address rows, expect only guards;
+        # cv.embed options are {id, height} and unknown keys are frame errors.
+        sb = " ".join(STORYBOARD_SKILL.read_text().split())
+        cv = " ".join(CANVAS_SKILL.read_text().split())
+        for needle in (
+            "read-only SQL `execute_sql`",
+            "A duration in any form (24h, 24-hour, 1h30m, 90m, 7d) is one value",
+            "a value in a time unit (converted) or none, never a count",
+            '"last 24h" needs the window bound',
+            "`expect` only guards equality",
+        ):
+            self.assertIn(needle, sb)
+        for needle in (
+            "`cv.embed(prefab, props, {id, height})`",
+            "its settings are props",
+            "a prop or option it does not accept (the error names the accepted keys)",
+        ):
+            self.assertIn(needle, cv)
+        # Superseded by #1961: compact durations were skipped; positional
+        # selectors were taught as needing expect.
+        self.assertNotIn("(p99, 1h30m)", sb)
+        self.assertNotIn("still does", sb)
+        self.assertNotIn("needs no `expect` guard", sb)
+
     def test_canvas_skill_lists_every_binding_shape(self):
         # conductor mcp-gateway storyboard/tools/authoring.go describe_grammar description.
         self.assertIn("source · select · ref · derive · reduce · extract", CANVAS_SKILL.read_text())
