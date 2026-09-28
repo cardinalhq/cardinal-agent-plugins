@@ -23,7 +23,10 @@ Run:  python3 -m unittest discover -s adapters/cursor/tests -v
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -452,6 +455,98 @@ class JsonManagedBlockTests(unittest.TestCase):
             "preCompact", "stop", "subagentStop",
             "afterAgentResponse", "afterAgentThought",
         })
+
+
+class ConnectWithoutIngestTests(unittest.TestCase):
+    """maestro grants mcp:invoke but no ingest key when the org has no
+    Lakerunner (or the server has no ingest endpoint). Connect must still
+    wire MCP + hooks, skip the ingest probe, and say why. The device flow
+    and probes are stubbed at the cardinal_core.deviceflow boundary."""
+
+    MCP = {
+        "url": "https://cardinal.example/api/orgs/org-1/mcp",
+        "api_key": "MCPPLAINTEXT" + "x" * 52,
+        "key_id": "mcp-key-1",
+        "key_prefix": "MCPPLAIN",
+    }
+
+    def setUp(self) -> None:
+        self.home = _CursorHome()
+        self.connect = _load_module("cardinal_connect_no_ingest", SCRIPTS_DIR / "cardinal-connect")
+
+    def tearDown(self) -> None:
+        self.home.close()
+
+    def _run(self, bundle: dict, telemetry_only: bool = False):
+        args = argparse.Namespace(
+            host="https://cardinal.example", telemetry_only=telemetry_only,
+            deployment_env=None, dry_run=False, project=False,
+        )
+        df = self.connect.deviceflow
+        out = io.StringIO()
+        with mock.patch.object(df, "poll_device_token", return_value=bundle), \
+                mock.patch.object(df, "verify_mcp_reachable", return_value=(True, "HTTP 405")), \
+                mock.patch.object(df, "verify_ingest_reachable",
+                                  side_effect=AssertionError("ingest probed")) as probe, \
+                contextlib.redirect_stdout(out):
+            code = None
+            try:
+                rc = self.connect.continue_after_grant(args, {"device_code": "dc", "interval": 1})
+            except SystemExit as exc:
+                code = exc.code
+                rc = None
+        return rc, code, out.getvalue(), probe
+
+    def _bundle(self, reason: str, mcp: bool = True) -> dict:
+        return {
+            "org": {"id": "org-1", "slug": "acme"},
+            "user": {"email": "dev@example.com"},
+            "mcp": dict(self.MCP) if mcp else None,
+            "ingest": None,
+            "ingest_unavailable_reason": reason,
+            "limits": None,
+        }
+
+    def test_no_lakerunner_still_writes_mcp_and_hooks(self) -> None:
+        rc, code, out, probe = self._run(self._bundle("no_lakerunner_integration"))
+        self.assertEqual((rc, code), (0, None), out)
+        probe.assert_not_called()
+
+        mcp = json.loads((self.home.cursor / "mcp.json").read_text())
+        self.assertEqual(mcp["mcpServers"]["cardinal"]["url"], self.MCP["url"])
+        self.assertTrue((self.home.cursor / "hooks.json").exists())
+
+        state = json.loads((self.home.cursor / "cardinal.json").read_text())
+        self.assertEqual(state["mode"], "mcp-only")
+        self.assertEqual(state["telemetry"], {
+            "enabled": False, "unavailable_reason": "no_lakerunner_integration",
+        })
+        self.assertNotIn("ingest_endpoint", state)
+        self.assertNotIn("limits", state)
+        self.assertIn(
+            "WARN telemetry ingest unavailable: no_lakerunner_integration "
+            "(this Cardinal org has no active Lakerunner integration); MCP tools connected",
+            out,
+        )
+        self.assertNotIn("Telemetry endpoint:", out)
+
+    def test_ingest_endpoint_not_configured_reason_is_reported(self) -> None:
+        rc, code, out, _ = self._run(self._bundle("ingest_endpoint_not_configured"))
+        self.assertEqual((rc, code), (0, None), out)
+        self.assertIn("telemetry ingest unavailable: ingest_endpoint_not_configured", out)
+        state = json.loads((self.home.cursor / "cardinal.json").read_text())
+        self.assertEqual(state["telemetry"]["unavailable_reason"], "ingest_endpoint_not_configured")
+
+    def test_no_ingest_and_no_mcp_fails_and_writes_nothing(self) -> None:
+        rc, code, out, _ = self._run(self._bundle("no_lakerunner_integration", mcp=False),
+                                     telemetry_only=True)
+        self.assertIsNone(rc)
+        self.assertIn("telemetry ingest unavailable: no_lakerunner_integration", str(code))
+        self.assertIn("Nothing to connect", str(code))
+        self.assertNotIn("MCP tools connected", str(code))
+        self.assertFalse((self.home.cursor / "cardinal.json").exists())
+        self.assertFalse((self.home.cursor / "mcp.json").exists())
+        self.assertFalse((self.home.cursor / "hooks.json").exists())
 
 
 class ManifestTests(unittest.TestCase):

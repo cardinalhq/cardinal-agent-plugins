@@ -63,6 +63,10 @@ class StubMaestro:
         # endpoint=null — simulates a maestro deployment with
         # MAESTRO_INGEST_ENDPOINT unset (the misconfig fixed in v1.52.0-rc3).
         self.bundle_null_ingest_endpoint = False
+        # When set, ingest:write is requested but can't be fulfilled (org has
+        # no Lakerunner / no ingest endpoint): maestro grants the other scopes
+        # and returns ingest=null + ingest_unavailable_reason (conductor#1963).
+        self.ingest_unavailable_reason: object = None
         # First N ingest probes return 401 before falling through to
         # `ingest_reachable_status`. Simulates the
         # provision_ingest_key worker race: bundle is back to the plugin
@@ -161,7 +165,10 @@ class StubMaestro:
                         "key_prefix": "MCPPLAIN",
                         "created_at": "2026-06-05T00:00:00Z",
                     }
-                if "ingest:write" in outer.last_scopes:
+                if "ingest:write" in outer.last_scopes and outer.ingest_unavailable_reason:
+                    bundle["ingest_unavailable_reason"] = outer.ingest_unavailable_reason
+                    bundle["limits"] = None
+                elif "ingest:write" in outer.last_scopes:
                     bundle["ingest"] = {
                         "endpoint": None if outer.bundle_null_ingest_endpoint else outer.url(),
                         "api_key": "INGESTPLAIN" + "y" * 53,
@@ -667,6 +674,134 @@ class ConnectTests(unittest.TestCase):
         env = settings_env(self.home)
         self.assertNotIn("CARDINAL_MCP_URL", env)
         self.assertNotIn("CARDINAL_MCP_API_KEY", env)
+
+
+class ConnectWithoutIngestTests(unittest.TestCase):
+    """maestro grants mcp/act but no ingest key when the org has no
+    Lakerunner (or the server has no ingest endpoint). Connect must still
+    wire MCP + act, skip the ingest probe and OTel env, and say why."""
+
+    def setUp(self):
+        self.stub = StubMaestro()
+        self.stub.start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.state = self.home / ".claude" / "cardinal.json"
+        self.secrets = self.home / ".claude" / "cardinal-secrets.json"
+
+    def tearDown(self):
+        self.stub.stop()
+        self.tmp.cleanup()
+
+    def test_no_lakerunner_still_writes_mcp_env_and_skips_ingest(self):
+        self.stub.ingest_unavailable_reason = "no_lakerunner_integration"
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertEqual(self.stub.ingest_probe_count, 0, "must not probe a missing ingest key")
+
+        env = settings_env(self.home)
+        self.assertTrue(env["CARDINAL_MCP_URL"].endswith("/api/orgs/org-uuid-1/mcp"))
+        self.assertTrue(env["CARDINAL_MCP_API_KEY"].startswith("MCPPLAIN"))
+        for key in ("CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOG_TOOL_DETAILS"):
+            self.assertNotIn(key, env)
+
+        state = read_json(self.state)
+        self.assertEqual(state["mode"], "mcp-only")
+        self.assertFalse(state["telemetry"]["enabled"])
+        self.assertEqual(state["telemetry"]["unavailable_reason"], "no_lakerunner_integration")
+        self.assertNotIn("ingest_endpoint", state)
+        self.assertNotIn("limits", state)
+        # Act token is still stored (0600), never in settings.json.
+        self.assertEqual(state["act_key_id"], "act-key-uuid-1")
+        self.assertTrue(read_json(self.secrets)["act_api_key"].startswith("ACTPLAINTEXT"))
+
+        self.assertIn(
+            "telemetry ingest unavailable: no_lakerunner_integration "
+            "(this Cardinal org has no active Lakerunner integration); MCP tools connected",
+            res.stdout,
+        )
+        self.assertIn("/cardinal:connect --rotate", res.stdout)
+        self.assertNotIn("Traceback", res.stderr)
+
+    def test_ingest_endpoint_not_configured_reason_is_reported(self):
+        self.stub.ingest_unavailable_reason = "ingest_endpoint_not_configured"
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn(
+            "telemetry ingest unavailable: ingest_endpoint_not_configured", res.stdout,
+        )
+        self.assertIn("MCP tools connected", res.stdout)
+        self.assertEqual(read_json(self.state)["telemetry"]["unavailable_reason"],
+                         "ingest_endpoint_not_configured")
+
+    def test_hostile_reason_text_is_not_echoed(self):
+        # The reason is server-supplied and lands in the terminal + state:
+        # anything that isn't a plain code must be replaced, not echoed.
+        self.stub.ingest_unavailable_reason = "\x1b[2Jrm -rf / please"
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertNotIn("\x1b", res.stdout)
+        self.assertNotIn("rm -rf", res.stdout)
+        self.assertIn("telemetry ingest unavailable: unknown; MCP tools connected", res.stdout)
+        raw_state = self.state.read_text()
+        self.assertNotIn("rm -rf", raw_state)
+        self.assertEqual(read_json(self.state)["telemetry"]["unavailable_reason"], "unknown")
+
+    def test_rotate_into_mcp_only_strips_stale_otel_env(self):
+        # A full connect wrote OTel env with an ingest key; the org then lost
+        # its Lakerunner. Rotating must drop the stale telemetry env, not
+        # leave Claude Code exporting with the old key.
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("OTEL_EXPORTER_OTLP_HEADERS", settings_env(self.home))
+
+        self.stub.token_calls = 0
+        self.stub.ingest_unavailable_reason = "no_lakerunner_integration"
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "--rotate"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        env = settings_env(self.home)
+        self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", env)
+        self.assertNotIn("CLAUDE_CODE_ENABLE_TELEMETRY", env)
+        self.assertIn("CARDINAL_MCP_URL", env)
+        state = read_json(self.state)
+        self.assertEqual(state["mode"], "mcp-only")
+        self.assertNotIn("ingest_key_id", state)
+
+    def test_dry_run_reports_reason_and_writes_nothing(self):
+        self.stub.ingest_unavailable_reason = "no_lakerunner_integration"
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "--dry-run"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn('"ingest_unavailable_reason": "no_lakerunner_integration"', res.stdout)
+        self.assertFalse(self.state.exists())
+        self.assertFalse((self.home / ".claude" / "settings.json").exists())
+
+    def test_telemetry_only_without_ingest_does_not_claim_mcp(self):
+        self.stub.ingest_unavailable_reason = "no_lakerunner_integration"
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "--telemetry-only"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("telemetry ingest unavailable: no_lakerunner_integration", res.stdout)
+        self.assertNotIn("MCP tools connected", res.stdout)
+        env = settings_env(self.home)
+        self.assertNotIn("CARDINAL_MCP_URL", env)
+        self.assertNotIn("CLAUDE_CODE_ENABLE_TELEMETRY", env)
+
+    def test_status_after_mcp_only_connect_reports_reason_and_passes(self):
+        self.stub.ingest_unavailable_reason = "no_lakerunner_integration"
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        res = run_plugin(STATUS, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("mcp-only", res.stdout)
+        self.assertIn("Telemetry:            unavailable (no_lakerunner_integration)", res.stdout)
+        self.assertIn("MCP endpoint", res.stdout)
+        self.assertNotIn("Telemetry endpoint", res.stdout)
+
+    def test_granted_ingest_carries_no_unavailable_reason(self):
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertNotIn("unavailable_reason", read_json(self.state)["telemetry"])
+        self.assertNotIn("telemetry ingest unavailable", res.stdout)
 
 
 # ---------------------------------------------------------------------------

@@ -159,6 +159,15 @@ Tell the user:
    loads the MCP servers.
 3. Run `/cardinal:status` from the new session to verify both sides.
 
+If the summary carries `⚠ telemetry ingest unavailable: <reason>; MCP
+tools connected`, connect succeeded without telemetry. It is not an error:
+the org has no Lakerunner integration (`no_lakerunner_integration`) or the
+Cardinal server has no ingest endpoint configured
+(`ingest_endpoint_not_configured`). MCP tools and actions work; this
+machine's sessions just won't reach the Outcomes Dashboard. Tell the user
+that, and that `/cardinal:connect --rotate` turns telemetry on once ingest
+is available.
+
 ## Errors
 
 Surface the script's stderr verbatim and don't claim success. Common

@@ -65,6 +65,11 @@ class StubCardinal:
         self.revoke_status = 204
         self.revoke_calls: list[tuple[str, str | None]] = []
         self.log_batches: list[dict] = []
+        self.ingest_probe_count = 0
+        # When set, ingest:write can't be fulfilled (org has no Lakerunner /
+        # no ingest endpoint): maestro grants the other scopes and returns
+        # ingest=null + ingest_unavailable_reason (conductor#1963).
+        self.ingest_unavailable_reason: str | None = None
         self.limits_verdict: dict = {
             "decision": "allow",
             "band": 0,
@@ -121,7 +126,7 @@ class StubCardinal:
                     if outer.token_calls <= outer.token_pending_count:
                         self._send_json(400, {"error": "authorization_pending"})
                         return
-                    self._send_json(200, {
+                    bundle = {
                         "org": {
                             "id": "org-uuid-1",
                             "slug": "test-org",
@@ -148,9 +153,17 @@ class StubCardinal:
                             "status_url": f"{outer.url()}/api/agent-limits/status",
                             "enabled": True,
                         },
-                    })
+                    }
+                    if "mcp:invoke" not in outer.last_scopes:
+                        bundle["mcp"] = None
+                    if outer.ingest_unavailable_reason:
+                        bundle["ingest"] = None
+                        bundle["limits"] = None
+                        bundle["ingest_unavailable_reason"] = outer.ingest_unavailable_reason
+                    self._send_json(200, bundle)
                     return
                 if self.path == "/v1/metrics":
+                    outer.ingest_probe_count += 1
                     if self.headers.get("x-cardinalhq-api-key", "").startswith("INGESTPLAINTEXT"):
                         self.send_response(outer.ingest_status)
                     else:
@@ -500,6 +513,77 @@ class ConnectTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("mcp reachability failed", (result.stderr + result.stdout).lower())
         self.assertFalse(self.state.exists())
+
+
+class ConnectWithoutIngestTests(unittest.TestCase):
+    """maestro grants mcp:invoke but no ingest key when the org has no
+    Lakerunner (or the server has no ingest endpoint). Connect must still
+    wire MCP, skip the ingest probe, and say why."""
+
+    def setUp(self):
+        self.stub = StubCardinal()
+        self.stub.start()
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.config = self.home / ".codex" / "config.toml"
+        self.state = self.home / ".codex" / "cardinal.json"
+        self.secrets = self.home / ".codex" / "cardinal-secrets.json"
+
+    def tearDown(self):
+        self.stub.stop()
+        self.tmp.cleanup()
+
+    def test_no_lakerunner_still_writes_mcp_config(self):
+        self.stub.ingest_unavailable_reason = "no_lakerunner_integration"
+        result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.stub.ingest_probe_count, 0, "must not probe a missing ingest key")
+
+        entry = read_toml(self.config)["mcp_servers"]["cardinal"]
+        self.assertTrue(entry["url"].endswith("/api/orgs/org-uuid-1/mcp"))
+        self.assertTrue(entry["http_headers"]["X-CardinalHQ-API-Key"].startswith("MCPPLAINTEXT"))
+
+        state = read_json(self.state)
+        self.assertEqual(state["mode"], "mcp-only")
+        self.assertEqual(state["telemetry"], {
+            "enabled": False, "unavailable_reason": "no_lakerunner_integration",
+        })
+        self.assertNotIn("ingest_endpoint", state)
+        self.assertNotIn("limits", state)
+        secrets = read_json(self.secrets)
+        self.assertIsNone(secrets["ingest_api_key"])
+        self.assertTrue(secrets["mcp_api_key"].startswith("MCPPLAINTEXT"))
+
+        self.assertIn(
+            "WARN telemetry ingest unavailable: no_lakerunner_integration "
+            "(this Cardinal org has no active Lakerunner integration); MCP tools connected",
+            result.stdout,
+        )
+        self.assertNotIn("Telemetry endpoint:", result.stdout)
+
+    def test_status_after_mcp_only_connect_passes_and_reports_reason(self):
+        self.stub.ingest_unavailable_reason = "ingest_endpoint_not_configured"
+        result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        result = run_script(STATUS, [], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Telemetry:      unavailable (ingest_endpoint_not_configured)", result.stdout)
+        self.assertIn("OK MCP reachable", result.stdout)
+        self.assertNotIn("FAIL", result.stdout)
+
+    def test_telemetry_only_without_ingest_fails_and_writes_nothing(self):
+        # --telemetry-only asks for ingest alone; with no ingest key there is
+        # nothing to connect, so fail loudly instead of a hollow success.
+        self.stub.ingest_unavailable_reason = "no_lakerunner_integration"
+        result = run_script(CONNECT, ["--host", self.stub.url(), "--telemetry-only"], self.home)
+        self.assertNotEqual(result.returncode, 0)
+        out = result.stderr + result.stdout
+        self.assertIn("telemetry ingest unavailable: no_lakerunner_integration", out)
+        self.assertIn("Nothing to connect", out)
+        self.assertNotIn("MCP tools connected", out)
+        self.assertNotIn("Traceback", out)
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.config.exists())
 
 
 class StatusAndDisconnectTests(unittest.TestCase):
