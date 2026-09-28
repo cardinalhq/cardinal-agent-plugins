@@ -398,6 +398,47 @@ class DeviceFlowTests(unittest.TestCase):
         self.assertEqual(deviceflow.verify_mcp_reachable(None, "k")[0], False)
         self.assertEqual(deviceflow.verify_mcp_reachable("http://x", None)[0], False)
 
+    def test_ingest_unavailable_reason_passes_server_codes(self) -> None:
+        for code in ("no_lakerunner_integration", "ingest_endpoint_not_configured"):
+            bundle = {"ingest": None, "mcp": {"url": "u"}, "ingest_unavailable_reason": code}
+            self.assertEqual(deviceflow.ingest_unavailable_reason(bundle), code)
+
+    def test_ingest_unavailable_reason_none_when_ingest_granted(self) -> None:
+        # A granted ingest block wins even if a reason is (wrongly) present.
+        bundle = {"ingest": {"endpoint": "e", "api_key": "k"},
+                  "ingest_unavailable_reason": "no_lakerunner_integration"}
+        self.assertIsNone(deviceflow.ingest_unavailable_reason(bundle))
+        self.assertIsNone(deviceflow.ingest_unavailable_reason(None))
+
+    def test_ingest_unavailable_reason_unknown_without_server_reason(self) -> None:
+        # Older maestro: ingest null, no reason key.
+        self.assertEqual(deviceflow.ingest_unavailable_reason({"ingest": None}), "unknown")
+        self.assertEqual(deviceflow.ingest_unavailable_reason({}), "unknown")
+
+    def test_ingest_unavailable_reason_never_echoes_arbitrary_server_text(self) -> None:
+        # The reason is printed to the user's terminal: anything that isn't a
+        # plain lowercase code (escape sequences, prose, huge strings) is
+        # replaced, not echoed.
+        for hostile in ("\x1b[2J\x1b[31mpwned", "No Lakerunner!", "a" * 65, 42, ["x"]):
+            bundle = {"ingest": None, "ingest_unavailable_reason": hostile}
+            self.assertEqual(deviceflow.ingest_unavailable_reason(bundle), "unknown")
+
+    def test_ingest_unavailable_note_text(self) -> None:
+        self.assertEqual(
+            deviceflow.ingest_unavailable_note("no_lakerunner_integration", mcp_connected=True),
+            "telemetry ingest unavailable: no_lakerunner_integration "
+            "(this Cardinal org has no active Lakerunner integration); MCP tools connected",
+        )
+        self.assertEqual(
+            deviceflow.ingest_unavailable_note("ingest_endpoint_not_configured", mcp_connected=False),
+            "telemetry ingest unavailable: ingest_endpoint_not_configured "
+            "(this Cardinal server has no telemetry ingest endpoint configured)",
+        )
+        self.assertEqual(
+            deviceflow.ingest_unavailable_note("some_new_reason", mcp_connected=True),
+            "telemetry ingest unavailable: some_new_reason; MCP tools connected",
+        )
+
 
 class GoldenNormalizationTests(unittest.TestCase):
     def test_normalizer_pins_drops_and_zeroes(self) -> None:
