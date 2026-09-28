@@ -1,0 +1,244 @@
+"""Tests for hooks/evidence-capture.py (PostToolUse on mcp__.*): the local
+evidence spool writer for non-Cardinal MCP results.
+
+Each test runs the hook as a subprocess with HOME pointed at a temp dir.
+Requires cardinal_core vendored: python3 build/vendor.py claude
+
+Run with: python3 -m unittest tests.test_evidence_capture -v
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import time
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+HOOK = PLUGIN_ROOT / "hooks" / "evidence-capture.py"
+VENDORED = PLUGIN_ROOT / "hooks" / "cardinal_core" / "evidence.py"
+SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
+EV_ID_RE = re.compile(r"^\[evidence:(ev_[0-9a-f]{12})\] ")
+
+
+class EvidenceCaptureHookTests(unittest.TestCase):
+    def setUp(self):
+        if not VENDORED.exists():
+            self.skipTest("cardinal_core not vendored — run: python3 build/vendor.py claude")
+        self.tmp = TemporaryDirectory()
+        self.home = Path(os.path.realpath(self.tmp.name))
+        self.root = self.home / ".cardinal" / "evidence"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _env(self, **extra) -> dict:
+        env = {"HOME": str(self.home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        env.update(extra)
+        return env
+
+    def _payload(self, tool_response=None, **over) -> dict:
+        body = {
+            "session_id": SESSION,
+            "transcript_path": str(self.home / ".claude" / "projects" / "-w" / f"{SESSION}.jsonl"),
+            "cwd": str(self.home),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "mcp__grafana__query_prometheus",
+            "tool_input": {"expr": "rate(http_requests_total[5m])", "datasourceUid": "prom"},
+            "tool_response": "series: 3" if tool_response is None else tool_response,
+            "tool_use_id": "toolu_01ABC",
+        }
+        body.update(over)
+        return body
+
+    def _run(self, payload=None, raw: str | None = None, env=None, hook: Path = HOOK):
+        stdin = raw if raw is not None else json.dumps(payload if payload is not None else self._payload())
+        res = subprocess.run([sys.executable, str(hook)], input=stdin, capture_output=True, text=True, timeout=30,
+                             env=env or self._env(), cwd=str(self.home))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stderr, "")
+        return res
+
+    def _captured(self, res) -> tuple:
+        body = json.loads(res.stdout)
+        self.assertEqual(body["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+        ctx = body["hookSpecificOutput"]["additionalContext"]
+        m = EV_ID_RE.match(ctx)
+        self.assertIsNotNone(m, ctx)
+        ev_id = m.group(1)
+        path = self.root / SESSION / f"{ev_id}.json"
+        self.assertTrue(path.is_file(), path)
+        return ev_id, ctx, json.loads(path.read_text()), path
+
+    def _assert_nothing(self, res):
+        self.assertEqual(res.stdout, "")
+        self.assertFalse(self.root.exists() and any(self.root.rglob("ev_*.json")))
+
+    # -- payload shapes ------------------------------------------------------
+
+    def test_string_result_is_captured_with_the_exact_context_line(self):
+        ev_id, ctx, entry, _ = self._captured(self._run())
+        self.assertEqual(ctx, f"[evidence:{ev_id}] captured locally from grafana/query_prometheus; "
+                              f"to cite it in a storyboard run cardinal-evidence promote {ev_id}")
+        self.assertEqual(entry["evidence_id"], ev_id)
+        self.assertEqual(entry["schema"], "cardinal.evidence.v1")
+        self.assertEqual(entry["tier"], "captured")
+        self.assertEqual(entry["server"], "grafana")
+        self.assertEqual(entry["tool"], "query_prometheus")
+        self.assertEqual(entry["tool_name"], "mcp__grafana__query_prometheus")
+        self.assertEqual(entry["session_id"], SESSION)
+        self.assertEqual(entry["tool_use_id"], "toolu_01ABC")
+        self.assertEqual(entry["agent"], "claude-code")
+        self.assertEqual(entry["args"], {"expr": "rate(http_requests_total[5m])", "datasourceUid": "prom"})
+        self.assertEqual(entry["result"], {"text": ["series: 3"]})
+        self.assertIs(entry["truncated"], False)
+        self.assertRegex(entry["called_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$")
+
+    def test_content_and_structured_content(self):
+        sc = {"series": [{"metric": {"job": "api"}, "values": [[1, "0.5"]]}]}
+        res = self._run(self._payload(tool_response={"content": json.dumps(sc), "structuredContent": sc}))
+        _, _, entry, _ = self._captured(res)
+        self.assertEqual(entry["result"], {"structured": sc})
+        blocks = [{"type": "text", "text": "hello"}, {"type": "image", "data": "iVBOR", "mimeType": "image/png"}]
+        _, _, entry, _ = self._captured(self._run(self._payload(tool_response=blocks)))
+        self.assertEqual(entry["result"], {"text": ["hello"], "other_blocks": 1})
+
+    def test_spill_notice_is_followed_only_under_claude_projects(self):
+        spill = self.home / ".claude" / "projects" / "-w" / SESSION / "tool-results" / "mcp-grafana-1.txt"
+        spill.parent.mkdir(parents=True)
+        spill.write_text('{"series":[1,2,3],"password":"LEAK-SPILL"}')
+        notice = (f"Error: result (91,000 characters) exceeds maximum allowed tokens. Output has been saved to "
+                  f"{spill}.\nUse offset and limit parameters to read specific portions of the file.")
+        _, _, entry, _ = self._captured(self._run(self._payload(tool_response=notice)))
+        self.assertIs(entry["spilled"], True)
+        self.assertEqual(entry["result"], {"text": ['{"password":"[redacted]","series":[1,2,3]}']})
+        # A notice naming a file elsewhere is stored as the notice, unread.
+        outside = self.home / "private" / "keys.txt"
+        outside.parent.mkdir()
+        outside.write_text("TOP-SECRET-FILE")
+        notice = f"Output has been saved to {outside}."
+        _, _, entry, path = self._captured(self._run(self._payload(tool_response=notice)))
+        self.assertNotIn("spilled", entry)
+        self.assertNotIn("TOP-SECRET-FILE", path.read_text())
+
+    # -- skip list / non-MCP ---------------------------------------------------
+
+    def test_cardinal_gateway_tools_and_non_mcp_tools_are_skipped(self):
+        for name in ("mcp__cardinal__lakerunner__execute_logs_query",
+                     "mcp__plugin_cardinal_cardinal__lakerunner__execute_logs_query",
+                     "mcp__plugin_cardinal_cardinal__storyboard__preview",
+                     "Bash", "Read", "mcp__", "mcp__grafana", ""):
+            self._assert_nothing(self._run(self._payload(tool_name=name)))
+        # A server merely named like Cardinal is not Cardinal's gateway.
+        _, ctx, entry, _ = self._captured(self._run(self._payload(tool_name="mcp__cardinal-dev__query")))
+        self.assertEqual(entry["server"], "cardinal-dev")
+        self.assertIn("captured locally from cardinal-dev/query;", ctx)
+
+    # -- opt-out ---------------------------------------------------------------
+
+    def test_env_opt_out(self):
+        for v in ("0", "false", "off"):
+            self._assert_nothing(self._run(env=self._env(CARDINAL_EVIDENCE_CAPTURE=v)))
+        self._captured(self._run(env=self._env(CARDINAL_EVIDENCE_CAPTURE="1")))
+
+    def test_flag_file_opt_out(self):
+        self.root.mkdir(parents=True)
+        (self.root / "disabled").touch()
+        self._assert_nothing(self._run())
+
+    # -- permissions, scrub, GC ----------------------------------------------
+
+    def test_spool_is_private(self):
+        _, _, _, path = self._captured(self._run())
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(path.parent).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.root).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.root.parent).st_mode), 0o700)
+
+    def test_credentials_never_reach_disk(self):
+        payload = self._payload(
+            tool_input={"query": "select 1", "api_key": "LEAK-ARG", "headers": {"Authorization": "Bearer LEAKx1"}},
+            tool_response={"content": "conn postgres://admin:LEAK-PW@db:5432/app ok",
+                           "structuredContent": {"rows": [{"user": "bob", "password_hash": "LEAK-HASH"}],
+                                                 "token": "ghp_" + "L" * 36}})
+        _, _, entry, path = self._captured(self._run(payload))
+        self.assertNotIn("LEAK", path.read_text())
+        self.assertEqual(entry["args"]["api_key"], "[redacted]")
+        self.assertEqual(entry["args"]["headers"], {"Authorization": "[redacted]"})
+        self.assertEqual(entry["result"]["text"], ["conn postgres://[redacted]@db:5432/app ok"])
+
+    def test_large_result_is_capped_with_a_truncation_marker(self):
+        big = {"rows": [{"i": i, "msg": "x" * 100} for i in range(5000)]}
+        _, _, entry, path = self._captured(self._run(self._payload(tool_response={"structuredContent": big})))
+        self.assertIs(entry["truncated"], True)
+        self.assertIs(entry["result"]["truncated"], True)
+        self.assertGreater(entry["result"]["original_bytes"], 256 * 1024)
+        self.assertLessEqual(len(json.dumps(entry["result"], separators=(",", ":")).encode()), 256 * 1024)
+        self.assertLess(path.stat().st_size, 300 * 1024)
+
+    def test_expired_entries_are_collected(self):
+        old = self.root / "old-session" / "ev_0123456789ab.json"
+        old.parent.mkdir(parents=True)
+        old.write_text("{}")
+        t = time.time() - 15 * 24 * 3600
+        os.utime(old, (t, t))
+        self._captured(self._run())
+        self.assertFalse(old.exists())
+        self.assertFalse(old.parent.exists())
+
+    # -- fail open -------------------------------------------------------------
+
+    def test_fails_open(self):
+        for raw in ("", "not json", "[]", "42", '{"tool_name": 7}'):
+            self.assertEqual(self._run(raw=raw).stdout, "")
+        # The spool root cannot be created (a file sits where ~/.cardinal is).
+        (self.home / ".cardinal").write_text("in the way")
+        self.assertEqual(self._run().stdout, "")
+        (self.home / ".cardinal").unlink()
+        # A tool_response json cannot express as-is is still handled.
+        self._captured(self._run(self._payload(tool_response={"content": [{"type": "text"}, None, 3]})))
+
+    def test_fails_open_without_a_vendored_core(self):
+        probe = subprocess.run([sys.executable, "-c", "import cardinal_core"], cwd=str(self.home),
+                               env=self._env(), capture_output=True)
+        if probe.returncode == 0:
+            self.skipTest("cardinal_core is installed site-wide; cannot simulate a missing core")
+        fake = self.home / "plugin" / "hooks"
+        fake.mkdir(parents=True)
+        shutil.copy(HOOK, fake / HOOK.name)
+        self._assert_nothing(self._run(hook=fake / HOOK.name))
+
+    def test_no_network_code(self):
+        for src in (HOOK, VENDORED):
+            text = src.read_text()
+            for mod in ("urllib", "http.client", "socket", "requests", "subprocess"):
+                self.assertNotRegex(text, rf"^\s*(import|from)\s+{re.escape(mod)}\b", f"{src.name} imports {mod}")
+
+    # -- registration ----------------------------------------------------------
+
+    def test_registered_synchronously_on_every_mcp_tool_with_a_short_timeout(self):
+        groups = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text())["hooks"]["PostToolUse"]
+        found = [(g["matcher"], h) for g in groups for h in g["hooks"] if "evidence-capture.py" in h["command"]]
+        self.assertEqual(len(found), 1)
+        matcher, entry = found[0]
+        self.assertEqual(matcher, "mcp__.*")
+        self.assertEqual(entry["command"], "${CLAUDE_PLUGIN_ROOT}/hooks/evidence-capture.py")
+        self.assertFalse(entry.get("async"), "additionalContext is dropped from async hooks")
+        self.assertIsInstance(entry.get("timeout"), int)
+        self.assertLessEqual(entry["timeout"], 3)
+        for name in ("mcp__grafana__query_prometheus", "mcp__plugin_cardinal_cardinal__storyboard__preview"):
+            self.assertRegex(name, "^(?:" + matcher + ")$")
+        for name in ("Bash", "Agent", "Edit"):
+            self.assertNotRegex(name, "^(?:" + matcher + ")$")
+        self.assertTrue(os.access(HOOK, os.X_OK))
+
+
+if __name__ == "__main__":
+    unittest.main()

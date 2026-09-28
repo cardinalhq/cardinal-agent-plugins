@@ -1305,6 +1305,9 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         self.assertNotIn("Only the scenes in this preview", self._context(self._run(payload)))
 
     def _spill(self, where: Path) -> str:
+        # The spill follower is cardinal_core.evidence (vendored next to the hook).
+        if not (PLUGIN_ROOT / "hooks" / "cardinal_core" / "evidence.py").exists():
+            self.skipTest("cardinal_core not vendored — run: python3 build/vendor.py claude")
         where.parent.mkdir(parents=True, exist_ok=True)
         where.write_text(json.dumps(self._result()))
         return (f"Error: result (71,204 characters) exceeds maximum allowed tokens. Output has been saved to "
@@ -1336,7 +1339,7 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         # The older one-line notice, text after the path on the same line.
         hook = _load_preview_hook()
         one_line = f"Output has been saved to {spill}. Use offset and limit parameters to read it."
-        self.assertIn(str(spill), hook._spill_candidates(one_line))
+        self.assertIn(str(spill), hook.evidence.spill_candidates(one_line))
 
     def test_spilled_path_outside_claude_projects_is_refused(self):
         outside = self.home / "elsewhere" / "tool-results" / "x.txt"

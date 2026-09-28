@@ -48,6 +48,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from cardinal_core import evidence  # noqa: E402  (spill-file follower)
+except Exception:  # not vendored: render inline results, skip spill notices
+    evidence = None
+
 HOOK_DIR = Path(__file__).resolve().parent
 RENDERER = HOOK_DIR.parent / "skills" / "canvas" / "scripts" / "render_preview.py"
 
@@ -65,12 +71,6 @@ MAX_FRAME_ERRORS = 3
 MAX_SPILL_BYTES = 64 * 1024 * 1024
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-# Claude Code's notice for a result too large to keep inline, e.g.
-# "Error: result (71,204 characters) exceeds maximum allowed tokens. Output
-# has been saved to /Users/me/.claude/projects/<p>/<s>/tool-results/x.txt.\n..."
-# The path runs to the end of its line (it may contain spaces, e.g. a HOME of
-# "/Users/John Doe"), minus the sentence's closing period.
-SPILL_RE = re.compile(r"Output has been saved to (.+?)\.?[ \t]*$", re.MULTILINE)
 EXC_NAME_RE = re.compile(r"^([A-Za-z_][\w.]{0,80}(?:Error|Exception|Exit|Interrupt))\b")
 
 READ_INSTRUCTION = ("Read every PNG, first and last step included, and judge whether a reader who stops at that "
@@ -90,34 +90,15 @@ def _budget() -> float:
     return max(1.0, min(v, float(HOOK_BUDGET_S)))
 
 
-def _spill_candidates(text: str) -> list:
-    """Paths the spill notice may name: its whole line, then (for a notice that
-    goes on after the path on the same line) each prefix ending before ". "."""
-    m = SPILL_RE.search(text)
-    if not m:
-        return []
-    line = m.group(1).strip()
-    out = [line]
-    for i in range(len(line)):
-        if line.startswith(". ", i) and line[:i] not in out:
-            out.append(line[:i])
-    return out[:8]
-
-
 def _spilled_text(text: str) -> str | None:
     """The saved result, when `text` is Claude Code's spill notice and the file
-    is one of its own tool-result files (under ~/.claude/projects/)."""
-    for cand in _spill_candidates(text):
-        try:
-            root = (home_dir() / ".claude" / "projects").resolve()
-            path = Path(cand).expanduser().resolve()
-            path.relative_to(root)
-            if not path.is_file() or path.stat().st_size > MAX_SPILL_BYTES:
-                continue
-            return path.read_text(encoding="utf-8")
-        except (OSError, ValueError, RuntimeError):
-            continue
-    return None
+    is one of its own tool-result files (under ~/.claude/projects/, at most
+    MAX_SPILL_BYTES). The follower lives in cardinal_core.evidence, shared
+    with the evidence-capture hook; without a vendored core the notice is
+    not followed."""
+    if evidence is None:
+        return None
+    return evidence.read_spill(text, home_dir() / ".claude" / "projects", MAX_SPILL_BYTES)
 
 
 def preview_result(tool_response) -> dict | None:
