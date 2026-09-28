@@ -1,7 +1,7 @@
 # migrate-from-grafana
 
 Moves your Grafana dashboards and alert rules into Cardinal. Claude does the
-work; you provide credentials and approve each step. See SKILL.md for the flow
+work; you provide credentials and approve each step. See CORE.md (shared by every agent) and SKILL.md (Claude Code specifics) for the flow
 Claude follows.
 
 ## Before you start
