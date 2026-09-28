@@ -62,7 +62,8 @@ storyboard is uploaded, by an explicit `cardinal-evidence promote`. Cardinal's
 own gateway tools are skipped; they already get witnessed receipts. Opt out
 with `CARDINAL_EVIDENCE_CAPTURE=0` or the flag file
 `~/.cardinal/evidence/disabled`. The spool lives in
-`core/cardinal_core/evidence.py`.
+`core/cardinal_core/evidence.py`. The Cursor (`postToolUse`) and Gemini
+(`AfterTool`) adapters write the same spool from their telemetry hooks.
 
 Native [OpenCode](adapters/opencode/README.md) and [Pi](adapters/pi/README.md)
 packages provide session/tool/usage telemetry and Cardinal MCP access. Build

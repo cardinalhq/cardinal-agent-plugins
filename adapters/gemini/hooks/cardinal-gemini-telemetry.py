@@ -26,7 +26,10 @@ Event dispatch (payload shapes: packages/core/src/hooks/types.ts):
                   background: cardinal.git_state (+PR) + verdict refresh
   AfterModel    → api_request + cardinal.turn_usage, final chunk only
                   (fires per streamed chunk; non-final chunks exit early)
-  AfterTool     → cardinal.turn_tool + tool_result (per tool call)
+  AfterTool     → cardinal.turn_tool + tool_result (per tool call); a
+                  non-Cardinal MCP result is also captured in the local
+                  evidence spool (~/.cardinal/evidence, cardinal_core.evidence)
+                  and its [evidence:ev_…] id returned as additionalContext
   AfterAgent    → cardinal.subagent_usage for subagent-shaped payloads only;
                   not registered by cardinal-connect (Gemini fires it per
                   main-agent turn with {prompt, prompt_response})
@@ -39,7 +42,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -58,7 +63,7 @@ if __name__ == "__main__" and sys.argv[1:3] == ["--event", "AfterModel"]:
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _plugin_version  # noqa: E402
-from cardinal_core import bashclass, decisions, initiative, limits, otlp, pricing, session  # noqa: E402
+from cardinal_core import bashclass, decisions, evidence, initiative, limits, otlp, pricing, session  # noqa: E402
 from cardinal_core.paths import AgentPaths  # noqa: E402
 
 
@@ -529,9 +534,186 @@ def tool_success(payload: dict[str, Any]) -> str:
     return "true"
 
 
+# ---------------------------------------------------------------------------
+# AfterTool — evidence capture (the Gemini side of the local evidence spool)
+# ---------------------------------------------------------------------------
+
+# Cardinal's own MCP server, as the extension manifest and cardinal-connect
+# name it (mcpServers.cardinal). Its gateway mints a *witnessed* receipt for
+# every call, so evidence capture skips it.
+CARDINAL_MCP_SERVERS = ("cardinal",)
+
+# Gemini CLI wraps each MCP text block it hands the model (tools/mcp-tool.ts
+# wrapUntrusted, gemini-cli 0.50): "<untrusted_context>\n" + text with its
+# closing tag escaped + "\n</untrusted_context>". Unwrapped before spooling,
+# so the spool keeps what the MCP server returned.
+_UNTRUSTED_OPEN = "<untrusted_context>\n"
+_UNTRUSTED_CLOSE = "\n</untrusted_context>"
+_UNTRUSTED_CLOSE_ESCAPED = "&lt;/untrusted_context&gt;"
+# The label Gemini puts ahead of an image/audio/blob part
+# (transformImageAudioBlock / transformResourceBlock); not tool output.
+_MEDIA_LABEL_RE = re.compile(r"^\[Tool '.*' provided the following .+ with mime-type: .*\]$", re.DOTALL)
+# What Gemini substitutes when an MCP result has no content array.
+_UNPARSEABLE_RESULT = "[Error: Could not parse tool response]"
+
+_GEMINI_VERSION: list[str | None] = []
+
+
+def _unwrap_untrusted(text: str) -> str:
+    if (len(text) >= len(_UNTRUSTED_OPEN) + len(_UNTRUSTED_CLOSE)
+            and text.startswith(_UNTRUSTED_OPEN) and text.endswith(_UNTRUSTED_CLOSE)):
+        inner = text[len(_UNTRUSTED_OPEN):len(text) - len(_UNTRUSTED_CLOSE)]
+        return inner.replace(_UNTRUSTED_CLOSE_ESCAPED, "</untrusted_context>")
+    return text
+
+
+def gemini_tool_response(tool_response: Any) -> dict[str, Any] | None:
+    """AfterTool `tool_response` = {llmContent, returnDisplay, error?}
+    (coreToolHookTriggers.ts) for an MCP tool -> an MCP-shaped
+    {content: [blocks], structuredContent?} that cardinal_core.evidence
+    normalizes like any other client's result. llmContent is a string, one
+    Part or a Part list: {text} parts become text blocks (unwrapped),
+    {functionResponse: {response: {content, structuredContent?}}} parts
+    (older Gemini CLI) contribute their raw MCP content, anything else
+    (inlineData) counts as a non-text block. None for a failed call (a
+    present `error`) or a result Gemini could not parse: only a successful
+    result is evidence."""
+    if not isinstance(tool_response, dict) or tool_response.get("error"):
+        return None
+    llm = tool_response.get("llmContent")
+    if isinstance(llm, list):
+        parts: list[Any] = llm
+    elif isinstance(llm, (str, dict)):
+        parts = [llm]
+    else:
+        parts = []
+    blocks: list[Any] = []
+    out: dict[str, Any] = {}
+    for i, part in enumerate(parts):
+        if isinstance(part, str):
+            blocks.append({"type": "text", "text": _unwrap_untrusted(part)})
+            continue
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            nxt = parts[i + 1] if i + 1 < len(parts) else None
+            if isinstance(nxt, dict) and "inlineData" in nxt and _MEDIA_LABEL_RE.match(text):
+                continue
+            blocks.append({"type": "text", "text": _unwrap_untrusted(text)})
+            continue
+        fr = part.get("functionResponse")
+        response = fr.get("response") if isinstance(fr, dict) else None
+        if isinstance(response, dict) and isinstance(response.get("content"), list):
+            blocks.extend(response["content"])
+            if response.get("structuredContent") is not None:
+                out["structuredContent"] = response["structuredContent"]
+            continue
+        blocks.append({"type": "inlineData" if "inlineData" in part else "other"})
+    if not blocks:
+        display = tool_response.get("returnDisplay")
+        if isinstance(display, str) and display:
+            blocks.append({"type": "text", "text": display})
+    if len(blocks) == 1 and blocks[0] == {"type": "text", "text": _UNPARSEABLE_RESULT}:
+        return None
+    out["content"] = blocks
+    return out
+
+
+def gemini_version() -> str | None:
+    """Best-effort version of the installed Gemini CLI: Gemini's hook
+    payload and environment carry none, so resolve `gemini` on PATH to its
+    package.json (@google/gemini-cli) and read `version`. File reads only,
+    at most once per process; None when it cannot be found."""
+    if _GEMINI_VERSION:
+        return _GEMINI_VERSION[0]
+    version = None
+    try:
+        exe = shutil.which("gemini")
+        if exe:
+            d = Path(os.path.realpath(exe)).parent
+            for _ in range(6):
+                pkg = d / "package.json"
+                if pkg.is_file() and pkg.stat().st_size < 1 << 20:
+                    data = json.loads(pkg.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and data.get("name") == "@google/gemini-cli":
+                        v = data.get("version")
+                        version = v if isinstance(v, str) else None
+                        break
+                if d.parent == d:
+                    break
+                d = d.parent
+    except (OSError, ValueError):
+        version = None
+    _GEMINI_VERSION.append(version)
+    return version
+
+
+def mcp_server_and_tool(payload: dict[str, Any], raw_name: str) -> tuple[str, str] | None:
+    """(server, tool) for an MCP call: from mcp_context {server_name,
+    tool_name} (hooks/types.ts McpToolContext), else from an
+    `mcp__<server>__<tool>` name. Gemini's own `mcp_<server>_<tool>` name is
+    ambiguous (either part may hold `_`), so it alone is not enough."""
+    mcp_context = payload.get("mcp_context")
+    if isinstance(mcp_context, dict):
+        server = mcp_context.get("server_name")
+        tool = mcp_context.get("tool_name") or raw_name
+        if isinstance(server, str) and server and isinstance(tool, str) and tool:
+            return server, tool
+    return evidence.split_mcp_tool(raw_name)
+
+
+def capture_evidence(payload: dict[str, Any]) -> str | None:
+    """Record a successful non-Cardinal MCP result in the local evidence
+    spool and return the `[evidence:ev_…]` context line; None for a non-MCP
+    or Cardinal tool, a failed call, when the user opted out
+    (CARDINAL_EVIDENCE_CAPTURE=0 or ~/.cardinal/evidence/disabled), or on
+    any failure. Local file work only; never raises."""
+    try:
+        raw_name = payload.get("tool_name") or payload.get("toolName")
+        if not isinstance(raw_name, str) or not raw_name:
+            return None
+        parts = mcp_server_and_tool(payload, raw_name)
+        if parts is None:
+            return None
+        server, tool = parts
+        if server in CARDINAL_MCP_SERVERS:
+            return None
+        response = gemini_tool_response(payload.get("tool_response"))
+        if response is None:
+            return None
+        tool_input = payload.get("tool_input")
+        if tool_input is None:
+            tool_input = payload.get("toolInput")
+        entry = evidence.capture(
+            Path.home(),
+            server=server,
+            tool=tool,
+            tool_name=f"mcp__{server}__{tool}",
+            tool_input=tool_input,
+            tool_response=response,
+            session_id=session_id_from_payload(payload),
+            agent=evidence.client_string("gemini", gemini_version()),
+        )
+        if entry is None:
+            return None
+        return evidence.captured_line(entry["evidence_id"], server, tool)
+    except Exception:
+        return None
+
+
 def handle_after_tool(payload: dict[str, Any]) -> None:
     dump_debug_payload("AfterTool", payload)
     session_id = session_id_from_payload(payload)
+    evidence_line = capture_evidence(payload)
+    if evidence_line:
+        sys.stdout.write(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "AfterTool",
+                "additionalContext": evidence_line,
+            }
+        }))
+        sys.stdout.flush()
     if not session_id:
         return
     raw_name = str(payload.get("tool_name") or payload.get("toolName") or "")

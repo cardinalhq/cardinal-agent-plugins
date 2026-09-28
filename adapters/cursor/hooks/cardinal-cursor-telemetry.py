@@ -18,7 +18,12 @@ specific:
     via `additional_context`, with opt-in CARDINAL_CURSOR_STRICT_WARN=1
     escalation of warn to block;
   * length-only turn_thought / turn_response emission (Divergence J);
-  * the preCompact context-window plan_usage slice (Divergence K).
+  * the preCompact context-window plan_usage slice (Divergence K);
+  * local evidence capture on postToolUse: a non-Cardinal MCP result is
+    recorded in the shared spool (~/.cardinal/evidence, cardinal_core.
+    evidence) and its `[evidence:ev_…]` id handed back via
+    `additional_context`, so a storyboard can cite it as *captured*
+    evidence. Nothing is sent over the network.
 
 There is NO turn_usage / api_request emission on Cursor — the product
 never exposes per-model-call token counts (parity spec gap D). Failures
@@ -41,7 +46,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _decision_cli  # noqa: E402
 import _plugin_version  # noqa: E402
-from cardinal_core import decisions, limits, otlp, session  # noqa: E402
+from cardinal_core import decisions, evidence, limits, otlp, session  # noqa: E402
 from cardinal_core.bashclass import classify_bash_command  # noqa: E402,F401
 from cardinal_core.initiative import (  # noqa: E402,F401
     canonical_repo,
@@ -99,6 +104,11 @@ BACKGROUND_INLINE_ENV = "CARDINAL_CURSOR_BACKGROUND_INLINE"
 BACKGROUND_EMIT_TIMEOUT_SEC = 3.0
 
 EXIT_CODE_RE = re.compile(r"(?:exit(?:ed)?|status)[ :]+(-?\d+)", re.IGNORECASE)
+
+# Cardinal's own MCP server as cardinal-connect registers it
+# (mcpServers.cardinal). Its gateway mints a *witnessed* receipt for every
+# call, so evidence capture skips it.
+CARDINAL_MCP_SERVERS = ("cardinal",)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +282,70 @@ def output_success(tool_output: Any) -> str:
     if not m:
         return "true"
     return "true" if m.group(1) == "0" else "false"
+
+
+# ---------------------------------------------------------------------------
+# Evidence capture (postToolUse) — the Cursor side of the local evidence
+# spool (cardinal_core.evidence). Cursor names MCP tools
+# `mcp__<server>__<tool>` and fires postToolUse only after a tool succeeds.
+# ---------------------------------------------------------------------------
+
+def _decode_json_container(value: Any) -> Any:
+    """Cursor documents postToolUse `tool_output` (and, on some builds,
+    `tool_input`) as a JSON-encoded string. Decode it when it holds a JSON
+    object or array, e.g. an MCP `{content, structuredContent}` result, so
+    the spool keeps its structure; any other value is returned as is (a
+    plain string is the result text)."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] in ("{", "["):
+            try:
+                decoded = json.loads(text)
+            except ValueError:
+                return value
+            if isinstance(decoded, (dict, list)):
+                return decoded
+    return value
+
+
+def capture_evidence(payload: dict[str, Any]) -> str | None:
+    """Record a non-Cardinal MCP result in the local evidence spool and
+    return the `[evidence:ev_…]` context line for the agent; None for a
+    non-MCP or Cardinal tool, when the user opted out
+    (CARDINAL_EVIDENCE_CAPTURE=0 or ~/.cardinal/evidence/disabled), or on
+    any failure. Local file work only; never raises."""
+    try:
+        raw_name = payload.get("tool_name") or payload.get("toolName")
+        parts = evidence.split_mcp_tool(raw_name)
+        if parts is None:
+            return None
+        server, tool = parts
+        if server in CARDINAL_MCP_SERVERS:
+            return None
+        tool_input = payload.get("tool_input")
+        if tool_input is None:
+            tool_input = payload.get("toolInput")
+        tool_output = payload.get("tool_output")
+        if tool_output is None:
+            tool_output = payload.get("toolOutput")
+        entry = evidence.capture(
+            Path.home(),
+            server=server,
+            tool=tool,
+            tool_name=raw_name,
+            tool_input=_decode_json_container(tool_input),
+            tool_response=_decode_json_container(tool_output),
+            session_id=conv_id_from_payload(payload),
+            tool_use_id=payload.get("tool_use_id") or payload.get("toolUseId"),
+            agent=evidence.client_string(
+                "cursor", payload.get("cursor_version") or payload.get("cursorVersion")
+            ),
+        )
+        if entry is None:
+            return None
+        return evidence.captured_line(entry["evidence_id"], server, tool)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -806,10 +880,15 @@ def post_tool_use_background(job: dict[str, Any]) -> None:
 def handle_post_tool_use(payload: dict[str, Any]) -> None:
     """Emit cardinal.turn_tool + tool_result from one payload; piggyback
     any staged notify message as `additional_context` output (once per
-    band per turn)."""
+    band per turn). A non-Cardinal MCP result is first captured in the
+    local evidence spool and its id prepended to that output."""
     dump_debug_payload("postToolUse", payload)
+    evidence_line = capture_evidence(payload)
     conv_id = conv_id_from_payload(payload)
     if not conv_id:
+        if evidence_line:
+            sys.stdout.write(json.dumps({"additional_context": evidence_line}))
+            sys.stdout.flush()
         return
     state = session.load_progress(PATHS, conv_id)
     _tick_turn(conv_id, payload.get("generation_id"), state)
@@ -868,7 +947,7 @@ def handle_post_tool_use(payload: dict[str, Any]) -> None:
     state["tool_seq"] += 1
     session.save_progress(PATHS, conv_id, state)
 
-    contexts: list[str] = []
+    contexts: list[str] = [evidence_line] if evidence_line else []
     # Piggyback pending notify/warn context onto the hook output. This
     # is the Cursor adapter's substitute for Claude's inline
     # systemMessage on the submit hook — see Divergence E.

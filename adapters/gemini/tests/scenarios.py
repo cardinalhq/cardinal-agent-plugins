@@ -399,6 +399,11 @@ def run_scenario(hook_script: Path, scenario: dict[str, Any], workdir: Path) -> 
         # Network work normally runs in a detached child; inline keeps the
         # OTLP batches deterministic and ordered for golden comparison.
         env["CARDINAL_GEMINI_INLINE_BACKGROUND"] = "1"
+        # The goldens pin telemetry parity with the pre-migration hook,
+        # which had no evidence capture; test_gemini_evidence_capture.py covers
+        # the AfterTool capture output (the after-tool scenario's
+        # non-Cardinal lakerunner MCP call would otherwise print its id).
+        env["CARDINAL_EVIDENCE_CAPTURE"] = "0"
         # Stub `gh` first on PATH: no network, deterministic PR linkage.
         env["PATH"] = f"{write_gh_stub(workdir)}{os.pathsep}{env.get('PATH', '')}"
         env["HOME"] = str(home)
