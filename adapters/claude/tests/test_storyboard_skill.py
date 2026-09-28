@@ -104,5 +104,87 @@ class StoryboardSkillTextTests(unittest.TestCase):
         for unit in spellings:
             self.assertIn(unit, RECOGNISED_DECLARED_UNITS, f"skill recommends declaring unit {unit!r}")
 
+    def test_rules_out_direction_matches_the_grammar(self):
+        # conductor packages/maestro/src/storyboard/grammar.ts RULES_OUT_DIRECTION
+        # (same text in design doc section 5 and the viewer's CLAIM_VERB.rules_out).
+        text = " ".join(STORYBOARD_SKILL.read_text().split())
+        self.assertIn(
+            "from = the candidate cause/hypothesis being ruled out, to = the outcome it is ruled out for; "
+            'reads "from — ruled out as a cause of — to"',
+            text,
+        )
+
+    def test_storyboard_skill_teaches_the_evidence_tools(self):
+        # Shapes shipped in conductor #1958 (select, ref, reduce.where literals)
+        # and #1959 (get_receipt navigation, failed-call receipts, compact preview).
+        text = " ".join(STORYBOARD_SKILL.read_text().split())
+        for needle in (
+            "{select: {receiptId, representation?, in, match, pointer?, unit?}}",
+            "{ref: <binding key>, pointer?}",
+            "`reduce.where` takes a literal",
+            "{param, label}",
+            "outline: true",
+            "`pointer` + `rows: {offset, limit ≤200}`",
+            "model_result_omitted",
+            '{receiptId, selector: "/error/message"}',
+            "verbose: true",
+        ):
+            self.assertIn(needle, text)
+        # Superseded text must not come back: failed reads now get receipts,
+        # and positional selectors are no longer the only row-addressing recipe.
+        self.assertNotIn("Writes, failed calls and kube Secret reads get no", text)
+        self.assertNotIn("Positional selectors need `expect` guards", text)
+        self.assertNotIn("value_preview_rule", text)
+
+    def test_canvas_skill_lists_every_binding_shape(self):
+        # conductor mcp-gateway storyboard/tools/authoring.go describe_grammar description.
+        self.assertIn("source · select · ref · derive · reduce · extract", CANVAS_SKILL.read_text())
+
+    def test_skills_pin_the_maestro_version_the_evidence_tools_need(self):
+        # v1.97.14 is the first maestro tag carrying conductor #1958 and #1959.
+        for path in (STORYBOARD_SKILL, STORYBOARD_SKILL.parent / "README.md"):
+            text = path.read_text()
+            self.assertIn("v1.97.14 or newer", text, path.name)
+            self.assertNotIn("v1.97.12", text, path.name)
+
+    def test_semantic_fixes_stay_pinned(self):
+        # Quality-pass fixes (b), (c), (d), (f); deleting any of them must fail.
+        text = " ".join(STORYBOARD_SKILL.read_text().split())
+        for needle in (
+            # (b) the viewer owns state and open questions; the canvas may still
+            # draw the relationship a claim names.
+            "The viewer renders each scene's state and its `openQuestions` from the spec; "
+            'do not draw state pills or a "still open" list in the Canvas',
+            # (c)
+            "An attribution that is only `correlates_with`",
+            "never inside another claim's from/to",
+            # (d)
+            "an established cause with an open impact is `supported`, with open questions",
+            # (f)
+            "`rules.prose_numbers`",
+            "the check never reads Canvas source, so bind every number a canvas draws",
+        ):
+            self.assertIn(needle, text)
+        # (b) must not tell the canvas to leave out the claims it visualizes.
+        self.assertNotIn("the claims (as sentences)", text)
+
+    def test_titles_carry_no_fixed_prefix(self):
+        text = " ".join(STORYBOARD_SKILL.read_text().split())
+        self.assertIn('**Titles are findings, not topics**, in about one clause, with no fixed prefix', text)
+
+    def test_combined_skill_length_does_not_grow(self):
+        # rjha, 2026-09-28: no new visual-style doctrine, and the skills must not
+        # grow; new tool shapes replace superseded text. Baseline: plugin 0.33.1,
+        # storyboard 209 + canvas 268 lines.
+        paths = (STORYBOARD_SKILL, CANVAS_SKILL)
+        total = sum(len(p.read_text().splitlines()) for p in paths)
+        self.assertLessEqual(total, 477)
+        # Lines alone can be gamed by re-flowing, so words are capped too. 0.33.1
+        # had 2262 + 2592 = 4854 words; 0.34.0's tool reference is 55 words longer
+        # (4909). The cap stops further growth; it does not claim a word-neutral 0.34.0.
+        words = sum(len(p.read_text().split()) for p in paths)
+        self.assertLessEqual(words, 4909)
+
+
 if __name__ == "__main__":
     unittest.main()
