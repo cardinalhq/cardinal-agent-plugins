@@ -87,7 +87,8 @@ What should be visually dominant? What can disappear?*
   eliminated, leave what it did not settle `open`, and never manufacture closure to make
   the story neater.
 - **`transition.note` is written for the reader.** The viewer shows it beside the scene's
-  state, as the line that says why this scene comes next. `transition.kind` is metadata.
+  state, as the line that says why this scene comes next. Pick `transition.kind` honestly
+  too (some viewers show it), but the note is what readers rely on.
 - **One point per scene.** The `statement` must stand on its own, without the visual. Every
   number in it must be a value the scene binds (its own bindings or its surface's). The
   prose-number check warns otherwise.
@@ -96,17 +97,20 @@ What should be visually dominant? What can disappear?*
   role, not the claim kinds `supports` / `contradicts` / `rules_out`). Say how far a claim
   reaches with `scope` (the population the evidence could see). Name the two things a claim
   connects as noun phrases a reader recognises (a service, a query shape, an org, a
-  rollout), so it reads as from → kind → to. Do not bend a kind, an endpoint or a scope to
-  make a sentence read well.
+  feature flag), so it reads as from → kind → to. Do not bend a kind, an endpoint or a
+  scope to make a sentence read well.
 - **Human-scale numbers are presentation; the measurement stays.** Write magnitudes as a
-  person would say them ("~31 min of worker time", "212× its usual rate"), and keep the exact
+  person would say them ("~31 min end to end", "212× its usual rate"), and keep the exact
   value bound and visible where the magnitude matters (marked in the canvas, or beside the
   humane figure). A ratio or delta combines values, so bind it (`derive divide` / `subtract`
   / `percent_change`). Unit conversion, rounding and separators are not derive ops: the prose
   check reconciles "~31 min", "1.8M" and "1,843,200 ms" with a bound 1843200 declared
-  `unit: "ms"`. Declare `unit` in a usual spelling (ms, s, min, h, d; B, KiB…; %; k, M, G)
-  and confirm it in `value_preview`: an unknown label (`"millis"`) never scales. The check
-  allows one step of the last written digit, so 212.4 can be "212×" but not "about 200×".
+  `unit: "ms"`. Declare `unit` in a usual spelling (ms, s, min, h, d; B, KB, KiB, GB…; %)
+  and confirm it in `value_preview`. k, M, G and × are written in the statement ("1.8M"),
+  never declared as the unit. An unknown label (`"millis"`, `"k"`) never scales and switches
+  off the fallbacks an undeclared value gets, so it is worse than none, and prefabs draw it
+  beside the value as its unit. The check allows one step of the last written digit, so
+  212.4 can be "212×" but not "about 200×".
 - **Numeric strings.** A bound string that is exactly a number literal (`"0.05"`, a regex
   `extract` result `"5"`) reconciles with the same number as written, with no unit or %
   scaling (`"5k"`, `"5%"` never match). `derive` refuses strings; turn one into a number
@@ -122,10 +126,10 @@ What should be visually dominant? What can disappear?*
 - **Answer the question the storyboard was created with.** When the answer is spread
   across scenes, give the reader a place where it comes together: the first scene, the
   last, or one of its own. You decide; sometimes an existing scene already does it. It is
-  an ordinary scene with one state: `supported` if the question is answered (the unresolved
-  remainder in its `openQuestions`), `open` if not. Established parts are claims with
-  evidence refs; unresolved parts stay `openQuestions`, never folded into a confident
-  sentence. Numbers in its statement must be bound in that scene too (re-bind them, or draw
+  an ordinary scene whose state is whatever the evidence established for the answer
+  (`supported`, `ruled_out` or `open`), with the unresolved remainder in its
+  `openQuestions`. Established parts are claims with evidence refs; unresolved parts stay
+  `openQuestions`, never folded into a confident sentence. Numbers in its statement must be bound in that scene too (re-bind them, or draw
   it on the surface that binds them).
 - **End on `open` when warranted.** An unresolved question is a valid final state. Use
   `openQuestions` rather than overclaiming.

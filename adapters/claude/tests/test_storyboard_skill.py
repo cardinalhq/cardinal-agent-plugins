@@ -56,6 +56,21 @@ CANVAS_DOCTRINE = [
 ]
 
 
+# Source units conductor's prose-number check scales from a binding's declared
+# `unit` (packages/maestro/src/storyboard/validation/numbers.ts: TIME_NS, BYTES,
+# BYTE_UNITS, "%"). A declared unit outside this set switches off the fallbacks an
+# undeclared value gets, so the skill must never recommend declaring one.
+# k/M/G/T are written suffixes (MULTIPLIER), never declared units.
+RECOGNISED_DECLARED_UNITS = {
+    "ns", "us", "µs", "ms", "msec", "s", "sec", "secs", "second", "seconds",
+    "m", "min", "mins", "minute", "minutes", "h", "hr", "hrs", "hour", "hours",
+    "d", "day", "days",
+    "B", "b", "byte", "bytes", "kB", "KB", "MB", "GB", "TB", "PB",
+    "KiB", "MiB", "GiB", "TiB", "PiB",
+    "%",
+}
+
+
 def _doctrine_blockquote(text: str) -> list:
     m = re.search(r"^## Canvas design doctrine\n\n((?:>[^\n]*\n)+)", text, re.M)
     return m.group(1).splitlines() if m else []
@@ -78,6 +93,16 @@ class StoryboardSkillTextTests(unittest.TestCase):
             text,
         )
 
+
+    def test_declared_unit_spellings_are_ones_the_prose_check_scales(self):
+        text = " ".join(STORYBOARD_SKILL.read_text().split())
+        m = re.search(r"Declare `unit` in a usual spelling \(([^)]*)\)", text)
+        self.assertIsNotNone(m, "declared-unit list not found in the storyboard skill")
+        spellings = [u.strip().rstrip("…").strip() for u in re.split(r"[,;]", m.group(1))]
+        spellings = [u for u in spellings if u]
+        self.assertTrue(spellings)
+        for unit in spellings:
+            self.assertIn(unit, RECOGNISED_DECLARED_UNITS, f"skill recommends declaring unit {unit!r}")
 
 if __name__ == "__main__":
     unittest.main()
