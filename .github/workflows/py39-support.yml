@@ -65,6 +65,7 @@ jobs:
           import cardinal_core.initiative
           import cardinal_core.bashclass
           import cardinal_core.decisions
+          import cardinal_core.evidence
           print('ok: all core modules import under 3.9')
           "
 

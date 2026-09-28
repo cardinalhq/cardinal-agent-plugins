@@ -51,6 +51,19 @@ synchronous `SessionStart` hook (`hooks/storyboard-session.py`) puts the
 session id in context for `storyboard__create`. The skills are Claude-only
 for now.
 
+Claude also ships local evidence capture for storyboards: a synchronous
+`PostToolUse` hook on every MCP tool (`hooks/evidence-capture.py`, matcher
+`mcp__.*`) records the result of a call to any non-Cardinal MCP server in
+`~/.cardinal/evidence/<session_id>/ev_<id>.json` (directories 0700, files
+0600, credentials scrubbed with a port of the gateway's receipt scrub,
+results capped at 256 KiB, entries removed after 14 days) and tells Claude
+the `ev_…` id. Nothing leaves the machine: only a result cited in a
+storyboard is uploaded, by an explicit `cardinal-evidence promote`. Cardinal's
+own gateway tools are skipped; they already get witnessed receipts. Opt out
+with `CARDINAL_EVIDENCE_CAPTURE=0` or the flag file
+`~/.cardinal/evidence/disabled`. The spool lives in
+`core/cardinal_core/evidence.py`.
+
 Native [OpenCode](adapters/opencode/README.md) and [Pi](adapters/pi/README.md)
 packages provide session/tool/usage telemetry and Cardinal MCP access. Build
 them with `python3 build/native.py`; test with `npm ci --ignore-scripts` and

@@ -1,0 +1,505 @@
+{
+ "_comment": "Port-parity vectors for cardinal_core.evidence.scrub, a Python port of conductor's receipt credential scrub (cardinalhq/conductor packages/mcp-gateway/storyboard/receipts/receipts.go scrub/isCredentialKey and errors.go redactValueShapes/RedactErrorText). 'keys' is copied from conductor's receipts/testdata/credential_keys.json (gateway classification: 'credential' and 'headers' keys match, 'evidence_both' and 'evidence_gateway_only' keys do not, 'secret_pair_names' {name, value} pairs are redacted and 'plain_pair_names' kept). 'scrub' (scrub), 'text' (scrubText) and 'plain' (RedactErrorText on non-JSON text) outputs were produced by the Go implementation at conductor 9d8bd031. When conductor's scrub changes, regenerate from Go and update the port in the same change.",
+ "keys": {
+  "credential": [
+   "x-cardinalhq-api-key",
+   "apiKey",
+   "api_key",
+   "APIKey",
+   "api_keys",
+   "apiKeys",
+   "api-keys",
+   "OpenAIAPIKey",
+   "AWSSecretKey",
+   "private_key_pem",
+   "api_key_value",
+   "access_token",
+   "access_tokens",
+   "refreshToken",
+   "token",
+   "clientSecret",
+   "secrets",
+   "Authorization",
+   "Authentication",
+   "auth",
+   "password",
+   "passwords",
+   "pwd",
+   "passphrase",
+   "Set-Cookie",
+   "cookies",
+   "privateKey",
+   "signing_key",
+   "encryption_key",
+   "ssh_key",
+   "routing_key",
+   "integration_key",
+   "dsn",
+   "connection_string",
+   "jwt",
+   "DD_APP_KEY",
+   "subscription_key",
+   "ocp-apim-subscription-key",
+   "account_key",
+   "storage_key",
+   "sharedKey",
+   "hmac_key",
+   "license_key",
+   "password_hash",
+   "password_digest",
+   "passwordHash",
+   "PASSWORD_HASH",
+   "token_hash",
+   "secret_salt",
+   "encrypted_password_hash_hex",
+   "secret_key_base",
+   "SECRET_KEY_BASE",
+   "database_url",
+   "DATABASE_URL",
+   "databaseUrl",
+   "db_url",
+   "conn_str",
+   "connstr",
+   "ConnStr",
+   "connection_str",
+   "apitoken",
+   "APITOKEN"
+  ],
+  "evidence_both": [
+   "input_tokens",
+   "total_tokens",
+   "max_tokens",
+   "tokens",
+   "key",
+   "cache_key",
+   "public_key",
+   "sort_key",
+   "secretName",
+   "tokenizer",
+   "secretary",
+   "base_url",
+   "keyspace",
+   "monkey",
+   "hash",
+   "commit_hash",
+   "digest",
+   "image_digest",
+   "salt",
+   "url",
+   "server_url",
+   "keyBase"
+  ],
+  "evidence_gateway_only": [
+   "next_token",
+   "nextPageToken",
+   "page_token",
+   "continuation_token",
+   "secret_name",
+   "token_count",
+   "max_token",
+   "output_token",
+   "eos_token"
+  ],
+  "headers": [
+   "headers",
+   "request_headers",
+   "ResponseHeaders",
+   "http-headers"
+  ],
+  "secret_pair_names": [
+   "DB_PASSWORD",
+   "API_KEY",
+   "GITHUB_TOKEN",
+   "AWS_SECRET_ACCESS_KEY",
+   "DATABASE_DSN",
+   "Authorization",
+   "DATABASE_URL",
+   "SECRET_KEY_BASE"
+  ],
+  "plain_pair_names": [
+   "LOG_LEVEL",
+   "PORT",
+   "OTEL_SERVICE_NAME"
+  ]
+ },
+ "scrub": [
+  {
+   "in": {
+    "api_key": "LEAK1",
+    "name": "ok",
+    "count": 3
+   },
+   "out": {
+    "api_key": "[redacted]",
+    "count": 3,
+    "name": "ok"
+   }
+  },
+  {
+   "in": {
+    "automountServiceAccountToken": true,
+    "volumes": [
+     {
+      "name": "creds",
+      "secret": {
+       "secretName": "db-creds"
+      }
+     }
+    ],
+    "env": [
+     {
+      "name": "DB_PASSWORD",
+      "value": "LEAK-ENV"
+     },
+     {
+      "name": "LOG_LEVEL",
+      "value": "debug"
+     }
+    ],
+    "request_headers": {
+     "X-Trace": "abc",
+     "n": 5
+    },
+    "nextPageToken": "cursor-1",
+    "api_keys": [
+     "LEAK-A",
+     "LEAK-B"
+    ]
+   },
+   "out": {
+    "api_keys": [
+     "[redacted]",
+     "[redacted]"
+    ],
+    "automountServiceAccountToken": true,
+    "env": [
+     {
+      "name": "DB_PASSWORD",
+      "value": "[redacted]"
+     },
+     {
+      "name": "LOG_LEVEL",
+      "value": "debug"
+     }
+    ],
+    "nextPageToken": "cursor-1",
+    "request_headers": {
+     "X-Trace": "[redacted]",
+     "n": 5
+    },
+    "volumes": [
+     {
+      "name": "creds",
+      "secret": {
+       "secretName": "db-creds"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "in": {
+    "token": {
+     "value": "LEAK",
+     "type": "bearer"
+    },
+    "credentials": {
+     "key": "LEAK2",
+     "secretKeyRef": {
+      "name": "s",
+      "key": "k"
+     }
+    }
+   },
+   "out": {
+    "credentials": {
+     "key": "[redacted]",
+     "secretKeyRef": {
+      "key": "k",
+      "name": "s"
+     }
+    },
+    "token": {
+     "type": "bearer",
+     "value": "[redacted]"
+    }
+   }
+  },
+  {
+   "in": {
+    "headers": [
+     {
+      "name": "Authorization",
+      "value": "Bearer LEAKabc123"
+     },
+     {
+      "name": "Accept",
+      "value": "*/*"
+     }
+    ]
+   },
+   "out": {
+    "headers": [
+     {
+      "name": "Authorization",
+      "value": "[redacted]"
+     },
+     {
+      "name": "Accept",
+      "value": "[redacted]"
+     }
+    ]
+   }
+  },
+  {
+   "in": {
+    "rows": [
+     [
+      "1",
+      "alice",
+      "$2a$10$abcdefghijklmnopqrstuvABCDEFGHIJ"
+     ],
+     [
+      "2",
+      "bob",
+      "plain"
+     ]
+    ]
+   },
+   "out": {
+    "rows": [
+     [
+      "1",
+      "alice",
+      "[redacted]"
+     ],
+     [
+      "2",
+      "bob",
+      "plain"
+     ]
+    ]
+   }
+  },
+  {
+   "in": {
+    "row": "{\"id\":1,\"password\":\"LEAK-ROW\",\"html\":\"<b>&</b>\"}"
+   },
+   "out": {
+    "row": "{\"html\":\"<b>&</b>\",\"id\":1,\"password\":\"[redacted]\"}"
+   }
+  },
+  {
+   "in": {
+    "dsn_col": "postgres://admin:LEAKpw@db:5432/app",
+    "url": "https://example.com/path?x=1"
+   },
+   "out": {
+    "dsn_col": "postgres://[redacted]@db:5432/app",
+    "url": "https://example.com/path?x=1"
+   }
+  },
+  {
+   "in": {
+    "msg": "Authorization: Bearer abcDEF123456==",
+    "prose": "invalid token TokenExpiredError happened"
+   },
+   "out": {
+    "msg": "Authorization: Bearer [redacted]",
+    "prose": "invalid token TokenExpiredError happened"
+   }
+  },
+  {
+   "in": {
+    "k": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+    "s": "xoxb-1234567890-abcdef",
+    "a": "AKIAABCDEFGHIJKLMNOP",
+    "pod": "sk-learn-inference-server-7f9c8d6b5",
+    "openai": "sk-proj-AbCdEfGhIjKlMnOpQr"
+   },
+   "out": {
+    "a": "[redacted]",
+    "k": "[redacted]",
+    "openai": "[redacted]",
+    "pod": "sk-learn-inference-server-7f9c8d6b5",
+    "s": "[redacted]"
+   }
+  },
+  {
+   "in": {
+    "jwt_in_text": "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcDEF_ghi"
+   },
+   "out": {
+    "jwt_in_text": "token [redacted]"
+   }
+  },
+  {
+   "in": {
+    "input_tokens": 1200,
+    "max_tokens": 4096,
+    "commit_hash": "deadbeef",
+    "public_key": "ssh-rsa AAAA",
+    "cache_key": "abc"
+   },
+   "out": {
+    "cache_key": "abc",
+    "commit_hash": "deadbeef",
+    "input_tokens": 1200,
+    "max_tokens": 4096,
+    "public_key": "ssh-rsa AAAA"
+   }
+  },
+  {
+   "in": {
+    "password_hash": "x",
+    "passwordDigest": "y",
+    "secret_salt": "z",
+    "hash": "keep"
+   },
+   "out": {
+    "hash": "keep",
+    "passwordDigest": "[redacted]",
+    "password_hash": "[redacted]",
+    "secret_salt": "[redacted]"
+   }
+  },
+  {
+   "in": {
+    "nested": {
+     "deeper": [
+      {
+       "clientSecret": "LEAK3",
+       "id": 7
+      }
+     ]
+    }
+   },
+   "out": {
+    "nested": {
+     "deeper": [
+      {
+       "clientSecret": "[redacted]",
+       "id": 7
+      }
+     ]
+    }
+   }
+  },
+  {
+   "in": {
+    "nul\u0000key": "a\u0000b"
+   },
+   "out": {
+    "nul�key": "a�b"
+   }
+  },
+  {
+   "in": [
+    {
+     "name": "GITHUB_TOKEN",
+     "value": "LEAK-GH"
+    },
+    {
+     "name": "PORT",
+     "value": "8080"
+    }
+   ],
+   "out": [
+    {
+     "name": "GITHUB_TOKEN",
+     "value": "[redacted]"
+    },
+    {
+     "name": "PORT",
+     "value": "8080"
+    }
+   ]
+  },
+  {
+   "in": "Basic dXNlcjpwYXNz=",
+   "out": "Basic [redacted]"
+  },
+  {
+   "in": {
+    "django": "pbkdf2_sha256$260000$saltsalt$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123=",
+    "argon": "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA"
+   },
+   "out": {
+    "argon": "[redacted]",
+    "django": "[redacted]"
+   }
+  }
+ ],
+ "text": [
+  {
+   "in": "{\"apiKey\":\"LEAK-T\",\"html\":\"<b>&</b>\"}",
+   "out": "{\"apiKey\":\"[redacted]\",\"html\":\"<b>&</b>\"}"
+  },
+  {
+   "in": "{\"a\":1} trailing prose",
+   "out": "{\"a\":1} trailing prose"
+  },
+  {
+   "in": "[{\"z\":1,\"password\":\"LEAK\"},{\"a\":\"ok\"}]",
+   "out": "[{\"password\":\"[redacted]\",\"z\":1},{\"a\":\"ok\"}]"
+  },
+  {
+   "in": "{\"ok\":\"nothing secret\",\"b\":[1,2,3]}",
+   "out": "{\"ok\":\"nothing secret\",\"b\":[1,2,3]}"
+  },
+  {
+   "in": "connecting to mysql://root:LEAK@10.0.0.1:3306/db failed",
+   "out": "connecting to mysql://[redacted]@10.0.0.1:3306/db failed"
+  },
+  {
+   "in": "curl -H 'Authorization: Bearer abc123DEF456ghi' https://x",
+   "out": "curl -H 'Authorization: Bearer [redacted]' https://x"
+  },
+  {
+   "in": "user password=hunter2 login",
+   "out": "user password=hunter2 login"
+  },
+  {
+   "in": "{\"outer\":\"{\\\"token\\\":\\\"LEAK-NESTED\\\"}\"}",
+   "out": "{\"outer\":\"{\\\"token\\\":\\\"[redacted]\\\"}\"}"
+  },
+  {
+   "in": "line sep {\"x\":1}",
+   "out": "line sep {\"x\":1}"
+  }
+ ],
+ "plain": [
+  {
+   "in": "password=hunter2 login failed",
+   "out": "password=[redacted] login failed"
+  },
+  {
+   "in": "{\"password\":\"LEAK-A\",\"user\":\"bob\"} cut here",
+   "out": "{\"password\":\"[redacted]\",\"user\":\"bob\"} cut here"
+  },
+  {
+   "in": "auth failed: api_key: 'LEAK B C' for user",
+   "out": "auth failed: api_key: '[redacted]' for user"
+  },
+  {
+   "in": "Authorization: Bearer LEAKtoken123",
+   "out": "Authorization: Bearer [redacted]"
+  },
+  {
+   "in": "dsn=\\\"postgres://u:p@h/db\\\" next",
+   "out": "dsn=\\\"[redacted]\\\" next"
+  },
+  {
+   "in": "Basic authentication required",
+   "out": "Basic authentication required"
+  },
+  {
+   "in": "token=abc&next_token=keep123&secret=LEAK9",
+   "out": "token=[redacted]&next_token=keep123&secret=[redacted]"
+  },
+  {
+   "in": "\"client_secret\":\"LEAK-UNTERMINATED",
+   "out": "\"client_secret\":\"[redacted]"
+  }
+ ]
+}
