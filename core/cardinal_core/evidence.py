@@ -24,8 +24,10 @@ What this module owns:
     errors.go redactValueShapes), ported so a secret a tool echoes never
     reaches disk. Keep the two in step: tests/testdata/scrub_vectors.json
     holds vectors both must satisfy.
-  - cap_body(): results over MAX_RESULT_BYTES become conductor's
-    truncatedBody ({truncated, original_bytes, prefix}).
+  - scrub_and_cap(): results over MAX_RESULT_BYTES become conductor's
+    truncatedBody ({truncated, original_bytes, prefix}). A result too large
+    to scrub whole in a hook's budget is scrubbed structurally only as far
+    as the prefix it keeps (bounded_scrub), with the same rules.
   - write_entry(): atomic write, directories 0700, files 0600.
   - gc(): opportunistic, time-bounded removal of entries past retention.
   - spill_path()/read_spill(): Claude Code's spill-file follower, shared
@@ -63,12 +65,17 @@ STALE_TMP_S = 3600
 # Mirrors conductor's receipts.MaxModelResultBytes.
 MAX_RESULT_BYTES = 256 << 10
 MAX_ARGS_BYTES = 64 << 10
-# A result whose serialization is larger than this is not decoded and
-# scrubbed structurally (too slow for a 2 s hook): its leading
-# MAX_RESULT_BYTES are scrubbed as plain text with the stricter error-text
-# rules (key=value pairs included), which err toward redacting more.
+# A result whose serialization is larger than this is not scrubbed whole
+# (walking every leaf is too slow for a 2 s hook). It is still scrubbed
+# structurally, with the same rules, but only as far as the prefix that is
+# kept (bounded_scrub): decoding a JSON text runs at C speed, the walk stops
+# once MAX_RESULT_BYTES of scrubbed output exist.
 MAX_STRUCTURAL_SCRUB_BYTES = 2 << 20
 MAX_SPILL_BYTES = 64 * 1024 * 1024
+# How much of a spill file is read. A spill up to this size is read whole,
+# so its JSON decodes and gets the structural scrub; a larger one is cut
+# here, cannot decode, and falls back to redact_json_text.
+MAX_SPILL_READ_BYTES = 16 << 20
 
 DISABLED_FLAG = "disabled"
 GC_STAMP = ".last-gc"
@@ -602,6 +609,122 @@ def redact_plain_text(text: str) -> str:
     return _redact_token_shapes(s)
 
 
+# JSON text that could not be decoded (a document cut short: a spill larger
+# than MAX_SPILL_READ_BYTES, or one leaf cut at the prefix end) still holds
+# JSON-shaped secrets redact_plain_text does not see: the value of a
+# {"name": "<credential key>", "value": ...} pair (a Kubernetes env var) and
+# every value under a headers object. redact_json_text applies those rules
+# textually, then the plain-text rules.
+_HEADERS_OPEN = re.compile(r'"([^"\\\n]{0,256})"[' + _WS + r']*:[' + _WS + r']*\{')
+_FLAT_OBJECT = re.compile(r"\{[^{}]*\}")
+_NAME_VALUE = re.compile(r'"name"[' + _WS + r']*:[' + _WS + r']*"([^"\\\n]{1,256})"[' + _WS + r']*,['
+                         + _WS + r']*"value"[' + _WS + r']*:[' + _WS + r']*')
+
+
+def _string_end(s: str, i: int) -> int:
+    """Index of the quote closing the JSON string whose opening quote is at
+    i - 1 (len(s) when it is unterminated)."""
+    n = len(s)
+    while i < n and s[i] != '"':
+        i += 2 if s[i] == "\\" else 1
+    return min(i, n)
+
+
+def _redact_headers_text(s: str) -> str:
+    """Every string value (not key, not a "name") inside a JSON object whose
+    key is a headers key becomes REDACTED, to the object's end or the text's."""
+    out, last, pos, n = [], 0, 0, len(s)
+    while True:
+        m = _HEADERS_OPEN.search(s, pos)
+        if not m:
+            break
+        if not is_headers_key(m.group(1)):
+            pos = m.end()
+            continue
+        j, depth, prev_key = m.end() - 1, 0, None
+        while j < n:
+            c = s[j]
+            if c == '"':
+                end = _string_end(s, j + 1)
+                q = end + 1
+                while q < n and s[q] in " \t\n\r\f":
+                    q += 1
+                if q < n and s[q] == ":":
+                    prev_key = s[j + 1:end]
+                else:
+                    if prev_key != "name" and end > j + 1:
+                        out.append(s[last:j + 1])
+                        out.append(REDACTED)
+                        last = end
+                    prev_key = None
+                j = end + 1
+                continue
+            if c in "{[":
+                depth += 1
+                prev_key = None
+            elif c in "}]":
+                depth -= 1
+                if depth == 0:
+                    j += 1
+                    break
+            elif c == ",":
+                prev_key = None
+            j += 1
+        pos = j
+    if not out:
+        return s
+    out.append(s[last:])
+    return "".join(out)
+
+
+def _scrub_flat_objects(s: str) -> str:
+    """Each innermost {...} that decodes as a JSON object is scrubbed
+    structurally (so a {name, value} credential pair loses its value) and
+    re-serialized when that changed it."""
+    def repl(m):
+        seg = m.group(0)
+        if '"' not in seg:
+            return seg
+        try:
+            v = _decode_json(seg)
+        except (ValueError, RecursionError):
+            return seg
+        sv = _scrub_at(v, MAX_NESTED_JSON)
+        return seg if sv == v else encode_json(sv)
+    return _FLAT_OBJECT.sub(repl, s)
+
+
+def _redact_name_value_text(s: str) -> str:
+    """"name": "<credential key>", "value": <v> (an object cut before its
+    close, or one _FLAT_OBJECT could not decode): v becomes REDACTED."""
+    out, last = [], 0
+    for m in _NAME_VALUE.finditer(s):
+        if m.start() < last or not is_credential_key(m.group(1)):
+            continue
+        vs, ve = _value_span(s, m.end())
+        if ve == vs or s.startswith(REDACTED, vs):
+            continue
+        out.append(s[last:vs])
+        out.append(REDACTED)
+        last = ve
+    if not out:
+        return s
+    out.append(s[last:])
+    return "".join(out)
+
+
+def redact_json_text(text: str) -> str:
+    """Text that looks like JSON but does not decode (cut short): the JSON
+    rules applied textually (headers objects, {name, value} credential
+    pairs, credential-keyed members of any decodable innermost object), then
+    redact_plain_text."""
+    s = _nul(text)
+    s = _redact_headers_text(s)
+    s = _scrub_flat_objects(s)
+    s = _redact_name_value_text(s)
+    return redact_plain_text(s)
+
+
 # ---------------------------------------------------------------------------
 # tool_response -> model_result body
 # ---------------------------------------------------------------------------
@@ -618,7 +741,8 @@ def _same_json(text: str, want: Any) -> bool:
 
 def normalize(tool_response: Any, spill_root: Optional[Path] = None) -> dict:
     """Claude Code's PostToolUse tool_response for an MCP tool -> an
-    UNSCRUBBED {structured?, text?, other_blocks?, spilled?} body (the shape
+    UNSCRUBBED {structured?, text?, other_blocks?, spilled?, spilled_bytes?}
+    body (spilled_bytes: the spill files' real size; the rest is the shape
     of conductor's model_result). Shapes: a string (the result text, or the
     spill notice, followed when the file resolves under spill_root);
     {content: str | [blocks], structuredContent?}; a list of content blocks;
@@ -629,13 +753,21 @@ def normalize(tool_response: Any, spill_root: Optional[Path] = None) -> dict:
 
     def add_text(t: str) -> None:
         if spill_root is not None and "Output has been saved to" in t:
-            # Past MAX_STRUCTURAL_SCRUB_BYTES only a prefix is kept anyway
-            # (scrub_and_cap), so a 64 MiB spill is not read whole.
-            spilled = read_spill(t, spill_root, read_limit=MAX_STRUCTURAL_SCRUB_BYTES + 1)
-            if spilled is not None:
-                body["spilled"] = True
-                texts.append(spilled)
-                return
+            # Only a prefix of a large result is kept anyway (scrub_and_cap),
+            # so a 64 MiB spill is not read whole.
+            path = spill_path(t, spill_root)
+            if path is not None:
+                try:
+                    size = path.stat().st_size
+                    with open(path, "rb") as f:
+                        spilled = f.read(MAX_SPILL_READ_BYTES).decode("utf-8", errors="ignore")
+                except (OSError, ValueError):
+                    spilled = None
+                if spilled is not None:
+                    body["spilled"] = True
+                    body["spilled_bytes"] = body.get("spilled_bytes", 0) + size
+                    texts.append(spilled)
+                    return
         texts.append(t)
 
     def add_blocks(blocks: list) -> None:
@@ -694,37 +826,164 @@ def _drop_trailing_run(s: str) -> str:
     return s[:i]
 
 
-def _truncated(original_bytes: int, prefix: str, max_bytes: int, scrubbed_as: Optional[str] = None) -> dict:
+def _truncated(original_bytes: int, prefix: str, max_bytes: int) -> dict:
     """conductor truncatedBody, shrunk until its serialization fits."""
     budget = max_bytes - 128
     while True:
         p = _utf8_prefix(prefix, budget)
         env = {"truncated": True, "original_bytes": original_bytes, "prefix": p}
-        if scrubbed_as:
-            env["scrubbed_as"] = scrubbed_as
         n = len(encode_json(env).encode("utf-8"))
         if n <= max_bytes or budget <= 0:
             return env
         budget -= (n - max_bytes) + 16
 
 
+class _Full(Exception):
+    """bounded_scrub has written as much as it keeps."""
+
+
+class _BoundedWriter:
+    """The scrubbed serialization of a value, as encode_json(scrub(value))
+    would write it, stopping (raising _Full) once `limit` characters exist.
+    A leaf cut short also stops it: nothing after a cut leaf is written."""
+
+    def __init__(self, limit: int):
+        self.parts: list = []
+        self.n = 0
+        self.limit = limit
+        # A string this much longer than the room left is not scrubbed whole.
+        self.slack = max(1024, limit // 4)
+
+    def text(self) -> str:
+        return "".join(self.parts)
+
+    def put(self, s: str) -> None:
+        self.parts.append(s)
+        self.n += len(s)
+        if self.n >= self.limit:
+            raise _Full
+
+    def room(self) -> int:
+        return max(1, self.limit - self.n)
+
+    def _members(self, v: dict) -> list:
+        try:
+            return sorted(v.items(), key=lambda kv: kv[0])
+        except TypeError:
+            return sorted(v.items(), key=lambda kv: str(kv[0]))
+
+    def _key(self, k: Any) -> str:
+        return encode_json(_nul(k) if isinstance(k, str) else str(k)) + ":"
+
+    # mode: "scrub" (_scrub_at), "secret" (_redact_secret), "all" (_redact_all)
+    def emit(self, v: Any, depth: int, mode: str = "scrub") -> None:
+        if isinstance(v, str):
+            if mode == "scrub":
+                self._string(v, depth)
+            else:
+                self.put(encode_json(REDACTED))
+            return
+        if isinstance(v, list):
+            self.put("[")
+            for i, e in enumerate(v):
+                if i:
+                    self.put(",")
+                self.emit(e, depth, mode)
+            self.put("]")
+            return
+        if isinstance(v, dict):
+            name = v.get("name")
+            secret_pair = mode == "scrub" and isinstance(name, str) and "value" in v and is_credential_key(name)
+            self.put("{")
+            for i, (k, val) in enumerate(self._members(v)):
+                if i:
+                    self.put(",")
+                self.put(self._key(k))
+                ks = k if isinstance(k, str) else str(k)
+                if mode == "scrub":
+                    if is_headers_key(ks):
+                        self.emit(val, depth, "all")
+                    elif is_credential_key(ks) or (secret_pair and ks == "value"):
+                        self.emit(val, depth, "secret")
+                    else:
+                        self.emit(val, depth, "scrub")
+                elif mode == "secret":
+                    self.emit(val, depth, "scrub" if is_reference_key(ks) else "secret")
+                elif k == "name" and isinstance(val, str):
+                    self.put(encode_json(_nul(val)))
+                else:
+                    self.emit(val, depth, "all")
+            self.put("}")
+            return
+        self.put(encode_json(v))
+
+    def _string(self, s: str, depth: int) -> None:
+        room = self.room()
+        if len(s) <= room + self.slack:
+            self.put(encode_json(scrub_string(s, depth)))
+            return
+        s = _nul(s)
+        t = s.strip()
+        if depth < MAX_NESTED_JSON and t and t[0] in "{[":
+            try:
+                v = _decode_json(t)
+            except (ValueError, RecursionError):
+                # JSON cut short (e.g. a spill read to MAX_SPILL_READ_BYTES).
+                head = _drop_trailing_run(s[:room])
+                self.put(encode_json(redact_json_text(head)))
+                raise _Full
+            inner = _BoundedWriter(room)
+            try:
+                inner.emit(v, depth + 1)
+            except _Full:
+                self.put(encode_json(inner.text()))
+                raise
+            self.put(encode_json(inner.text()))
+            return
+        head = _drop_trailing_run(s[:room])
+        self.put(encode_json(redact_plain_text(head)))
+        raise _Full
+
+
+def bounded_scrub(value: Any, limit: int) -> tuple:
+    """-> (text, complete): the leading `limit`-odd characters of
+    encode_json(scrub(value)), computed without walking the rest of the
+    value. Same rules as scrub(); a string leaf too long to scrub whole is
+    decoded when it is JSON (and walked the same way) or cut and scrubbed
+    as text (redact_json_text / redact_plain_text, both stricter than the
+    leaf rule) when it is not."""
+    w = _BoundedWriter(limit)
+    try:
+        w.emit(value, 0)
+    except _Full:
+        return w.text(), False
+    return w.text(), True
+
+
 def scrub_and_cap(value: Any, max_bytes: int = MAX_RESULT_BYTES,
                   structural_limit: int = MAX_STRUCTURAL_SCRUB_BYTES) -> tuple:
     """-> (stored value, truncated). Scrubs first, then caps, like a gateway
     receipt: a value that serializes to more than max_bytes becomes
-    {truncated: true, original_bytes, prefix}. A value too large to scrub
-    structurally in a hook's budget has only its leading bytes kept, scrubbed
-    as plain text with the stricter error-text rules (scrubbed_as:
-    "plain_text")."""
+    {truncated: true, original_bytes, prefix}. A value whose serialization
+    is over structural_limit is not scrubbed whole: bounded_scrub scrubs it
+    structurally, with the same rules, only as far as the kept prefix."""
     try:
         raw = encode_json(value)
     except (ValueError, TypeError, RecursionError):
         return {"truncated": True, "original_bytes": 0, "prefix": ""}, True
     raw_len = len(raw.encode("utf-8"))
     if raw_len > structural_limit:
-        head = _utf8_prefix(raw, max_bytes)
-        head = _drop_trailing_run(head)
-        return _truncated(raw_len, redact_plain_text(head), max_bytes, "plain_text"), True
+        del raw
+        try:
+            text, complete = bounded_scrub(value, max_bytes)
+        except RecursionError:
+            return {"truncated": True, "original_bytes": raw_len, "prefix": ""}, True
+        if complete and len(text.encode("utf-8")) <= max_bytes:
+            try:
+                return _decode_json(text), False
+            except (ValueError, RecursionError):
+                pass
+        return _truncated(raw_len, text, max_bytes), True
     scrubbed = scrub(value)
     out = encode_json(scrubbed)
     if len(out.encode("utf-8")) <= max_bytes:
@@ -760,6 +1019,7 @@ def build_entry(*, server: str, tool: str, tool_name: str, tool_input: Any, tool
     args, args_truncated = scrub_and_cap(tool_input if tool_input is not None else {}, MAX_ARGS_BYTES)
     body = normalize(tool_response, spill_root)
     spilled = bool(body.pop("spilled", False))
+    spilled_bytes = body.pop("spilled_bytes", None)
     result, truncated = scrub_and_cap(body, MAX_RESULT_BYTES)
     entry = {
         "schema": SCHEMA,
@@ -778,6 +1038,8 @@ def build_entry(*, server: str, tool: str, tool_name: str, tool_input: Any, tool
         entry["args_truncated"] = True
     if spilled:
         entry["spilled"] = True
+        if isinstance(spilled_bytes, int):
+            entry["spilled_bytes"] = spilled_bytes
     if isinstance(tool_use_id, str) and len(tool_use_id) <= 256:
         entry["tool_use_id"] = tool_use_id
     if agent:
@@ -786,11 +1048,16 @@ def build_entry(*, server: str, tool: str, tool_name: str, tool_input: Any, tool
 
 
 def _ensure_private_dir(path: Path) -> None:
-    """mkdir 0700 (or tighten an existing one we own); refuse a symlink."""
+    """mkdir 0700 (or tighten an existing one we own); refuse a symlink.
+    Concurrent hooks race to create the same directory; losing that race is
+    fine (the lstat after it still refuses a planted link)."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
-        os.mkdir(path, 0o700)
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
         st = os.lstat(path)
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
         raise OSError(f"not a private directory: {path}")
@@ -817,10 +1084,17 @@ def write_entry(root: Path, entry: dict) -> Path:
     directories 0700, the file 0600 (mkstemp creates it 0600; os.replace
     swaps it in whole)."""
     root = Path(root)
-    ensure_root(root)
     path = entry_path(root, entry.get("session_id"), entry["evidence_id"])
-    _ensure_private_dir(path.parent)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ev_", suffix=".tmp")
+    for attempt in (0, 1):
+        ensure_root(root)
+        _ensure_private_dir(path.parent)
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ev_", suffix=".tmp")
+            break
+        except FileNotFoundError:
+            # gc() removed the (still empty) session directory in between.
+            if attempt:
+                raise
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
@@ -842,9 +1116,15 @@ def read_entry(root: Path, ev_id: str) -> Optional[dict]:
     try:
         for sdir in Path(root).iterdir():
             p = sdir / f"{ev_id}.json"
-            if sdir.is_dir() and not sdir.is_symlink() and p.is_file():
-                data = json.loads(p.read_text(encoding="utf-8"))
-                return data if isinstance(data, dict) else None
+            try:
+                if not stat.S_ISDIR(os.lstat(sdir).st_mode) or not stat.S_ISREG(os.lstat(p).st_mode):
+                    continue
+            except OSError:
+                continue
+            fd = os.open(str(p), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "r", encoding="utf-8") as f:
+                data = json.loads(f.read())
+            return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
     return None

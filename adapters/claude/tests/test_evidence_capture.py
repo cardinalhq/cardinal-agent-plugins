@@ -128,6 +128,31 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self.assertNotIn("spilled", entry)
         self.assertNotIn("TOP-SECRET-FILE", path.read_text())
 
+    def test_large_spilled_pod_list_keeps_env_pair_and_header_secrets_off_disk(self):
+        # A kube MCP's `get pods -o json` easily passes the 2 MiB structural
+        # limit; the stored prefix must still get the {name, value} pair and
+        # headers rules, not just the plain-text ones.
+        pod = {"metadata": {"name": "api-0", "annotations": {"note": "x" * 200}},
+               "spec": {"containers": [{"name": "app",
+                                        "env": [{"name": "DB_PASSWORD", "value": "hunter2-plaintext"},
+                                                {"name": "LOG_LEVEL", "value": "info"}],
+                                        "probe": {"headers": {"X-Tenant": "tenant-secret-zzz"}}}]}}
+        spill = self.home / ".claude" / "projects" / "-w" / SESSION / "tool-results" / "mcp-kube-1.txt"
+        spill.parent.mkdir(parents=True)
+        spill.write_text(json.dumps({"kind": "PodList", "items": [pod] * 8000}))
+        size = spill.stat().st_size
+        self.assertGreater(size, 2 << 20)
+        notice = f"Error: result exceeds maximum allowed tokens. Output has been saved to {spill}.\n"
+        _, _, entry, path = self._captured(self._run(self._payload(tool_response=notice,
+                                                                   tool_name="mcp__kube__list_pods")))
+        stored = path.read_text()
+        self.assertNotIn("hunter2-plaintext", stored)
+        self.assertNotIn("tenant-secret-zzz", stored)
+        self.assertIn("LOG_LEVEL", stored)
+        self.assertIs(entry["truncated"], True)
+        self.assertEqual(entry["spilled_bytes"], size)
+        self.assertLessEqual(len(json.dumps(entry["result"]).encode("utf-8")), 300 * 1024)
+
     # -- skip list / non-MCP ---------------------------------------------------
 
     def test_cardinal_gateway_tools_and_non_mcp_tools_are_skipped(self):

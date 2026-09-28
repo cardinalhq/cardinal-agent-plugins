@@ -11,8 +11,10 @@ import random
 import re
 import stat
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from cardinal_core import evidence as ev
@@ -135,7 +137,7 @@ class NormalizeTests(unittest.TestCase):
         spill.parent.mkdir(parents=True)
         spill.write_text('{"rows":[1,2,3]}')
         body = ev.normalize(self._notice(spill), spill_root=self.projects)
-        self.assertEqual(body, {"spilled": True, "text": ['{"rows":[1,2,3]}']})
+        self.assertEqual(body, {"spilled": True, "spilled_bytes": 16, "text": ['{"rows":[1,2,3]}']})
         body = ev.normalize({"content": [{"type": "text", "text": self._notice(spill)}]}, spill_root=self.projects)
         self.assertTrue(body["spilled"])
         # Without a spill root the notice is kept as text.
@@ -181,13 +183,92 @@ class CapTests(unittest.TestCase):
         self.assertNotIn("LEAK", out["prefix"])
         self.assertTrue(out["prefix"].startswith('{"structured":{"rows":[{"i":0,'))
 
-    def test_too_large_to_scrub_structurally_uses_the_strict_plain_text_rules(self):
+    def test_too_large_to_scrub_whole_is_still_scrubbed_structurally(self):
         text = json.dumps({"password": "LEAK-A", "rows": ["y" * 100] * 50})
         out, truncated = ev.scrub_and_cap({"text": [text]}, max_bytes=2048, structural_limit=1024)
         self.assertTrue(truncated)
-        self.assertEqual(out["scrubbed_as"], "plain_text")
+        self.assertEqual(set(out), {"truncated", "original_bytes", "prefix"})
         self.assertNotIn("LEAK", out["prefix"])
+        self.assertIn('\\"password\\":\\"[redacted]\\"', out["prefix"])
         self.assertLessEqual(len(ev.encode_json(out).encode("utf-8")), 2048)
+
+    def test_bounded_scrub_is_a_prefix_of_the_whole_scrub(self):
+        rows = [{"i": i, "name": "DB_PASSWORD" if i % 3 == 0 else "LEVEL", "value": f"v{i}",
+                 "headers": {"X-Tenant": f"t{i}", "name": "keep"}, "auth": {"secretRef": "s", "key": f"k{i}"},
+                 "note": f"postgres://u:p{i}@db/x ghp_{'A' * 30}", "nested": json.dumps({"api_key": f"n{i}"})}
+                for i in range(300)]
+        value = {"structured": {"rows": rows}, "text": [json.dumps({"rows": rows})]}
+        whole = ev.encode_json(ev.scrub(value))
+        for limit in (1, 50, 997, 4096, 30000, len(whole) + 10):
+            text, complete = ev.bounded_scrub(value, limit)
+            self.assertTrue(whole.startswith(text), limit)
+            self.assertGreaterEqual(len(text), min(limit, len(whole)), limit)
+            self.assertEqual(complete, text == whole, limit)
+
+    def _pod_list(self, n: int) -> dict:
+        # `kubectl get pods -o json` shape: a credential env var as a
+        # {name, value} pair and a probe's headers object.
+        def pod(i):
+            return {"metadata": {"name": f"pod-{i}", "annotations": {"note": "x" * 200}},
+                    "spec": {"containers": [{"name": "app",
+                                             "env": [{"name": "DB_PASSWORD", "value": "hunter2-plaintext"},
+                                                     {"name": "LOG_LEVEL", "value": "info"}],
+                                             "livenessProbe": {"httpGet": {
+                                                 "path": "/healthz",
+                                                 "httpHeaders": [{"name": "X-Tenant", "value": "tenant-hdr-yyy"}],
+                                                 "headers": {"X-Tenant": "tenant-secret-zzz"}}}}]}}
+        return {"kind": "PodList", "items": [pod(i) for i in range(n)]}
+
+    def test_result_over_the_structural_limit_keeps_pair_and_header_rules(self):
+        pods = self._pod_list(8000)
+        text = json.dumps(pods)
+        self.assertGreater(len(text), ev.MAX_STRUCTURAL_SCRUB_BYTES)
+        for body in ({"text": [text]}, {"structured": pods}, {"structured": pods, "text": [text]},
+                     {"text": [json.dumps({"content": [{"type": "text", "text": text}]})]}):
+            out, truncated = ev.scrub_and_cap(body)
+            self.assertTrue(truncated)
+            stored = json.dumps(out)
+            self.assertLessEqual(len(ev.encode_json(out).encode("utf-8")), ev.MAX_RESULT_BYTES)
+            self.assertNotIn("hunter2-plaintext", stored)
+            self.assertNotIn("tenant-secret-zzz", stored)
+            self.assertIn("[redacted]", stored)
+            self.assertIn("LOG_LEVEL", stored)
+            self.assertIn("info", stored)
+            self.assertGreater(out["original_bytes"], ev.MAX_STRUCTURAL_SCRUB_BYTES)
+            self.assertGreater(len(out["prefix"]), ev.MAX_RESULT_BYTES // 2)
+
+    def test_json_cut_short_over_the_structural_limit_keeps_pair_and_header_rules(self):
+        text = json.dumps(self._pod_list(8000))
+        cut = text[: len(text) - 1000]  # a spill read to MAX_SPILL_READ_BYTES does not decode
+        out, truncated = ev.scrub_and_cap({"text": [cut]})
+        self.assertTrue(truncated)
+        stored = json.dumps(out)
+        self.assertNotIn("hunter2-plaintext", stored)
+        self.assertNotIn("tenant-secret-zzz", stored)
+        self.assertIn("LOG_LEVEL", stored)
+
+    def test_redact_json_text(self):
+        cases = [
+            ('[{"name": "DB_PASSWORD", "value": "hunter2"}, {"name": "LEVEL", "value": "info"}',
+             '[{"name":"DB_PASSWORD","value":"[redacted]"}, {"name": "LEVEL", "value": "info"}'),
+            ('{"name":"API_TOKEN","value":"ab}cd"}', '{"name":"API_TOKEN","value":"[redacted]"}'),
+            ('{"env":[{"name":"DB_PASSWORD","value":"cut-her', '{"env":[{"name":"DB_PASSWORD","value":"[redacted]'),
+            ('{"headers": {"X-Tenant": "t-1", "name": "keep", "Accept": ["a", "b"]}, "after": "ok"}',
+             '{"headers": {"X-Tenant": "[redacted]", "name": "keep", "Accept": ["[redacted]", "[redacted]"]}, '
+             '"after": "ok"}'),
+            ('{"requestHeaders": {"Cookie": "sess=1", "X-A": "open-ended', '{"requestHeaders": {"Cookie": "[redacted]", "X-A": "[redacted]'),
+            ('{"header": "not-a-headers-object"}', '{"header": "not-a-headers-object"}'),
+            ('{"name": "LEVEL", "value": "info"}', '{"name": "LEVEL", "value": "info"}'),
+        ]
+        for text, want in cases:
+            self.assertEqual(ev.redact_json_text(text), want, text)
+
+    def test_redact_json_text_stays_fast(self):
+        for text in ('{"headers":{' + '"a":"b",' * (1 << 16), '{' * (1 << 18), '{"a":1}' * (1 << 16),
+                     '"name":"password","value":' * (1 << 14)):
+            t0 = time.monotonic()
+            ev.redact_json_text(text)
+            self.assertLess(time.monotonic() - t0, 2.0)
 
     def test_a_token_cut_at_the_prefix_end_is_dropped(self):
         tok = "ghp_" + "Z" * 36
@@ -254,6 +335,56 @@ class EntryTests(unittest.TestCase):
         self.assertEqual([p.name for p in path.parent.iterdir()], [path.name], "no temp file left behind")
         self.assertEqual(ev.read_entry(self.root, e["evidence_id"]), e)
         self.assertIsNone(ev.read_entry(self.root, "../../etc/passwd"))
+
+    def test_concurrent_writes_into_a_new_session_all_land(self):
+        # Parallel MCP calls in a new session race to create the root and
+        # the session directory; every capture must still be written.
+        for trial in range(20):
+            root = self.home / f"r{trial}" / ".cardinal" / "evidence"
+            entries = [self._entry(called_at=f"2026-09-28T12:00:00.{i:06d}Z") for i in range(8)]
+            barrier = threading.Barrier(len(entries))
+            errors = []
+
+            def write(e):
+                try:
+                    barrier.wait()
+                    ev.write_entry(root, e)
+                except BaseException as exc:  # noqa: BLE001 - recorded for the assertion
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=write, args=(e,)) for e in entries]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            for e in entries:
+                self.assertTrue((root / "sess-1" / f"{e['evidence_id']}.json").is_file())
+            self.assertEqual(stat.S_IMODE(os.stat(root / "sess-1").st_mode), 0o700)
+
+    def test_session_dir_removed_by_gc_before_the_write_is_recreated(self):
+        real = tempfile.mkstemp
+        calls = []
+
+        def racing_mkstemp(*a, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                os.rmdir(kw["dir"])  # gc() emptied and removed it
+            return real(*a, **kw)
+
+        with mock.patch.object(ev.tempfile, "mkstemp", side_effect=racing_mkstemp):
+            path = ev.write_entry(self.root, self._entry())
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(path.is_file())
+
+    def test_read_entry_refuses_a_symlinked_entry(self):
+        e = self._entry()
+        outside = self.home / "planted.json"
+        outside.write_text(json.dumps({"evidence_id": e["evidence_id"], "planted": True}))
+        sdir = self.root / "sess-1"
+        sdir.mkdir(parents=True)
+        (sdir / f"{e['evidence_id']}.json").symlink_to(outside)
+        self.assertIsNone(ev.read_entry(self.root, e["evidence_id"]))
 
     def test_loose_permissions_are_tightened(self):
         self.root.mkdir(parents=True, mode=0o755)
