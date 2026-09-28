@@ -128,7 +128,6 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "model_result_omitted",
             '{receiptId, selector: "/error/message"}',
             "verbose: true",
-            "openQuestions",
         ):
             self.assertIn(needle, text)
         # Superseded text must not come back: failed reads now get receipts,
@@ -148,6 +147,27 @@ class StoryboardSkillTextTests(unittest.TestCase):
             self.assertIn("v1.97.14 or newer", text, path.name)
             self.assertNotIn("v1.97.12", text, path.name)
 
+    def test_semantic_fixes_stay_pinned(self):
+        # Quality-pass fixes (b), (c), (d), (f); deleting any of them must fail.
+        text = " ".join(STORYBOARD_SKILL.read_text().split())
+        for needle in (
+            # (b) the viewer owns state and open questions; the canvas may still
+            # draw the relationship a claim names.
+            "The viewer renders each scene's state and its `openQuestions` from the spec; "
+            'do not draw state pills or a "still open" list in the Canvas',
+            # (c)
+            "An attribution that is only `correlates_with`",
+            "never inside another claim's from/to",
+            # (d)
+            "an established cause with an open impact is `supported`, with open questions",
+            # (f)
+            "`rules.prose_numbers`",
+            "the check never reads Canvas source, so bind every number a canvas draws",
+        ):
+            self.assertIn(needle, text)
+        # (b) must not tell the canvas to leave out the claims it visualizes.
+        self.assertNotIn("the claims (as sentences)", text)
+
     def test_titles_carry_no_fixed_prefix(self):
         text = " ".join(STORYBOARD_SKILL.read_text().split())
         self.assertIn('**Titles are findings, not topics**, in about one clause, with no fixed prefix', text)
@@ -156,8 +176,14 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # rjha, 2026-09-28: no new visual-style doctrine, and the skills must not
         # grow; new tool shapes replace superseded text. Baseline: plugin 0.33.1,
         # storyboard 209 + canvas 268 lines.
-        total = sum(len(p.read_text().splitlines()) for p in (STORYBOARD_SKILL, CANVAS_SKILL))
+        paths = (STORYBOARD_SKILL, CANVAS_SKILL)
+        total = sum(len(p.read_text().splitlines()) for p in paths)
         self.assertLessEqual(total, 477)
+        # Lines alone can be gamed by re-flowing, so words are capped too. 0.33.1
+        # had 2262 + 2592 = 4854 words; 0.34.0's tool reference is 55 words longer
+        # (4909). The cap stops further growth; it does not claim a word-neutral 0.34.0.
+        words = sum(len(p.read_text().split()) for p in paths)
+        self.assertLessEqual(words, 4909)
 
 
 if __name__ == "__main__":

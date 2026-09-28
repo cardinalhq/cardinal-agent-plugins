@@ -93,16 +93,16 @@ What should be visually dominant? What can disappear?*
   the evidence eliminated and `open` when the scene settles nothing; an open ending is
   valid. Never manufacture closure to make the story neater.
 - **`transition.note` is written for the reader**: the viewer shows it as the line that says
-  why this scene comes next. The viewer renders the state, this note, the claims (as
-  sentences) and the `openQuestions` from the spec, so do not draw them in the Canvas: a
-  copy in pixels drifts from the spec.
+  why this scene comes next. The viewer renders each scene's state and its `openQuestions`
+  from the spec; do not draw state pills or a "still open" list in the Canvas: a copy in
+  pixels drifts from the spec.
 - **One point per scene.** The `statement` must stand on its own, without the visual. Every
   number in it must be a value the scene binds (its own bindings or its surface's), or the
-  prose-number check warns. It skips dates, clock times, versions, cron, ids and digits
-  glued to letters (p99, 1h30m), and checks every other quantity, 1.4 included; the exact
-  list is `describe_grammar {section: "rules"}` → `rules.prose_numbers`. A bound numeric
-  string ("0.05") matches as written; the check never reads Canvas source, so bind every
-  number a canvas draws.
+  prose-number check warns. It skips dates, clock times, versions (1.97.13, v1.4), cron, ids
+  and digits glued to letters (p99, 1h30m), and checks every other quantity, a bare 1.4
+  included; the exact list is `describe_grammar {section: "rules"}` → `rules.prose_numbers`.
+  A bound numeric string ("0.05") matches as written; the check never reads Canvas source,
+  so bind every number a canvas draws.
 - **Claims are evidence first.** Type them honestly: `precedes` is not `causes`. Causal kinds
   (`causes`, `contributes_to`) need an evidence ref with role `supports` (an evidence-ref
   role, not the claim kinds `supports` / `contradicts` / `rules_out`). Say how far a claim
@@ -136,7 +136,8 @@ What should be visually dominant? What can disappear?*
     strict types (`"200"` ≠ `200`); exactly one row must match (`select_no_match` names
     nearby values; `select_ambiguous`: add fields). It needs no `expect` guard; a positional
     selector (`/data_points/3/…`) still does. A value inside a JSON string (kube events,
-    log lines) needs `extract`; `extract {parse: "json", pointer: ""}` turns `"5"` into 5.
+    log lines) needs `extract`; derive never coerces a string, and `extract {parse: "json",
+    pointer: ""}` turns `"5"` into 5.
   - **Reuse a value with `ref`**: `{ref: <binding key>, pointer?}` reads this scene's
     bindings (its surface's and its own); across scenes, bind it on the surface. Declare
     `unit` on the target, not the ref; a `pointer` reaches into receipt-read values only,
