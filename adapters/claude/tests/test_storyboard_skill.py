@@ -167,10 +167,10 @@ class StoryboardSkillTextTests(unittest.TestCase):
         self.assertIn("source · select · ref · derive · reduce · extract", CANVAS_SKILL.read_text())
 
     def test_skills_pin_the_maestro_version_the_evidence_tools_need(self):
-        # v1.97.14 is the first maestro tag carrying conductor #1958 and #1959.
+        # v1.97.15 is the first maestro tag carrying conductor #1958, #1959 and #1961.
         for path in (STORYBOARD_SKILL, STORYBOARD_SKILL.parent / "README.md"):
             text = path.read_text()
-            self.assertIn("v1.97.14 or newer", text, path.name)
+            self.assertIn("v1.97.15 or newer", text, path.name)
             self.assertNotIn("v1.97.12", text, path.name)
 
     def test_semantic_fixes_stay_pinned(self):

@@ -19,7 +19,7 @@ bindings, receipts, derived values, libraries, static source checks, and the num
 statement against the resolved bindings. It never renders anything or inspects pixels.
 Rendering is authoring feedback, done locally by the plugin (canvas skill); a skipped preview
 is a quality problem, not a trust violation. Storyboards are on for every org. This skill
-targets Cardinal (maestro) **v1.97.14 or newer**; an older one rejects `select` and `ref`,
+targets Cardinal (maestro) **v1.97.15 or newer**; an older one rejects `select` and `ref`,
 so ask the user to upgrade.
 
 ## Receipts: collect them while you investigate
