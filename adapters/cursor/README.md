@@ -83,6 +83,10 @@ Unverified, and worth knowing:
 - **Turning capture on doesn't affect sessions that are already open.** Start a new chat to pick it up.
 - **User Rules are not used.** They live only in Cursor Settings (*Customize → Rules*), and there's no file on disk the plugin could write ([rules docs](https://cursor.com/docs/context/rules)). Project rules (`.cursor/rules/*.mdc`) would have to be committed to each repo.
 
+## Evidence capture (storyboards)
+
+The `postToolUse` hook records the result of every successful call to a non-Cardinal MCP server (tool name `mcp__<server>__<tool>`) in the local evidence spool shared with the Claude plugin: `~/.cardinal/evidence/<conversation_id>/ev_<id>.json` (directories 0700, files 0600, credentials scrubbed with a port of the gateway's receipt scrub, results capped at 256 KiB, entries removed after 14 days). It hands the agent `[evidence:ev_…] captured locally from <server>/<tool>` via `additional_context`, so an Investigation Storyboard can later cite the result as *captured* evidence. Entries name the client `cursor/<cursor_version>`. Nothing leaves the machine: a result is uploaded only when it is cited in a storyboard. Cardinal's own `cardinal` server is skipped (its gateway mints witnessed receipts). Opt out with `CARDINAL_EVIDENCE_CAPTURE=0` or the flag file `~/.cardinal/evidence/disabled`. Capture is local file work and fails open.
+
 ## Cloud agents
 
 Cursor cloud agents do **not** load `~/.cursor/hooks.json`. They only load `.cursor/hooks.json` at the repo root, plus team/enterprise hooks distributed centrally. To send Cardinal telemetry from cloud-agent runs:

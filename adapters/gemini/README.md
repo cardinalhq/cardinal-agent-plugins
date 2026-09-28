@@ -53,6 +53,10 @@ before starting Gemini CLI — raw hook payloads land under
 plugin maintainers so the parity spec (`docs/specs/gemini-parity.md`) can be
 locked to real key names.
 
+## Evidence capture (storyboards)
+
+The `AfterTool` hook records the result of every successful call to a non-Cardinal MCP server (identified by `mcp_context`) in the local evidence spool shared with the Claude plugin: `~/.cardinal/evidence/<session_id>/ev_<id>.json` (directories 0700, files 0600, credentials scrubbed with a port of the gateway's receipt scrub, results capped at 256 KiB, entries removed after 14 days). Gemini's `<untrusted_context>` wrapper is removed so the spool keeps what the server returned, and `mcp_context`'s connection details (command, args, url) are never recorded. The hook returns `[evidence:ev_…] captured locally from <server>/<tool>` as `additionalContext`, so an Investigation Storyboard can later cite the result as *captured* evidence. Entries name the client `gemini/<version>`, read from the installed `@google/gemini-cli` package (Gemini's hook payload carries no version; `gemini` alone when it cannot be found). Nothing leaves the machine: a result is uploaded only when it is cited in a storyboard. Failed calls and Cardinal's own `cardinal` server are skipped. Opt out with `CARDINAL_EVIDENCE_CAPTURE=0` or the flag file `~/.cardinal/evidence/disabled`. Capture is local file work and fails open.
+
 ## Session context & spend limits
 
 Parity features with the Claude, Codex, and Cursor plugins, driven by the

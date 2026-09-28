@@ -29,6 +29,9 @@ What this module owns:
     to scrub whole in a hook's budget is scrubbed structurally only as far
     as the prefix it keeps (bounded_scrub), with the same rules.
   - write_entry(): atomic write, directories 0700, files 0600.
+  - capture(): the whole per-call step a client hook runs (opt-out check,
+    build, write, gc), shared by the Claude, Cursor and Gemini adapters;
+    client_string() spells the entry's client ("cursor/1.7.29").
   - gc(): opportunistic, time-bounded removal of entries past retention.
   - spill_path()/read_spill(): Claude Code's spill-file follower, shared
     with the storyboard preview hook.
@@ -1128,6 +1131,61 @@ def read_entry(root: Path, ev_id: str) -> Optional[dict]:
     except (OSError, ValueError):
         return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Client capture: one MCP call, as a client hook records it
+# ---------------------------------------------------------------------------
+
+# A version token a client reports about itself ("1.7.29", "0.50.0-nightly.1").
+_CLIENT_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,63}")
+_CLIENT_NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+
+
+def client_string(name: str, version: Any = None) -> str:
+    """The client an entry names: "<name>/<version>" (e.g. "cursor/1.7.29",
+    the shape of a receipt's `client`), or the bare name when the version is
+    missing or is not a plain version token (it comes from a hook payload or
+    a file on disk, so it is never trusted into the spool as free text)."""
+    if not isinstance(name, str) or not _CLIENT_NAME_RE.fullmatch(name):
+        raise ValueError("bad client name")
+    if isinstance(version, str) and _CLIENT_VERSION_RE.fullmatch(version):
+        return f"{name}/{version}"
+    return name
+
+
+def captured_line(ev_id: str, server: str, tool: str) -> str:
+    """The context line a hook hands the model beside a captured result."""
+    return f"[evidence:{ev_id}] captured locally from {server}/{tool}"
+
+
+def capture(home: Path, *, server: str, tool: str, tool_name: str, tool_input: Any, tool_response: Any,
+            session_id: Any, tool_use_id: Any = None, agent: str = "", spill_root: Optional[Path] = None,
+            env: Optional[dict] = None) -> Optional[dict]:
+    """Record one MCP call in the spool under home: nothing when the user
+    opted out (capture_disabled), else build_entry -> write_entry, then an
+    opportunistic gc(). Returns the written entry, or None when disabled.
+    A failed write raises; hooks call this inside their fail-open guard."""
+    root = default_root(home)
+    if capture_disabled(root, env):
+        return None
+    entry = build_entry(
+        server=server,
+        tool=tool,
+        tool_name=tool_name,
+        tool_input=tool_input,
+        tool_response=tool_response,
+        session_id=session_id,
+        spill_root=spill_root,
+        tool_use_id=tool_use_id,
+        agent=agent,
+    )
+    write_entry(root, entry)
+    try:
+        gc(root)
+    except Exception:
+        pass
+    return entry
 
 
 # ---------------------------------------------------------------------------

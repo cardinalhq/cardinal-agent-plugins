@@ -419,6 +419,71 @@ class EntryTests(unittest.TestCase):
         self.assertTrue(ev.capture_disabled(self.root, env={}))
 
 
+class CaptureTests(unittest.TestCase):
+    """capture(): the per-call step the Claude, Cursor and Gemini hooks share."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(os.path.realpath(self.tmp.name))
+        self.root = ev.default_root(self.home)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _capture(self, env=None, **over):
+        kw = dict(server="grafana", tool="query_prometheus", tool_name="mcp__grafana__query_prometheus",
+                  tool_input={"expr": "up", "password": "LEAK-ARG"},
+                  tool_response={"content": [{"type": "text", "text": "series: 3"}]},
+                  session_id="conv-1", tool_use_id="tu_1", agent="cursor/1.7.29")
+        kw.update(over)
+        return ev.capture(self.home, env={} if env is None else env, **kw)
+
+    def test_client_string(self):
+        self.assertEqual(ev.client_string("cursor", "1.7.29"), "cursor/1.7.29")
+        self.assertEqual(ev.client_string("gemini", "0.50.0-nightly.20260901"), "gemini/0.50.0-nightly.20260901")
+        # Missing or not a plain version token: the bare name, never free text.
+        for v in (None, "", 7, "1.0; rm -rf /", "../1", "1.0/2", "v" * 65, "\n1.0", "1.0\n", " 1.0", ".1"):
+            self.assertEqual(ev.client_string("cursor", v), "cursor", repr(v))
+        for bad in ("", "Cursor", "a/b", "x y", "cursor\n", None):
+            with self.assertRaises(ValueError):
+                ev.client_string(bad, "1.0")
+
+    def test_captured_line(self):
+        self.assertEqual(ev.captured_line("ev_0123456789ab", "grafana", "query_prometheus"),
+                         "[evidence:ev_0123456789ab] captured locally from grafana/query_prometheus")
+
+    def test_capture_writes_a_scrubbed_private_entry(self):
+        e = self._capture()
+        path = self.root / "conv-1" / f"{e['evidence_id']}.json"
+        self.assertTrue(path.is_file())
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.root / "conv-1").stat().st_mode), 0o700)
+        on_disk = json.loads(path.read_text())
+        self.assertEqual(on_disk, e)
+        self.assertEqual(on_disk["agent"], "cursor/1.7.29")
+        self.assertEqual(on_disk["tool_use_id"], "tu_1")
+        self.assertEqual(on_disk["args"], {"expr": "up", "password": "[redacted]"})
+        self.assertEqual(on_disk["result"], {"text": ["series: 3"]})
+        self.assertNotIn("LEAK", path.read_text())
+
+    def test_capture_honours_the_opt_out(self):
+        self.assertIsNone(self._capture(env={"CARDINAL_EVIDENCE_CAPTURE": "0"}))
+        self.assertFalse(self.root.exists())
+        self.root.mkdir(parents=True)
+        (self.root / "disabled").touch()
+        self.assertIsNone(self._capture())
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["disabled"])
+
+    def test_capture_raises_on_a_refused_spool_for_the_caller_to_swallow(self):
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+        (self.home / ".cardinal").mkdir()
+        os.symlink(elsewhere, self.root)
+        with self.assertRaises(OSError):
+            self._capture()
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+
 class GCTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
