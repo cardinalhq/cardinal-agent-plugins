@@ -13,7 +13,8 @@ Contract:
     directory (a storyboard does not need a git repo). SessionStart also
     fires on resume / clear / compact, so the id survives compaction.
   - No session-id sentence when there is no id, or the id is not one maestro accepts
-    (^[A-Za-z0-9_-]{1,128}$, routes/storyboards-mcp-tools.ts CreateSchema).
+    (^[A-Za-z0-9_-]{1,128}$, routes/storyboards-mcp-tools.ts CreateSchema),
+    or when not connected (no storyboard__create to pass it to).
   - Not connected (hooks/_connection.py: no Cardinal key, ingest key or
     connect state): one line on how to get write access (sign up at
     app.cardinalhq.io, then /cardinal:connect, which stores an API key) and why /mcp
@@ -135,8 +136,14 @@ def main() -> None:
     except Exception:
         payload = {}
     sid = session_id(payload)
+    try:
+        connected = _connection.is_connected()
+    except Exception:
+        connected = False
     parts = []
-    if sid:
+    # Unconnected, the storyboard__* tools do not exist (the cardinal server
+    # has no URL), so the id would only point Claude at a missing tool.
+    if sid and connected:
         parts.append(
             f"Cardinal session id for this session: {sid}. "
             "Pass it as session_id to storyboard__create."
@@ -148,7 +155,7 @@ def main() -> None:
     if warning:
         parts.append(warning)
     try:
-        hint = connect_hint(payload.get("source"))
+        hint = None if connected else connect_hint(payload.get("source"))
     except Exception:
         hint = None
     if hint:

@@ -412,11 +412,15 @@ class StoryboardHooksUnconnectedTests(_GuardedCase):
         (self.home / ".claude").mkdir(parents=True)
         self.env = {"HOME": str(self.home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 
-    def test_session_hook_puts_the_session_id_in_context(self):
+    def test_session_hook_omits_the_session_id_when_not_connected(self):
+        # No cardinal server, so no storyboard__create to pass the id to.
         proc = self.guarded_run(HOOKS / "storyboard-session.py",
                                 {"session_id": SESSION, "hook_event_name": "SessionStart"}, self.env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(SESSION, json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"])
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn(SESSION, ctx)
+        self.assertNotIn("storyboard__create", ctx)
+        self.assertIn("Cardinal is not connected", ctx)
         self.assertEqual(self.guard_lines(), [])
 
     def _session(self, sid=SESSION, source="startup", raw_env=None) -> str:
@@ -463,26 +467,28 @@ class StoryboardHooksUnconnectedTests(_GuardedCase):
         self.assertNotIn("CARDINAL_MCP_API_KEY", ctx)
 
     def test_session_hook_does_not_warn_when_connected_or_keyless(self):
+        # (label, settings env, process env, connected -> session id in context)
         cases = (
-            ("nothing", {}, None),
+            ("nothing", {}, None, False),
             ("connected", {"CARDINAL_MCP_URL": "https://app.cardinalhq.io/api/orgs/o1/mcp",
-                           "CARDINAL_MCP_API_KEY": "ck_1"}, None),
-            ("empty key", {"CARDINAL_MCP_API_KEY": ""}, None),
-            ("blank key", {"CARDINAL_MCP_API_KEY": "  "}, None),
-            ("url only", {"CARDINAL_MCP_URL": "https://maestro.example/mcp"}, None),
-            ("url from shell", {"CARDINAL_MCP_API_KEY": "ck_1"}, {"CARDINAL_MCP_URL": "https://maestro.example/mcp"}),
+                           "CARDINAL_MCP_API_KEY": "ck_1"}, None, True),
+            ("empty key", {"CARDINAL_MCP_API_KEY": ""}, None, False),
+            ("blank key", {"CARDINAL_MCP_API_KEY": "  "}, None, False),
+            ("url only", {"CARDINAL_MCP_URL": "https://maestro.example/mcp"}, None, False),
+            ("url from shell", {"CARDINAL_MCP_API_KEY": "ck_1"}, {"CARDINAL_MCP_URL": "https://maestro.example/mcp"}, True),
         )
-        for i, (label, settings, raw_env) in enumerate(cases):
+        for i, (label, settings, raw_env, connected) in enumerate(cases):
             with self.subTest(label):
                 self._settings(settings)
                 ctx = self._session(sid=f"s-{i}", raw_env=raw_env)
-                self.assertIn(f"s-{i}", ctx)
+                (self.assertIn if connected else self.assertNotIn)(f"s-{i}", ctx)
                 self.assertNotIn("CARDINAL_MCP_API_KEY", ctx)
 
     def test_session_hook_gives_unconnected_users_a_one_line_hint_once(self):
         # First unconnected startup on this machine: "tell the user once".
         ctx = self._session()
-        self.assertIn(SESSION, ctx)
+        self.assertNotIn(SESSION, ctx, "no storyboard__create to pass the id to")
+        self.assertTrue(ctx.startswith("Tell the user once"), ctx)
         hint = ctx[ctx.index("Tell the user once"):]
         self.assertNotIn("\n", hint, "one line")
         self.assertIn("Cardinal is not connected", hint)
