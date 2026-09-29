@@ -146,8 +146,9 @@ class GeminiEvidenceCaptureTests(unittest.TestCase):
         self.assertEqual(entry["tool_name"], "mcp__grafana__query_prometheus")
         self.assertEqual(entry["agent"], "gemini")
         self.assertEqual(entry["args"], {"expr": "rate(http_requests_total[5m])", "datasourceUid": "prom"})
-        # Gemini's <untrusted_context> wrapper is not part of the result.
-        self.assertEqual(entry["result"], {"text": ['{"series": 3}']})
+        # Gemini's <untrusted_context> wrapper is not part of the result; the
+        # one JSON text left is the tool's structured result.
+        self.assertEqual(entry["result"], {"structured": {"series": 3}})
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
 

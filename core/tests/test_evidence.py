@@ -91,9 +91,20 @@ class LinearScannerParityTests(unittest.TestCase):
             want = [(m.end(1), m.end()) for m in go.finditer(s)]
             self.assertEqual(ev._url_userinfo_spans(s), want, repr(s))
 
+    def test_pem_scanner_equals_single_pattern(self):
+        go = re.compile(ev.GO_PEM_PRIVATE_KEY, re.ASCII)
+        rnd = random.Random(1944)
+        pieces = ["-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----",
+                  "-----END EC PRIVATE KEY-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----", "-----BEGIN PUBLIC KEY-----",
+                  "MIIE", "A", "=", "!", " ", "\n", "\\", "[", ":", "-", "x"]
+        for _ in range(30000):
+            s = "".join(rnd.choice(pieces) for _ in range(rnd.randint(0, 10)))
+            self.assertEqual(ev._redact_pem_private_keys(s), go.sub(ev.REDACTED, s), repr(s))
+
     def test_pathological_runs_stay_fast(self):
         for text in ("k" * (1 << 20), "a" * (1 << 19) + "://" + "b" * (1 << 19), "\\" * (1 << 19) + "=",
-                     "k=:" * (1 << 16)):
+                     "k=:" * (1 << 16), "-----BEGIN PRIVATE KEY-----!" * (1 << 15),
+                     "-----BEGIN PRIVATE KEY-----\nA\n-----END PRIVATE KEY-----!" * (1 << 14)):
             t0 = time.monotonic()
             ev.redact_plain_text(text)
             ev.scrub_text(text)
@@ -128,6 +139,38 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(ev.normalize({"rows": []}), {"structured": {"rows": []}})
         self.assertEqual(ev.normalize(None), {})
 
+    def test_one_json_text_is_the_structured_content_claude_code_serialized(self):
+        # Claude Code hands a hook a tool's structuredContent as the result's
+        # only text (MCP's server-everything get-structured-content, verbatim).
+        weather = '{"temperature":36,"conditions":"Light rain / drizzle","humidity":82}'
+        self.assertEqual(ev.normalize(weather), {"structured": json.loads(weather)})
+        self.assertEqual(ev.normalize([{"type": "text", "text": " [1, 2] "}]), {"structured": [1, 2]})
+        self.assertEqual(ev.normalize({"content": weather}), {"structured": json.loads(weather)})
+        # Not one JSON container: kept as text.
+        for keep in ('"a string"', "42", "{not json", '{"a":1} trailing', "NaN", "[1, NaN]"):
+            self.assertEqual(ev.normalize(keep), {"text": [keep]}, keep)
+        self.assertEqual(ev.normalize(['{"a":1}', "more"]), {"text": ['{"a":1}', "more"]})
+        blocks = [{"type": "text", "text": '{"a":1}'}, {"type": "image", "data": "..."}]
+        self.assertEqual(ev.normalize(blocks), {"text": ['{"a":1}'], "other_blocks": 1})
+
+    def test_claude_code_local_file_paths_are_not_kept(self):
+        saved = self.projects / "-w" / "sess" / "tool-results"
+        blocks = [
+            {"type": "text", "text": "Here's the image you requested:"},
+            {"type": "text", "text": f"[Image source: {saved}/mcp-x-blob-1.png]"},
+            {"type": "text", "text": f"[Resource from x at file:///b.bin] Binary content (application/octet-stream, "
+                                     f"256 bytes) saved to {saved}/mcp-x-blob-2.bin"},
+            {"type": "text", "text": "[Resource link: r1] https://example.com/r/1"},
+        ]
+        body = ev.normalize(blocks, spill_root=self.projects)
+        self.assertEqual(body["text"], [
+            "Here's the image you requested:",
+            "[Image source: [local file]]",
+            "[Resource from x at file:///b.bin] Binary content (application/octet-stream, 256 bytes) saved to [local file]",
+            "[Resource link: r1] https://example.com/r/1",
+        ])
+        self.assertNotIn(str(self.root), json.dumps(body))
+
     def _notice(self, path: Path) -> str:
         return (f"Error: result (71,204 characters) exceeds maximum allowed tokens. Output has been saved to "
                 f"{path}.\nFormat: JSON\nUse offset and limit parameters to read specific portions of the file.")
@@ -137,7 +180,8 @@ class NormalizeTests(unittest.TestCase):
         spill.parent.mkdir(parents=True)
         spill.write_text('{"rows":[1,2,3]}')
         body = ev.normalize(self._notice(spill), spill_root=self.projects)
-        self.assertEqual(body, {"spilled": True, "spilled_bytes": 16, "text": ['{"rows":[1,2,3]}']})
+        # The spilled text is one JSON object: kept as structured.
+        self.assertEqual(body, {"spilled": True, "spilled_bytes": 16, "structured": {"rows": [1, 2, 3]}})
         body = ev.normalize({"content": [{"type": "text", "text": self._notice(spill)}]}, spill_root=self.projects)
         self.assertTrue(body["spilled"])
         # Without a spill root the notice is kept as text.
@@ -323,6 +367,40 @@ class EntryTests(unittest.TestCase):
         # Deterministic for the same call, distinct for another time.
         self.assertEqual(self._entry()["evidence_id"], e["evidence_id"])
         self.assertNotEqual(self._entry(called_at="2026-09-28T12:00:00.000001Z")["evidence_id"], e["evidence_id"])
+
+    def test_lone_surrogates_and_nuls_do_not_stop_a_capture(self):
+        # A tool may emit a lone UTF-16 surrogate as a JSON escape; Python
+        # keeps it in the str and UTF-8 encoding then raises. It becomes
+        # U+FFFD, as Go's decoder makes it on the gateway.
+        e = self._entry(tool_input={"q\udcff": "a\udc80b"},
+                        tool_response=[{"type": "text", "text": "lone:\udcff\udc80 nul:\x00 ok \U0001F600"}])
+        self.assertEqual(e["args"], {"q\ufffd": "a\ufffdb"})
+        self.assertEqual(e["result"], {"text": ["lone:\ufffd\ufffd nul:\ufffd ok \U0001F600"]})
+        json.dumps(e, ensure_ascii=False).encode("utf-8")
+        path = ev.write_entry(self.root, e)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["result"], e["result"])
+
+    def test_error_result_is_marked_and_redacted_as_error_text(self):
+        e = self._entry(tool_response="upstream 403: rejected password=hunter2 api_key=sk-ant-api03-"
+                                      "LEAKabcdefghijklmnopqrstuvwxyz0123 for tenant acme", is_error=True)
+        self.assertTrue(e["is_error"])
+        self.assertEqual(e["result"], {"text": ["upstream 403: rejected password=[redacted] api_key=[redacted] "
+                                                "for tenant acme"]})
+        e = self._entry(tool_response='{"error":"auth failed: token=LEAK-T","code":401}', is_error=True)
+        self.assertNotIn("LEAK", json.dumps(e))
+        self.assertNotIn("is_error", self._entry())
+
+    def test_pem_private_keys_are_redacted(self):
+        pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowLEAKIBAAKCAQEA7\n-----END RSA PRIVATE KEY-----"
+        e = self._entry(tool_response={"content": "x", "structuredContent": {"pem": pem, "note": "k: " + pem + " end"}})
+        self.assertEqual(e["result"]["structured"], {"pem": "[redacted]", "note": "k: [redacted] end"})
+        for block in ("-----BEGIN PRIVATE KEY-----\nMIIEvLEAK\n-----END PRIVATE KEY-----",
+                      "-----BEGIN OPENSSH PRIVATE KEY-----\\nb3BlbnNzaLEAK\\n-----END OPENSSH PRIVATE KEY-----",
+                      "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFLEAK==",  # cut before its footer
+                      "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBLEAK\n-----END PGP PRIVATE KEY BLOCK-----"):
+            self.assertNotIn("LEAK", ev.scrub_string("key=" + block), block)
+        public = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----"
+        self.assertEqual(ev.scrub_string(public), public)
 
     def test_write_is_atomic_and_private(self):
         e = self._entry()

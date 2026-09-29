@@ -118,7 +118,7 @@ class EvidenceCaptureHookTests(unittest.TestCase):
                   f"{spill}.\nUse offset and limit parameters to read specific portions of the file.")
         _, _, entry, _ = self._captured(self._run(self._payload(tool_response=notice)))
         self.assertIs(entry["spilled"], True)
-        self.assertEqual(entry["result"], {"text": ['{"password":"[redacted]","series":[1,2,3]}']})
+        self.assertEqual(entry["result"], {"structured": {"password": "[redacted]", "series": [1, 2, 3]}})
         # A notice naming a file elsewhere is stored as the notice, unread.
         outside = self.home / "private" / "keys.txt"
         outside.parent.mkdir()
@@ -152,6 +152,75 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self.assertIs(entry["truncated"], True)
         self.assertEqual(entry["spilled_bytes"], size)
         self.assertLessEqual(len(json.dumps(entry["result"]).encode("utf-8")), 300 * 1024)
+
+    def test_structured_content_serialized_as_text_is_kept_structured(self):
+        # How Claude Code hands a hook a tool's structuredContent
+        # (server-everything get-structured-content, as captured live).
+        text = '{"temperature":36,"conditions":"Light rain / drizzle","humidity":82}'
+        _, _, entry, _ = self._captured(self._run(self._payload(tool_response=text)))
+        self.assertEqual(entry["result"], {"structured": json.loads(text)})
+
+    def test_image_and_blob_placeholders_keep_no_local_path(self):
+        saved = self.home / ".claude" / "projects" / "-w" / SESSION / "tool-results"
+        blocks = [{"type": "text", "text": "Here's the image you requested:"},
+                  {"type": "text", "text": f"[Image source: {saved}/mcp-x-blob-1.png]"}]
+        _, _, entry, path = self._captured(self._run(self._payload(tool_response=blocks)))
+        self.assertEqual(entry["result"], {"text": ["Here's the image you requested:", "[Image source: [local file]]"]})
+        self.assertNotIn(str(self.home), path.read_text())
+
+    def test_hostile_text_is_still_captured(self):
+        # Lone surrogates arrive as JSON escapes; NULs and control characters
+        # as themselves. None of them may cost the capture.
+        raw = json.dumps(self._payload(tool_response=[{"type": "text", "text": "PLACEHOLDER"}]))
+        raw = raw.replace("PLACEHOLDER", "lone:\\udcff\\udc80 nul:\\u0000 esc:\\u001b[31m rtl:\\u202e ok")
+        _, _, entry, path = self._captured(self._run(raw=raw))
+        self.assertEqual(entry["result"], {"text": ["lone:\ufffd\ufffd nul:\ufffd esc:\x1b[31m rtl:\u202e ok"]})
+        path.read_bytes().decode("utf-8")
+
+    def test_pem_private_key_never_reaches_disk(self):
+        pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowLEAKIBAAKCAQEA7\n-----END RSA PRIVATE KEY-----"
+        _, _, entry, path = self._captured(self._run(self._payload(tool_response={"structuredContent": {"pem": pem}})))
+        self.assertNotIn("LEAK", path.read_text())
+        self.assertEqual(entry["result"], {"structured": {"pem": "[redacted]"}})
+
+    # -- error results (PostToolUseFailure) --------------------------------------
+
+    def _failure(self, **over) -> dict:
+        body = self._payload(hook_event_name="PostToolUseFailure",
+                             error="upstream 403 Forbidden: rejected api_key=sk-ant-api03-LEAKabcdefghijklmnop"
+                                   "qrstuvwxyz0123 password=hunter2 for tenant acme",
+                             is_interrupt=False)
+        body.pop("tool_response")
+        body.update(over)
+        return body
+
+    def test_error_result_is_captured_and_marked(self):
+        res = self._run(self._failure())
+        body = json.loads(res.stdout)
+        self.assertEqual(body["hookSpecificOutput"]["hookEventName"], "PostToolUseFailure")
+        ctx = body["hookSpecificOutput"]["additionalContext"]
+        m = EV_ID_RE.match(ctx)
+        self.assertIsNotNone(m, ctx)
+        path = self.root / SESSION / f"{m.group(1)}.json"
+        entry = json.loads(path.read_text())
+        self.assertIs(entry["is_error"], True)
+        self.assertEqual(entry["result"], {"text": ["upstream 403 Forbidden: rejected api_key=[redacted] "
+                                                    "password=[redacted] for tenant acme"]})
+        self.assertNotIn("LEAK", path.read_text())
+        self.assertIn("captured locally from grafana/query_prometheus;", ctx)
+        # A JSON error body stays the error's text, redacted as error text.
+        res = self._run(self._failure(error='{"error":"auth failed: token=LEAK-T","code":401}'))
+        m = EV_ID_RE.match(json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"])
+        entry = json.loads((self.root / SESSION / f"{m.group(1)}.json").read_text())
+        self.assertEqual(list(entry["result"]), ["text"])
+        self.assertNotIn("LEAK", json.dumps(entry))
+
+    def test_interrupts_empty_errors_cardinal_tools_and_other_events_are_skipped(self):
+        self._assert_nothing(self._run(self._failure(is_interrupt=True)))
+        self._assert_nothing(self._run(self._failure(error="")))
+        self._assert_nothing(self._run(self._failure(error=None)))
+        self._assert_nothing(self._run(self._failure(tool_name="mcp__plugin_cardinal_cardinal__lakerunner__x")))
+        self._assert_nothing(self._run(self._payload(hook_event_name="PreToolUse")))
 
     # -- skip list / non-MCP ---------------------------------------------------
 
@@ -249,7 +318,12 @@ class EvidenceCaptureHookTests(unittest.TestCase):
     # -- registration ----------------------------------------------------------
 
     def test_registered_synchronously_on_every_mcp_tool_with_a_short_timeout(self):
-        groups = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text())["hooks"]["PostToolUse"]
+        hooks = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text())["hooks"]
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            with self.subTest(event=event):
+                self._check_registration(hooks[event])
+
+    def _check_registration(self, groups):
         found = [(g["matcher"], h) for g in groups for h in g["hooks"] if "evidence-capture.py" in h["command"]]
         self.assertEqual(len(found), 1)
         matcher, entry = found[0]

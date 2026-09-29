@@ -272,6 +272,17 @@ _TOKEN_SHAPES = [re.compile(p, re.ASCII) for p in (
     r"\bpbkdf2_sha(?:1|256|512)\$\d+\$[^" + _WS + r"$]+\$[A-Za-z0-9+/=]{20,}",                         # Django
 )]
 _SK_HOST_NAME = re.compile(r"^sk(?:-[a-z0-9]+){2,}$")
+# A PEM private key block, header to footer; a block cut before its footer
+# (a capped prefix) loses the base64 run after its header. Matched by
+# _redact_pem_private_keys, not one regexp with a lazy "anything up to a
+# footer" arm: that rescans to the end for every footerless header and is
+# quadratic on a run of them (conductor errors.go redactPEMPrivateKeys).
+# The single-pattern form, kept for the parity fuzz in tests/test_evidence.py.
+GO_PEM_PRIVATE_KEY = (r"-----BEGIN[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----(?:(?s:.)*?"
+                      r"-----END[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----|[A-Za-z0-9+/=\t\n\f\r \\:,.\-]*)")
+_PEM_PRIVATE_BEGIN = re.compile(r"-----BEGIN[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----", re.ASCII)
+_PEM_PRIVATE_END = re.compile(r"-----END[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----", re.ASCII)
+_PEM_BODY_RUN = re.compile(r"[A-Za-z0-9+/=" + _WS + r"\\:,.\-]*", re.ASCII)
 _VALUE_STOP = " \t\r\n\"'&,;)}]<>"
 _VALUE_ESCAPE_STOP = "\"'nrt"
 
@@ -323,8 +334,36 @@ def is_credential_key(k: str) -> bool:
     return raw in _CREDENTIAL_WORD or last in _CREDENTIAL_WORD
 
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def _nul(s: str) -> str:
-    return s.replace("\x00", "\ufffd")
+    """NULs and lone UTF-16 surrogates become U+FFFD. A tool can emit a
+    lone surrogate as a JSON escape ("\\udcff"); Python keeps it in the str,
+    where encoding it to UTF-8 raises. Go's decoder makes it U+FFFD, so the
+    gateway stores the same thing."""
+    s = s.replace("\x00", "\ufffd")
+    return _LONE_SURROGATE.sub("\ufffd", s) if not s.isascii() else s
+
+
+def well_formed(v: Any) -> Any:
+    """A copy of a decoded JSON value with every string (keys included)
+    passed through _nul, so it encodes to UTF-8. Values nested past the
+    recursion limit are returned as they are."""
+    try:
+        return _well_formed(v)
+    except RecursionError:
+        return v
+
+
+def _well_formed(v: Any) -> Any:
+    if isinstance(v, str):
+        return _nul(v)
+    if isinstance(v, list):
+        return [_well_formed(e) for e in v]
+    if isinstance(v, dict):
+        return {(_nul(k) if isinstance(k, str) else k): _well_formed(e) for k, e in v.items()}
+    return v
 
 
 def scrub(v: Any) -> Any:
@@ -483,7 +522,42 @@ def _redact_url_and_scheme(s: str, credential) -> str:
     return _AUTH_SCHEME.sub(repl, s)
 
 
+def _redact_pem_private_keys(s: str) -> str:
+    """Each PEM private key block -> REDACTED: a header through the first
+    footer after it or, with no footer after it, the body run after the
+    header. Linear in len(s)."""
+    if "-----BEGIN" not in s:
+        return s
+    out = []
+    last = 0
+    # The first footer at or after the last search start: None = not
+    # searched yet, -1 = none left in s.
+    end_start, end_stop = None, 0
+    while last < len(s):
+        m = _PEM_PRIVATE_BEGIN.search(s, last)
+        if m is None:
+            break
+        hs, he = m.start(), m.end()
+        if end_start is None or 0 <= end_start < he:
+            e = _PEM_PRIVATE_END.search(s, he)
+            if e is None:
+                end_start = -1
+            else:
+                end_start, end_stop = e.start(), e.end()
+        stop = end_stop if end_start >= 0 else _PEM_BODY_RUN.match(s, he).end()
+        out.append(s[last:hs])
+        out.append(REDACTED)
+        last = stop
+    if not out:
+        return s
+    out.append(s[last:])
+    return "".join(out)
+
+
 def _redact_token_shapes(s: str) -> str:
+    # PEM first: a shape matched inside a key's base64 would end a
+    # footerless block's body run early and leave the rest of it.
+    s = _redact_pem_private_keys(s)
     for rx in _TOKEN_SHAPES:
         s = rx.sub(lambda m: m.group(0) if _SK_HOST_NAME.match(m.group(0)) else REDACTED, s)
     return s
@@ -616,6 +690,42 @@ def redact_plain_text(text: str) -> str:
     return _redact_token_shapes(s)
 
 
+def redact_error_text(text: str, depth: int = 0) -> str:
+    """conductor RedactErrorText: an error result's text. A JSON document is
+    scrubbed structurally and every string leaf redacted as error text; any
+    other text gets redact_plain_text (which, unlike a result leaf, also
+    redacts credential key=value pairs). Text over the structural scrub
+    budget is left to scrub_and_cap, which cuts it and applies the same
+    plain-text rules to the kept prefix."""
+    if len(text) > MAX_STRUCTURAL_SCRUB_BYTES:
+        return text
+    t = text.strip()
+    if depth < MAX_NESTED_JSON and t and t[0] in "{[":
+        try:
+            v = _decode_json(t)
+        except (ValueError, RecursionError):
+            v = None
+        else:
+            try:
+                sv = _redact_error_leaves(scrub(v), depth + 1)
+                if sv == v:
+                    return text
+                return encode_json(sv)
+            except (ValueError, TypeError, RecursionError):
+                return REDACTED
+    return redact_plain_text(text)
+
+
+def _redact_error_leaves(v: Any, depth: int) -> Any:
+    if isinstance(v, str):
+        return v if v == REDACTED else redact_error_text(v, depth)
+    if isinstance(v, list):
+        return [_redact_error_leaves(e, depth) for e in v]
+    if isinstance(v, dict):
+        return {k: _redact_error_leaves(e, depth) for k, e in v.items()}
+    return v
+
+
 # JSON text that could not be decoded (a document cut short: a spill larger
 # than MAX_SPILL_READ_BYTES, or one leaf cut at the prefix end) still holds
 # JSON-shaped secrets redact_plain_text does not see: the value of a
@@ -746,14 +856,27 @@ def _same_json(text: str, want: Any) -> bool:
         return False
 
 
-def normalize(tool_response: Any, spill_root: Optional[Path] = None) -> dict:
+def normalize(tool_response: Any, spill_root: Optional[Path] = None, structure_json: bool = True) -> dict:
     """Claude Code's PostToolUse tool_response for an MCP tool -> an
     UNSCRUBBED {structured?, text?, other_blocks?, spilled?, spilled_bytes?}
     body (spilled_bytes: the spill files' real size; the rest is the shape
     of conductor's model_result). Shapes: a string (the result text, or the
     spill notice, followed when the file resolves under spill_root);
     {content: str | [blocks], structuredContent?}; a list of content blocks;
-    any other JSON value (kept as structured)."""
+    any other JSON value (kept as structured).
+
+    Two client renderings are undone:
+      - Claude Code hands a hook a tool's structuredContent serialized as
+        the result's only text (MCP also asks a tool to mirror it as one
+        JSON text block). A result that is exactly one text, with no other
+        block, holding a JSON object or array is kept as structured, so a
+        storyboard can bind into it like a witnessed receipt (not with
+        structure_json=False: an error result's text stays its message).
+      - A non-text block (an image, a blob resource) reaches the hook as a
+        text placeholder naming the file Claude Code saved it to under
+        spill_root ("[Image source: /Users/me/.claude/projects/...png]").
+        That path is this machine's, not the tool's result: it becomes
+        LOCAL_FILE."""
     body: dict = {}
     texts: list = []
     other = 0
@@ -804,11 +927,47 @@ def normalize(tool_response: Any, spill_root: Optional[Path] = None) -> dict:
         body["structured"] = tool_response
     if "structured" in body:
         texts = [t for t in texts if not _same_json(t, body["structured"])]
+    elif structure_json and len(texts) == 1 and not other:
+        decoded = _json_container(texts[0])
+        if decoded is not None:
+            body["structured"] = decoded
+            texts = []
+    if spill_root is not None and texts:
+        texts = [_redact_local_paths(t, spill_root) for t in texts]
     if texts:
         body["text"] = texts
     if other:
         body["other_blocks"] = other
     return body
+
+
+LOCAL_FILE = "[local file]"
+
+
+def _json_container(text: str) -> Any:
+    """The JSON object or array text holds, whole; None otherwise."""
+    t = text.strip()
+    if not t or t[0] not in "{[":
+        return None
+    try:
+        v = _decode_json(t)
+    except (ValueError, RecursionError):
+        return None
+    return v if isinstance(v, (dict, list)) else None
+
+
+def _redact_local_paths(text: str, spill_root: Path) -> str:
+    """Paths under spill_root (Claude Code's own ~/.claude/projects files)
+    -> LOCAL_FILE. A path runs to whitespace or a closing bracket."""
+    roots = {str(spill_root)}
+    try:
+        roots.add(str(Path(spill_root).resolve()))
+    except (OSError, RuntimeError):
+        pass
+    for root in sorted(roots, key=len, reverse=True):
+        if root in text:
+            text = re.sub(re.escape(root) + r"(?:/[^\s\]]*)?", LOCAL_FILE, text)
+    return text
 
 
 def _utf8_prefix(s: str, max_bytes: int) -> str:
@@ -1020,13 +1179,18 @@ def evidence_id(server: str, tool: str, args: Any, called_at: str) -> str:
 
 def build_entry(*, server: str, tool: str, tool_name: str, tool_input: Any, tool_response: Any,
                 session_id: Any, spill_root: Optional[Path] = None, called_at: Optional[str] = None,
-                tool_use_id: Any = None, agent: str = "") -> dict:
-    """A spool entry (scrubbed, capped) for one MCP call."""
+                tool_use_id: Any = None, agent: str = "", is_error: bool = False) -> dict:
+    """A spool entry (scrubbed, capped) for one MCP call. is_error: the call
+    returned an error result (MCP isError, or the client's error text for
+    it); its text is redacted with the stricter error-text rules, as the
+    gateway does for an error receipt (RedactErrorText)."""
     called_at = called_at or now_iso()
-    args, args_truncated = scrub_and_cap(tool_input if tool_input is not None else {}, MAX_ARGS_BYTES)
-    body = normalize(tool_response, spill_root)
+    args, args_truncated = scrub_and_cap(well_formed(tool_input if tool_input is not None else {}), MAX_ARGS_BYTES)
+    body = well_formed(normalize(tool_response, spill_root, structure_json=not is_error))
     spilled = bool(body.pop("spilled", False))
     spilled_bytes = body.pop("spilled_bytes", None)
+    if is_error and isinstance(body.get("text"), list):
+        body["text"] = [redact_error_text(t) if isinstance(t, str) else t for t in body["text"]]
     result, truncated = scrub_and_cap(body, MAX_RESULT_BYTES)
     entry = {
         "schema": SCHEMA,
@@ -1041,6 +1205,8 @@ def build_entry(*, server: str, tool: str, tool_name: str, tool_input: Any, tool
         "result": result,
         "truncated": truncated,
     }
+    if is_error:
+        entry["is_error"] = True
     if args_truncated:
         entry["args_truncated"] = True
     if spilled:
@@ -1347,7 +1513,7 @@ def captured_line(ev_id: str, server: str, tool: str) -> str:
 
 def capture(home: Path, *, server: str, tool: str, tool_name: str, tool_input: Any, tool_response: Any,
             session_id: Any, tool_use_id: Any = None, agent: str = "", spill_root: Optional[Path] = None,
-            env: Optional[dict] = None) -> Optional[dict]:
+            env: Optional[dict] = None, is_error: bool = False) -> Optional[dict]:
     """Record one MCP call in the spool under home: nothing when the user
     opted out (capture_disabled), else build_entry -> write_entry, then an
     opportunistic gc(). Returns the written entry, or None when disabled.
@@ -1365,6 +1531,7 @@ def capture(home: Path, *, server: str, tool: str, tool_name: str, tool_input: A
         spill_root=spill_root,
         tool_use_id=tool_use_id,
         agent=agent,
+        is_error=is_error,
     )
     write_entry(root, entry)
     try:

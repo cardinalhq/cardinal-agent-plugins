@@ -537,6 +537,15 @@ class PromoteUnitTests(_HomeCase):
         self.assertEqual(item["result"], {"structured_content": env})
         self.assertNotIn("client_called_at", item)
 
+    def test_error_entry_uploads_is_error(self):
+        entry = {"server": "s", "tool": "t", "args": {}, "is_error": True,
+                 "result": {"text": ["upstream 403 Forbidden"]}}
+        item = self.cli.wire_item(entry, "claude-code/1.0")
+        self.assertEqual(item["result"], {"content": [{"type": "text", "text": "upstream 403 Forbidden"}],
+                                          "is_error": True})
+        entry.pop("is_error")
+        self.assertNotIn("is_error", self.cli.wire_item(entry, "claude-code/1.0")["result"])
+
     def test_empty_result_is_still_a_result(self):
         self.assertEqual(self.cli.wire_result({}), {"text": ""})
         with self.assertRaises(ValueError):

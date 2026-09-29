@@ -74,6 +74,18 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/evidence-capture.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "",

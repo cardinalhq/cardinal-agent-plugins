@@ -201,16 +201,22 @@ def wire_result(result) -> dict:
 
 
 def wire_item(entry: dict, client: str) -> dict:
-    """One spool entry -> one upload item (conductor EvidenceItemSchema)."""
+    """One spool entry -> one upload item (conductor EvidenceItemSchema). An
+    entry the capture hook marked is_error (the tool returned an error
+    result) is uploaded with result.is_error, so the receipt records it as
+    the call's error."""
     server, tool = entry.get("server"), entry.get("tool")
     if not isinstance(server, str) or not server or not isinstance(tool, str) or not tool:
         raise ValueError("the entry names no server or tool")
+    result = wire_result(entry.get("result"))
+    if entry.get("is_error") is True:
+        result["is_error"] = True
     item = {
         "provenance": "captured",
         "source_server": server,
         "client": client,
         "tool": tool,
-        "result": wire_result(entry.get("result")),
+        "result": result,
     }
     if evidence_mod().parse_time(entry.get("called_at")) is not None:
         item["client_called_at"] = entry["called_at"]
