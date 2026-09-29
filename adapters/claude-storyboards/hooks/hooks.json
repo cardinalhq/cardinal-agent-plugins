@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_cardinal[-_]storyboards_cardinal__storyboard__preview",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-preview.py",
+            "timeout": 150
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_cardinal[-_]storyboards_cardinal__storyboard__(create|preview)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-token.py",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/evidence-capture.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-session.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

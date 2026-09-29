@@ -7,8 +7,17 @@ and release flow). This script builds one adapter's artifact — product
 code plus vendored cardinal_core, minus monorepo-only files — and pushes
 it to the mirror as a release commit + tag.
 
+A composed adapter (a directory with a compose.json, e.g.
+adapters/claude-storyboards) is not copied whole: its artifact is the
+explicit `include` list taken from its `base` adapter, with the composed
+directory's own files (plugin.json, .mcp.json, hooks.json, README) laid
+over it. Two plugins can share one mirror (the claude mirror carries
+plugins/cardinal and plugins/cardinal-storyboards); each has its own tag
+prefix and its own marketplace.json entry, matched by exact plugin name.
+
 Usage:
     python3 build/release.py <adapter> [--dry-run] [--work-dir DIR]
+    python3 build/release.py <adapter> --build-only DIR   # lay the artifact down, no git
 
 Version comes from the adapter's plugin.json manifest. The push is direct
 to the mirror's main; if the mirror enforces PRs, the script pushes a
@@ -20,30 +29,59 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 CORE_PKG = ROOT / "core" / "cardinal_core"
+ADAPTERS_DIR = ROOT / "adapters"
 
-# adapter -> (mirror repo slug, plugin subpath inside the mirror)
+
+class Mirror(NamedTuple):
+    slug: str        # mirror repo
+    subpath: str     # plugin directory inside the mirror
+    tag_prefix: str  # release tag = tag_prefix + version; unique per plugin in a mirror
+
+
 MIRRORS = {
-    "claude": ("cardinalhq/cardinal-claude-plugin", "plugins/cardinal"),
-    "codex": ("cardinalhq/cardinal-codex-plugin", "plugins/cardinal-codex-plugin"),
-    "cursor": ("cardinalhq/cardinal-cursor-plugin", "plugins/cardinal-cursor-plugin"),
-    "gemini": ("cardinalhq/cardinal-gemini-plugin", "plugins/cardinal-gemini-plugin"),
+    "claude": Mirror("cardinalhq/cardinal-claude-plugin", "plugins/cardinal", "v"),
+    # Second plugin in the claude mirror. Its own tag namespace: the mirror
+    # already has v0.1.0 … v0.34.x tags from the full plugin.
+    "claude-storyboards": Mirror("cardinalhq/cardinal-claude-plugin", "plugins/cardinal-storyboards",
+                                 "cardinal-storyboards/v"),
+    "codex": Mirror("cardinalhq/cardinal-codex-plugin", "plugins/cardinal-codex-plugin", "v"),
+    "cursor": Mirror("cardinalhq/cardinal-cursor-plugin", "plugins/cardinal-cursor-plugin", "v"),
+    "gemini": Mirror("cardinalhq/cardinal-gemini-plugin", "plugins/cardinal-gemini-plugin", "v"),
 }
 
 # Monorepo-only files never shipped to mirrors.
 EXCLUDE = {"tests", "REPORT.md", "CORE_GAPS.md", "__pycache__"}
+# A composed adapter's build recipe (never shipped).
+COMPOSE_FILE = "compose.json"
 
 REQUIRED_ARTIFACTS = {
     "claude": (".claude-plugin/plugin.json",),
+    "claude-storyboards": (
+        ".claude-plugin/plugin.json",
+        ".mcp.json",
+        "hooks/hooks.json",
+        "hooks/_plugin_mode.py",
+        "hooks/cardinal_core/evidence.py",
+        "bin/cardinal-evidence",
+        "skills/storyboard/SKILL.md",
+        "skills/canvas/SKILL.md",
+        "skills/canvas/scripts/render_preview.py",
+    ),
     "codex": (".codex-plugin/plugin.json",),
 }
+
+# ${CLAUDE_PLUGIN_ROOT}/<path> in a hooks.json command.
+PLUGIN_ROOT_REF = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\s\"']+)")
 
 BANNER = (
     "> [!NOTE]\n"
@@ -62,19 +100,76 @@ def adapter_version(adapter: str) -> str:
     matches = glob.glob(str(ROOT / "adapters" / adapter / ".*plugin" / "plugin.json"))
     if not matches:
         sys.exit(f"no plugin.json manifest found for adapter {adapter!r}")
-    return json.load(open(matches[0]))["version"]
+    return json.loads(Path(matches[0]).read_text())["version"]
+
+
+def _ignore(directory: str, names: list[str]) -> set[str]:
+    return {n for n in names if n in EXCLUDE}
+
+
+def compose_spec(adapter: str) -> dict | None:
+    """adapters/<adapter>/compose.json, or None for a whole-directory adapter."""
+    path = ADAPTERS_DIR / adapter / COMPOSE_FILE
+    if not path.is_file():
+        return None
+    spec = json.loads(path.read_text())
+    base, include = spec.get("base"), spec.get("include")
+    if not isinstance(base, str) or not (ADAPTERS_DIR / base).is_dir() or (ADAPTERS_DIR / base / COMPOSE_FILE).exists():
+        raise RuntimeError(f"{adapter}/{COMPOSE_FILE}: base must name a whole-directory adapter")
+    if not isinstance(include, list) or not include or not all(isinstance(i, str) and i for i in include):
+        raise RuntimeError(f"{adapter}/{COMPOSE_FILE}: include must be a non-empty list of paths")
+    return spec
+
+
+def _safe_rel(rel: str, adapter: str) -> Path:
+    p = Path(rel)
+    if p.is_absolute() or ".." in p.parts or rel != p.as_posix():
+        raise RuntimeError(f"{adapter}/{COMPOSE_FILE}: include path must be relative and normalized: {rel!r}")
+    return p
+
+
+def _compose(adapter: str, spec: dict, dest: Path) -> None:
+    """The composed artifact: each `include` path from the base adapter (a
+    file, or a directory copied whole minus EXCLUDE), then every file of the
+    composed adapter's own directory laid over it."""
+    base = ADAPTERS_DIR / spec["base"]
+    dest.mkdir(parents=True)
+    for rel in spec["include"]:
+        p = _safe_rel(rel, adapter)
+        src = base / p
+        if any(part in EXCLUDE for part in p.parts):
+            raise RuntimeError(f"{adapter}/{COMPOSE_FILE}: {rel} is monorepo-only")
+        target = dest / p
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, target, ignore=_ignore)
+        elif src.is_file():
+            shutil.copy2(src, target)
+        else:
+            raise RuntimeError(f"{adapter}/{COMPOSE_FILE}: {rel} does not exist in adapters/{spec['base']}")
+    own = ADAPTERS_DIR / adapter
+    for src in sorted(own.rglob("*")):
+        rel = src.relative_to(own)
+        if not src.is_file() or rel.as_posix() == COMPOSE_FILE or any(part in EXCLUDE for part in rel.parts):
+            continue
+        if rel.parts[:2] == ("hooks", "cardinal_core"):
+            continue  # a stray vendored copy; the fresh one is added below
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
 
 
 def build_artifact(adapter: str, dest: Path) -> None:
     """Copy adapter product code + vendored core into dest."""
-    src = ROOT / "adapters" / adapter
+    src = ADAPTERS_DIR / adapter
     if dest.exists():
         shutil.rmtree(dest)
 
-    def _ignore(directory: str, names: list[str]) -> set[str]:
-        return {n for n in names if n in EXCLUDE}
-
-    shutil.copytree(src, dest, ignore=_ignore)
+    spec = compose_spec(adapter)
+    if spec is not None:
+        _compose(adapter, spec, dest)
+    else:
+        shutil.copytree(src, dest, ignore=_ignore)
     # Vendored core goes next to hooks/ (bin/ for claude has its own
     # sys.path bootstrap into hooks/).
     vendor_dest = dest / "hooks" / "cardinal_core"
@@ -103,6 +198,60 @@ def validate_artifact(adapter: str, dest: Path) -> None:
             f"{adapter} release artifact is missing required files: "
             + ", ".join(missing)
         )
+    # Every hook command must name a file the artifact ships (a composed
+    # plugin's include list can otherwise drift from its hooks.json).
+    hooks_json = dest / "hooks" / "hooks.json"
+    if hooks_json.is_file():
+        dangling = sorted({
+            ref for ref in PLUGIN_ROOT_REF.findall(hooks_json.read_text())
+            if not (dest / ref).is_file()
+        })
+        if dangling:
+            raise RuntimeError(
+                f"{adapter} release artifact: hooks.json runs files it does not ship: "
+                + ", ".join(dangling)
+            )
+
+
+def plugin_manifest(dest: Path) -> dict:
+    """The built artifact's plugin.json (.claude-plugin/, .codex-plugin/, ...)."""
+    matches = sorted(dest.glob(".*plugin/plugin.json"))
+    return json.loads(matches[0].read_text()) if matches else {}
+
+
+def sync_marketplace(marketplace_json: Path, manifest: dict, subpath: str, label: str = "") -> bool:
+    """Set the version of the marketplace.json entry whose name is EXACTLY
+    this plugin's name (two plugins share the claude mirror's marketplace:
+    `cardinal` and `cardinal-storyboards`; neither may touch the other's
+    entry). Adds the entry when the plugin has none yet (its first release).
+    Returns whether the file changed."""
+    name, version = manifest.get("name"), manifest.get("version")
+    if not isinstance(name, str) or not isinstance(version, str):
+        raise RuntimeError(f"{label}: built plugin.json has no name/version")
+    mf = json.loads(marketplace_json.read_text())
+    plugins = mf.setdefault("plugins", [])
+    entries = [e for e in plugins if isinstance(e, dict) and e.get("name") == name]
+    changed = False
+    if not entries:
+        entry = {
+            "name": name,
+            "version": version,
+            "description": manifest.get("description", ""),
+            "source": f"./{subpath}",
+            "category": "observability",
+            "homepage": manifest.get("homepage", ""),
+            "license": manifest.get("license", "Apache-2.0"),
+        }
+        plugins.append({k: v for k, v in entry.items() if v != ""})
+        print(f"{label}: marketplace.json adds {name} {version}")
+        changed = True
+    for entry in entries:
+        if entry.get("version") != version:
+            print(f"{label}: marketplace.json {name} {entry.get('version')} → {version}")
+            entry["version"] = version
+            changed = True
+    marketplace_json.write_text(json.dumps(mf, indent=2) + "\n")
+    return changed
 
 
 def ensure_banner(readme: Path) -> None:
@@ -124,12 +273,18 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--work-dir", default=None,
                         help="Reuse a directory for the mirror clone (default: temp)")
+    parser.add_argument("--build-only", metavar="DIR", default=None,
+                        help="Only build the artifact into DIR (no clone, no git)")
     args = parser.parse_args()
 
     adapter = args.adapter
-    slug, subpath = MIRRORS[adapter]
+    if args.build_only:
+        build_artifact(adapter, Path(args.build_only))
+        print(f"{adapter}: built artifact in {args.build_only}")
+        return 0
+    slug, subpath, tag_prefix = MIRRORS[adapter]
     version = adapter_version(adapter)
-    tag = f"v{version}"
+    tag = f"{tag_prefix}{version}"
     mono_sha = run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT)
 
     workdir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix=f"mirror-{adapter}-"))
@@ -138,7 +293,9 @@ def main() -> int:
         shutil.rmtree(clone)
     run(["gh", "repo", "clone", slug, str(clone), "--", "--depth", "1"])
 
-    existing_tags = run(["git", "ls-remote", "--tags", "origin", tag], cwd=clone)
+    # The full ref: a bare pattern also matches a tail ("v0.2.0" would match
+    # cardinal-storyboards/v0.2.0 and skip the full plugin's release).
+    existing_tags = run(["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"], cwd=clone)
     if existing_tags:
         # v29-follow-up: was sys.exit(non-zero) — hostile to matrix jobs on
         # push, where only the adapter with the actual version bump has a
@@ -170,17 +327,7 @@ def main() -> int:
     # CLIs — no Claude Code marketplace manifest at the root).
     marketplace_json = clone / ".claude-plugin" / "marketplace.json"
     if marketplace_json.exists():
-        mf = json.loads(marketplace_json.read_text())
-        for entry in mf.get("plugins", []):
-            if entry.get("source", "").rstrip("/").endswith(f"/{adapter}") or \
-               entry.get("name") == adapter or entry.get("name") == "cardinal":
-                if entry.get("version") != version:
-                    print(
-                        f"{adapter}: marketplace.json {entry['name']} "
-                        f"{entry.get('version')} → {version}"
-                    )
-                    entry["version"] = version
-        marketplace_json.write_text(json.dumps(mf, indent=2) + "\n")
+        sync_marketplace(marketplace_json, plugin_manifest(plugin_dir), subpath, adapter)
 
     # Vendored core must be committed in mirrors even though the monorepo
     # gitignores it — guard against an inherited ignore rule.

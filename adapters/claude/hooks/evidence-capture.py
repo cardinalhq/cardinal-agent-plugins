@@ -22,6 +22,8 @@ Contract:
   - Output: hookSpecificOutput.additionalContext, one line:
     "[evidence:ev_xxx] captured locally from <server>/<tool>; to cite it in
     a storyboard run cardinal-evidence promote ev_xxx".
+  - In the slim cardinal-storyboards plugin: silent while the full cardinal
+    plugin is active (hooks/_plugin_mode.py), which captures instead.
   - Opt-out: CARDINAL_EVIDENCE_CAPTURE=0 or the flag file
     ~/.cardinal/evidence/disabled. Silent when disabled, for a Cardinal tool
     or a non-MCP tool, or when the payload is unreadable.
@@ -38,10 +40,19 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+try:
+    import _plugin_mode  # noqa: E402
+except Exception:  # this file copied alone: behave as the full plugin
+    _plugin_mode = None
+
 # Cardinal's own MCP servers, as Claude Code names them (a user-scope
-# `cardinal` server, or the plugin's bundled one). The gateway mints
-# witnessed receipts for these.
-CARDINAL_SERVERS = ("cardinal", "plugin_cardinal_cardinal")
+# `cardinal` server, or the one bundled with the full or the slim
+# cardinal-storyboards plugin). The gateway mints witnessed receipts for these.
+if _plugin_mode:
+    CARDINAL_SERVERS = _plugin_mode.CARDINAL_SERVERS
+else:  # same list as _plugin_mode.CARDINAL_SERVERS
+    CARDINAL_SERVERS = ("cardinal", "plugin_cardinal_cardinal", "plugin_cardinal-storyboards_cardinal",
+                        "plugin_cardinal_storyboards_cardinal")
 
 
 def home_dir() -> Path:
@@ -60,6 +71,8 @@ def main() -> None:
     except ValueError:
         return
     if not isinstance(payload, dict):
+        return
+    if _plugin_mode and _plugin_mode.slim_should_yield(home_dir(), cwd=payload.get("cwd")):
         return
     from cardinal_core import evidence
 

@@ -1,0 +1,17 @@
+{
+  "_comment": "Explicit include manifest for the slim cardinal-storyboards Claude Code plugin (build/release.py build_artifact). Every path is copied from the base adapter; every other file in this directory (plugin.json, .mcp.json, hooks/hooks.json, README.md) is laid over it. Nothing else from adapters/claude ships: no telemetry, limits, initiative, decision, git-state, invariant or usage hooks, no connect/status CLIs, no other skills.",
+  "base": "claude",
+  "include": [
+    "hooks/storyboard-session.py",
+    "hooks/storyboard-preview.py",
+    "hooks/storyboard-token.py",
+    "hooks/evidence-capture.py",
+    "hooks/_plugin_mode.py",
+    "hooks/_plugin_version.py",
+    "bin/cardinal-evidence",
+    "skills/storyboard/SKILL.md",
+    "skills/canvas/SKILL.md",
+    "skills/canvas/scripts/render_preview.py",
+    "skills/canvas/exemplars"
+  ]
+}

@@ -31,7 +31,9 @@ Credentials, in order: the storyboard's evidence token (storyboard__create
 returns it; hooks/storyboard-token.py stores it, 24 h, this storyboard's
 evidence upload only) as `Authorization: CardinalEvidence <token>`, then the
 Cardinal MCP key from ~/.claude/settings.json (or the environment) as
-X-CardinalHQ-API-Key. Either goes only to the origin of CARDINAL_MCP_URL,
+X-CardinalHQ-API-Key. Either goes only to the origin of CARDINAL_MCP_URL
+(without it, the Cardinal the plugin's own .mcp.json names: the slim
+cardinal-storyboards plugin's https://app.cardinalhq.io/mcp, token only),
 never across a redirect. The upload's org is the storyboard's; it must be
 the org CARDINAL_MCP_URL names.
 
@@ -131,6 +133,11 @@ def connection(home: Path, environ: dict) -> dict:
     url, key = env.get("CARDINAL_MCP_URL"), env.get("CARDINAL_MCP_API_KEY")
     if not (isinstance(url, str) and url):
         url, key = environ.get("CARDINAL_MCP_URL"), environ.get("CARDINAL_MCP_API_KEY")
+    if not (isinstance(url, str) and url):
+        # The slim cardinal-storyboards plugin has no /cardinal:connect: its
+        # .mcp.json names the Cardinal (Claude Code signs in with OAuth), and
+        # uploads carry the storyboard's evidence token, never a key.
+        url, key = rp.plugin_mcp_url(PLUGIN_ROOT), None
     if not (isinstance(url, str) and url):
         return {}
     origin = rp._origin(url)

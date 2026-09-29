@@ -1,0 +1,6 @@
+{
+  "cardinal": {
+    "type": "http",
+    "url": "https://app.cardinalhq.io/mcp"
+  }
+}

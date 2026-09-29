@@ -13,7 +13,8 @@ API key.
 Contract:
   - Input on stdin: Claude Code's PostToolUse payload {tool_name,
     tool_response, session_id, ...}. Only Cardinal's own server counts
-    (mcp__cardinal__* or mcp__plugin_cardinal_cardinal__*): a token another
+    (mcp__cardinal__*, mcp__plugin_cardinal_cardinal__* or the slim plugin's
+    mcp__plugin_cardinal-storyboards_cardinal__*): a token another
     MCP server hands back is never stored, so no other server can point a
     later upload at its own storyboard.
   - tool_response: {content: "<result JSON>", structuredContent: {...}}, the
@@ -27,6 +28,8 @@ Contract:
     0700, atomic), keyed by storyboard id (cardinal_core.evidence
     store_token). No output. No network. Nothing is stored while evidence
     capture is off (CARDINAL_EVIDENCE_CAPTURE=0 or the disabled flag file).
+  - In the slim cardinal-storyboards plugin: silent while the full cardinal
+    plugin is active (hooks/_plugin_mode.py), which stores it instead.
   - Fail open: always exits 0, never blocks the tool, never prints an error.
 """
 
@@ -41,7 +44,16 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-CARDINAL_SERVERS = ("cardinal", "plugin_cardinal_cardinal")
+try:
+    import _plugin_mode  # noqa: E402
+except Exception:  # this file copied alone: behave as the full plugin
+    _plugin_mode = None
+
+if _plugin_mode:
+    CARDINAL_SERVERS = _plugin_mode.CARDINAL_SERVERS
+else:  # same list as _plugin_mode.CARDINAL_SERVERS
+    CARDINAL_SERVERS = ("cardinal", "plugin_cardinal_cardinal", "plugin_cardinal-storyboards_cardinal",
+                        "plugin_cardinal_storyboards_cardinal")
 TOOLS = ("storyboard__create", "storyboard__preview")
 
 UPLOAD_PATH_RE = re.compile(r"^/api/orgs/([^/?#]+)/storyboards/(sb_[0-9a-f]{24})/evidence$")
@@ -126,6 +138,8 @@ def main() -> None:
     except ValueError:
         return
     if not isinstance(payload, dict):
+        return
+    if _plugin_mode and _plugin_mode.slim_should_yield(home_dir(), cwd=payload.get("cwd")):
         return
     from cardinal_core import evidence
 

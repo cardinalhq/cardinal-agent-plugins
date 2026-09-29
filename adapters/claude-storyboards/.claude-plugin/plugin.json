@@ -1,0 +1,11 @@
+{
+  "name": "cardinal-storyboards",
+  "version": "0.1.0",
+  "description": "Cardinal Investigation Storyboards for Claude Code: evidence-bound, shareable write-ups of an investigation over any MCP data, with local previews. Signs in to Cardinal with OAuth; no telemetry.",
+  "author": {
+    "name": "CardinalHQ",
+    "url": "https://cardinalhq.io"
+  },
+  "homepage": "https://github.com/cardinalhq/cardinal-claude-plugin",
+  "license": "Apache-2.0"
+}

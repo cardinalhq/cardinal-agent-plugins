@@ -14,6 +14,8 @@ Contract:
     fires on resume / clear / compact, so the id survives compaction.
   - Silent when there is no id, or the id is not one maestro accepts
     (^[A-Za-z0-9_-]{1,128}$, routes/storyboards-mcp-tools.ts CreateSchema).
+  - In the slim cardinal-storyboards plugin: silent while the full cardinal
+    plugin is active (hooks/_plugin_mode.py), which says it instead.
   - Fail open: never blocks or delays session start, never prints an error.
 """
 
@@ -23,6 +25,13 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import _plugin_mode  # noqa: E402
+except Exception:  # this file copied alone: behave as the full plugin
+    _plugin_mode = None
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -46,6 +55,9 @@ def main() -> None:
             payload = {}
     except Exception:
         payload = {}
+    home = Path(os.environ.get("HOME") or str(Path.home()))
+    if _plugin_mode and _plugin_mode.slim_should_yield(home, cwd=payload.get("cwd")):
+        return
     sid = session_id(payload)
     if not sid:
         return

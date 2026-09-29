@@ -95,7 +95,8 @@ own `glob.py` would run here:
 RENDER=$(python3 -I -c 'import glob, os, re
 h = os.path.expanduser("~/.claude")
 ver = lambda p: [int(n) for n in re.findall(r"\d+", p.split(os.sep)[-5])]
-c = sorted(glob.glob(h + "/plugins/cache/*/cardinal/*/skills/canvas/scripts/render_preview.py"), key=ver)
+c = sorted(glob.glob(h + "/plugins/cache/*/cardinal/*/skills/canvas/scripts/render_preview.py")
+    + glob.glob(h + "/plugins/cache/*/cardinal-storyboards/*/skills/canvas/scripts/render_preview.py"), key=ver)
 c = c[-1:] or glob.glob(h + "/skills/canvas/scripts/render_preview.py")
 print(c[0] if c else "")')
 [ -f "$RENDER" ] || echo "canvas render_preview.py not found"

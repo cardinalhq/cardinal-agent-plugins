@@ -3,7 +3,7 @@
 
 When `storyboard__preview` returns, this hook hands the result to the canvas
 skill's local renderer (skills/canvas/scripts/render_preview.py), which fetches
-each scene's preview bundle with the Cardinal MCP key, renders it in the user's
+each scene's preview bundle (Cardinal MCP key or preview_token), renders it in the user's
 own sandboxed, network-locked Chromium and writes one PNG per reveal step to
 ~/.claude/cardinal/storyboards/<storyboard_id>/r<revision>/. The hook then puts
 the PNG paths (and any per-scene render errors) in Claude's context, so Claude
@@ -25,8 +25,15 @@ Contract:
     and one instruction to Read every step. Frame and renderer error text
     comes from the scene's own (untrusted) code and is labelled as quoted
     data, not instructions.
-  - Silent when the tool is not storyboard__preview, the result is an error or
+  - Silent when the tool is not Cardinal's storyboard__preview (mcp__cardinal__,
+    mcp__plugin_cardinal_cardinal__ or the slim plugin's
+    mcp__plugin_cardinal-storyboards_cardinal__), the result is an error or
     has no scenes, or the payload is unreadable.
+  - In the slim cardinal-storyboards plugin: silent while the full cardinal
+    plugin is active (hooks/_plugin_mode.py), which renders instead.
+  - Credentials: the renderer uses the Cardinal MCP key when /cardinal:connect
+    stored one, else the result's own preview_token (10 min, this
+    storyboard's preview pages only) as `Authorization: CardinalPreview`.
   - No local Chromium (renderer exit 3): says so once per session (a marker
     keyed by session_id; `claude --resume` keeps the id, so a resumed session
     stays quiet), then stays silent.
@@ -49,6 +56,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import _plugin_mode  # noqa: E402
+except Exception:  # this file copied alone: behave as the full plugin
+    _plugin_mode = None
+
+if _plugin_mode:
+    CARDINAL_SERVERS = _plugin_mode.CARDINAL_SERVERS
+else:  # same list as _plugin_mode.CARDINAL_SERVERS
+    CARDINAL_SERVERS = ("cardinal", "plugin_cardinal_cardinal", "plugin_cardinal-storyboards_cardinal",
+                        "plugin_cardinal_storyboards_cardinal")
+
 try:
     from cardinal_core import evidence  # noqa: E402  (spill-file follower)
 except Exception:  # not vendored: render inline results, skip spill notices
@@ -79,6 +97,17 @@ READ_INSTRUCTION = ("Read every PNG, first and last step included, and judge whe
 
 def home_dir() -> Path:
     return Path(os.environ.get("HOME") or str(Path.home()))
+
+
+def is_cardinal_preview(name) -> bool:
+    """storyboard__preview on Cardinal's own server (a user-scope `cardinal`,
+    or the full or slim plugin's bundled one). Another server's tool of the
+    same name never reaches the renderer: the result carries the credential
+    (preview_token) and names the pages it fetches."""
+    if not (isinstance(name, str) and name.startswith("mcp__")):
+        return False
+    server, sep, tool = name[len("mcp__"):].partition("__")
+    return bool(sep) and server in CARDINAL_SERVERS and tool == "storyboard__preview"
 
 
 def _budget() -> float:
@@ -338,8 +367,9 @@ def main() -> None:
         return
     if not isinstance(payload, dict):
         return
-    name = payload.get("tool_name")
-    if not (isinstance(name, str) and name.endswith("storyboard__preview")):
+    if not is_cardinal_preview(payload.get("tool_name")):
+        return
+    if _plugin_mode and _plugin_mode.slim_should_yield(home_dir(), cwd=payload.get("cwd")):
         return
     result = preview_result(payload.get("tool_response"))
     if result is None or not RENDERER.is_file():

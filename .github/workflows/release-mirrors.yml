@@ -4,12 +4,20 @@ name: Release adapter to mirror
 #   1. workflow_dispatch: manually release one adapter (choose via input).
 #      Matrix contains just that one adapter.
 #   2. push to main touching any adapter's plugin.json: auto-release all
-#      4 adapters (matrix over all). release.py is idempotent — adapters
+#      adapters (matrix over all). release.py is idempotent — adapters
 #      whose plugin.json version already has a matching tag on the mirror
 #      no-op cleanly, so firing all 4 on any single bump has no side
 #      effect beyond a fast "already at vX.Y.Z" print. Path filter
 #      restricts firing to actual plugin-manifest changes, not every
 #      merge to main.
+#
+# claude-storyboards is the slim cardinal-storyboards Claude Code plugin,
+# composed from adapters/claude by adapters/claude-storyboards/compose.json.
+# It ships to the SAME mirror as claude (cardinal-claude-plugin, second
+# subpath plugins/cardinal-storyboards, tags cardinal-storyboards/v<version>),
+# so it uses the claude deploy key and its tests are the claude suite. Its
+# plugin.json matches the push path filter below: the push that first adds
+# it releases cardinal-storyboards v0.1.0.
 on:
   workflow_dispatch:
     inputs:
@@ -17,7 +25,7 @@ on:
         description: Adapter to release (version read from its plugin.json)
         required: true
         type: choice
-        options: [claude, codex, cursor, gemini]
+        options: [claude, claude-storyboards, codex, cursor, gemini]
   push:
     branches: [main]
     paths:
@@ -29,7 +37,7 @@ on:
 jobs:
   # Compute the matrix once, based on trigger:
   # - dispatch → [inputs.adapter]
-  # - push     → [claude, codex, cursor, gemini]
+  # - push     → [claude, claude-storyboards, codex, cursor, gemini]
   # Emitted as a JSON array on stdout, consumed by downstream matrix.
   matrix:
     runs-on: ubuntu-latest
@@ -41,7 +49,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "adapters=[\"${{ inputs.adapter }}\"]" >> "$GITHUB_OUTPUT"
           else
-            echo 'adapters=["claude","codex","cursor","gemini"]' >> "$GITHUB_OUTPUT"
+            echo 'adapters=["claude","claude-storyboards","codex","cursor","gemini"]' >> "$GITHUB_OUTPUT"
           fi
 
   test:
@@ -60,8 +68,14 @@ jobs:
         run: cd core && python3 -m unittest discover tests
       - name: Vendor + adapter suite
         run: |
-          python3 build/vendor.py ${{ matrix.adapter }}
-          cd adapters/${{ matrix.adapter }} && python3 -m unittest discover tests
+          # A composed adapter is tested through its base adapter's suite
+          # (adapters/claude/tests covers the storyboard hooks it ships).
+          case "${{ matrix.adapter }}" in
+            claude-storyboards) suite=claude ;;
+            *) suite="${{ matrix.adapter }}" ;;
+          esac
+          python3 build/vendor.py "$suite"
+          cd "adapters/$suite" && python3 -m unittest discover tests
       - name: Contract suite
         run: python3 -m unittest discover tests
 
@@ -70,6 +84,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # One release at a time: claude and claude-storyboards push to the same
+      # mirror (main + marketplace.json), so running them in parallel races.
+      max-parallel: 1
       matrix:
         adapter: ${{ fromJson(needs.matrix.outputs.adapters) }}
     steps:
@@ -88,7 +105,7 @@ jobs:
           KEY_GEMINI: ${{ secrets.MIRROR_DEPLOY_KEY_GEMINI }}
         run: |
           case "${{ matrix.adapter }}" in
-            claude) KEY="$KEY_CLAUDE" ;;
+            claude|claude-storyboards) KEY="$KEY_CLAUDE" ;;
             codex)  KEY="$KEY_CODEX" ;;
             cursor) KEY="$KEY_CURSOR" ;;
             gemini) KEY="$KEY_GEMINI" ;;

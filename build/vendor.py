@@ -26,9 +26,11 @@ ADAPTERS_DIR = ROOT / "adapters"
 def known_adapters() -> list[str]:
     if not ADAPTERS_DIR.exists():
         return []
+    # A composed adapter (compose.json, e.g. claude-storyboards) has no hook
+    # code of its own: build/release.py vendors core into its artifact.
     return sorted(
         p.name for p in ADAPTERS_DIR.iterdir()
-        if p.is_dir() and (p / "hooks").exists()
+        if p.is_dir() and (p / "hooks").exists() and not (p / "compose.json").exists()
     )
 
 
