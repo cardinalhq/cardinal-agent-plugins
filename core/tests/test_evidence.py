@@ -91,9 +91,20 @@ class LinearScannerParityTests(unittest.TestCase):
             want = [(m.end(1), m.end()) for m in go.finditer(s)]
             self.assertEqual(ev._url_userinfo_spans(s), want, repr(s))
 
+    def test_pem_scanner_equals_single_pattern(self):
+        go = re.compile(ev.GO_PEM_PRIVATE_KEY, re.ASCII)
+        rnd = random.Random(1944)
+        pieces = ["-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----",
+                  "-----END EC PRIVATE KEY-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----", "-----BEGIN PUBLIC KEY-----",
+                  "MIIE", "A", "=", "!", " ", "\n", "\\", "[", ":", "-", "x"]
+        for _ in range(30000):
+            s = "".join(rnd.choice(pieces) for _ in range(rnd.randint(0, 10)))
+            self.assertEqual(ev._redact_pem_private_keys(s), go.sub(ev.REDACTED, s), repr(s))
+
     def test_pathological_runs_stay_fast(self):
         for text in ("k" * (1 << 20), "a" * (1 << 19) + "://" + "b" * (1 << 19), "\\" * (1 << 19) + "=",
-                     "k=:" * (1 << 16)):
+                     "k=:" * (1 << 16), "-----BEGIN PRIVATE KEY-----!" * (1 << 15),
+                     "-----BEGIN PRIVATE KEY-----\nA\n-----END PRIVATE KEY-----!" * (1 << 14)):
             t0 = time.monotonic()
             ev.redact_plain_text(text)
             ev.scrub_text(text)

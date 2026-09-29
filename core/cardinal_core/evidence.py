@@ -270,12 +270,19 @@ _TOKEN_SHAPES = [re.compile(p, re.ASCII) for p in (
     r"\$7\$[./A-Za-z0-9]+\$[./A-Za-z0-9]{20,}",                                                        # crypt scrypt
     r"\$scrypt\$[A-Za-z0-9+/.=,$\-]{20,}",                                                             # PHC scrypt
     r"\bpbkdf2_sha(?:1|256|512)\$\d+\$[^" + _WS + r"$]+\$[A-Za-z0-9+/=]{20,}",                         # Django
-    # A PEM private key block, header to footer; a block cut before its
-    # footer (a capped prefix) loses the base64 run after its header.
-    r"-----BEGIN[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----(?:(?s:.)*?-----END[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----"
-    r"|[A-Za-z0-9+/=" + _WS + r"\\:,.\-]*)",                                                                  # PEM
 )]
 _SK_HOST_NAME = re.compile(r"^sk(?:-[a-z0-9]+){2,}$")
+# A PEM private key block, header to footer; a block cut before its footer
+# (a capped prefix) loses the base64 run after its header. Matched by
+# _redact_pem_private_keys, not one regexp with a lazy "anything up to a
+# footer" arm: that rescans to the end for every footerless header and is
+# quadratic on a run of them (conductor errors.go redactPEMPrivateKeys).
+# The single-pattern form, kept for the parity fuzz in tests/test_evidence.py.
+GO_PEM_PRIVATE_KEY = (r"-----BEGIN[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----(?:(?s:.)*?"
+                      r"-----END[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----|[A-Za-z0-9+/=\t\n\f\r \\:,.\-]*)")
+_PEM_PRIVATE_BEGIN = re.compile(r"-----BEGIN[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----", re.ASCII)
+_PEM_PRIVATE_END = re.compile(r"-----END[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----", re.ASCII)
+_PEM_BODY_RUN = re.compile(r"[A-Za-z0-9+/=" + _WS + r"\\:,.\-]*", re.ASCII)
 _VALUE_STOP = " \t\r\n\"'&,;)}]<>"
 _VALUE_ESCAPE_STOP = "\"'nrt"
 
@@ -515,7 +522,42 @@ def _redact_url_and_scheme(s: str, credential) -> str:
     return _AUTH_SCHEME.sub(repl, s)
 
 
+def _redact_pem_private_keys(s: str) -> str:
+    """Each PEM private key block -> REDACTED: a header through the first
+    footer after it or, with no footer after it, the body run after the
+    header. Linear in len(s)."""
+    if "-----BEGIN" not in s:
+        return s
+    out = []
+    last = 0
+    # The first footer at or after the last search start: None = not
+    # searched yet, -1 = none left in s.
+    end_start, end_stop = None, 0
+    while last < len(s):
+        m = _PEM_PRIVATE_BEGIN.search(s, last)
+        if m is None:
+            break
+        hs, he = m.start(), m.end()
+        if end_start is None or 0 <= end_start < he:
+            e = _PEM_PRIVATE_END.search(s, he)
+            if e is None:
+                end_start = -1
+            else:
+                end_start, end_stop = e.start(), e.end()
+        stop = end_stop if end_start >= 0 else _PEM_BODY_RUN.match(s, he).end()
+        out.append(s[last:hs])
+        out.append(REDACTED)
+        last = stop
+    if not out:
+        return s
+    out.append(s[last:])
+    return "".join(out)
+
+
 def _redact_token_shapes(s: str) -> str:
+    # PEM first: a shape matched inside a key's base64 would end a
+    # footerless block's body run early and leave the rest of it.
+    s = _redact_pem_private_keys(s)
     for rx in _TOKEN_SHAPES:
         s = rx.sub(lambda m: m.group(0) if _SK_HOST_NAME.match(m.group(0)) else REDACTED, s)
     return s

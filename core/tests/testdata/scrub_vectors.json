@@ -1,5 +1,5 @@
 {
- "_comment": "Port-parity vectors for cardinal_core.evidence.scrub, a Python port of conductor's receipt credential scrub (cardinalhq/conductor packages/mcp-gateway/storyboard/receipts/receipts.go scrub/isCredentialKey and errors.go redactValueShapes/RedactErrorText). 'keys' is copied from conductor's receipts/testdata/credential_keys.json (gateway classification: 'credential' and 'headers' keys match, 'evidence_both' and 'evidence_gateway_only' keys do not, 'secret_pair_names' {name, value} pairs are redacted and 'plain_pair_names' kept). 'scrub' (scrub), 'text' (scrubText) and 'plain' (RedactErrorText on non-JSON text) outputs were produced by the Go implementation at conductor 9d8bd031. When conductor's scrub changes, regenerate from Go and update the port in the same change. The PEM private-key vectors were produced by the Go implementation on conductor branch fix/receipt-scrub-pem-private-keys (tokenShapes PEM).",
+ "_comment": "Port-parity vectors for cardinal_core.evidence.scrub, a Python port of conductor's receipt credential scrub (cardinalhq/conductor packages/mcp-gateway/storyboard/receipts/receipts.go scrub/isCredentialKey and errors.go redactValueShapes/RedactErrorText). 'keys' is copied from conductor's receipts/testdata/credential_keys.json (gateway classification: 'credential' and 'headers' keys match, 'evidence_both' and 'evidence_gateway_only' keys do not, 'secret_pair_names' {name, value} pairs are redacted and 'plain_pair_names' kept). 'scrub' (scrub), 'text' (scrubText) and 'plain' (RedactErrorText on non-JSON text) outputs were produced by the Go implementation at conductor 9d8bd031. When conductor's scrub changes, regenerate from Go and update the port in the same change. The PEM private-key vectors were produced by the Go implementation on conductor branch fix/receipt-scrub-pem-private-keys (redactPEMPrivateKeys, e7d88135).",
  "keys": {
   "credential": [
    "x-cardinalhq-api-key",
@@ -440,6 +440,18 @@
     "note": "k: [redacted] end",
     "pem": "[redacted]"
    }
+  },
+  {
+   "in": {
+    "cut": "-----BEGIN PRIVATE KEY-----\nMIIELEAK1\nAKIAABCDEFGHIJKLMNOP\nLEAK2==",
+    "mixed": "x -----BEGIN PRIVATE KEY-----\nAAA\n! y -----BEGIN PRIVATE KEY-----\nB\n-----END PRIVATE KEY----- z",
+    "repeat": "h1 -----BEGIN PRIVATE KEY-----! h2 -----BEGIN PRIVATE KEY-----! end"
+   },
+   "out": {
+    "cut": "[redacted]",
+    "mixed": "x [redacted] z",
+    "repeat": "h1 [redacted]! h2 [redacted]! end"
+   }
   }
  ],
  "text": [
@@ -502,6 +514,22 @@
   {
    "in": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----",
    "out": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----"
+  },
+  {
+   "in": "-----BEGIN PRIVATE KEY-----\nMIIELEAK1\nAKIAABCDEFGHIJKLMNOP\nLEAK2==",
+   "out": "[redacted]"
+  },
+  {
+   "in": "x -----BEGIN PRIVATE KEY-----\nAAA\n! y -----BEGIN PRIVATE KEY-----\nB\n-----END PRIVATE KEY----- z",
+   "out": "x [redacted] z"
+  },
+  {
+   "in": "a -----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY----- b -----BEGIN EC PRIVATE KEY-----\nY\n-----END EC PRIVATE KEY----- c",
+   "out": "a [redacted] b [redacted] c"
+  },
+  {
+   "in": "h1 -----BEGIN PRIVATE KEY-----! h2 -----BEGIN PRIVATE KEY-----! end",
+   "out": "h1 [redacted]! h2 [redacted]! end"
   }
  ],
  "plain": [
@@ -560,6 +588,22 @@
   {
    "in": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----",
    "out": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----"
+  },
+  {
+   "in": "-----BEGIN PRIVATE KEY-----\nMIIELEAK1\nAKIAABCDEFGHIJKLMNOP\nLEAK2==",
+   "out": "[redacted]"
+  },
+  {
+   "in": "x -----BEGIN PRIVATE KEY-----\nAAA\n! y -----BEGIN PRIVATE KEY-----\nB\n-----END PRIVATE KEY----- z",
+   "out": "x [redacted] z"
+  },
+  {
+   "in": "a -----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY----- b -----BEGIN EC PRIVATE KEY-----\nY\n-----END EC PRIVATE KEY----- c",
+   "out": "a [redacted] b [redacted] c"
+  },
+  {
+   "in": "h1 -----BEGIN PRIVATE KEY-----! h2 -----BEGIN PRIVATE KEY-----! end",
+   "out": "h1 [redacted]! h2 [redacted]! end"
   }
  ]
 }
