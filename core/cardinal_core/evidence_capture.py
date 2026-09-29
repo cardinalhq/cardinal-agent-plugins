@@ -1,0 +1,556 @@
+"""Generic evidence capture: ONE pipeline for every tool call.
+
+Any tool call an agent makes (a built-in tool, any MCP server's tool, a tool
+that does not exist yet) is recorded the same way, in the local spool
+(cardinal_core.evidence, ~/.cardinal/evidence/<session>/ev_<12 hex>.json), so
+a storyboard can later cite it. Nothing here touches the network: a result
+leaves the machine only when the author promotes it
+(cardinal_core.evidence_promote).
+
+    capture_call(ToolCall)
+      0  (adapter) budget guard: time_guard(), read_stdin_bounded()
+      1  opt-out?  CARDINAL_EVIDENCE_CAPTURE=0 | <spool>/disabled  -> nothing
+      2  dedupe:   source kind "cardinal" (Cardinal's own gateway already
+                   minted a witnessed receipt)                      -> nothing
+      3  sensitivity gate over every key and string of tool_input
+         (cardinal_core.evidence_gate; tool-neutral)          -> withheld stub
+      4  normalize: the first matching pluggable normalizer, else generic
+         (cardinal_core.evidence_normalizers; shape only, never a gate)
+      5  redact every field: the gateway's scrub (evidence.scrub) plus
+         plain-text key=value rules, sensitive-path lines, base64 blobs and
+         local paths (spill root -> [local file], cwd -> ".", $HOME -> "~")
+      6  cap: args <= 64 KiB, result <= 256 KiB, else conductor's
+         {truncated, original_bytes, prefix} envelope
+      7  write (atomic, 0600 in a 0700 dir) + gc (TTL, 256 MiB, 10k/session)
+
+Steps 1-3 are the whole capture decision; none of them names a tool.
+
+Entry schema: cardinal.evidence.v2 (see SCHEMA_V2 below and
+docs/specs/generic-evidence-capture.md). v1 entries stay readable.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import signal
+import sys
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+from . import evidence
+from . import evidence_gate as gate
+from .evidence_normalizers import Normalized, ToolCall, normalize_call
+
+SCHEMA_V2 = "cardinal.evidence.v2"
+
+# Budget: under the 2 s a Claude Code hook gets.
+TIME_BUDGET_S = 1.5
+MAX_STDIN_BYTES = 32 << 20
+MAX_TOOL_NAME = 256
+HINTED = ".hinted"
+BASE64_MIN = 4096
+LOCAL_FILE = evidence.LOCAL_FILE
+
+CONTEXT_ENV = "CARDINAL_EVIDENCE_CONTEXT"
+
+SOURCE_MCP = "mcp"
+SOURCE_BUILTIN = "builtin"
+SOURCE_TOOL = "tool"
+SOURCE_CARDINAL = "cardinal"
+
+# The characters maestro accepts in an identifier (evidence-upload.ts ident /
+# gateway external.go checkIdent): ^[A-Za-z0-9_.:/@-]+(?: [A-Za-z0-9_.:/@-]+)*$
+IDENT_RE = re.compile(r"^[A-Za-z0-9_.:/@-]+(?: [A-Za-z0-9_.:/@-]+)*$")
+_IDENT_BAD = re.compile(r"[^A-Za-z0-9_.:/@ -]")
+_RUNTIME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+
+def mcp_source(server: str, runtime: str) -> dict:
+    return {"kind": SOURCE_MCP, "server": server, "runtime": runtime}
+
+
+def builtin_source(runtime: str) -> dict:
+    return {"kind": SOURCE_BUILTIN, "runtime": runtime}
+
+
+def classify_mcp_name(tool_name: Any, runtime: str, cardinal_servers=()) -> tuple:
+    """(source, short tool) for a runtime that names MCP tools
+    mcp__<server>__<tool> (Claude Code, Cursor, Codex): an MCP source for
+    such a name (kind "cardinal" for Cardinal's own gateway), else a
+    built-in source with the whole name as the tool."""
+    name = tool_name if isinstance(tool_name, str) else ""
+    parts = evidence.split_mcp_tool(name)
+    if parts is not None:
+        server, tool = parts
+        if server in cardinal_servers:
+            return {"kind": SOURCE_CARDINAL, "server": server, "runtime": runtime}, tool
+        return mcp_source(server, runtime), tool
+    return builtin_source(runtime), name
+
+
+def ident(s: Any, max_len: int, empty: str) -> str:
+    """s as a maestro identifier: characters outside [A-Za-z0-9_.:/@-] ->
+    "_", runs of spaces -> one, trimmed, at most max_len characters."""
+    t = _IDENT_BAD.sub("_", s if isinstance(s, str) else "")
+    t = re.sub(r" +", " ", t).strip()[:max_len].strip()
+    return t if t and IDENT_RE.match(t) else empty
+
+
+def wire_source_server(source: Any, fallback: Any = None) -> str:
+    """The upload's source_server for an entry's source: the MCP server
+    (":" -> "_", so the builtin:/tool: namespaces stay the plugin's own),
+    "builtin:<runtime>", or "tool:<runtime>"."""
+    if isinstance(source, dict):
+        kind = source.get("kind")
+        rt = ident(source.get("runtime"), 60, "agent")
+        if kind == SOURCE_BUILTIN:
+            return "builtin:" + rt
+        if kind == SOURCE_TOOL:
+            return "tool:" + rt
+        if kind == SOURCE_MCP:
+            return ident(str(source.get("server") or "").replace(":", "_"), 128, "unknown_server")
+    return ident(fallback, 128, "unknown_server")
+
+
+# ---------------------------------------------------------------------------
+# Ids
+# ---------------------------------------------------------------------------
+
+def evidence_id_v2(runtime: str, session_id: Any, tool_use_id: Any) -> Optional[str]:
+    """ev_ + sha256("cardinal.evidence.v2|runtime|session|tool_use_id")[:12]
+    when the runtime gives a tool-use id (deterministic: a re-fired hook
+    rewrites the same file, and a JS adapter computes the same id;
+    core/tests/testdata/evidence_id_vectors.json pins both). None
+    otherwise."""
+    if not isinstance(tool_use_id, str) or not tool_use_id or len(tool_use_id) > 256:
+        return None
+    s = "|".join((SCHEMA_V2, runtime or "", evidence.session_dir_name(session_id), tool_use_id))
+    return "ev_" + hashlib.sha256(s.encode("utf-8", errors="surrogatepass")).hexdigest()[:12]
+
+
+def _random_id(server: str, tool: str, called_at: str) -> str:
+    s = "|".join((SCHEMA_V2, server, tool, called_at, os.urandom(8).hex()))
+    return "ev_" + hashlib.sha256(s.encode("utf-8", errors="surrogatepass")).hexdigest()[:12]
+
+
+# ---------------------------------------------------------------------------
+# Step 5: redaction beyond the gateway's leaf rule
+# ---------------------------------------------------------------------------
+
+_B64_RUN = re.compile(r"[A-Za-z0-9+/=_\-\r\n]+")
+_DATA_URL = re.compile(r"data:[^,;\s]{0,100}(?:;[^,;\s]{0,100}){0,4};base64,", re.IGNORECASE)
+_PATH_LINE = re.compile(r"^([^\s:]{1,1024}):(?!//)(.*)$", re.MULTILINE)
+
+
+class _Local:
+    """Local path rewrites: spill root -> [local file], cwd -> ".",
+    home -> "~"."""
+
+    def __init__(self, spill_root: Optional[str], cwd: Optional[str], home: Optional[str]):
+        self.rules = []
+        roots = set()
+        if spill_root:
+            roots.add(str(spill_root))
+            try:
+                roots.add(str(Path(spill_root).resolve()))
+            except (OSError, RuntimeError):
+                pass
+        for r in sorted(roots, key=len, reverse=True):
+            if len(r) > 1:
+                self.rules.append((r, re.compile(re.escape(r) + r"(?:/[^\s\]\"'`)]*)?"), LOCAL_FILE))
+        for p, repl in ((cwd, "."), (home, "~")):
+            if isinstance(p, str) and len(p.rstrip("/")) > 1 and p.startswith("/"):
+                q = p.rstrip("/")
+                self.rules.append((q, re.compile(re.escape(q) + r"(?=/|$|[\s\"'`:;,)\]}])"), repl))
+
+    def apply(self, s: str) -> str:
+        for needle, rx, repl in self.rules:
+            if needle in s:
+                s = rx.sub(repl, s)
+        return s
+
+
+def _path_lines(s: str, home: Optional[str], cwd: Optional[str]) -> str:
+    """grep/rg `path:line:` output: a line whose leading path is sensitive
+    (the gate's path rules) keeps only `<path>:[withheld]`."""
+    if ":" not in s:
+        return s
+
+    def repl(m):
+        p = gate._norm(m.group(1), cwd, home)
+        if p and gate.full_path_rule(p, home):
+            return m.group(1) + ":[withheld]"
+        return m.group(0)
+
+    return _PATH_LINE.sub(repl, s)
+
+
+def _is_base64_blob(s: str) -> bool:
+    """A string of at least BASE64_MIN characters that is a base64 (or
+    base64url) run, or a data: URL of one. Encoded bytes use the whole
+    alphabet (upper and lower case, digits and "+/" or "-_"), which a hex
+    listing or a run of one letter does not."""
+    if len(s) < BASE64_MIN:
+        return False
+    m = _DATA_URL.match(s)
+    body = s[m.end():] if m else s
+    if len(body) < BASE64_MIN or _B64_RUN.fullmatch(body) is None:
+        return False
+    if m:
+        return True
+    sample = body[:BASE64_MIN]
+    return (any(c.isupper() for c in sample) and any(c.islower() for c in sample)
+            and any(c.isdigit() for c in sample) and any(c in "+/-_" for c in sample))
+
+
+def _looks_json(s: str) -> bool:
+    t = s.lstrip()
+    return bool(t) and t[0] in "{["
+
+
+class _Hardener:
+    """Walks a value in the order encode_json serializes it (sorted keys) and
+    applies the stricter text rules to every string leaf. Past `budget`
+    characters of output the rest of the value cannot fit in the capped
+    prefix, so later strings are dropped (and the caller marks the value
+    truncated)."""
+
+    def __init__(self, budget: int, local: _Local, home: Optional[str], cwd: Optional[str]):
+        self.left = budget
+        self.local = local
+        self.home = home
+        self.cwd = cwd
+        self.cut = False
+
+    def string(self, s: str, depth: int = 0) -> str:
+        if self.left <= 0:
+            self.cut = True
+            return ""
+        s = evidence._nul(s)
+        decoded = None
+        if (not _is_base64_blob(s) and depth < evidence.MAX_NESTED_JSON and _looks_json(s)
+                and len(s) <= evidence.MAX_STRUCTURAL_SCRUB_BYTES):
+            decoded = evidence._json_container(s)
+        if _is_base64_blob(s):
+            out = f"[binary omitted: {len(s)} bytes]"
+        elif decoded is not None:
+            # A JSON document in a string: its own leaves get the same rules;
+            # evidence.scrub_string scrubs it structurally afterwards.
+            # The text is kept as written unless a rule changed a leaf.
+            try:
+                hardened = self.walk(decoded, depth + 1)
+                out = self.local.apply(s) if hardened == decoded else evidence.encode_json(hardened)
+            except (ValueError, TypeError):
+                out = evidence.redact_json_text(s)
+            self.left -= 2
+            return out
+        else:
+            if len(s) > self.left + 1024:
+                s = evidence._drop_trailing_run(s[: self.left + 1024])
+                self.cut = True
+            if _looks_json(s):
+                out = evidence.redact_json_text(s)
+            else:
+                out = evidence.redact_plain_text(_path_lines(s, self.home, self.cwd))
+            out = self.local.apply(out)
+        self.left -= len(out) + 2
+        return out
+
+    def walk(self, v: Any, depth: int = 0) -> Any:
+        if isinstance(v, str):
+            return self.string(v, depth)
+        if isinstance(v, list):
+            return [self.walk(e, depth) for e in v]
+        if isinstance(v, dict):
+            try:
+                items = sorted(v.items(), key=lambda kv: kv[0])
+            except TypeError:
+                items = sorted(v.items(), key=lambda kv: str(kv[0]))
+            out = {}
+            for k, e in items:
+                if isinstance(k, str):
+                    self.left -= len(k) + 3
+                out[k] = self.walk(e, depth)
+            return out
+        if v is not None and not isinstance(v, (bool, int, float)):
+            return str(v)
+        self.left -= 8
+        return v
+
+
+def redact_and_cap(value: Any, max_bytes: int, local: _Local, home: Optional[str], cwd: Optional[str]) -> tuple:
+    """-> (stored value, truncated). The hardening pass, then the gateway's
+    scrub and cap (evidence.scrub_and_cap). A value whose tail had to be
+    dropped to stay in budget is always stored as the truncation envelope,
+    with the original size."""
+    try:
+        raw_len = len(evidence.encode_json(value).encode("utf-8", errors="surrogatepass"))
+    except (ValueError, TypeError, RecursionError):
+        raw_len = 0
+    h = _Hardener(max_bytes + (max_bytes >> 2), local, home, cwd)
+    try:
+        hardened = h.walk(value)
+    except RecursionError:
+        return {"truncated": True, "original_bytes": raw_len, "prefix": ""}, True
+    stored, truncated = evidence.scrub_and_cap(hardened, max_bytes)
+    if not h.cut:
+        return stored, truncated
+    if truncated and isinstance(stored, dict):
+        stored["original_bytes"] = max(raw_len, int(stored.get("original_bytes") or 0))
+        return stored, True
+    try:
+        text = evidence.encode_json(stored)
+    except (ValueError, TypeError, RecursionError):
+        text = ""
+    return evidence._truncated(raw_len, text, max_bytes), True
+
+
+# ---------------------------------------------------------------------------
+# Records
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Captured:
+    entry: dict
+    line: Optional[str]    # the context line for the agent, or None
+    withheld: bool = False
+
+
+def _clip_scrubbed(s: Any, n: int, local: _Local) -> Optional[str]:
+    if not isinstance(s, str) or not s:
+        return None
+    t = local.apply(evidence.redact_plain_text(evidence._nul(s[: n * 4])))
+    t = " ".join(t.split())
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def _base_record(call: ToolCall, local: _Local, called_at: str) -> dict:
+    source = dict(call.source) if isinstance(call.source, dict) else builtin_source(call.runtime)
+    source["runtime"] = call.runtime
+    if source.get("kind") == SOURCE_MCP:
+        source["server"] = _clip_scrubbed(source.get("server"), 128, local) or "unknown_server"
+    else:
+        source.pop("server", None)
+    tool_name = _clip_scrubbed(call.tool_name, MAX_TOOL_NAME, local) or ""
+    tool = _clip_scrubbed(call.tool, MAX_TOOL_NAME, local) or tool_name or "unknown_tool"
+    rec = {
+        "schema": SCHEMA_V2,
+        "evidence_id": "",
+        "tier": evidence.TIER,
+        "session_id": call.session_id if isinstance(call.session_id, str)
+        and evidence.SESSION_ID_RE.match(call.session_id) else None,
+        "source": source,
+        "server": wire_source_server(source),
+        "tool": tool,
+        "tool_name": tool_name,
+        "client": _clip_scrubbed(call.client, 64, local) or call.runtime,
+        "called_at": called_at,
+    }
+    if isinstance(call.tool_use_id, str) and 0 < len(call.tool_use_id) <= 256:
+        rec["tool_use_id"] = call.tool_use_id
+    return rec
+
+
+def build_record(call: ToolCall, *, home: Optional[str] = None, withheld: Optional[gate.Withheld] = None) -> dict:
+    """The v2 spool entry for one call (scrubbed, capped), or its withheld
+    stub (no args, no result, no summary)."""
+    local = _Local(call.spill_root, call.cwd, home)
+    called_at = call.called_at or evidence.now_iso()
+    rec = _base_record(call, local, called_at)
+    failed = call.error is not None
+    if withheld is not None:
+        rec.update({"status": "error" if failed else "ok", "args": None, "result": None, "truncated": False,
+                    "withheld": withheld.as_dict()})
+        if failed:
+            rec["is_error"] = True
+    else:
+        norm, nid = normalize_call(call)
+        if not isinstance(norm, Normalized):  # pragma: no cover - normalize_call guarantees it
+            norm = Normalized(text=[""])
+        args_in = call.tool_input if call.tool_input is not None else {}
+        args, args_truncated = redact_and_cap(evidence.well_formed(args_in), evidence.MAX_ARGS_BYTES, local, home,
+                                              call.cwd)
+        body: dict = {}
+        if norm.has_structured or norm.structured is not None:
+            body["structured"] = norm.structured
+        if norm.text:
+            body["text"] = [t if isinstance(t, str) else str(t) for t in norm.text]
+        if norm.other_blocks:
+            body["other_blocks"] = int(norm.other_blocks)
+        result, truncated = redact_and_cap(evidence.well_formed(body), evidence.MAX_RESULT_BYTES, local, home,
+                                           call.cwd)
+        is_error = failed or bool(norm.is_error)
+        rec.update({
+            "status": "error" if is_error else "ok",
+            "normalizer": nid,
+            "args": args,
+            "result": result,
+            "truncated": truncated,
+        })
+        if norm.spilled_bytes is not None:
+            rec["spilled"] = True
+            rec["spilled_bytes"] = int(norm.spilled_bytes)
+        if args_truncated:
+            rec["args_truncated"] = True
+        if is_error:
+            rec["is_error"] = True
+        if isinstance(norm.exit_code, int) and not isinstance(norm.exit_code, bool):
+            rec["exit_code"] = norm.exit_code
+        summary = _clip_scrubbed(norm.summary, 120, local)
+        if summary:
+            rec["summary"] = summary
+    ev_id = evidence_id_v2(call.runtime, call.session_id, call.tool_use_id)
+    rec["evidence_id"] = ev_id or _random_id(rec["server"], rec["tool"], called_at)
+    return rec
+
+
+def unreadable_record(runtime: str, client: str, head: bytes, spill_root: Optional[str] = None) -> Optional[dict]:
+    """A payload too large to read: a withheld stub (reason "unreadable",
+    rule "size"), with the session and tool pulled from the payload's head
+    when they are there. None when not even the tool name is readable."""
+    text = head[: 64 << 10].decode("utf-8", errors="ignore")
+
+    def field(name, rx):
+        m = re.search(r'"' + name + r'"\s*:\s*"(' + rx + r')"', text)
+        return m.group(1) if m else None
+
+    tool_name = field("tool_name", r"[^\"\\]{1,256}")
+    if not tool_name:
+        return None
+    source, tool = classify_mcp_name(tool_name, runtime)
+    call = ToolCall(runtime=runtime, tool_name=tool_name, source=source, tool=tool,
+                    session_id=field("session_id", r"[A-Za-z0-9_-]{1,128}"),
+                    tool_use_id=field("tool_use_id", r"[A-Za-z0-9_.:-]{1,256}"), client=client,
+                    spill_root=spill_root)
+    return build_record(call, withheld=gate.Withheld(gate.REASON_UNREADABLE, "size", f"> {MAX_STDIN_BYTES >> 20} MiB"))
+
+
+# ---------------------------------------------------------------------------
+# Context lines
+# ---------------------------------------------------------------------------
+
+def context_enabled(env: Optional[dict] = None) -> bool:
+    env = os.environ if env is None else env
+    return str(env.get(CONTEXT_ENV, "")).strip().lower() not in ("0", "false", "off", "no")
+
+
+def _first_in_session(root: Path, session_id: Any) -> bool:
+    """True once per session: creates <session>/.hinted."""
+    try:
+        sdir = Path(root) / evidence.session_dir_name(session_id)
+        fd = os.open(str(sdir / HINTED), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+
+
+def context_line(entry: dict, first: bool, promote_cmd: str = "cardinal-evidence") -> str:
+    ev_id = entry["evidence_id"]
+    w = entry.get("withheld")
+    if isinstance(w, dict):
+        text = gate.describe(gate.Withheld(str(w.get("reason")), str(w.get("rule")), str(w.get("hint"))))
+        line = f"[evidence:{ev_id} withheld: {text}]"
+        if first:
+            line += (" Nothing from this call was kept, so it cannot be cited; say so plainly instead of "
+                     "paraphrasing its result.")
+        return line
+    if not first:
+        return f"[evidence:{ev_id}]"
+    return (f"[evidence:{ev_id}] Cardinal kept this result on this machine. Every tool result in this session gets "
+            f"an id like this and can be cited in a storyboard: `{promote_cmd} promote ev_...` uploads only what "
+            f"you promote; `{promote_cmd} find <text>` looks an id up.")
+
+
+# ---------------------------------------------------------------------------
+# The pipeline
+# ---------------------------------------------------------------------------
+
+def capture_call(call: ToolCall, home: Path, *, env: Optional[dict] = None, rules: Optional[gate.Rules] = None,
+                 promote_cmd: str = "cardinal-evidence", write: bool = True) -> Optional[Captured]:
+    """Record one tool call. None when capture is off or the call is
+    Cardinal's own (already witnessed). Otherwise the written entry (or its
+    withheld stub) and the context line for the agent (None when
+    CARDINAL_EVIDENCE_CONTEXT=0). A failed write raises: hooks call this
+    inside their fail-open guard."""
+    env = os.environ if env is None else env
+    if not isinstance(call, ToolCall) or not _RUNTIME_RE.match(call.runtime or ""):
+        return None
+    root = evidence.default_root(home)
+    if evidence.capture_disabled(root, env):
+        return None
+    if isinstance(call.source, dict) and call.source.get("kind") == SOURCE_CARDINAL:
+        return None
+    home_s = str(home) if home else None
+    if rules is None:
+        rules = gate.load_rules(Path(home) if home else None, call.cwd)
+    verdict = gate.check(call.tool_name, call.tool_input, cwd=call.cwd, home=home_s, rules=rules)
+    entry = build_record(call, home=home_s, withheld=verdict)
+    if not write:
+        return Captured(entry, None, verdict is not None)
+    evidence.write_entry(root, entry)
+    try:
+        evidence.gc(root)
+    except Exception:
+        pass
+    line = None
+    if context_enabled(env):
+        line = context_line(entry, _first_in_session(root, entry.get("session_id")), promote_cmd)
+    return Captured(entry, line, verdict is not None)
+
+
+# ---------------------------------------------------------------------------
+# Hook budget helpers
+# ---------------------------------------------------------------------------
+
+class BudgetExceeded(BaseException):
+    """Raised by time_guard's timer; a hook's fail-open guard swallows it."""
+
+
+@contextmanager
+def time_guard(seconds: float = TIME_BUDGET_S):
+    """Abort the block after `seconds` of wall time (SIGALRM/setitimer, main
+    thread, POSIX). A write it interrupts leaves only a temp file, which gc
+    reaps. A no-op where timers are unavailable."""
+    armed = False
+    old = None
+    try:
+        if hasattr(signal, "setitimer") and seconds > 0:
+            def _fire(signum, frame):  # noqa: ARG001
+                raise BudgetExceeded()
+            old = signal.signal(signal.SIGALRM, _fire)
+            signal.setitimer(signal.ITIMER_REAL, seconds)
+            armed = True
+    except (ValueError, OSError):
+        armed = False
+    try:
+        yield
+    finally:
+        if armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            try:
+                signal.signal(signal.SIGALRM, old if old is not None else signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
+
+
+def read_stdin_bounded(limit: int = MAX_STDIN_BYTES) -> tuple:
+    """-> (bytes, complete). Reads at most limit + 1 bytes of stdin."""
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is None:
+        data = sys.stdin.read(limit + 1).encode("utf-8", errors="ignore")
+    else:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        return data[:limit], False
+    return data, True

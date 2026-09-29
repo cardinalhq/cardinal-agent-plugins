@@ -1,10 +1,11 @@
-"""Local evidence spool: captured MCP tool results, kept on this machine.
+"""Local evidence spool: captured tool results, kept on this machine.
 
 A storyboard cites evidence. Cardinal's own gateway mints a *witnessed*
-receipt for every read-only call it serves; a call to any other MCP server
-is invisible to it. A client hook (the Claude adapter's
-hooks/evidence-capture.py) records such a result here instead: one JSON file
-per call, under
+receipt for every read-only call it serves; any other tool call (a built-in
+tool such as a shell command or a file read, another MCP server, any tool at
+all) is invisible to it. A client hook records such a result here instead,
+through the generic pipeline in cardinal_core.evidence_capture: one JSON
+file per call, under
 
     <root>/<session_id>/ev_<12 hex>.json      (root: ~/.cardinal/evidence)
 
@@ -61,11 +62,23 @@ from typing import Any, Optional
 SCHEMA = "cardinal.evidence.v1"
 TIER = "captured"
 
+SCHEMA_V2 = "cardinal.evidence.v2"
+SCHEMAS = (SCHEMA, SCHEMA_V2)
+
 RETENTION_S = 14 * 24 * 3600
 # gc() runs at most once per GC_INTERVAL_S (stamp file) and for at most
 # GC_BUDGET_S, so a hook that calls it on every tool call stays cheap.
-GC_INTERVAL_S = 6 * 3600
+GC_INTERVAL_S = 10 * 60
 GC_BUDGET_S = 0.25
+# Size bounds (every tool call is captured, so these are load-bearing): the
+# whole spool stays under MAX_SPOOL_BYTES (CARDINAL_EVIDENCE_MAX_MB), oldest
+# entries evicted first across sessions, and one session keeps at most
+# MAX_ENTRIES_PER_SESSION entries. Token files and markers are never evicted
+# for size.
+MAX_SPOOL_BYTES = 256 << 20
+MAX_ENTRIES_PER_SESSION = 10000
+MAX_MB_ENV = "CARDINAL_EVIDENCE_MAX_MB"
+HINTED = ".hinted"
 # A temp file this old belongs to a write that died.
 STALE_TMP_S = 3600
 
@@ -1545,16 +1558,30 @@ def capture(home: Path, *, server: str, tool: str, tool_name: str, tool_input: A
 # GC
 # ---------------------------------------------------------------------------
 
+def spool_cap_bytes(env: Optional[dict] = None) -> int:
+    """MAX_SPOOL_BYTES, or CARDINAL_EVIDENCE_MAX_MB (1..65536) MiB."""
+    env = os.environ if env is None else env
+    v = str(env.get(MAX_MB_ENV, "")).strip()
+    if v.isdigit() and 1 <= int(v) <= 65536:
+        return int(v) << 20
+    return MAX_SPOOL_BYTES
+
+
 def gc(root: Path, now: Optional[float] = None, retention_s: float = RETENTION_S,
-       budget_s: float = GC_BUDGET_S, interval_s: float = GC_INTERVAL_S, force: bool = False) -> int:
+       budget_s: float = GC_BUDGET_S, interval_s: float = GC_INTERVAL_S, force: bool = False,
+       max_bytes: Optional[int] = None, max_per_session: int = MAX_ENTRIES_PER_SESSION) -> int:
     """Remove spool entries older than retention_s (by mtime), token files
-    older than TOKEN_RETENTION_S, temp files of dead writes and emptied
-    session directories. Opportunistic: at most once
-    per interval_s (a stamp file under root) unless force, and stops after
-    budget_s. Never raises. Returns the number of files removed."""
+    older than TOKEN_RETENTION_S, temp files of dead writes, then (size
+    bounds) the oldest entries beyond max_per_session in a session and the
+    oldest entries across sessions until the spool is under max_bytes
+    (default spool_cap_bytes()); then emptied session directories.
+    Opportunistic: at most once per interval_s (a stamp file under root)
+    unless force, and stops after budget_s. Never raises. Returns the number
+    of files removed."""
     now = time.time() if now is None else now
     deadline = time.monotonic() + budget_s
     root = Path(root)
+    cap = spool_cap_bytes() if max_bytes is None else max_bytes
     removed = 0
     try:
         st = os.lstat(root)
@@ -1573,17 +1600,23 @@ def gc(root: Path, now: Optional[float] = None, retention_s: float = RETENTION_S
             os.utime(str(stamp), (now, now))
         except OSError:
             pass
+        kept = []       # (mtime, size, path, session dir path) of live entries
+        left = {}       # session dir path -> files left
+        complete = True
         with os.scandir(root) as sessions:
             for sdir in sessions:
                 if time.monotonic() > deadline:
+                    complete = False
                     break
                 if not sdir.is_dir(follow_symlinks=False):
                     continue
-                left = 0
+                n_left = 0
+                entries = []
                 with os.scandir(sdir.path) as files:
                     for f in files:
                         if time.monotonic() > deadline:
-                            left += 1
+                            n_left += 1
+                            complete = False
                             continue
                         try:
                             fst = f.stat(follow_symlinks=False)
@@ -1591,8 +1624,10 @@ def gc(root: Path, now: Optional[float] = None, retention_s: float = RETENTION_S
                             continue
                         name = f.name
                         old = now - fst.st_mtime
-                        stale = ((name.startswith("ev_") and name.endswith(".json") and old > retention_s)
+                        is_entry = name.startswith("ev_") and name.endswith(".json")
+                        stale = ((is_entry and old > retention_s)
                                  or (name == TOKEN_FILE and old > min(retention_s, TOKEN_RETENTION_S))
+                                 or (name == HINTED and old > retention_s)
                                  or (name.startswith((".ev_", ".token_")) and name.endswith(".tmp")
                                      and old > STALE_TMP_S))
                         if stale and not stat.S_ISDIR(fst.st_mode):
@@ -1602,12 +1637,60 @@ def gc(root: Path, now: Optional[float] = None, retention_s: float = RETENTION_S
                                 continue
                             except OSError:
                                 pass
-                        left += 1
-                if left == 0:
+                        n_left += 1
+                        if is_entry and stat.S_ISREG(fst.st_mode):
+                            entries.append((fst.st_mtime, fst.st_size, f.path, sdir.path))
+                if len(entries) > max_per_session:
+                    entries.sort()
+                    drop, entries = entries[:len(entries) - max_per_session], entries[len(entries) - max_per_session:]
+                    for _, _, path, _ in drop:
+                        try:
+                            os.unlink(path)
+                            removed += 1
+                            n_left -= 1
+                        except OSError:
+                            pass
+                kept.extend(entries)
+                left[sdir.path] = n_left
+        if complete:
+            total = sum(e[1] for e in kept)
+            if total > cap:
+                kept.sort()
+                for mtime, size, path, sdir_path in kept:
+                    if total <= cap or time.monotonic() > deadline:
+                        break
                     try:
-                        os.rmdir(sdir.path)
+                        os.unlink(path)
+                        removed += 1
+                        total -= size
+                        left[sdir_path] = left.get(sdir_path, 1) - 1
                     except OSError:
                         pass
+        for sdir_path, n in left.items():
+            if n <= 0:
+                try:
+                    os.rmdir(sdir_path)
+                except OSError:
+                    pass
     except OSError:
         pass
     return removed
+
+
+def spool_usage(root: Path) -> tuple:
+    """(entries, bytes, sessions) across the spool."""
+    n = size = sessions = 0
+    for _, sdir in session_dirs(root):
+        sessions += 1
+        try:
+            with os.scandir(sdir) as it:
+                for f in it:
+                    if f.name.startswith("ev_") and f.name.endswith(".json"):
+                        try:
+                            size += f.stat(follow_symlinks=False).st_size
+                            n += 1
+                        except OSError:
+                            continue
+        except OSError:
+            continue
+    return n, size, sessions
