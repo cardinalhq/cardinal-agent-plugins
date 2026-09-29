@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import openCode from "../../dist/native/opencode/index.js";
 import pi from "../../dist/native/pi/index.ts";
-import { evidenceId, evidenceCaptureEnabled } from "../../dist/native/opencode/lib/bridge.js";
+import { boundEvidenceEvent, createEvidenceSink, evidenceId, evidenceCaptureEnabled, MAX_EVIDENCE_EVENT, MAX_EVIDENCE_FIELD } from "../../dist/native/opencode/lib/bridge.js";
 
 const VECTORS = resolve(import.meta.dirname, "../../core/tests/testdata/evidence_id_vectors.json");
 
@@ -131,4 +131,62 @@ test("context off: captured, but the result is not changed", async t => {
   assert.equal(await handlers.get("tool_result")({ toolCallId: "c", toolName: "bash", input: { command: "ls" }, content: [{ type: "text", text: "a" }], isError: false }, ctx), undefined);
   await handlers.get("session_shutdown")();
   assert.equal((await entries(dir)).length, 1);
+});
+
+test("huge results are cut, not dropped; one huge call never sinks the batch", async t => {
+  const dir = await home(t);
+  const handlers = new Map();
+  pi({ on: (name, fn) => handlers.set(name, fn), registerTool: () => {} });
+  const ctx = { cwd: dir, sessionManager: { getSessionId: () => "pi-big" } };
+  const fire = (event) => handlers.get("tool_result")(event, ctx);
+  // 40 calls of ~3 MiB each (a build log, a big file read): ~120 MiB raw,
+  // more than Python reads in one batch. Every one must still land.
+  const big = "L".repeat(3 << 20);
+  for (let i = 0; i < 40; i++) {
+    await fire({ toolCallId: `big-${i}`, toolName: "read", input: { path: `/tmp/f${i}` }, content: [{ type: "text", text: big }], isError: false });
+  }
+  // An input too large to send whole: kept as a withheld stub, never unchecked.
+  await fire({ toolCallId: "huge-input", toolName: "write", input: { path: "/tmp/x", content: "W".repeat(5 << 20) }, content: [{ type: "text", text: "ok" }], isError: false });
+  await fire({ toolCallId: "small", toolName: "some_future_tool", input: { q: 1 }, content: [{ type: "text", text: "fine" }], isError: false });
+  await handlers.get("session_shutdown")();
+  assert.equal((await entries(dir)).length, 42);
+  const e = await entry(dir, "pi-big", evidenceId("pi", "pi-big", "big-7"));
+  assert.equal(e.truncated, true);
+  assert.equal(e.tool, "read");
+  // Past the queue's byte bound the rest are stubs (reason "unreadable",
+  // rule "backlog"), not dropped: every id the agent was shown resolves.
+  const last = await entry(dir, "pi-big", evidenceId("pi", "pi-big", "big-39"));
+  assert.equal(last.tool, "read");
+  if (last.withheld) assert.equal(last.withheld.rule, "backlog");
+  const stub = await entry(dir, "pi-big", evidenceId("pi", "pi-big", "huge-input"));
+  assert.equal(stub.withheld.reason, "unreadable");
+  assert.equal(stub.args, null);
+  assert.equal(stub.result, null);
+  const small = await entry(dir, "pi-big", evidenceId("pi", "pi-big", "small"));
+  assert.deepEqual(small.result, { text: ["fine"] });
+});
+
+test("boundEvidenceEvent: small events pass through; fields are cut; oversize input becomes a stub", () => {
+  const small = { kind: "evidence", tool_name: "x", input: { a: 1 }, output: "o" };
+  assert.equal(boundEvidenceEvent(small)[0], small);
+  const [cut, size] = boundEvidenceEvent({ kind: "evidence", tool_name: "x", input: {}, output: "o".repeat(MAX_EVIDENCE_EVENT + 10),
+    content: [{ type: "text", text: "t".repeat(MAX_EVIDENCE_EVENT) }, { type: "image", data: "i".repeat(MAX_EVIDENCE_EVENT) }] });
+  assert(size <= MAX_EVIDENCE_EVENT);
+  assert.equal(cut.output.length, MAX_EVIDENCE_FIELD);
+  assert.equal(cut.content[0].text.length, MAX_EVIDENCE_FIELD);
+  assert.deepEqual(cut.content[1], { type: "image" });
+  const [stub] = boundEvidenceEvent({ kind: "evidence", tool_name: "x", tool_call_id: "c", input: { big: "b".repeat(MAX_EVIDENCE_EVENT) }, output: "o" });
+  assert.equal(stub.unreadable, "size");
+  assert.equal(stub.input, undefined);
+  assert.equal(stub.output, undefined);
+});
+
+test("evidence sink batches by bytes", async () => {
+  const batches = [];
+  const sink = createEvidenceSink("pi", { run: async (_rt, batch) => { batches.push(batch.length); } });
+  for (let i = 0; i < 20; i++) sink.send({ kind: "evidence", tool_name: "t", tool_call_id: `c${i}`, input: {}, output: "x".repeat(3 << 20) });
+  await sink.flush();
+  assert.equal(batches.reduce((a, b) => a + b, 0), 20);
+  assert(Math.max(...batches) <= 16, JSON.stringify(batches));
+  assert(batches.length > 1);
 });

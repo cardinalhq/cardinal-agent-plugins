@@ -452,6 +452,7 @@ def evidence_capture(runtime, events, version):
     input, output | content, is_error, error} in the local evidence spool.
     Never raises for one bad event."""
     from cardinal_core import evidence_capture as cap
+    from cardinal_core import evidence_gate as gate
 
     home = Path.home()
     client = f"{runtime}/{version}" if isinstance(version, str) and version else runtime
@@ -461,6 +462,21 @@ def evidence_capture(runtime, events, version):
                 continue
             name = event.get("tool_name")
             if not isinstance(name, str) or not name:
+                continue
+            if event.get("unreadable") is not None:
+                # The plugin could not send this call whole (bridge.js
+                # boundEvidenceEvent): its input cannot be checked, so it is
+                # kept as a withheld stub, never unchecked.
+                call = cap.ToolCall(
+                    runtime=runtime, tool_name=name, source=evidence_source(runtime, name), tool=name,
+                    error="error" if event.get("is_error") is True else None,
+                    session_id=event.get("session_id") if isinstance(event.get("session_id"), str) else None,
+                    tool_use_id=event.get("tool_call_id") if isinstance(event.get("tool_call_id"), str) else None,
+                    cwd=event.get("cwd") if isinstance(event.get("cwd"), str) else None, client=client)
+                why = "backlog" if event.get("unreadable") == "backlog" else "size"
+                hint = "capture backlog" if why == "backlog" else "too large to send"
+                cap.write_stub(call, home, gate.Withheld(gate.REASON_UNREADABLE, why, hint),
+                               promote_cmd=f"cardinal-{runtime} evidence")
                 continue
             response = event.get("content") if "content" in event else event.get("output")
             error = event.get("error")
@@ -481,7 +497,10 @@ def evidence_capture(runtime, events, version):
                 cwd=event.get("cwd") if isinstance(event.get("cwd"), str) else None,
                 client=client,
             )
-            cap.capture_call(call, home, promote_cmd=f"cardinal-{runtime} evidence")
+            # A per-call budget: one pathological call is kept as a withheld
+            # stub instead of eating the batch's time (the bridge kills a
+            # batch after 10 s).
+            cap.capture_call_guarded(call, home, promote_cmd=f"cardinal-{runtime} evidence")
         except Exception:
             continue
 
