@@ -1,7 +1,7 @@
 {
   "cardinal": {
     "type": "http",
-    "url": "${CARDINAL_MCP_URL:-https://app.cardinalhq.io/mcp}",
+    "url": "${CARDINAL_MCP_URL}",
     "headers": {
       "X-CardinalHQ-API-Key": "${CARDINAL_MCP_API_KEY:-}"
     }

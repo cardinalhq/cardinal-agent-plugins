@@ -3,8 +3,7 @@
 
 When `storyboard__preview` returns, this hook hands the result to the canvas
 skill's local renderer (skills/canvas/scripts/render_preview.py), which fetches
-each scene's preview bundle (with the Cardinal MCP key when /cardinal:connect
-stored one, else the result's own preview_token), renders it in the user's
+each scene's preview bundle with the Cardinal MCP key, renders it in the user's
 own sandboxed, network-locked Chromium and writes one PNG per reveal step to
 ~/.claude/cardinal/storyboards/<storyboard_id>/r<revision>/. The hook then puts
 the PNG paths (and any per-scene render errors) in Claude's context, so Claude
@@ -28,14 +27,9 @@ Contract:
     data, not instructions.
   - Silent when the tool is not Cardinal's storyboard__preview (server
     `cardinal` or the plugin's `plugin_cardinal_cardinal`: the result carries
-    a credential and names the pages to fetch, so another server's tool of
-    the same name never reaches the renderer), the result is an error or has
-    no scenes, or the payload is unreadable.
-  - Works connected or not: the renderer uses the Cardinal MCP key when
-    /cardinal:connect stored one, else the result's preview_token (10 min,
-    this storyboard's preview pages only) as `Authorization: CardinalPreview`,
-    sent to CARDINAL_MCP_URL's origin or, unset, Cardinal Cloud (the
-    default URL of the plugin's .mcp.json).
+    names the pages to fetch with the Cardinal key, so another server's tool
+    of the same name never reaches the renderer), the result is an error or
+    has no scenes, or the payload is unreadable.
   - No local Chromium (renderer exit 3): says so once per session (a marker
     keyed by session_id; `claude --resume` keeps the id, so a resumed session
     stays quiet), then stays silent.
@@ -65,7 +59,7 @@ except Exception:  # not vendored: render inline results, skip spill notices
 
 HOOK_DIR = Path(__file__).resolve().parent
 # Cardinal's own MCP servers, as Claude Code names them: a user-scope
-# `cardinal` server, or this plugin's bundled one (connected or not, same name).
+# `cardinal` server, or this plugin's bundled one.
 CARDINAL_SERVERS = ("cardinal", "plugin_cardinal_cardinal")
 RENDERER = HOOK_DIR.parent / "skills" / "canvas" / "scripts" / "render_preview.py"
 
@@ -179,7 +173,7 @@ def _clip(s, n: int = MAX_ERROR_CHARS) -> str:
 def run_renderer(result: dict, budget: float) -> tuple:
     """-> (records, summary | None, exit code | None, timed_out, stderr)"""
     # -I: never import from the user's cwd or honour PYTHONPATH; the renderer
-    # holds the Cardinal key or the preview token.
+    # holds the Cardinal key.
     cmd = [sys.executable, "-I", str(RENDERER), "--from-json", "-", "--timeout", str(RENDER_TIMEOUT_S)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, start_new_session=True)

@@ -31,6 +31,12 @@ memory. This skill adds only what is specific to Claude Code with the Cardinal p
 Needs Cardinal (maestro) newer than v1.97.16. An older one rejects `section: "authoring"`
 as invalid: ask the user to upgrade.
 
+No `storyboard__*` tools means the plugin is not connected (writes need an API key; there
+is no sign-in flow). Tell the user once: sign up at https://app.cardinalhq.io, run
+`/cardinal:connect` and approve it in the browser (it stores an API key; self-hosted:
+`--host <url>`), then restart Claude Code.
+Captured evidence stays on this machine meanwhile and can be cited after connecting.
+
 ## Evidence in Claude Code
 
 - **Witnessed.** Every read-only Cardinal tool result ends with `[receipt:rcpt_<24 hex>]`.

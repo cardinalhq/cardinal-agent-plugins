@@ -37,7 +37,7 @@ contract this event shipped with — hence the str() coercion around
 core's kv.
 
 Not connected (hooks/_connection.py: /cardinal:connect never ran, the
-plugin's MCP server is on OAuth to Cardinal Cloud): exits 0 at once, with
+plugin is local-only and its MCP server has no URL): exits 0 at once, with
 no output and no network.
 """
 

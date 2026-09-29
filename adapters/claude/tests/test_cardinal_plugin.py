@@ -283,14 +283,15 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("cardinal", data)
         entry = data["cardinal"]
         self.assertEqual(entry["type"], "http")
-        # Connected: /cardinal:connect's CARDINAL_MCP_URL / _API_KEY win.
-        # Not connected: Cardinal Cloud's org-less /mcp (Claude Code runs MCP
-        # OAuth there) and an empty key header, which maestro treats as absent.
-        self.assertEqual(entry["url"], "${CARDINAL_MCP_URL:-https://app.cardinalhq.io/mcp}")
+        # Connected: /cardinal:connect's CARDINAL_MCP_URL / _API_KEY.
+        # Not connected: no URL (no default), so the server never connects;
+        # there is no OAuth fallback. The key header defaults to empty so a
+        # missing key is never reported as a second missing variable.
+        self.assertEqual(entry["url"], "${CARDINAL_MCP_URL}")
         self.assertEqual(entry["headers"], {"X-CardinalHQ-API-Key": "${CARDINAL_MCP_API_KEY:-}"})
-        # One server, named `cardinal`: tool names stay
-        # mcp__plugin_cardinal_cardinal__* in both modes, which the storyboard
-        # hooks' matchers and Cardinal-server lists rely on.
+        # One server, named `cardinal`: tool names are
+        # mcp__plugin_cardinal_cardinal__*, which the storyboard hooks'
+        # matchers and Cardinal-server lists rely on.
         self.assertEqual(list(data), ["cardinal"])
         self.assertEqual(set(entry), {"type", "url", "headers"})
 
@@ -1055,18 +1056,26 @@ class DisconnectTests(unittest.TestCase):
         self.assertIn("Could not remove", res.stdout)
         self.assertTrue(secrets_path.exists())
 
-    def test_disconnect_says_the_server_falls_back_to_cardinal_cloud(self):
-        # No CARDINAL_MCP_* left: .mcp.json resolves to Cardinal Cloud's /mcp
-        # over OAuth, not to "nothing". The closing output says so.
+    def test_disconnect_says_the_plugin_falls_back_to_local_only(self):
+        # No CARDINAL_MCP_* left: .mcp.json has no URL, the server never
+        # connects. The closing output says so, with no OAuth / Cloud claim.
         res = run_plugin(DISCONNECT, [], self.home)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("falls back to Cardinal Cloud", res.stdout)
-        self.assertIn("https://app.cardinalhq.io/mcp", res.stdout)
-        self.assertIn("disable it in /mcp", res.stdout)
+        self.assertIn("falls back to local-only", res.stdout)
+        self.assertIn("missing CARDINAL_MCP_URL", res.stdout)
+        self.assertIn("/cardinal:connect", res.stdout)
+        for s in ("OAuth", "Cardinal Cloud", "app.cardinalhq.io/mcp"):
+            self.assertNotIn(s, res.stdout)
         skill = (PLUGIN_BIN.parent / "skills" / "disconnect" / "SKILL.md").read_text()
-        self.assertNotIn("empty URL", skill)
-        self.assertIn("falls back to Cardinal Cloud", skill)
-        self.assertIn("disable `cardinal` in `/mcp`", skill)
+        self.assertIn("falls back to local-only", skill)
+        self.assertNotIn("OAuth", skill)
+
+    def test_disconnect_keep_telemetry_says_only_the_server_is_off(self):
+        res = run_plugin(DISCONNECT, ["--keep-telemetry"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("cardinal MCP server is off", res.stdout)
+        self.assertIn("Telemetry stays on", res.stdout)
+        self.assertNotIn("local-only", res.stdout)
 
     def test_no_state_file_no_op(self):
         self.state.unlink()
@@ -1096,13 +1105,16 @@ class StatusTests(unittest.TestCase):
         res = run_plugin(STATUS, [], self.home, hermetic=True)
         self.assertEqual(res.returncode, 1)
         self.assertIn("not connected", res.stdout.lower())
-        # Storyboards work unconnected: say so, and where to sign in.
-        self.assertIn("Storyboards work without connecting", res.stdout)
-        self.assertIn("Cardinal Cloud (https://app.cardinalhq.io/mcp)", res.stdout)
-        self.assertIn("sign in via /mcp", res.stdout)
+        # Local-only: the server is off, and how to get write access.
+        self.assertIn("Local-only", res.stdout)
+        self.assertIn("missing", res.stdout)
+        self.assertIn("sign up at https://app.cardinalhq.io, then run /cardinal:connect and approve it in the browser",
+                      res.stdout)
+        for s in ("OAuth", "sign in via /mcp", "app.cardinalhq.io/mcp"):
+            self.assertNotIn(s, res.stdout)
         self.assertNotIn("CARDINAL_MCP_API_KEY is set", res.stdout)
 
-    def test_unconnected_status_warns_when_a_key_would_go_to_cardinal_cloud(self):
+    def test_unconnected_status_warns_about_a_key_without_a_url(self):
         for label, settings, overrides in (
             ("process env", None, {"CARDINAL_MCP_API_KEY": "ck_from_shell"}),
             ("settings env", {"CARDINAL_MCP_API_KEY": "ck_in_settings"}, None),
@@ -1116,15 +1128,15 @@ class StatusTests(unittest.TestCase):
                 self.assertIn("CARDINAL_MCP_API_KEY is set but CARDINAL_MCP_URL is not", res.stdout)
                 self.assertIn("/cardinal:connect --host", res.stdout)
                 self.assertNotIn("ck_", res.stdout, "never echo the key")
-        # With a URL the key goes there: no warning, and the server's URL is shown.
+                self.assertIn("has no URL", res.stdout)
+        # With a URL the key goes there: no warning.
         res = run_plugin(STATUS, [], self.home, hermetic=True, env_overrides={
             "CARDINAL_MCP_API_KEY": "ck_1", "CARDINAL_MCP_URL": "https://maestro.example/mcp"})
         self.assertNotIn("CARDINAL_MCP_API_KEY is set", res.stdout)
-        self.assertIn("CARDINAL_MCP_URL (https://maestro.example/mcp)", res.stdout)
 
     def test_connected_status_warns_about_a_stray_key_only_without_a_url(self):
         # Telemetry-only connect writes no MCP vars; a key exported in the
-        # shell would then go to Cardinal Cloud.
+        # shell then has no server URL to go with.
         run_plugin(CONNECT, ["--host", self.stub.url(), "--telemetry-only"], self.home, timeout=15, hermetic=True)
         res = run_plugin(STATUS, [], self.home, hermetic=True, env_overrides={"CARDINAL_MCP_API_KEY": "ck_x"})
         self.assertIn("telemetry-only", res.stdout)

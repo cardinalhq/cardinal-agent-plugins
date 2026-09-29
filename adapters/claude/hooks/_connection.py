@@ -2,15 +2,21 @@
 
 The plugin works in two modes:
 
-  not connected   The bundled `cardinal` MCP server points at Cardinal Cloud's
-                  org-less https://app.cardinalhq.io/mcp and Claude Code signs
-                  in with standard MCP OAuth. Storyboards, local preview and
-                  evidence capture/promote work. Every telemetry, spend-limit,
+  not connected   Local-only. CARDINAL_MCP_URL is unset, so the bundled
+                  `cardinal` MCP server has no URL and never connects (no
+                  network, no sign-in; /mcp lists it as missing
+                  CARDINAL_MCP_URL). Evidence capture into the local spool
+                  and local rendering work. Every telemetry, spend-limit,
                   initiative, plan, decision, git-state and usage hook is a
-                  silent no-op: no context, no network.
+                  silent no-op: no context, no network. storyboard-session.py
+                  gives one line on how to connect (connect_hint).
   connected       /cardinal:connect wrote the org's MCP URL + key and the OTel
                   ingest settings into ~/.claude/settings.json `env` (and its
                   state file ~/.claude/cardinal.json). Everything runs.
+
+Write access (publishing storyboards, Cardinal's tools) needs an API key:
+sign up at https://app.cardinalhq.io, then run /cardinal:connect, whose
+device-code approval creates and stores one. There is no OAuth sign-in.
 
 Connected means any Cardinal credential or connect state is configured:
 
@@ -77,3 +83,11 @@ def is_connected(home: Path | None = None, environ: dict | None = None) -> bool:
         return (claude_dir / "cardinal.json").is_file()
     except Exception:
         return False
+
+
+SIGNUP_URL = "https://app.cardinalhq.io"
+CONNECT_STEPS = (
+    f"sign up at {SIGNUP_URL}, then run /cardinal:connect and approve it in the "
+    "browser, which stores an API key for this machine (self-hosted Cardinal: "
+    "/cardinal:connect --host <your maestro URL>)"
+)
