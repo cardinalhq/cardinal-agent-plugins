@@ -19,9 +19,12 @@ previewing the visuals is the [canvas](../canvas/README.md) skill.
   off` stops the local capture.
 - For visual previews: **Google Chrome or Chromium** (version 112+) on macOS or Linux.
   Without it Claude still authors and publishes, but can't look at the scenes first.
-- Cardinal (maestro) v1.97.15 or newer. On an older install, row lookups by identity
-  (`select`) and binding reuse (`ref`) are rejected as unknown binding keys, and large
-  receipts cannot be navigated.
+- Cardinal (maestro) newer than v1.97.16. Cardinal serves the authoring guidance itself
+  (`storyboard__describe_grammar` sections `authoring`, `evidence` and `canvas`), and an
+  older install rejects those sections.
+
+Other Claude clients connected to Cardinal (claude.ai, Claude Desktop) get the same
+guidance from the server. The plugin adds the local previews and captured evidence.
 
 ## Use it
 

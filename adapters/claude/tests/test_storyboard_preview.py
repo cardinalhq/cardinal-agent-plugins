@@ -1079,9 +1079,11 @@ class CanvasSkillTests(unittest.TestCase):
             self.assertRegex(call, r"^python3 -I\b", call)
 
     def test_skill_steers_large_populations_to_canvas(self):
-        text = CANVAS_SKILL.read_text()
-        self.assertIn("few thousand marks", text)
-        self.assertIn("`<canvas>`", text)
+        # The full rule ("Past a few thousand marks draw on a <canvas>") is
+        # served by describe_grammar canvas.design.rules_that_bite (conductor
+        # #1975); the skill keeps the pointer where it names the row exemplar.
+        text = " ".join(CANVAS_SKILL.read_text().split())
+        self.assertIn("For thousands of rows, draw on a `<canvas>` instead.", text)
 
     def test_exemplars_ship_with_the_skill_and_follow_the_frame_rules(self):
         text = CANVAS_SKILL.read_text()
