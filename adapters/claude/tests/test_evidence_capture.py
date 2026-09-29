@@ -1,5 +1,6 @@
-"""Tests for hooks/evidence-capture.py (PostToolUse on mcp__.*): the local
-evidence spool writer for non-Cardinal MCP results.
+"""Tests for hooks/evidence-capture.py (PostToolUse / PostToolUseFailure on
+every tool): the local evidence spool writer, through the generic pipeline
+cardinal_core.evidence_capture.
 
 Each test runs the hook as a subprocess with HOME pointed at a temp dir.
 Requires cardinal_core vendored: python3 build/vendor.py claude
@@ -24,8 +25,11 @@ from tempfile import TemporaryDirectory
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 HOOK = PLUGIN_ROOT / "hooks" / "evidence-capture.py"
 VENDORED = PLUGIN_ROOT / "hooks" / "cardinal_core" / "evidence.py"
+CORE = PLUGIN_ROOT / "hooks" / "cardinal_core"
+PLUGIN_VERSION = json.loads((PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text())["version"]
 SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
-EV_ID_RE = re.compile(r"^\[evidence:(ev_[0-9a-f]{12})\] ")
+EV_ID_RE = re.compile(r"^\[evidence:(ev_[0-9a-f]{12})\]")
+WITHHELD_RE = re.compile(r"^\[evidence:(ev_[0-9a-f]{12}) withheld: ([^\]]+)\]")
 
 
 class EvidenceCaptureHookTests(unittest.TestCase):
@@ -66,9 +70,9 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self.assertEqual(res.stderr, "")
         return res
 
-    def _captured(self, res) -> tuple:
+    def _captured(self, res, event="PostToolUse") -> tuple:
         body = json.loads(res.stdout)
-        self.assertEqual(body["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+        self.assertEqual(body["hookSpecificOutput"]["hookEventName"], event)
         ctx = body["hookSpecificOutput"]["additionalContext"]
         m = EV_ID_RE.match(ctx)
         self.assertIsNotNone(m, ctx)
@@ -81,21 +85,74 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self.assertEqual(res.stdout, "")
         self.assertFalse(self.root.exists() and any(self.root.rglob("ev_*.json")))
 
+    # -- never silent: pathological payloads -----------------------------------
+
+    def _withheld(self, res, event="PostToolUse"):
+        body = json.loads(res.stdout)
+        self.assertEqual(body["hookSpecificOutput"]["hookEventName"], event)
+        m = WITHHELD_RE.match(body["hookSpecificOutput"]["additionalContext"])
+        self.assertIsNotNone(m, body)
+        entry = json.loads((self.root / SESSION / f"{m.group(1)}.json").read_text())
+        self.assertIsNone(entry["args"])
+        self.assertIsNone(entry["result"])
+        return entry
+
+    def test_payload_nested_deeper_than_the_parser_is_a_withheld_stub(self):
+        d = 1_200_000
+        raw = ('{"session_id":"%s","tool_use_id":"toolu_deep","hook_event_name":"PostToolUseFailure",'
+               '"tool_name":"mcp__weird__nest","tool_input":{},"error":' % SESSION) + "[" * d + "]" * d + "}"
+        entry = self._withheld(self._run(raw=raw), event="PostToolUseFailure")
+        self.assertEqual(entry["withheld"]["reason"], "unreadable")
+        self.assertEqual(entry["withheld"]["rule"], "depth")
+        self.assertEqual(entry["tool"], "nest")
+        self.assertEqual(entry["server"], "weird")
+
+    def test_raw_control_characters_in_strings_are_still_captured(self):
+        # A raw tab and a raw U+0001 inside JSON strings: not strict JSON.
+        raw = ('{"session_id":"%s","tool_use_id":"toolu_ctl","hook_event_name":"PostToolUse",'
+               '"tool_name":"AnyTool","tool_input":{"a":"x\ty"},"tool_response":"line1\x01line2"}' % SESSION)
+        with self.assertRaises(ValueError):
+            json.loads(raw)
+        _, _, entry, _ = self._captured(self._run(raw=raw))
+        self.assertEqual(entry["tool"], "AnyTool")
+        self.assertIn("line2", json.dumps(entry["result"]))
+
+    def test_input_too_large_to_check_in_time_is_a_withheld_stub(self):
+        # A very wide input (200k members): the pipeline cannot finish in the
+        # hook's budget, so the call is kept as a stub, not dropped.
+        wide = {f"k{i}": f"v{i}" for i in range(200_000)}
+        t = time.monotonic()
+        res = self._run(self._payload(tool_name="FutureBulkTool", tool_input=wide, tool_response=wide))
+        self.assertLess(time.monotonic() - t, 2.5)
+        entry = self._withheld(res)
+        self.assertEqual(entry["withheld"]["reason"], "unreadable")
+        self.assertIn(entry["withheld"]["rule"], ("budget", "gate.bounds"))
+        self.assertEqual(entry["tool"], "FutureBulkTool")
+
     # -- payload shapes ------------------------------------------------------
 
     def test_string_result_is_captured_with_the_exact_context_line(self):
         ev_id, ctx, entry, _ = self._captured(self._run())
-        self.assertEqual(ctx, f"[evidence:{ev_id}] captured locally from grafana/query_prometheus; "
-                              f"to cite it in a storyboard run cardinal-evidence promote {ev_id}")
+        # The first capture of a session explains how to cite; later ones are
+        # just the id.
+        self.assertTrue(ctx.startswith(f"[evidence:{ev_id}] Cardinal kept this result on this machine."), ctx)
+        self.assertIn("cardinal-evidence promote ev_", ctx)
+        self.assertIn("cardinal-evidence find", ctx)
+        ev2, ctx2, _, _ = self._captured(self._run(self._payload(tool_use_id="toolu_02")))
+        self.assertEqual(ctx2, f"[evidence:{ev2}]")
+        self.assertNotEqual(ev2, ev_id)
         self.assertEqual(entry["evidence_id"], ev_id)
-        self.assertEqual(entry["schema"], "cardinal.evidence.v1")
+        self.assertEqual(entry["schema"], "cardinal.evidence.v2")
         self.assertEqual(entry["tier"], "captured")
+        self.assertEqual(entry["source"], {"kind": "mcp", "server": "grafana", "runtime": "claude-code"})
         self.assertEqual(entry["server"], "grafana")
         self.assertEqual(entry["tool"], "query_prometheus")
         self.assertEqual(entry["tool_name"], "mcp__grafana__query_prometheus")
         self.assertEqual(entry["session_id"], SESSION)
         self.assertEqual(entry["tool_use_id"], "toolu_01ABC")
-        self.assertEqual(entry["agent"], "claude-code")
+        self.assertEqual(entry["client"], f"claude-code/{PLUGIN_VERSION}")
+        self.assertEqual(entry["status"], "ok")
+        self.assertEqual(entry["normalizer"], "mcp-content")
         self.assertEqual(entry["args"], {"expr": "rate(http_requests_total[5m])", "datasourceUid": "prom"})
         self.assertEqual(entry["result"], {"text": ["series: 3"]})
         self.assertIs(entry["truncated"], False)
@@ -195,19 +252,12 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         return body
 
     def test_error_result_is_captured_and_marked(self):
-        res = self._run(self._failure())
-        body = json.loads(res.stdout)
-        self.assertEqual(body["hookSpecificOutput"]["hookEventName"], "PostToolUseFailure")
-        ctx = body["hookSpecificOutput"]["additionalContext"]
-        m = EV_ID_RE.match(ctx)
-        self.assertIsNotNone(m, ctx)
-        path = self.root / SESSION / f"{m.group(1)}.json"
-        entry = json.loads(path.read_text())
+        _, ctx, entry, path = self._captured(self._run(self._failure()), "PostToolUseFailure")
         self.assertIs(entry["is_error"], True)
+        self.assertEqual(entry["status"], "error")
         self.assertEqual(entry["result"], {"text": ["upstream 403 Forbidden: rejected api_key=[redacted] "
                                                     "password=[redacted] for tenant acme"]})
         self.assertNotIn("LEAK", path.read_text())
-        self.assertIn("captured locally from grafana/query_prometheus;", ctx)
         # A JSON error body stays the error's text, redacted as error text.
         res = self._run(self._failure(error='{"error":"auth failed: token=LEAK-T","code":401}'))
         m = EV_ID_RE.match(json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"])
@@ -222,18 +272,101 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self._assert_nothing(self._run(self._failure(tool_name="mcp__plugin_cardinal_cardinal__lakerunner__x")))
         self._assert_nothing(self._run(self._payload(hook_event_name="PreToolUse")))
 
-    # -- skip list / non-MCP ---------------------------------------------------
+    # -- skip list: Cardinal's own gateway only --------------------------------
 
-    def test_cardinal_gateway_tools_and_non_mcp_tools_are_skipped(self):
+    def test_only_cardinal_gateway_tools_are_skipped(self):
         for name in ("mcp__cardinal__lakerunner__execute_logs_query",
                      "mcp__plugin_cardinal_cardinal__lakerunner__execute_logs_query",
-                     "mcp__plugin_cardinal_cardinal__storyboard__preview",
-                     "Bash", "Read", "mcp__", "mcp__grafana", ""):
+                     "mcp__plugin_cardinal_cardinal__storyboard__preview", ""):
             self._assert_nothing(self._run(self._payload(tool_name=name)))
         # A server merely named like Cardinal is not Cardinal's gateway.
-        _, ctx, entry, _ = self._captured(self._run(self._payload(tool_name="mcp__cardinal-dev__query")))
+        _, _, entry, _ = self._captured(self._run(self._payload(tool_name="mcp__cardinal-dev__query")))
         self.assertEqual(entry["server"], "cardinal-dev")
-        self.assertIn("captured locally from cardinal-dev/query;", ctx)
+        # Names that are not mcp__<server>__<tool> are the runtime's own tools.
+        for i, name in enumerate(("Bash", "Read", "mcp__", "mcp__grafana")):
+            _, _, entry, _ = self._captured(self._run(self._payload(tool_name=name, tool_use_id=f"toolu_n{i}")))
+            self.assertEqual(entry["source"]["kind"], "builtin")
+            self.assertEqual(entry["server"], "builtin:claude-code")
+            self.assertEqual(entry["tool"], name)
+
+    # -- every tool: built-in, unknown ---------------------------------------------
+
+    def test_bash_result_is_captured_with_its_shape(self):
+        payload = self._payload(tool_name="Bash", tool_input={"command": "make check-maestro", "description": "x"},
+                                tool_response={"stdout": "ok 42 passed\nDB_PASSWORD=hunter2\n", "stderr": "",
+                                               "interrupted": False, "isImage": False,
+                                               "noOutputExpected": False})
+        ev_id, _, entry, path = self._captured(self._run(payload))
+        self.assertEqual(entry["server"], "builtin:claude-code")
+        self.assertEqual(entry["tool"], "Bash")
+        self.assertEqual(entry["normalizer"], "shell")
+        self.assertEqual(entry["summary"], "make check-maestro")
+        self.assertEqual(entry["result"], {"structured": {"stdout": "ok 42 passed\nDB_PASSWORD=[redacted]\n",
+                                                          "stderr": ""}})
+        self.assertNotIn("hunter2", path.read_text())
+        self.assertNotIn("exit_code", entry)
+
+    def test_failed_bash_records_its_exit_code(self):
+        body = self._payload(tool_name="Bash", tool_input={"command": "make test"}, hook_event_name="PostToolUseFailure",
+                             error="Exit code 2\nFAIL src/a.test.ts", is_interrupt=False)
+        body.pop("tool_response")
+        _, _, entry, _ = self._captured(self._run(body), "PostToolUseFailure")
+        self.assertEqual(entry["status"], "error")
+        self.assertEqual(entry["exit_code"], 2)
+        self.assertEqual(entry["result"], {"structured": {"exit_code": 2, "output": "FAIL src/a.test.ts"}})
+
+    def test_read_edit_write_and_an_unknown_tool_are_captured(self):
+        cwd = str(self.home / "repo")
+        write = {"type": "create", "filePath": f"{cwd}/notes.md", "content": "# hi\n",
+                 "structuredPatch": [{"lines": ["+# hi"]}], "originalFile": None, "userModified": False}
+        _, _, entry, _ = self._captured(self._run(self._payload(
+            tool_name="Write", cwd=cwd, tool_use_id="t_w",
+            tool_input={"file_path": f"{cwd}/notes.md", "content": "# hi\n"}, tool_response=write)))
+        # Write's `content` key is not MCP content: the patch is the evidence.
+        self.assertEqual(entry["normalizer"], "file-edit")
+        self.assertEqual(entry["result"]["structured"]["file_path"], "./notes.md")
+        self.assertEqual(entry["result"]["structured"]["patch"], [{"lines": ["+# hi"]}])
+        read = {"type": "text", "file": {"filePath": f"{cwd}/a.py", "content": "print(1)\n", "numLines": 1}}
+        _, _, entry, _ = self._captured(self._run(self._payload(
+            tool_name="Read", cwd=cwd, tool_use_id="t_r", tool_input={"file_path": f"{cwd}/a.py"},
+            tool_response=read)))
+        self.assertEqual(entry["normalizer"], "generic")
+        self.assertEqual(entry["result"]["structured"]["file"]["content"], "print(1)\n")
+        self.assertEqual(entry["args"], {"file_path": "./a.py"})
+        _, _, entry, _ = self._captured(self._run(self._payload(
+            tool_name="FrobnicateWidgets_v9", tool_use_id="t_u", tool_input={"x": [1, {"y": "z"}]},
+            tool_response={"weird": {"n": 1}})))
+        self.assertEqual(entry["source"], {"kind": "builtin", "runtime": "claude-code"})
+        self.assertEqual(entry["normalizer"], "generic")
+        self.assertEqual(entry["result"], {"structured": {"weird": {"n": 1}}})
+
+    def test_sensitive_call_is_a_withheld_stub(self):
+        secret = "SECRET-VALUE-zz9"
+        payload = self._payload(tool_name="Read", tool_use_id="t_env", cwd=str(self.home),
+                                tool_input={"file_path": str(self.home / ".env")},
+                                tool_response={"type": "text", "file": {"content": f"API_TOKEN={secret}"}})
+        res = self._run(payload)
+        ctx = json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
+        m = WITHHELD_RE.match(ctx)
+        self.assertIsNotNone(m, ctx)
+        self.assertEqual(m.group(2), "sensitive path (.env*)")
+        path = self.root / SESSION / f"{m.group(1)}.json"
+        entry = json.loads(path.read_text())
+        self.assertEqual(entry["withheld"], {"reason": "sensitive_path", "rule": "path.dotenv", "hint": ".env*"})
+        self.assertIsNone(entry["args"])
+        self.assertIsNone(entry["result"])
+        self.assertNotIn(secret, path.read_text())
+        self.assertNotIn(".env\"", path.read_text().replace('"hint":".env*"', ""))
+        res = self._run(self._payload(tool_name="Bash", tool_use_id="t_tok",
+                                      tool_input={"command": "echo $(gh auth token)"},
+                                      tool_response={"stdout": "gho_" + "x" * 36, "stderr": ""}))
+        self.assertRegex(json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"],
+                         r"withheld: secret command \(gh auth token\)")
+
+    def test_context_lines_can_be_turned_off_but_capture_continues(self):
+        res = self._run(env=self._env(CARDINAL_EVIDENCE_CONTEXT="0"))
+        self.assertEqual(res.stdout, "")
+        self.assertEqual(len(list(self.root.rglob("ev_*.json"))), 1)
 
     # -- opt-out ---------------------------------------------------------------
 
@@ -258,14 +391,19 @@ class EvidenceCaptureHookTests(unittest.TestCase):
 
     def test_credentials_never_reach_disk(self):
         payload = self._payload(
-            tool_input={"query": "select 1", "api_key": "LEAK-ARG", "headers": {"Authorization": "Bearer LEAKx1"}},
+            tool_input={"query": "select 1", "api_key": "LEAK-ARG", "headers": {"X-Tenant": "LEAKx1"}},
             tool_response={"content": "conn postgres://admin:LEAK-PW@db:5432/app ok",
                            "structuredContent": {"rows": [{"user": "bob", "password_hash": "LEAK-HASH"}],
                                                  "token": "ghp_" + "L" * 36}})
         _, _, entry, path = self._captured(self._run(payload))
         self.assertNotIn("LEAK", path.read_text())
         self.assertEqual(entry["args"]["api_key"], "[redacted]")
-        self.assertEqual(entry["args"]["headers"], {"Authorization": "[redacted]"})
+        self.assertEqual(entry["args"]["headers"], {"X-Tenant": "[redacted]"})
+        # A request that carries a credential header is withheld outright:
+        # what it returned is private too.
+        res = self._run(self._payload(tool_use_id="t_auth", tool_input={"headers": {"Authorization": "Bearer LEAKx1"}}))
+        ctx = json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertRegex(ctx, r"withheld: credential in a request")
         self.assertEqual(entry["result"]["text"], ["conn postgres://[redacted]@db:5432/app ok"])
 
     def test_large_result_is_capped_with_a_truncation_marker(self):
@@ -292,6 +430,14 @@ class EvidenceCaptureHookTests(unittest.TestCase):
     def test_fails_open(self):
         for raw in ("", "not json", "[]", "42", '{"tool_name": 7}'):
             self.assertEqual(self._run(raw=raw).stdout, "")
+        # A read-only home: nothing written, nothing printed, exit 0.
+        ro = self.home / "ro"
+        ro.mkdir()
+        os.chmod(ro, 0o500)
+        try:
+            self.assertEqual(self._run(env=self._env(HOME=str(ro))).stdout, "")
+        finally:
+            os.chmod(ro, 0o700)
         # The spool root cannot be created (a file sits where ~/.cardinal is).
         (self.home / ".cardinal").write_text("in the way")
         self.assertEqual(self._run().stdout, "")
@@ -310,14 +456,16 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self._assert_nothing(self._run(hook=fake / HOOK.name))
 
     def test_no_network_code(self):
-        for src in (HOOK, VENDORED):
+        core = [CORE / "evidence_capture.py", CORE / "evidence_gate.py"] + sorted(
+            (CORE / "evidence_normalizers").glob("*.py"))
+        for src in [HOOK, VENDORED] + core:
             text = src.read_text()
             for mod in ("urllib", "http.client", "socket", "requests", "subprocess"):
                 self.assertNotRegex(text, rf"^\s*(import|from)\s+{re.escape(mod)}\b", f"{src.name} imports {mod}")
 
     # -- registration ----------------------------------------------------------
 
-    def test_registered_synchronously_on_every_mcp_tool_with_a_short_timeout(self):
+    def test_registered_synchronously_on_every_tool_with_a_short_timeout(self):
         hooks = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text())["hooks"]
         for event in ("PostToolUse", "PostToolUseFailure"):
             with self.subTest(event=event):
@@ -327,15 +475,13 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         found = [(g["matcher"], h) for g in groups for h in g["hooks"] if "evidence-capture.py" in h["command"]]
         self.assertEqual(len(found), 1)
         matcher, entry = found[0]
-        self.assertEqual(matcher, "mcp__.*")
+        self.assertEqual(matcher, ".*")
         self.assertEqual(entry["command"], "${CLAUDE_PLUGIN_ROOT}/hooks/evidence-capture.py")
         self.assertFalse(entry.get("async"), "additionalContext is dropped from async hooks")
         self.assertIsInstance(entry.get("timeout"), int)
-        self.assertLessEqual(entry["timeout"], 3)
-        for name in ("mcp__grafana__query_prometheus", "mcp__plugin_cardinal_cardinal__storyboard__preview"):
+        self.assertLessEqual(entry["timeout"], 2)
+        for name in ("mcp__grafana__query_prometheus", "Bash", "Agent", "Edit", "WebFetch", "SomeFutureTool"):
             self.assertRegex(name, "^(?:" + matcher + ")$")
-        for name in ("Bash", "Agent", "Edit"):
-            self.assertNotRegex(name, "^(?:" + matcher + ")$")
         self.assertTrue(os.access(HOOK, os.X_OK))
 
 

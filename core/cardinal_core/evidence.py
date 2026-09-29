@@ -1,10 +1,11 @@
-"""Local evidence spool: captured MCP tool results, kept on this machine.
+"""Local evidence spool: captured tool results, kept on this machine.
 
 A storyboard cites evidence. Cardinal's own gateway mints a *witnessed*
-receipt for every read-only call it serves; a call to any other MCP server
-is invisible to it. A client hook (the Claude adapter's
-hooks/evidence-capture.py) records such a result here instead: one JSON file
-per call, under
+receipt for every read-only call it serves; any other tool call (a built-in
+tool such as a shell command or a file read, another MCP server, any tool at
+all) is invisible to it. A client hook records such a result here instead,
+through the generic pipeline in cardinal_core.evidence_capture: one JSON
+file per call, under
 
     <root>/<session_id>/ev_<12 hex>.json      (root: ~/.cardinal/evidence)
 
@@ -61,11 +62,25 @@ from typing import Any, Optional
 SCHEMA = "cardinal.evidence.v1"
 TIER = "captured"
 
+SCHEMA_V2 = "cardinal.evidence.v2"
+SCHEMAS = (SCHEMA, SCHEMA_V2)
+
 RETENTION_S = 14 * 24 * 3600
 # gc() runs at most once per GC_INTERVAL_S (stamp file) and for at most
 # GC_BUDGET_S, so a hook that calls it on every tool call stays cheap.
-GC_INTERVAL_S = 6 * 3600
+GC_INTERVAL_S = 10 * 60
 GC_BUDGET_S = 0.25
+# Size bounds (every tool call is captured, so these are load-bearing): the
+# whole spool stays under MAX_SPOOL_BYTES (CARDINAL_EVIDENCE_MAX_MB), the
+# least recently active sessions' entries evicted first (oldest first within
+# a session; per-session totals cached in GC_INDEX so this holds for a spool
+# of any size), and one session keeps at most
+# MAX_ENTRIES_PER_SESSION entries. Token files and markers are never evicted
+# for size.
+MAX_SPOOL_BYTES = 256 << 20
+MAX_ENTRIES_PER_SESSION = 10000
+MAX_MB_ENV = "CARDINAL_EVIDENCE_MAX_MB"
+HINTED = ".hinted"
 # A temp file this old belongs to a write that died.
 STALE_TMP_S = 3600
 
@@ -657,11 +672,15 @@ def _key_sep_matches(s: str):
         yield start, s[key_start:run_end], end
 
 
-def _redact_key_values(s: str) -> str:
+def _redact_key_values(s: str, pred=None) -> str:
+    """The value of every key=value / key: value pair whose key is a
+    credential key (pred: a wider key test, used by the plugin's own
+    stricter pass; the gateway parity path always uses is_credential_key)."""
+    pred = pred or is_credential_key
     out = []
     last = 0
     for start, key, end in _key_sep_matches(s):
-        if start < last or not is_credential_key(key):
+        if start < last or not pred(key):
             continue
         vs, ve = _value_span(s, end)
         if vs == end:
@@ -1545,16 +1564,37 @@ def capture(home: Path, *, server: str, tool: str, tool_name: str, tool_input: A
 # GC
 # ---------------------------------------------------------------------------
 
+def spool_cap_bytes(env: Optional[dict] = None) -> int:
+    """MAX_SPOOL_BYTES, or CARDINAL_EVIDENCE_MAX_MB (1..65536) MiB."""
+    env = os.environ if env is None else env
+    v = str(env.get(MAX_MB_ENV, "")).strip()
+    if v.isdigit() and 1 <= int(v) <= 65536:
+        return int(v) << 20
+    return MAX_SPOOL_BYTES
+
+
 def gc(root: Path, now: Optional[float] = None, retention_s: float = RETENTION_S,
-       budget_s: float = GC_BUDGET_S, interval_s: float = GC_INTERVAL_S, force: bool = False) -> int:
+       budget_s: float = GC_BUDGET_S, interval_s: float = GC_INTERVAL_S, force: bool = False,
+       max_bytes: Optional[int] = None, max_per_session: int = MAX_ENTRIES_PER_SESSION) -> int:
     """Remove spool entries older than retention_s (by mtime), token files
-    older than TOKEN_RETENTION_S, temp files of dead writes and emptied
-    session directories. Opportunistic: at most once
-    per interval_s (a stamp file under root) unless force, and stops after
-    budget_s. Never raises. Returns the number of files removed."""
+    older than TOKEN_RETENTION_S, temp files of dead writes, then (size
+    bounds) the oldest entries beyond max_per_session in a session and,
+    while the spool is over max_bytes (default spool_cap_bytes()), entries
+    of the least recently active sessions, oldest first; then emptied
+    session directories. Opportunistic: at most once per interval_s (a stamp
+    file under root) unless force, and stops after budget_s. Never raises.
+    Returns the number of files removed.
+
+    The size bound holds for a spool of any size: each session's totals are
+    kept in GC_INDEX, keyed by the session directory's mtime (any entry
+    written, replaced or removed changes it), so a pass only lists the
+    sessions that changed or have something due to expire. A pass that runs
+    out of budget keeps what it learned and asks for another pass in
+    GC_RETRY_S instead of waiting out the interval."""
     now = time.time() if now is None else now
     deadline = time.monotonic() + budget_s
     root = Path(root)
+    cap = spool_cap_bytes() if max_bytes is None else max_bytes
     removed = 0
     try:
         st = os.lstat(root)
@@ -1568,46 +1608,235 @@ def gc(root: Path, now: Optional[float] = None, retention_s: float = RETENTION_S
             except OSError:
                 pass
         try:
-            fd = os.open(str(stamp), os.O_WRONLY | os.O_CREAT, 0o600)
+            fd = os.open(str(stamp), os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
             os.close(fd)
             os.utime(str(stamp), (now, now))
         except OSError:
             pass
+        old_index = _gc_index_load(root)
+        index = {}       # session name -> [dir mtime_ns, bytes, entries, due, newest]
+        stale = []       # (name, path, dir mtime_ns) to list this pass
         with os.scandir(root) as sessions:
             for sdir in sessions:
-                if time.monotonic() > deadline:
-                    break
                 if not sdir.is_dir(follow_symlinks=False):
                     continue
-                left = 0
-                with os.scandir(sdir.path) as files:
-                    for f in files:
-                        if time.monotonic() > deadline:
-                            left += 1
-                            continue
+                try:
+                    dm = sdir.stat(follow_symlinks=False).st_mtime_ns
+                except OSError:
+                    continue
+                c = old_index.get(sdir.name)
+                if c is not None and c[0] == dm and now < c[3] and c[2] <= max_per_session:
+                    index[sdir.name] = c
+                else:
+                    stale.append((sdir.name, sdir.path, dm))
+        complete = True
+        empty = []
+        for name, path, dm in stale:
+            if time.monotonic() > deadline:
+                complete = False
+                break
+            got = _gc_session(path, now, retention_s, deadline, max_per_session)
+            if got is None:
+                complete = False
+                break
+            n_removed, n_left, entries, due = got
+            removed += n_removed
+            if n_left <= 0:
+                empty.append(path)
+                continue
+            # The mtime read BEFORE listing: a write during the listing
+            # leaves the stored mtime stale, so the next pass lists again.
+            index[name] = [dm if n_removed == 0 else -1, sum(e[1] for e in entries), len(entries), due,
+                           max((e[0] for e in entries), default=0.0)]
+        if complete:
+            total = sum(c[1] for c in index.values())
+            if total > cap:
+                # Least recently active sessions first; the oldest entries
+                # of each first.
+                for name in sorted(index, key=lambda k: (index[k][4], k)):
+                    if total <= cap:
+                        break
+                    if time.monotonic() > deadline:
+                        complete = False
+                        break
+                    path = os.path.join(str(root), name)
+                    entries = _gc_entries(path, deadline)
+                    if entries is None:
+                        complete = False
+                        break
+                    entries.sort()
+                    for _, size, p in entries:
+                        if total <= cap or time.monotonic() > deadline:
+                            break
                         try:
-                            fst = f.stat(follow_symlinks=False)
+                            os.unlink(p)
+                            removed += 1
+                            total -= size
                         except OSError:
-                            continue
-                        name = f.name
-                        old = now - fst.st_mtime
-                        stale = ((name.startswith("ev_") and name.endswith(".json") and old > retention_s)
-                                 or (name == TOKEN_FILE and old > min(retention_s, TOKEN_RETENTION_S))
-                                 or (name.startswith((".ev_", ".token_")) and name.endswith(".tmp")
-                                     and old > STALE_TMP_S))
-                        if stale and not stat.S_ISDIR(fst.st_mode):
-                            try:
-                                os.unlink(f.path)
-                                removed += 1
-                                continue
-                            except OSError:
-                                pass
-                        left += 1
-                if left == 0:
-                    try:
-                        os.rmdir(sdir.path)
-                    except OSError:
-                        pass
+                            pass
+                    index[name] = [-1, 0, 0, 0.0, 0.0]   # list it again next pass
+                    if total > cap and time.monotonic() > deadline:
+                        complete = False
+                        break
+        for path in empty:
+            try:
+                os.rmdir(path)
+            except OSError:
+                pass
+        _gc_index_save(root, index)
+        if not complete:
+            try:
+                t = now - interval_s + GC_RETRY_S
+                os.utime(str(stamp), (t, t))
+            except OSError:
+                pass
     except OSError:
         pass
     return removed
+
+
+GC_INDEX = ".gc-index.json"
+# A pass that ran out of budget runs again this soon, not a whole interval
+# later, so a large spool is brought under its bounds in a few passes.
+GC_RETRY_S = 30
+MAX_GC_INDEX_BYTES = 8 << 20
+
+
+def _gc_index_load(root: Path) -> dict:
+    """{session: [dir mtime_ns, bytes, entries, due, newest]} from GC_INDEX;
+    anything malformed is dropped (that session is listed again)."""
+    data = None
+    try:
+        fd = os.open(str(root / GC_INDEX), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            if stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                data = json.loads(f.read(MAX_GC_INDEX_BYTES))
+    except (OSError, ValueError):
+        data = None
+    out = {}
+    if isinstance(data, dict) and isinstance(data.get("sessions"), dict):
+        for k, v in data["sessions"].items():
+            if (isinstance(k, str) and SESSION_ID_RE.match(k) and isinstance(v, list) and len(v) == 5
+                    and isinstance(v[0], int) and isinstance(v[1], int) and isinstance(v[2], int)
+                    and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)):
+                out[k] = v
+    return out
+
+
+def _gc_index_save(root: Path, index: dict) -> None:
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(root), prefix=".gc-index_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"version": 1, "sessions": index}, separators=(",", ":")))
+        os.replace(tmp, str(root / GC_INDEX))
+        tmp = None
+    except (OSError, ValueError, TypeError):
+        pass
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _gc_entries(path: str, deadline: float) -> Optional[list]:
+    """[(mtime, size, path)] of a session's entries, or None past deadline."""
+    out = []
+    try:
+        with os.scandir(path) as files:
+            for f in files:
+                if time.monotonic() > deadline:
+                    return None
+                if not (f.name.startswith("ev_") and f.name.endswith(".json")):
+                    continue
+                try:
+                    fst = f.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISREG(fst.st_mode):
+                    out.append((fst.st_mtime, fst.st_size, f.path))
+    except OSError:
+        return []
+    return out
+
+
+def _gc_session(path: str, now: float, retention_s: float, deadline: float,
+                max_per_session: int) -> Optional[tuple]:
+    """List one session directory: remove what expired (entries, token,
+    marker, dead temp files) and the oldest entries beyond max_per_session.
+    -> (removed, files left, [(mtime, size, path)] of entries kept, the
+    time the next file here expires), or None past deadline."""
+    removed = 0
+    n_left = 0
+    entries = []
+    due = float("inf")
+    try:
+        with os.scandir(path) as files:
+            for f in files:
+                if time.monotonic() > deadline:
+                    return None
+                try:
+                    fst = f.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                name = f.name
+                is_entry = name.startswith("ev_") and name.endswith(".json")
+                if is_entry:
+                    ttl = retention_s
+                elif name == TOKEN_FILE:
+                    ttl = min(retention_s, TOKEN_RETENTION_S)
+                elif name == HINTED:
+                    ttl = retention_s
+                elif name.startswith((".ev_", ".token_")) and name.endswith(".tmp"):
+                    ttl = STALE_TMP_S
+                else:
+                    ttl = None
+                if ttl is not None and not stat.S_ISDIR(fst.st_mode):
+                    if now - fst.st_mtime > ttl:
+                        try:
+                            os.unlink(f.path)
+                            removed += 1
+                            continue
+                        except OSError:
+                            pass
+                    else:
+                        due = min(due, fst.st_mtime + ttl)
+                n_left += 1
+                if is_entry and stat.S_ISREG(fst.st_mode):
+                    entries.append((fst.st_mtime, fst.st_size, f.path))
+    except OSError:
+        return removed, 1, [], now
+    if len(entries) > max_per_session:
+        entries.sort()
+        drop, entries = entries[:len(entries) - max_per_session], entries[len(entries) - max_per_session:]
+        for _, _, p in drop:
+            try:
+                os.unlink(p)
+                removed += 1
+                n_left -= 1
+            except OSError:
+                pass
+    if due == float("inf"):
+        due = now + retention_s
+    return removed, n_left, entries, due
+
+
+def spool_usage(root: Path) -> tuple:
+    """(entries, bytes, sessions) across the spool."""
+    n = size = sessions = 0
+    for _, sdir in session_dirs(root):
+        sessions += 1
+        try:
+            with os.scandir(sdir) as it:
+                for f in it:
+                    if f.name.startswith("ev_") and f.name.endswith(".json"):
+                        try:
+                            size += f.stat(follow_symlinks=False).st_size
+                            n += 1
+                        except OSError:
+                            continue
+        except OSError:
+            continue
+    return n, size, sessions

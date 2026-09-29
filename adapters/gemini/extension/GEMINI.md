@@ -31,3 +31,23 @@ so the convention is the way to ensure correct classification.
 
 The `cardinal` MCP server is available for observability queries against
 your Cardinal workspace.
+
+## Citing tool results in a Cardinal storyboard
+
+Every tool result in this session is kept on this machine by the Cardinal
+plugin and gets an id, shown next to the result as `[evidence:ev_…]`. Any of
+them can be cited in an Investigation Storyboard: shell commands (tests,
+`git`, `make`), file reads and edits, searches, web fetches, other MCP
+servers, any tool. Nothing is uploaded until you promote it:
+`cardinal-evidence promote --storyboard <sb_id> ev_… [ev_…]` prints `ev_… -> rcpt_…`;
+bind that receipt. `cardinal-evidence find <text>` looks up an id you lost;
+`cardinal-evidence show ev_…` prints exactly what you would cite.
+(`cardinal-evidence` is the plugin's `scripts/cardinal-evidence`; the first
+`[evidence:…]` line of a session gives its full path.)
+
+- `[evidence:ev_… withheld: …]` means the call touched something sensitive
+  (a `.env`, a key, a credential command). Nothing was kept and it cannot be
+  cited: say so plainly instead of paraphrasing its result.
+- Never claim more than the output shows. A captured result is the client's
+  record, labeled "reported by <client>". Exit 0 shows a command succeeded,
+  not that the feature works; bind the exact field that carries the claim.

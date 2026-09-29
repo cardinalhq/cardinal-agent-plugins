@@ -85,6 +85,24 @@ delivery is not retried, and failures never interrupt the agent. No prompts,
 assistant text, tool outputs, or raw shell commands are emitted. Unknown cost
 is omitted; a runtime-reported cost of zero is preserved.
 
+## Evidence capture (storyboards)
+
+Every tool call (from `tool.execute.after`, and a failed call from its `message.part.updated` error state) is recorded in the local evidence spool shared with
+the other Cardinal adapters, `~/.cardinal/evidence/<session>/ev_<id>.json`,
+through the shared generic pipeline (`cardinal_core.evidence_capture`,
+reached via `lib/cardinal_native.py evidence-capture`): a call that touches
+something sensitive (a `.env` or key file, `printenv`, `gh auth token`, a
+credentialed URL or header) is kept only as a *withheld* stub; everything
+else is scrubbed, capped at 256 KiB and removed after 14 days. This is the
+one path where tool input and output reach the Python side, and it never
+leaves the machine. The id is appended to the tool output the model sees as `[evidence:ev_…]`; a failed call has no output to append to, so its id is found with `cardinal-opencode evidence list`. Calls upload with source
+`tool:opencode`: OpenCode tool ids cannot tell an MCP tool from a built-in one. Cardinal's own tools are skipped (witnessed already).
+`cardinal-opencode evidence promote --storyboard sb_… ev_…` uploads only what a
+storyboard cites, with the connection's MCP key; `cardinal-opencode evidence
+list | find <text> | show ev_… | off | on | status`. Opt out with
+`CARDINAL_EVIDENCE_CAPTURE=0`; `CARDINAL_EVIDENCE_CONTEXT=0` keeps capturing
+without the inline ids.
+
 ## Decision capture
 
 Off by default. `cardinal-opencode decision on|off|status [--session ID]` toggles it;

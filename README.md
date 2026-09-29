@@ -34,8 +34,8 @@ tagged with engineer, session, repo, branch, PR, anchors, and D18 code
 clusters. See [docs/specs/decision-telemetry.md](docs/specs/decision-telemetry.md).
 
 Before `/cardinal:connect` the Claude plugin is local-only: its `cardinal` MCP
-server has no URL and never connects, evidence capture keeps other MCP servers'
-results on the machine, and every telemetry, spend-limit, initiative, plan,
+server has no URL and never connects, evidence capture keeps every tool call's
+result on the machine, and every telemetry, spend-limit, initiative, plan,
 decision, git-state and usage hook stays silent (no context, no network).
 Writing to Cardinal needs an API key (sign up at https://app.cardinalhq.io,
 then `/cardinal:connect` creates one for the machine); there is no OAuth sign-in. See
@@ -59,26 +59,39 @@ synchronous `SessionStart` hook (`hooks/storyboard-session.py`) puts the
 session id in context for `storyboard__create`. The skills are Claude-only
 for now.
 
-Claude also ships local evidence capture for storyboards: a synchronous
-`PostToolUse` hook on every MCP tool (`hooks/evidence-capture.py`, matcher
-`mcp__.*`) records the result of a call to any non-Cardinal MCP server in
-`~/.cardinal/evidence/<session_id>/ev_<id>.json` (directories 0700, files
-0600, credentials scrubbed with a port of the gateway's receipt scrub,
-results capped at 256 KiB, entries removed after 14 days) and tells Claude
-the `ev_…` id. Nothing leaves the machine: only a result cited in a
-storyboard is uploaded, by an explicit
-`cardinal-evidence promote --storyboard sb_… ev_…` (`bin/cardinal-evidence`),
-which posts it to the draft's evidence route as a *captured* receipt. It
-authenticates with the storyboard's own 24 h evidence token, which a
-`PostToolUse` hook on Cardinal's `storyboard__create` / `storyboard__preview`
-(`hooks/storyboard-token.py`) keeps in the session's `token.json` (0600), and
-falls back to the Cardinal MCP key. Cardinal's own gateway tools are skipped;
-they already get witnessed receipts. `cardinal-evidence list` shows the
-session's captures; opt out with `cardinal-evidence off`,
-`CARDINAL_EVIDENCE_CAPTURE=0` or the flag file
-`~/.cardinal/evidence/disabled`. The spool lives in
-`core/cardinal_core/evidence.py`. The Cursor (`postToolUse`) and Gemini
-(`AfterTool`) adapters write the same spool from their telemetry hooks.
+Every adapter ships generic local evidence capture for storyboards: every
+tool call the agent makes (shell commands, file reads and edits, searches,
+web fetches, subagents, any MCP server, and tools nobody has listed yet) goes
+through ONE pipeline, `core/cardinal_core/evidence_capture.py`
+(`capture_call`), into `~/.cardinal/evidence/<session_id>/ev_<id>.json`
+(directories 0700, files 0600). The capture decision never names a tool: an
+opt-out check, a skip for Cardinal's own gateway (it already mints witnessed
+receipts), and a tool-neutral sensitivity gate
+(`core/cardinal_core/evidence_gate.py`) over every string of the call's
+input. A call that touches a sensitive path (`.env`, keys, `~/.aws`,
+kubeconfig, …), runs a secret-dumping command (`printenv`, `gh auth token`,
+`kubectl get secret`, …) or sends a credential is kept only as a *withheld*
+stub (tool, status, rule; no input, no output) so the agent can say why it
+cannot cite it. Everything else is shaped by optional, shape-based
+normalizers (`core/cardinal_core/evidence_normalizers/`: MCP content, shell
+output, file edits; a generic JSON fallback for the rest), scrubbed (the
+gateway's receipt scrub plus plain-text `key=value` rules, base64 blobs and
+local paths) and capped at 256 KiB. The spool stays under 14 days, 256 MiB
+and 10,000 entries per session. Nothing leaves the machine: only a result
+cited in a storyboard is uploaded, by an explicit
+`cardinal-evidence promote --storyboard sb_… ev_…`
+(`core/cardinal_core/evidence_promote.py`, launched per adapter), as a
+*captured* receipt (`source_server` is the MCP server, or
+`builtin:<runtime>` for the agent's own tools). Claude authenticates the
+upload with the storyboard's own 24 h evidence token
+(`hooks/storyboard-token.py`) and falls back to the Cardinal MCP key; the
+other adapters use their connection's MCP key. Opt out with
+`cardinal-evidence off`, `CARDINAL_EVIDENCE_CAPTURE=0` or the flag file
+`~/.cardinal/evidence/disabled`; `CARDINAL_EVIDENCE_CONTEXT=0` keeps
+capturing but stops the inline `[evidence:…]` lines; extra deny (and, in
+your home only, allow) rules go in `~/.cardinal/evidence-rules.json`. See
+[docs/specs/generic-evidence-capture.md](docs/specs/generic-evidence-capture.md)
+for the per-runtime hook wiring.
 
 Native [OpenCode](adapters/opencode/README.md) and [Pi](adapters/pi/README.md)
 packages provide session/tool/usage telemetry and Cardinal MCP access. Build

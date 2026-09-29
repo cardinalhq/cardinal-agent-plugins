@@ -380,14 +380,21 @@ class ConnectTests(unittest.TestCase):
         # registered.
         self.assertNotIn("PreToolUse", hooks["hooks"])
         self.assertNotIn("semantic-dag", json.dumps(hooks))
-        # PostToolUse is registered only for hook-side decision emission:
-        # exact "Bash" matcher, no status message on every shell call.
-        (group,) = hooks["hooks"]["PostToolUse"]
+        # PostToolUse: hook-side decision emission (exact "Bash" matcher)
+        # and generic evidence capture (".*", every tool). No status message
+        # on either: it would flash on every tool call.
+        group, evidence_group = hooks["hooks"]["PostToolUse"]
         self.assertEqual(group["matcher"], "Bash")
         (handler,) = group["hooks"]
         self.assertIn("--event PostToolUse", handler["command"])
         self.assertIn("cardinal-codex-plugin", handler["command"])
         self.assertNotIn("statusMessage", handler)
+        self.assertEqual(evidence_group["matcher"], ".*")
+        (handler,) = evidence_group["hooks"]
+        self.assertIn("--event ToolEvidence", handler["command"])
+        self.assertIn("cardinal-codex-plugin", handler["command"])
+        self.assertNotIn("statusMessage", handler)
+        self.assertLessEqual(handler["timeout"], 5)
 
     def test_repair_hooks_strips_legacy_semantic_dag_paths_without_auth(self):
         """Installs connected before the Semantic DAG removal still carry

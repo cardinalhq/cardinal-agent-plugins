@@ -184,7 +184,8 @@ def write_hooks_config(path: Path) -> Path | None:
     Events registered:
       sessionStart        — initiative-convention + budget standing
       beforeSubmitPrompt  — spend-limits gate + git_state
-      postToolUse         — turn_tool + tool_result + notify piggyback +
+      postToolUseFailure  — local evidence capture of a failed tool call
+      postToolUse         — evidence capture + turn_tool + tool_result + notify piggyback +
                             cardinal.decision recording (the sandboxed
                             `cardinal-decision record` only prints a
                             marker; this hook gates, ledgers, resolves the
@@ -202,6 +203,7 @@ def write_hooks_config(path: Path) -> Path | None:
         ("sessionStart", 5),
         ("beforeSubmitPrompt", 5),
         ("postToolUse", POST_TOOL_USE_TIMEOUT_SECS),
+        ("postToolUseFailure", 5),
         ("preCompact", 5),
         ("stop", 10),
         ("subagentStop", 5),

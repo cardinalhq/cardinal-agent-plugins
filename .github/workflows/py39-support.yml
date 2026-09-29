@@ -66,6 +66,10 @@ jobs:
           import cardinal_core.bashclass
           import cardinal_core.decisions
           import cardinal_core.evidence
+          import cardinal_core.evidence_gate
+          import cardinal_core.evidence_normalizers
+          import cardinal_core.evidence_capture
+          import cardinal_core.evidence_promote
           print('ok: all core modules import under 3.9')
           "
 

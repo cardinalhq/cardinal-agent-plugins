@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """Shared Python boundary for the OpenCode and Pi packages.
 
-The JS surfaces send normalized metadata, never prompts or tool output. Each
-invocation handles a batch under a per-session lock; credentials stay on disk
-and Cardinal's existing core owns the wire format and initiative semantics.
+The JS surfaces send normalized metadata for telemetry, never prompts or tool
+output. Each invocation handles a batch under a per-session lock; credentials
+stay on disk and Cardinal's existing core owns the wire format and initiative
+semantics.
+
+Evidence capture is the one exception to "no tool output", and it never
+leaves the machine: `evidence-capture` receives tool calls (input and result)
+from the plugin and records them in the local evidence spool through the
+generic pipeline (cardinal_core.evidence_capture), exactly as the Claude,
+Cursor, Gemini and Codex hooks do. Nothing is sent over the network until the
+author runs `evidence promote`.
 """
 from __future__ import annotations
 
@@ -415,6 +423,102 @@ def add_decision_parser(sub):
     context.add_argument("--tool")
 
 
+# ---------------------------------------------------------------------------
+# Evidence capture (every tool call, local only)
+# ---------------------------------------------------------------------------
+
+# Cardinal's own tools in each runtime: calls through Cardinal's gateway
+# (already witnessed) and Cardinal's local helpers. Everything else is
+# captured.
+CARDINAL_TOOLS = {"pi": ("cardinal_call_tool", "cardinal_list_tools", "cardinal_record_decision")}
+
+
+def evidence_source(runtime: str, tool_name: str) -> dict:
+    """pi: its built-in tools and extension tools are "builtin" (pi has no
+    MCP of its own; Cardinal's MCP is reached through cardinal_call_tool).
+    opencode: tool ids cannot tell an MCP tool from a built-in one
+    (`<server>_<tool>` is ambiguous), so "tool"; `cardinal_*` is Cardinal's."""
+    if runtime == "opencode":
+        if tool_name.startswith("cardinal_"):
+            return {"kind": "cardinal", "runtime": runtime}
+        return {"kind": "tool", "runtime": runtime}
+    if tool_name in CARDINAL_TOOLS.get(runtime, ()):
+        return {"kind": "cardinal", "runtime": runtime}
+    return {"kind": "builtin", "runtime": runtime}
+
+
+def evidence_capture(runtime, events, version):
+    """Record each tool-call event {session_id, cwd, tool_name, tool_call_id,
+    input, output | content, is_error, error} in the local evidence spool.
+    Never raises for one bad event."""
+    from cardinal_core import evidence_capture as cap
+    from cardinal_core import evidence_gate as gate
+
+    home = Path.home()
+    client = f"{runtime}/{version}" if isinstance(version, str) and version else runtime
+    for event in events[:256]:
+        try:
+            if not isinstance(event, dict):
+                continue
+            name = event.get("tool_name")
+            if not isinstance(name, str) or not name:
+                continue
+            if event.get("unreadable") is not None:
+                # The plugin could not send this call whole (bridge.js
+                # boundEvidenceEvent): its input cannot be checked, so it is
+                # kept as a withheld stub, never unchecked.
+                call = cap.ToolCall(
+                    runtime=runtime, tool_name=name, source=evidence_source(runtime, name), tool=name,
+                    error="error" if event.get("is_error") is True else None,
+                    session_id=event.get("session_id") if isinstance(event.get("session_id"), str) else None,
+                    tool_use_id=event.get("tool_call_id") if isinstance(event.get("tool_call_id"), str) else None,
+                    cwd=event.get("cwd") if isinstance(event.get("cwd"), str) else None, client=client)
+                why = "backlog" if event.get("unreadable") == "backlog" else "size"
+                hint = "capture backlog" if why == "backlog" else "too large to send"
+                cap.write_stub(call, home, gate.Withheld(gate.REASON_UNREADABLE, why, hint),
+                               promote_cmd=f"cardinal-{runtime} evidence")
+                continue
+            response = event.get("content") if "content" in event else event.get("output")
+            error = event.get("error")
+            if event.get("is_error") is True and not (isinstance(error, str) and error.strip()):
+                error = response if isinstance(response, str) and response.strip() else "error"
+                if isinstance(response, str):
+                    response = None
+            call = cap.ToolCall(
+                runtime=runtime,
+                tool_name=name,
+                source=evidence_source(runtime, name),
+                tool=name,
+                tool_input=event.get("input"),
+                response=response,
+                error=error if isinstance(error, str) and error.strip() else None,
+                session_id=event.get("session_id") if isinstance(event.get("session_id"), str) else None,
+                tool_use_id=event.get("tool_call_id") if isinstance(event.get("tool_call_id"), str) else None,
+                cwd=event.get("cwd") if isinstance(event.get("cwd"), str) else None,
+                client=client,
+            )
+            # A per-call budget: one pathological call is kept as a withheld
+            # stub instead of eating the batch's time (the bridge kills a
+            # batch after 10 s).
+            cap.capture_call_guarded(call, home, promote_cmd=f"cardinal-{runtime} evidence")
+        except Exception:
+            continue
+
+
+def evidence_cli(runtime, paths, argv, version):
+    from cardinal_core import evidence_promote
+
+    adapter = evidence_promote.PromoteAdapter(
+        runtime=runtime,
+        client=f"{runtime}/{version}" if version else runtime,
+        connection=evidence_promote.agent_paths_connection(paths),
+        connect_hint=f"cardinal-{runtime} connect",
+        reconnect_hint=f"cardinal-{runtime} connect",
+        prog=f"cardinal-{runtime} evidence",
+    )
+    return evidence_promote.main(argv, adapter)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Cardinal native agent integration")
     parser.add_argument("--runtime", choices=("opencode", "pi"), required=True)
@@ -428,7 +532,12 @@ def main():
     disc = sub.add_parser("disconnect", help="Revoke credentials and remove the local connection")
     disc.add_argument("--local-only", action="store_true")
     add_decision_parser(sub)
+    ev = sub.add_parser("evidence", help="Find, show and promote locally captured tool results "
+                        "(promote --storyboard sb_... ev_... | list | find TEXT | show ev_... | off | on | status)",
+                        add_help=False)
+    ev.add_argument("evidence_args", nargs=argparse.REMAINDER)
     sub.add_parser("telemetry", help=argparse.SUPPRESS)
+    sub.add_parser("evidence-capture", help=argparse.SUPPRESS)
     args = parser.parse_args()
     paths = agent_paths(args.runtime)
     try:
@@ -437,6 +546,13 @@ def main():
             if isinstance(payload, list):
                 telemetry(args.runtime, paths, payload[:256], args.version)
             return 0
+        if args.command == "evidence-capture":
+            payload = json.loads(sys.stdin.buffer.read(64 << 20).decode("utf-8", errors="replace"))
+            if isinstance(payload, list):
+                evidence_capture(args.runtime, payload, args.version)
+            return 0
+        if args.command == "evidence":
+            return evidence_cli(args.runtime, paths, args.evidence_args or ["--help"], args.version)
         if args.command == "connect":
             return connect(args, paths)
         if args.command == "disconnect":
@@ -445,7 +561,7 @@ def main():
             return decision(args, paths)
         return status(paths)
     except Exception as exc:
-        if args.command != "telemetry":
+        if args.command not in ("telemetry", "evidence-capture"):
             print(str(exc), file=sys.stderr)
         return 1
 

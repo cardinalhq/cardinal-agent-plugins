@@ -128,10 +128,20 @@ class StoryboardSkillTextTests(unittest.TestCase):
             self.assertIn(needle, text)
 
     def test_storyboard_skill_teaches_promoting_captured_evidence(self):
-        # bin/cardinal-evidence promote: results from non-Cardinal MCP servers
-        # become captured receipts only once promoted into the draft.
+        # bin/cardinal-evidence promote: any tool result (built-in tools and
+        # other MCP servers alike) becomes a captured receipt only once
+        # promoted into the draft.
         text = _flat(STORYBOARD_SKILL)
         for needle in (
+            "Any tool result from this session can be cited",
+            "shell commands (tests, `git`, `make`), file reads and edits",
+            "`cardinal-evidence find <text>`",
+            "**Withheld.**",
+            "`[evidence:ev_… withheld: …]`",
+            "it cannot be cited: say so plainly",
+            "**Never claim more than the output shows.**",
+            "reported by <client>",
+            "`cardinal-evidence show ev_…`",
             "`[evidence:ev_…]`",
             "promote the ones you cite before binding them",
             "`cardinal-evidence promote --storyboard <id> ev_… [ev_…]`",

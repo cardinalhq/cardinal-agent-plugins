@@ -357,6 +357,17 @@ def write_hooks_config() -> Path | None:
     post_tool_use = managed_hook_group("PostToolUse", 10)
     post_tool_use["matcher"] = "Bash"
     hooks.setdefault("PostToolUse", []).append(post_tool_use)
+    # Generic evidence capture: every tool call (shell, apply_patch, MCP,
+    # any tool) is kept in the local evidence spool so a storyboard can cite
+    # it. A separate group so the decision emitter above is untouched; ".*"
+    # is a regex matcher (hooks/src/events/common.rs matches_matcher: only an
+    # alphanumeric matcher is an exact match). Local file work, no network.
+    evidence_group = {"matcher": ".*", "hooks": [{
+        "type": "command",
+        "command": managed_hook_command("ToolEvidence"),
+        "timeout": 3,
+    }]}
+    hooks["PostToolUse"].append(evidence_group)
     HOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
     backup_path = backup(HOOKS_PATH)
     atomic_write(HOOKS_PATH, json.dumps(data, indent=2) + "\n")

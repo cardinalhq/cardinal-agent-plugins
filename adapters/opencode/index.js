@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
-import { connection, createBridge, DECISION_TOOL, decisionContext, recordDecision } from "./lib/bridge.js";
+import { connection, createBridge, createEvidenceSink, DECISION_TOOL, decisionContext, evidenceCaptureEnabled,
+  evidenceContextEnabled, evidenceId, evidenceLine, recordDecision } from "./lib/bridge.js";
 
 async function loadZod() {
   try { return (await import("zod")).z; } catch { return undefined; }
@@ -39,6 +40,12 @@ function decisionTool(z, onRecorded) {
 export default async function CardinalPlugin({ client, directory }, options = {}) {
   const warn = (message) => { void client.app.log({ body: { service: "cardinal", level: "warn", message } }).catch(() => {}); };
   const bridge = options.bridge || createBridge("opencode", { warn });
+  // Generic evidence capture: every tool call except Cardinal's own
+  // (`cardinal_*`) goes to the local evidence spool through cardinal_native.py.
+  const evidence = options.evidence || createEvidenceSink("opencode", { warn });
+  const toolArgs = new Map();
+  const hinted = new Set();
+  const evidenceOn = () => { try { return evidenceCaptureEnabled(); } catch { return false; } };
   const sessions = new Map();
   const readConnection = options.connection || (() => connection("opencode"));
   // One context lookup per session per user message; messages.transform runs on every chat step.
@@ -70,6 +77,33 @@ export default async function CardinalPlugin({ client, directory }, options = {}
   return {
     ...(tool ? { tool: { [DECISION_TOOL.name]: tool } } : {}),
     async "chat.message"(input) { decisionContexts.delete(input?.sessionID); compacting.delete(input?.sessionID); },
+    // Evidence: args before the call, the result after it. The id line is
+    // appended to the output the model sees (tool.execute.after's output is
+    // mutable). A failed call never reaches tool.execute.after: it is
+    // captured from its message.part.updated error state below.
+    async "tool.execute.before"(input, output) {
+      try {
+        if (!input?.callID || String(input.tool || "").startsWith("cardinal_") || !evidenceOn()) return;
+        if (toolArgs.size >= 1024) toolArgs.delete(toolArgs.keys().next().value);
+        toolArgs.set(input.callID, output?.args);
+      } catch { /* evidence capture must never break a tool call */ }
+    },
+    async "tool.execute.after"(input, output) {
+      try {
+        const tool = String(input?.tool || "");
+        if (!input?.callID || tool.startsWith("cardinal_") || !evidenceOn()) return;
+        const args = input.args ?? toolArgs.get(input.callID);
+        toolArgs.delete(input.callID);
+        const ctx = await context(input.sessionID);
+        evidence.send({ kind: "evidence", session_id: input.sessionID, cwd: ctx?.cwd ?? directory, tool_name: tool,
+          tool_call_id: input.callID, input: args, output: output?.output, is_error: false });
+        const id = evidenceId("opencode", input.sessionID, input.callID);
+        if (!id || !evidenceContextEnabled() || typeof output?.output !== "string") return;
+        const first = !hinted.has(input.sessionID);
+        if (first) { if (hinted.size >= 1024) hinted.clear(); hinted.add(input.sessionID); }
+        output.output = `${output.output}\n\n${evidenceLine("opencode", id, first)}`;
+      } catch { /* evidence capture must never break a tool call */ }
+    },
     // OpenCode 1.18.30 triggers this immediately before compaction's messages.transform
     // (session/compaction.ts:372-379); that summarization request has no tools.
     async "experimental.session.compacting"(input) { if (input?.sessionID) compacting.add(input.sessionID); },
@@ -146,14 +180,21 @@ export default async function CardinalPlugin({ client, directory }, options = {}
               tool_name: part.tool, success: state.status === "completed", timestamp: state.time.end,
               duration_ms: state.time.end - state.time.start, command: state.input?.command,
               mcp_server_name: mcp ? "cardinal" : undefined, mcp_tool_name: mcp });
+            // A failed call is evidence too; it skips tool.execute.after.
+            if (state.status === "error" && !part.tool.startsWith("cardinal_") && evidenceOn()) {
+              toolArgs.delete(part.callID);
+              evidence.send({ kind: "evidence", session_id: part.sessionID, cwd: ctx.cwd, tool_name: part.tool,
+                tool_call_id: part.callID, input: state.input, error: String(state.error ?? "error"), is_error: true });
+            }
           }
         } else if (event.type === "server.instance.disposed") {
           await bridge.flush();
+          await evidence.flush();
           sessions.clear();
           decisionContexts.clear();
         }
       } catch { /* An unfamiliar upstream event must not interrupt the agent. */ }
     },
-    async dispose() { await bridge.flush(); sessions.clear(); decisionContexts.clear(); },
+    async dispose() { await bridge.flush(); await evidence.flush(); sessions.clear(); decisionContexts.clear(); toolArgs.clear(); },
   };
 }

@@ -41,12 +41,21 @@ Captured evidence stays on this machine meanwhile and can be cited after connect
 
 - **Witnessed.** Every read-only Cardinal tool result ends with `[receipt:rcpt_<24 hex>]`.
   Note receipt ids as you investigate.
-- **Captured.** The plugin's hook keeps each result from another MCP server (Grafana,
-  Datadog, …) on this machine and prints `[evidence:ev_…]`. Nothing is uploaded until a
-  storyboard cites it. After `create`, promote the ones you cite before binding them:
+- **Captured.** Any tool result from this session can be cited: shell commands (tests,
+  `git`, `make`), file reads and edits, searches, web fetches, subagents, other MCP
+  servers, any tool. The plugin's hook keeps each result on this machine and prints
+  `[evidence:ev_…]`. Nothing is uploaded until a storyboard cites it. Lost an id? Run
+  `cardinal-evidence find <text>`. After `create`,
+  promote the ones you cite before binding them:
   `cardinal-evidence promote --storyboard <id> ev_… [ev_…]` prints `ev_… -> rcpt_…` per
-  entry (or its error); bind that receipt. Exit 1 means some entries failed: read the
-  errors. `cardinal-evidence list` shows this session's entries.
+  entry (or its error); bind that receipt. Exit 1 means some entries failed: read the errors.
+- **Withheld.** `[evidence:ev_… withheld: …]` means the call touched something sensitive
+  (a `.env`, a key, a credential command). Nothing was kept and it cannot be cited: say so
+  plainly instead of paraphrasing its result.
+- **Never claim more than the output shows.** A captured result is the client's record,
+  labeled "reported by <client>". Exit 0 shows a command succeeded, not that the feature
+  works. `cardinal-evidence show ev_…` prints what you would cite; bind the exact field
+  (`/exit_code`, a `stdout` line) that carries the claim.
 - **Reported** (`storyboard__record_evidence`) is for a result with no `ev_…` id, for
   example when the user turned capture off (`cardinal-evidence status`). Prefer captured.
 
