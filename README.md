@@ -34,8 +34,8 @@ tagged with engineer, session, repo, branch, PR, anchors, and D18 code
 clusters. See [docs/specs/decision-telemetry.md](docs/specs/decision-telemetry.md).
 
 Before `/cardinal:connect` the Claude plugin is local-only: its `cardinal` MCP
-server has no URL and never connects, evidence capture keeps other MCP servers'
-results on the machine, and every telemetry, spend-limit, initiative, plan,
+server has no URL and never connects, evidence capture keeps every tool call's
+result on the machine, and every telemetry, spend-limit, initiative, plan,
 decision, git-state and usage hook stays silent (no context, no network).
 Writing to Cardinal needs an API key (sign up at https://app.cardinalhq.io,
 then `/cardinal:connect` creates one for the machine); there is no OAuth sign-in. See

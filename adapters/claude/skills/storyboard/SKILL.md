@@ -44,8 +44,8 @@ Captured evidence stays on this machine meanwhile and can be cited after connect
 - **Captured.** Any tool result from this session can be cited: shell commands (tests,
   `git`, `make`), file reads and edits, searches, web fetches, subagents, other MCP
   servers, any tool. The plugin's hook keeps each result on this machine and prints
-  `[evidence:ev_…]`. Nothing is uploaded until a storyboard cites it. Lost an id?
-  `cardinal-evidence find <text>` or `cardinal-evidence list --tool Bash`. After `create`,
+  `[evidence:ev_…]`. Nothing is uploaded until a storyboard cites it. Lost an id? Run
+  `cardinal-evidence find <text>`. After `create`,
   promote the ones you cite before binding them:
   `cardinal-evidence promote --storyboard <id> ev_… [ev_…]` prints `ev_… -> rcpt_…` per
   entry (or its error); bind that receipt. Exit 1 means some entries failed: read the errors.
