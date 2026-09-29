@@ -180,49 +180,63 @@ pin the Python and JS implementations to each other.
 
 **Input:** the raw (pre-scrub) `tool_input` and tool name, in memory only. **Output:** `None` (capture) or
 `Withheld{reason, rule, hint}`. It walks every string leaf *and every key*, depth ≤ 32, visiting ≤ 5,000 leaves.
-Each string is looked at up to 64 KiB. A longer string is content (a Write body), not a path or command: it's
-only redacted in step 5. It **never looks at the tool name** except through a user's own `deny.tools` rule.
+It **fails closed**: an input the walk cannot finish (deeper, or more leaves) is withheld as `unreadable`
+(`gate.bounds`), never captured unchecked. Each string is looked at up to 64 KiB. A longer string is content (a
+Write body), not a path or command: it's only redacted in step 5, except that a long shell script with here-documents
+is checked with the heredoc bodies stripped (so `cat > x <<EOF …70 KiB… EOF; cat .env` is still seen). It **never
+looks at the tool name** except through a user's own `deny.tools` rule.
 
 ### 3.1 Path rules (any path-like token in any string)
 
 Tokenize on whitespace, quotes, `= , ; | & < > ( )` and backticks. A token is path-like if it contains `/`,
-starts with `.` or `~`, or equals a sensitive basename. Normalize it: `~` → `$HOME`, relative to payload `cwd`,
-`..` collapsed lexically. For ≤ 32 tokens that name an existing path, also `os.path.realpath` (a symlink
-`notes.txt → ~/.aws/credentials` is caught). Match basename globs and directory prefixes:
+starts with `.` or `~`, or equals a sensitive basename; a bare word that is a symlink in `cwd` counts too.
+Normalize it: `~`, `$HOME`, `${HOME}` → home, `~user` → that user's home, relative to payload `cwd`, `..` collapsed
+lexically. For ≤ 256 tokens that name an existing path, also `os.path.realpath` (a symlink
+`notes.txt → ~/.aws/credentials` is caught). `{a,b}` brace words are expanded; a glob (`.env*`, `.e?v`,
+`~/.kube/conf*`) is matched against the well-known sensitive names when its file part starts with a literal, and
+against the files it names on disk (bounded). Matching is case- and Unicode-folded (NFKC + casefold: `~/.KUBE/Config`
+opens `~/.kube/config` on APFS), and the credential stores below match under **any** home directory (`/root/.kube/config`,
+`/home/x/.aws/…`, an unexpanded `$HOME/…`). Match basename globs and directory prefixes:
 
 | rule id | pattern |
 |---|---|
-| path.dotenv | basename `.env`, `.env.*`, `.envrc` |
+| path.dotenv | basename `.env`, `.env.*`, `.envrc`, `*.env` (a bare `name.env` word only when that file exists: `process.env` is code) |
 | path.credentials | basename `*credential*` unless the extension is source/doc (`.ts .tsx .js .mjs .cjs .py .go .rs .java .kt .rb .php .cs .c .h .cc .cpp .swift .md .mdx .rst .html .css`); so `credentials.json`, `credentials` yes, `credentials-store.ts` no |
-| path.secrets | basename `secret`/`secrets` + `{,.json,.yaml,.yml,.toml,.env,.txt}`, `*.secret(s)`, `*.tfvars`, `terraform.tfstate*`, `.vault-token` |
+| path.secrets | basename `secret`/`secrets` + `{,.json,.yaml,.yml,.toml,.env,.txt}`, `*.secret(s)`, `*.tfvars`, `terraform.tfstate*`, `.vault-token`; any file under a `secret/`, `secrets/` or `.secrets/` directory unless it is source/doc |
 | path.private-key | `*.pem *.key *.p12 *.pfx *.jks *.keystore *.ppk`, `id_rsa* id_dsa* id_ecdsa* id_ed25519*` |
 | path.ssh / .aws / .gnupg / .azure / .password-store | `~/.ssh/**` (except `*.pub`, `known_hosts`), `~/.aws/**`, `~/.gnupg/**`, `~/.azure/**`, `~/.password-store/**` |
-| path.kube | `~/.kube/config`, basename `*kubeconfig*`, `/var/run/secrets/**` |
+| path.kube | `~/.kube/**`, basename `*kubeconfig*`, `/var/run/secrets/**` |
 | path.netrc / .docker / .npmrc … | `.netrc _netrc .git-credentials .pgpass .my.cnf .npmrc .pypirc`, `~/.docker/config.json`, `~/.config/gh/hosts.yml`, `~/.config/gcloud/**` |
 | path.keychain | `*.keychain *.keychain-db`, `~/Library/Keychains/**` |
 | path.agent-secrets | `~/.cardinal/**` (spool + tokens), `~/.claude/settings*.json`, `~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`, `<agent home>/cardinal-secrets.json` |
 | path.proc-environ | `/proc/*/environ`, `/etc/shadow`, `/etc/sudoers*` |
+| path.agent-transcripts | `~/.claude/projects/**` (transcripts and spilled tool outputs), `~/.codex/sessions/**`, `~/.gemini/tmp/**`, `~/.claude/history.jsonl`, `~/.codex/history.jsonl`: they replay earlier results verbatim, including withheld ones. Cite the original call instead |
 
 ### 3.2 Secret-command rules (any string that parses as shell)
 
 The gate splits strings of ≤ 64 KiB into simple commands on `; && || | & \n`, `$( … )` and backticks. It
-recurses into `bash|sh|zsh -c '<script>'`, `eval`, `xargs`, and at most 256 segments. Each segment goes
+recurses into `bash|sh|zsh -c '<script>'`, `su -c`, `eval`, `xargs`, here-strings (`sh <<< '…'`), `kubectl|oc exec … --
+<cmd>`, `docker|podman exec|run [opts] <container> <cmd>`, `ssh [opts] <host> <cmd>`, anything after `--`, and at most
+256 segments. Each segment goes
 through `shlex.split` (on failure, a whitespace split). Wrappers are dropped: `sudo [-flags]`, `command`, `exec`,
 `nohup`, `time`, `nice`, `timeout N`, and `env [-i] [VAR=val…]` when a command follows. The rest is matched
 by basename(argv0) plus a subcommand path:
 
 | rule id | match |
 |---|---|
-| cmd.env-dump | `printenv`; `env` with no command operand; `export`/`declare -x`/`typeset -x`/`set` with no args or only `-p` |
+| cmd.env-dump | `printenv`; `env` with no command operand; `export`/`declare -x`/`typeset -x`/`set` with no args or only `-p`; `ps e…`/`ps -E`; an interpreter's inline program that prints the environment (`node -e …process.env`, `python -c …os.environ`, `ruby -e …ENV.to_h`, `perl …%ENV`, heredoc programs too) |
+| cmd.secret-var | `echo`/`printf` of `$NAME` where NAME is secret-named (`OPENAI_KEY`, `GITHUB_TOKEN`; `gate.secretish_name`), `declare -p` of one, an inline program reading one (`os.environ["STRIPE_KEY"]`) |
+| cmd.decoded-exec | a decoded string used as a command or argument: `$(… \| base64 -d)`, `… base64 -d \| sh` (what it names cannot be checked) |
+| cmd.config-secret | `<tool> config get <key>` / `config --get` of a secret-named key (`npm config get //registry/:_authToken`, `pip config get global.password`) |
 | cmd.aws | `aws sts get-session-token\|assume-role*\|get-federation-token`, `aws configure export-credentials\|get *key*\|*secret*`, `aws secretsmanager get-secret-value`, `aws ssm get-parameter(s)` + `--with-decryption`, `aws ecr get-login-password`, `aws iam create-access-key` |
-| cmd.kube-secret | `kubectl\|oc get\|describe\|edit` + `secret(s)` / `secret/*`; `kubectl config view --raw\|--flatten`; `kubectl create token` |
+| cmd.kube-secret | `kubectl\|oc\|k\|kc get\|describe\|edit` + `secret(s)` / `secret/*`; `kubectl config view --raw\|--flatten`; `kubectl create token` |
 | cmd.gh-token | `gh auth token`; `gh auth status -t\|--show-token` |
 | cmd.gcloud / az | `gcloud auth [application-default] print-*-token`, `gcloud secrets versions access`, `az account get-access-token`, `az keyvault secret show\|download` |
 | cmd.vault / op | `vault read\|kv get\|token lookup\|print token`, `op read`, `op item get` |
 | cmd.keychain | `security find-generic-password\|find-internet-password\|dump-keychain` |
 | cmd.git-credential | `git credential fill`, `git config --get*` of `*credential*`/`*token*` |
 | cmd.misc-token | `heroku auth:token`, `npm token *`, `doctl auth *`, `sops -d\|--decrypt`, `gpg -d\|--decrypt` |
-| + path rules | every argv token also runs through §3.1 (`cat ~/.aws/credentials`, `source .env`) |
+| + path rules | every argv word, after shell unquoting, also runs through §3.1 (`cat ~/.aws/credentials`, `source .env`, `cat .e''nv`, `cat "$HOME"/.kube/config`); in a multi-line string only for commands that read files (`cat`, `grep`, `cp`, …), so a README line "copy it to .env" is not an access |
 
 `grep -r printenv docs/` isn't withheld: argv0 is `grep`, and argv parsing is why a regex over the raw
 string isn't enough. `env FOO=1 make test` isn't withheld either: a command follows.
@@ -230,8 +244,9 @@ string isn't enough. `env FOO=1 make test` isn't withheld either: a command foll
 ### 3.3 Credentialed URLs and headers (any string)
 
 - **url.userinfo** — `scheme://user:pass@` (the linear scanner `_url_userinfo_spans` already exists).
-- **url.credential-param** — a query parameter named `token access_token id_token api_key apikey key sig signature
-  password secret client_secret code X-Amz-Signature X-Amz-Credential X-Goog-Signature sv+sig (SAS)`, carrying a value.
+- **url.credential-param** — a query or fragment (`#access_token=`) parameter, name percent-decoded, named `token
+  access_token id_token api_key apikey key sig signature password secret client_secret code X-Amz-Signature
+  X-Amz-Credential X-Goog-Signature sv+sig (SAS)` or secret-named (`private_token`, `jwt`, `STRIPE_KEY`), carrying a value.
 - **header.credential** — `Authorization:`, `Proxy-Authorization:`, `Cookie:`, `X-Api-Key:`, `X-*-Token:` or any
   `is_credential_key` header name followed by a value, in a string or as a `headers` object key. Also `curl -u
   user:pass`, `--password[= ]x`, `-p<pw>` for mysql, `PGPASSWORD=… ` prefixes.
@@ -241,7 +256,12 @@ The content behind a credentialed request is treated as private, so the call is 
 ### 3.4 Response-side defense (not a gate; part of step 5, tool-neutral)
 
 - A line of result text that begins with a path matching §3.1 followed by `:` (the `grep`/`rg` `path:line:`
-  shape) becomes `<path>:[withheld]`.
+  shape) becomes `<path>:[withheld]`; a `path-line-` / `path-` context line becomes `<path>-[withheld]`; in rg's
+  `--heading` form, the lines under a sensitive path heading become `[withheld]` up to the next blank line.
+- A wider key rule than the gateway's (plugin-only, so the gateway parity vectors are unchanged): a key=value pair
+  or JSON member whose key is secret-named in the wider sense (`OPENAI_KEY`, `STRIPE_SECRET`, `tls.key`,
+  `client-key-data`, `private_token`), a `{"name": <secret name>, "value": …}` object (k8s/ECS env), and the YAML
+  `- name: DB_PASSWORD` / `value: …` pair all lose the value.
 - A string leaf ≥ 4 KiB made only of base64 characters becomes `"[binary omitted: N bytes]"`. This covers
   Read's `file.base64`, MCP blobs and data URLs.
 - `redact_plain_text` (key=value rules) runs on every non-JSON string leaf, on top of the gateway's leaf rule.

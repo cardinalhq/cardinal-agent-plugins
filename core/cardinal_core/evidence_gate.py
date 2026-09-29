@@ -11,14 +11,21 @@ agent can say why it cannot cite the call instead of the call vanishing.
 Rule families (stable ids; a user may allow-list an id):
   path.*   a sensitive file or directory named anywhere in any string
            (.env, credentials, private keys, ~/.ssh, ~/.aws, kubeconfig,
-           .netrc, keychains, agent credential files, /proc/*/environ, ...).
-           Relative paths resolve against the call's cwd; a path that exists
-           is also followed through symlinks.
+           .netrc, keychains, agent credential files and transcripts,
+           /proc/*/environ, ...). Relative paths resolve against the call's
+           cwd; $HOME / ~user expand; a path that exists is also followed
+           through symlinks; globs and {a,b} braces are expanded; matching
+           is case- and Unicode-folded, and credential stores match under
+           any home directory.
   cmd.*    a secret-dumping command, matched on parsed argv (so wrappers
-           such as sudo, env, timeout, `bash -c '...'`, eval, xargs, $(...)
-           and backticks are seen through): printenv, aws sts / secrets
-           manager, kubectl get secret, gh auth token, gcloud auth print-*,
-           vault/op read, security find-*-password, ...
+           such as sudo, env, timeout, `bash -c '...'`, eval, xargs, $(...),
+           backticks, here-strings, `kubectl exec -- ...`, `docker exec`,
+           `ssh host ...` are seen through): printenv, ps e, aws sts /
+           secrets manager, kubectl get secret, gh auth token, gcloud auth
+           print-*, vault/op read, security find-*-password, echo $SECRET,
+           an inline program that prints the environment, a base64-decoded
+           command, `config get <secret key>`, ...
+           Every unquoted argv word also goes through the path rules.
   url.* / header.* / arg.* / env.*
            a URL or request carrying a credential (userinfo, a credential
            query parameter, an Authorization/Cookie/API-key header, curl -u,
@@ -27,6 +34,8 @@ Rule families (stable ids; a user may allow-list an id):
            project's <cwd>/.cardinal/evidence-rules.json may only deny).
 
 A verdict never carries the matched text: `hint` is the rule's pattern.
+The gate fails closed: an input it cannot finish walking (too deep, too many
+leaves) is withheld (gate.bounds), never captured unchecked.
 
 Standard library only, Python 3.9.
 """
@@ -34,15 +43,18 @@ Standard library only, Python 3.9.
 from __future__ import annotations
 
 import fnmatch
+import glob as _globmod
 import json
 import os
 import posixpath
 import re
 import shlex
 import stat
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
+from urllib.parse import unquote_plus
 
 MAX_DEPTH = 32
 MAX_LEAVES = 5000
@@ -51,7 +63,8 @@ MAX_STRING = 64 << 10
 # only explicit paths (with a "/" or a leading "~") count there, not a bare
 # word such as ".env" a README mentions.
 PROSE_CHARS = 1024
-MAX_REALPATH = 32
+MAX_REALPATH = 256
+MAX_LINKS = 256
 MAX_SEGMENTS = 256
 MAX_RULES_BYTES = 64 << 10
 RULES_FILE = "evidence-rules.json"
@@ -69,7 +82,7 @@ REASON_TEXT = {
     REASON_URL: "credential in a URL",
     REASON_HEADER: "credential in a request",
     REASON_USER: "your evidence rule",
-    REASON_UNREADABLE: "payload too large to read",
+    REASON_UNREADABLE: "too large to read or check",
 }
 
 
@@ -202,7 +215,7 @@ def basename_rule(base: str) -> Optional[tuple]:
     b = base.lower()
     if not b or b in (".", ".."):
         return None
-    if b == ".env" or b.startswith(".env.") or b == ".envrc":
+    if b == ".env" or b.startswith(".env.") or b == ".envrc" or (b.endswith(".env") and len(b) > 4):
         return "path.dotenv", ".env*"
     if b in _CLIENT_CRED_BASE:
         return "path.netrc", base if b != "cardinal-secrets.json" else "cardinal-secrets.json"
@@ -223,31 +236,74 @@ def basename_rule(base: str) -> Optional[tuple]:
     return None
 
 
+def _fold(s: str) -> str:
+    """Compare paths the way a case-insensitive, normalization-insensitive
+    file system (macOS APFS, Windows) would: ~/.KUBE/Config opens
+    ~/.kube/config there. Folding only ever widens a match."""
+    try:
+        return unicodedata.normalize("NFKC", s).casefold()
+    except (TypeError, ValueError):
+        return s.lower()
+
+
+# Credential stores under ANY home directory (this user's, another user's,
+# /root, or an unexpanded $HOME): matched as a path-component sequence
+# anywhere in the path, case-folded.
+_ANY_HOME_TREES = tuple((f"/{_fold(rel)}/", rule, hint) for rel, rule, hint in _HOME_TREES if rel != ".cardinal") + (
+    ("/.kube/", "path.kube", "~/.kube/**"),
+)
+_ANY_HOME_FILES = tuple(("/" + _fold(rel), rule, hint) for rel, rule, hint in _HOME_FILES)
+# Directory names whose files are secrets (k8s/secrets/db.yaml), unless the
+# file is source code or docs (src/secrets/index.ts).
+_SECRET_DIRS = frozenset(("secret", "secrets", ".secrets"))
+# Agent transcripts and their spilled tool outputs replay every earlier
+# tool result verbatim, including ones this gate withheld.
+_TRANSCRIPT_TREES = (
+    (".claude/projects", "~/.claude/projects/**"),
+    (".codex/sessions", "~/.codex/sessions/**"),
+    (".gemini/tmp", "~/.gemini/tmp/**"),
+)
+_TRANSCRIPT_FILES = (".claude/history.jsonl", ".codex/history.jsonl")
+
+
 def full_path_rule(p: str, home: Optional[str]) -> Optional[tuple]:
-    """(rule id, hint) for a sensitive absolute path, else None."""
-    base = posixpath.basename(p)
+    """(rule id, hint) for a sensitive absolute path, else None. Matched
+    case-folded, and credential stores under any home directory count."""
+    f = _fold(p)
+    base = posixpath.basename(f)
     hit = basename_rule(base)
     if hit:
         return hit
-    if p.startswith("/proc/") and p.endswith("/environ"):
+    if f.startswith("/proc/") and f.endswith("/environ"):
         return "path.proc-environ", "/proc/*/environ"
-    if p == "/etc/shadow" or p.startswith("/etc/sudoers"):
+    if f == "/etc/shadow" or f.startswith("/etc/sudoers"):
         return "path.proc-environ", "/etc/shadow, /etc/sudoers*"
-    if p == "/var/run/secrets" or p.startswith("/var/run/secrets/") or p.startswith("/run/secrets/"):
+    if f == "/var/run/secrets" or f.startswith("/var/run/secrets/") or f.startswith("/run/secrets/"):
         return "path.kube", "/var/run/secrets/**"
+    fs = f + "/"
+    for suffix, rule, hint in _ANY_HOME_FILES:
+        if f.endswith(suffix):
+            return rule, hint
+    if "/.claude/settings" in f and f.endswith(".json") and "/" not in f[f.rindex("/.claude/settings") + 9:]:
+        return "path.agent-secrets", "~/.claude/settings*.json"
+    for seg, rule, hint in _ANY_HOME_TREES:
+        if seg in fs:
+            if rule == "path.ssh" and (base.endswith(".pub") or base in ("known_hosts", "known_hosts.old")):
+                continue
+            return rule, hint
+    parts = f.split("/")
+    if any(d in _SECRET_DIRS for d in parts[:-1]) and posixpath.splitext(base)[1] not in _SOURCE_EXT:
+        return "path.secrets", "secrets/**"
     if home and home != "/":
-        h = home.rstrip("/")
-        for rel, rule, hint in _HOME_FILES:
-            if p == h + "/" + rel:
-                return rule, hint
-        if p.startswith(h + "/.claude/settings") and p.endswith(".json") and "/" not in p[len(h + "/.claude/"):]:
-            return "path.agent-secrets", "~/.claude/settings*.json"
-        for rel, rule, hint in _HOME_TREES:
-            root = h + "/" + rel
-            if p == root or p.startswith(root + "/"):
-                if rule == "path.ssh" and (base.endswith(".pub") or base in ("known_hosts", "known_hosts.old")):
-                    continue
-                return rule, hint
+        h = _fold(home).rstrip("/")
+        if f == h + "/.cardinal" or f.startswith(h + "/.cardinal/"):
+            return "path.agent-secrets", "~/.cardinal/**"
+        for rel, hint in _TRANSCRIPT_TREES:
+            if f.startswith(h + "/" + rel + "/"):
+                return "path.agent-transcripts", hint
+        for rel in _TRANSCRIPT_FILES:
+            if f == h + "/" + rel:
+                return "path.agent-transcripts", "~/" + rel
     return None
 
 
@@ -260,15 +316,28 @@ def _path_like(tok: str, prose: bool, cwd: Optional[str], budget: "_Budget") -> 
     ("credentials.json", "server.key") or an ssh key name. A bare word
     ("secrets", "credential") counts only when a file of that name exists in
     cwd, so `kubectl get secrets` or `git credential fill` is left to the
-    command rules and `git commit -m "fix secret handling"` is not a path."""
+    command rules and `git commit -m "fix secret handling"` is not a path.
+    A bare word that is a symlink in cwd counts too (notes.txt -> .env)."""
     if "/" in tok or tok.startswith("~"):
         return True
     if prose:
         return False
     if tok.startswith("."):
         return True
-    if basename_rule(tok) is None:
-        return False
+    hit = basename_rule(tok)
+    weak = hit is not None and hit[0] == "path.dotenv" and not tok.lower().startswith(".env")
+    if hit is None or weak:
+        # A bare `name.env` is as often code (process.env, import.meta.env)
+        # as a file, so it counts only when that file exists; any other
+        # bare word counts when it is a symlink (the target is checked).
+        if not cwd or budget.links >= MAX_LINKS or len(tok) > 255 or not _BARE_NAME.match(tok):
+            return False
+        budget.links += 1
+        try:
+            q = os.path.join(cwd, tok)
+            return os.path.lexists(q) if weak else os.path.islink(q)
+        except (OSError, ValueError):
+            return False
     if "." in tok or tok.lower().startswith(_SSH_KEY_PREFIX):
         return True
     if not cwd or budget.realpaths >= MAX_REALPATH:
@@ -280,17 +349,28 @@ def _path_like(tok: str, prose: bool, cwd: Optional[str], budget: "_Budget") -> 
         return False
 
 
+_BARE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+@-]*$")
+_HOME_VAR = re.compile(r"\$\{HOME\}|\$HOME\b|\$\{USERPROFILE\}|\$USERPROFILE\b")
+
+
 def _norm(tok: str, cwd: Optional[str], home: Optional[str]) -> Optional[str]:
     t = tok.rstrip(":.")
     if not t or "://" in t:
         return None
     if t.startswith("~"):
-        if not home:
-            return None
         if t == "~" or t.startswith("~/"):
+            if not home:
+                return None
             t = home.rstrip("/") + t[1:]
         else:
-            return None
+            # ~user/...: that user's home. Where it cannot be looked up, a
+            # stand-in root keeps the any-home rules (/.aws/, /.kube/config)
+            # working.
+            try:
+                e = os.path.expanduser(t)
+            except (KeyError, ValueError, OSError):
+                e = t
+            t = e if e.startswith("/") else "/" + t
     if not t.startswith("/"):
         if not cwd:
             return posixpath.normpath(t)
@@ -301,6 +381,8 @@ def _norm(tok: str, cwd: Optional[str], home: Optional[str]) -> Optional[str]:
 class _Budget:
     def __init__(self):
         self.realpaths = 0
+        self.links = 0
+        self.globs = 0
 
 
 def _check_path(p: str, home: Optional[str], rules: Rules, budget: _Budget) -> Optional[Withheld]:
@@ -337,10 +419,83 @@ def _glob(p: str, pattern: str) -> bool:
     return not pattern.startswith(("/", "*", "~")) and fnmatch.fnmatchcase(posixpath.basename(p), pattern)
 
 
+# Shell glob patterns: a pattern such as `.env*`, `.e?v` or `~/.kube/conf*`
+# names a sensitive file without spelling it. Checked two ways: against
+# these well-known names (when the pattern's file part starts with a literal,
+# so `dist/*` or `*.json` is not assumed to hit), and against the files it
+# matches on disk (bounded).
+_GLOB_CHARS = frozenset("*?[")
+_GLOB_CANDIDATES = (
+    ".env", ".env.local", ".env.production", ".envrc", "credentials", "credentials.json", "secrets.json",
+    "secrets.yaml", "secrets.yml", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "server.key", "key.pem",
+    "cert.p12", ".netrc", ".git-credentials", ".pgpass", ".my.cnf", ".npmrc", ".pypirc", ".vault-token",
+    "config", "config.json", "hosts.yml", "auth.json", "oauth_creds.json", ".credentials.json",
+    "terraform.tfstate", "prod.tfvars", "kubeconfig", "login.keychain-db", "environ", "shadow",
+)
+MAX_GLOBS = 8
+MAX_GLOB_MATCHES = 64
+
+
+def _glob_paths(p: str, budget: _Budget) -> Iterator[str]:
+    """Concrete paths a glob pattern may name (candidates, then real files)."""
+    d, b = posixpath.split(p)
+    if b and b[0] not in _GLOB_CHARS:
+        for cand in _GLOB_CANDIDATES:
+            if fnmatch.fnmatch(cand, b):
+                yield posixpath.join(d, cand)
+    if budget.globs >= MAX_GLOBS or not p.startswith("/"):
+        return
+    budget.globs += 1
+    try:
+        for i, m in enumerate(_globmod.iglob(p)):
+            if i >= MAX_GLOB_MATCHES:
+                break
+            yield m
+    except (OSError, ValueError, RecursionError):
+        return
+
+
+_BRACE = re.compile(r"\{([^{}\s]*,[^{}\s]*)\}")
+MAX_BRACE_WORDS = 64
+
+
+def _brace_words(s: str) -> list:
+    """Brace expansions of every word with {a,b} in it (bounded):
+    ~/.kube/{config,x} -> ~/.kube/config, ~/.kube/x."""
+    out = []
+    if "{" not in s or "," not in s:
+        return out
+    for word in s.split():
+        if "{" not in word or len(out) >= MAX_BRACE_WORDS:
+            continue
+        cur = [word.strip("\"'")]
+        for _ in range(4):
+            nxt = []
+            changed = False
+            for w in cur:
+                m = _BRACE.search(w)
+                if not m:
+                    nxt.append(w)
+                    continue
+                changed = True
+                for alt in m.group(1).split(","):
+                    nxt.append(w[:m.start()] + alt + w[m.end():])
+            cur = nxt[:MAX_BRACE_WORDS]
+            if not changed:
+                break
+        out.extend(w for w in cur if w != word)
+    return out[:MAX_BRACE_WORDS]
+
+
 def paths_in(s: str, cwd: Optional[str], home: Optional[str], budget: Optional["_Budget"] = None) -> Iterator[str]:
     prose = "\n" in s.strip() or len(s) > PROSE_CHARS
     budget = budget or _Budget()
-    for tok in _TOKEN_SPLIT.split(s):
+    if home and "$" in s:
+        s = _HOME_VAR.sub(lambda _m: home.rstrip("/"), s)
+    toks = _TOKEN_SPLIT.split(s)
+    if not prose:
+        toks = toks + _brace_words(s)
+    for tok in toks:
         if tok and _path_like(tok, prose, cwd, budget):
             p = _norm(tok, cwd, home)
             if p:
@@ -349,12 +504,16 @@ def paths_in(s: str, cwd: Optional[str], home: Optional[str], budget: Optional["
 
 def check_paths(s: str, cwd: Optional[str], home: Optional[str], rules: Rules, budget: _Budget) -> Optional[Withheld]:
     for p in paths_in(s, cwd, home, budget):
-        for g in rules.deny_paths:
-            if _glob(p, g) or (home and _glob(p, g.replace("~", home.rstrip("/"), 1))):
-                return Withheld(REASON_USER, "user.deny-path", g)
-        w = _check_path(p, home, rules, budget)
-        if w:
-            return w
+        concrete = [p]
+        if any(c in _GLOB_CHARS for c in p):
+            concrete.extend(_glob_paths(p, budget))
+        for q in concrete:
+            for g in rules.deny_paths:
+                if _glob(q, g) or (home and _glob(q, g.replace("~", home.rstrip("/"), 1))):
+                    return Withheld(REASON_USER, "user.deny-path", g)
+            w = _check_path(q, home, rules, budget)
+            if w:
+                return w
     return None
 
 
@@ -489,6 +648,74 @@ def _after(pos: list, word: str) -> Optional[str]:
     return pos[i + 1] if i + 1 < len(pos) else None
 
 
+_SECRET_NAME_TAIL = re.compile(
+    r"(?:^|_)(?:KEY|KEYS|TOKEN|TOKENS|SECRET|SECRETS|PAT|PASS|PASSWD|PASSWORD|PWD|CREDS?|CREDENTIALS?|APIKEY|DSN)$")
+_SECRET_NAME_EXTRA = frozenset(("private_token", "private-token", "oauth_token", "session_token", "jwt", "sig",
+                                "client-key-data", "client_key_data", "private_key", "private-key", "signature"))
+
+
+def secretish_name(name: str) -> bool:
+    """A variable, parameter or field name that holds a secret, judged more
+    widely than the gateway's credential-key rule (which a leaf of any
+    receipt already gets): an UPPER_SNAKE env name ending in _KEY / _TOKEN /
+    _SECRET / _PAT / _PASS... (OPENAI_KEY, STRIPE_SECRET; not sort_key or
+    page_token), a key-file field (tls.key, client-key-data), or
+    private_token / jwt / sig."""
+    from . import evidence
+
+    if not isinstance(name, str) or not name or len(name) > 256:
+        return False
+    if name in ("PWD", "OLDPWD"):  # the shell's working directory
+        return False
+    if evidence.is_credential_key(name):
+        return True
+    if _SECRET_NAME_TAIL.search(name.upper()) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        return name.isupper()
+    lower = name.lower()
+    return lower in _SECRET_NAME_EXTRA or lower.endswith((".key", ".pem", ".p12", ".pfx", ".jks"))
+
+
+_VAR_REF = re.compile(r"\$\{?!?([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _secret_var_ref(word: str) -> bool:
+    """$SECRET / ${SECRET} in a word (an echo of a secret's value)."""
+    return "$" in word and any(secretish_name(m.group(1)) for m in _VAR_REF.finditer(word))
+
+
+# An interpreter's inline program that prints the whole environment, or a
+# secret-named variable from it (node -e, python -c, ruby -e, perl -e, ...).
+_INTERPRETERS = re.compile(r"(?:^|[\s;&|(`/])(?:node|nodejs|python[0-9.]*|ruby|perl|deno|bun|php|irb|pwsh)\b")
+_ENV_DUMP_CODE = re.compile(
+    r"process\.env\b(?!\s*(?:\.|\[|\?\.))"
+    r"|os\.environ\b(?!\s*(?:\[|\.get\b|\.setdefault\b|\.pop\b))"
+    r"|%ENV\b|\bENV\.(?:to_h|to_a|each|inspect|keys|values|map|select|sort|dup)\b"
+    r"|\b(?:p|pp|puts|print)\s*\(?\s*ENV\b(?!\s*\[|\.fetch)"
+    r"|Deno\.env\.toObject\b|\bgetenv\s*\(\s*\)|\$env:|Get-ChildItem\s+env:")
+_ENV_READ_CODE = re.compile(
+    r"(?:process\.env(?:\.|\[\s*[\"'`])|os\.environ(?:\.get)?\s*[\[(]\s*[\"']|os\.getenv\s*\(\s*[\"']"
+    r"|ENV(?:\.fetch\s*\(|\[)\s*[\"']|\$ENV\{\s*[\"']?|Deno\.env\.get\s*\(\s*[\"']|getenv\s*\(\s*[\"'])"
+    r"([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def env_code_rule(s: str) -> Optional[tuple]:
+    if not _INTERPRETERS.search(s):
+        return None
+    if _ENV_DUMP_CODE.search(s):
+        return REASON_COMMAND, "cmd.env-dump", "env / printenv / export -p"
+    for m in _ENV_READ_CODE.finditer(s):
+        if secretish_name(m.group(1)):
+            return REASON_COMMAND, "cmd.secret-var", "echo $SECRET_VAR"
+    return None
+
+
+# A decoded string run as a command or used as an argument: `$(echo … |
+# base64 -d)`, `… | base64 -d | sh`. What it names cannot be checked.
+_DECODE = r"(?:base64\s+(?:[^|;&]*\s)?(?:-d|-D|--decode)\b|xxd\s+(?:[^|;&]*\s)?-r\b|openssl\s+(?:enc|base64)\b[^|;&]*\s-d\b)"
+_DECODED_EXEC = re.compile(r"\$\([^()]*" + _DECODE + r"|`[^`]*" + _DECODE + r"|" + _DECODE +
+                           r"[^;&]*\|\s*(?:sudo\s+)?(?:(?:ba|z|da|k)?sh|eval|source|xargs)\b")
+
+
 def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
     """(reason, rule id, hint) for one simple command, else None."""
     for a in assigns:
@@ -505,6 +732,13 @@ def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
     lower = [a.lower() for a in pos]
     if cmd == "printenv":
         return REASON_COMMAND, "cmd.env-dump", "env / printenv / export -p"
+    if cmd == "ps" and any((not a.startswith("-") and "e" in a) or (a.startswith("-") and "E" in a) for a in args):
+        # BSD-style `ps eww` / `ps auxe`, macOS `ps -E`: every process's environment.
+        return REASON_COMMAND, "cmd.env-dump", "ps e / ps -E"
+    if cmd in ("echo", "printf", "print") and any(_secret_var_ref(a) for a in args):
+        return REASON_COMMAND, "cmd.secret-var", "echo $SECRET_VAR"
+    if cmd in ("declare", "typeset") and "-p" in args and any(secretish_name(a) for a in pos):
+        return REASON_COMMAND, "cmd.secret-var", "echo $SECRET_VAR"
     if cmd in ("export", "declare", "typeset", "set") and all(a in ("-p", "-x", "-px", "-xp") for a in args):
         if cmd in ("export", "set") or "-x" in args or "-p" in args or "-px" in args or "-xp" in args:
             return REASON_COMMAND, "cmd.env-dump", "env / printenv / export -p"
@@ -525,7 +759,7 @@ def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
             return REASON_COMMAND, "cmd.aws", "aws ecr get-login-password"
         if _follows(lower, "iam", "create-access-key"):
             return REASON_COMMAND, "cmd.aws", "aws iam create-access-key"
-    if cmd in ("kubectl", "oc", "kubecolor"):
+    if cmd in ("kubectl", "oc", "kubecolor", "k", "kc"):
         if pos and any(v in lower for v in ("get", "describe", "edit")):
             for a in lower:
                 for r in a.split(","):
@@ -564,6 +798,14 @@ def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
         if "config" in lower and any(a.startswith("--get") or a in ("-l", "--list") for a in args):
             if any(("credential" in a or "token" in a or "password" in a) for a in lower):
                 return REASON_COMMAND, "cmd.git-credential", "git config --get *credential*"
+    if "config" in lower and ("get" in lower or any(a.startswith("--get") for a in args)):
+        # npm config get //registry/:_authToken, git config --get x.token,
+        # pip/poetry/yarn config get ...password
+        for a in pos[pos.index("config") + 1:] if "config" in pos else []:
+            leaf = re.split(r"[:/.]", a)[-1]
+            al = a.lower()
+            if secretish_name(leaf) or any(w in al for w in ("token", "password", "secret", "_auth", "credential")):
+                return REASON_COMMAND, "cmd.config-secret", "<tool> config get <secret key>"
     if cmd == "heroku" and lower[:1] == ["auth:token"]:
         return REASON_COMMAND, "cmd.misc-token", "heroku auth:token"
     if cmd in ("npm", "pnpm", "yarn") and lower[:1] == ["token"]:
@@ -610,13 +852,101 @@ def scripts_in(s: str) -> list:
     return out
 
 
-def check_command(s: str, rules: Rules, depth: int = 0, count: Optional[list] = None) -> Optional[Withheld]:
+_SSH_VALUE_FLAGS = frozenset(("-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o",
+                              "-p", "-Q", "-R", "-S", "-W", "-w", "-B"))
+_EXEC_VALUE_FLAGS = frozenset(("-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--name", "-v",
+                               "--volume", "-p", "--publish", "--network", "--entrypoint", "--platform", "-l",
+                               "--label", "--mount", "-h", "--hostname", "--pull", "--detach-keys"))
+
+
+# Commands that read (or copy, send, decode) the files they are given.
+_FILE_READERS = frozenset((
+    "cat", "bat", "less", "more", "head", "tail", "source", ".", "cp", "mv", "rsync", "scp", "tar", "zip", "gzip",
+    "base64", "xxd", "od", "hexdump", "strings", "grep", "egrep", "fgrep", "rg", "ag", "awk", "sed", "cut", "sort",
+    "uniq", "nl", "tac", "tee", "diff", "cmp", "jq", "yq", "vim", "vi", "nano", "view", "open", "pbcopy", "wc",
+    "dd", "openssl", "gpg", "xargs", "find", "curl", "wget", "python", "python3", "node", "ruby", "perl", "bash",
+    "sh", "zsh", "column", "fold", "fmt", "paste", "join", "iconv", "file", "stat", "install", "ln", "readlink",
+))
+
+
+def _inner_commands(argv: list) -> list:
+    """Commands another command runs: `sh -c X`, `su -c X`, `eval X`,
+    `xargs X`, `sh <<< X`, `kubectl exec … -- X`, `docker exec C X`,
+    `ssh host X`, and anything after a `--`."""
+    cmd = posixpath.basename(argv[0]).lower()
+    out = []
+    if cmd in _SHELLS or cmd in ("su", "runuser", "script"):
+        for j, a in enumerate(argv[1:], 1):
+            if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+                if j + 1 < len(argv):
+                    out.append(argv[j + 1])
+                break
+            if a == "--command" and j + 1 < len(argv):
+                out.append(argv[j + 1])
+                break
+    if cmd in _SHELLS or cmd in ("eval", "source", "."):
+        for j, a in enumerate(argv[1:], 1):
+            if a == "<<<" and j + 1 < len(argv):
+                out.append(argv[j + 1])
+            elif a.startswith("<<<") and len(a) > 3:
+                out.append(a[3:])
+    if cmd == "eval":
+        out.append(" ".join(argv[1:]))
+    elif cmd == "xargs":
+        k = 1
+        while k < len(argv) and argv[k].startswith("-"):
+            if argv[k] in ("-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"):
+                k += 1
+            k += 1
+        if k < len(argv):
+            out.append(shlex.join(argv[k:]))
+    elif cmd in ("docker", "podman", "nerdctl") and len(argv) > 1:
+        rest = argv[1:]
+        if rest and rest[0] == "container":
+            rest = rest[1:]
+        if rest and rest[0] in ("exec", "run"):
+            k = 1
+            while k < len(rest) and rest[k].startswith("-"):
+                if rest[k] in _EXEC_VALUE_FLAGS:
+                    k += 1
+                k += 1
+            if k + 1 < len(rest):
+                out.append(shlex.join(rest[k + 1:]))
+    elif cmd in ("ssh", "autossh"):
+        k = 1
+        while k < len(argv) and argv[k].startswith("-"):
+            if argv[k] in _SSH_VALUE_FLAGS:
+                k += 1
+            k += 1
+        if k + 1 < len(argv):
+            out.append(" ".join(argv[k + 1:]))
+    if "--" in argv[1:]:
+        i = argv.index("--", 1)
+        if i + 1 < len(argv):
+            out.append(shlex.join(argv[i + 1:]))
+    return out
+
+
+def check_command(s: str, rules: Rules, depth: int = 0, count: Optional[list] = None, *, cwd: Optional[str] = None,
+                  home: Optional[str] = None, budget: Optional[_Budget] = None) -> Optional[Withheld]:
     """Every simple command in a string, through wrappers, `sh -c`, eval,
-    xargs and substitutions."""
+    xargs, here-strings, remote/container exec and substitutions. Each
+    word of each command also goes through the path rules after shell
+    unquoting (so .e''nv or "$HOME"/.kube/config is seen as written)."""
     if count is None:
         count = [0]
+    if budget is None:
+        budget = _Budget()
     if depth > 4:
         return None
+    prose = "\n" in s.strip() or len(s) > PROSE_CHARS
+    if depth == 0:
+        hit = env_code_rule(s)
+        if hit and hit[1] not in rules.allow_rules:
+            return Withheld(*hit)
+        if ("base64" in s or "xxd" in s or "openssl" in s) and _DECODED_EXEC.search(s) \
+                and "cmd.decoded-exec" not in rules.allow_rules:
+            return Withheld(REASON_COMMAND, "cmd.decoded-exec", "$(… | base64 -d)")
     for script in scripts_in(s):
         for seg in _split_ops(script):
             count[0] += 1
@@ -625,33 +955,27 @@ def check_command(s: str, rules: Rules, depth: int = 0, count: Optional[list] = 
             for rx in rules.deny_commands:
                 if rx.search(seg[:4096]):
                     return Withheld(REASON_USER, "user.deny-command", rx.pattern[:120])
-            argv, assigns, env_dump = _strip_wrappers(_argv(seg))
+            words = _argv(seg)
+            argv, assigns, env_dump = _strip_wrappers(words)
             hit = command_rule(argv, assigns, env_dump)
             if hit and hit[1] not in rules.allow_rules:
                 return Withheld(*hit)
+            # Unquoted words as paths. In a multi-line string (a script, or
+            # prose / file content) only a command that reads files counts,
+            # so "Copy the example to .env" in a README is not an access.
+            if not prose or (argv and posixpath.basename(argv[0]).lower() in _FILE_READERS):
+                for word in words[:MAX_SEGMENTS]:
+                    if word and len(word) <= 4096 and "\n" not in word:
+                        w = check_paths(word, cwd, home, rules, budget)
+                        if w:
+                            return w
             if not argv:
                 continue
-            cmd = posixpath.basename(argv[0]).lower()
-            inner = None
-            if cmd in _SHELLS:
-                for j, a in enumerate(argv[1:], 1):
-                    if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-                        if j + 1 < len(argv):
-                            inner = argv[j + 1]
-                        break
-            elif cmd == "eval":
-                inner = " ".join(argv[1:])
-            elif cmd == "xargs":
-                k = 1
-                while k < len(argv) and argv[k].startswith("-"):
-                    if argv[k] in ("-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"):
-                        k += 1
-                    k += 1
-                inner = shlex.join(argv[k:]) if k < len(argv) else None
-            if inner:
-                w = check_command(inner, rules, depth + 1, count)
-                if w:
-                    return w
+            for inner in _inner_commands(argv):
+                if inner:
+                    w = check_command(inner, rules, depth + 1, count, cwd=cwd, home=home, budget=budget)
+                    if w:
+                        return w
     return None
 
 
@@ -662,7 +986,8 @@ def check_command(s: str, rules: Rules, depth: int = 0, count: Optional[list] = 
 _CRED_PARAMS = ("token", "access_token", "id_token", "refresh_token", "api_key", "apikey", "api-key", "key", "sig",
                 "signature", "password", "passwd", "secret", "client_secret", "code", "x-amz-signature",
                 "x-amz-credential", "x-amz-security-token", "x-goog-signature", "x-goog-credential", "auth")
-_URL_QUERY = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s?#\"'<>]*\?([^\s#\"'<>]*)")
+# The query, and the fragment (OAuth's #access_token=...), of every URL.
+_URL_QUERY = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s?#\"'<>]*(?:\?([^\s#\"'<>]*))?(?:#([^\s\"'<>]*))?")
 _HEADER_LINE = re.compile(
     r"(?im)(?:^|[\s\"'{,;])(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|"
     r"x-[a-z0-9-]*-(?:token|key|secret|auth))\s*:\s*[^\s\"',}]")
@@ -682,12 +1007,19 @@ def check_url_header(s: str) -> Optional[Withheld]:
 
     if "://" in s and evidence._url_userinfo_spans(s):
         return Withheld(REASON_URL, "url.userinfo", "scheme://user:pass@")
-    if "?" in s and "://" in s:
+    if ("?" in s or "#" in s) and "://" in s:
         for m in _URL_QUERY.finditer(s):
-            for part in m.group(1).split("&"):
-                name, eq, val = part.partition("=")
-                if eq and val and name.lower() in _CRED_PARAMS:
-                    return Withheld(REASON_URL, "url.credential-param", "?" + name.lower() + "=")
+            for group in (m.group(1), m.group(2)):
+                if not group or "=" not in group:
+                    continue
+                for part in group.split("&")[:256]:
+                    name, eq, val = part.partition("=")
+                    try:
+                        name = unquote_plus(name)
+                    except (ValueError, TypeError):
+                        pass
+                    if eq and val and (name.lower() in _CRED_PARAMS or secretish_name(name)):
+                        return Withheld(REASON_URL, "url.credential-param", "?" + name.lower()[:40] + "=")
     if ":" in s and (_HEADER_FLAG.search(s) if prose else _HEADER_LINE.search(s)):
         return Withheld(REASON_HEADER, "header.credential", "Authorization / Cookie / API-key header")
     return None
@@ -735,7 +1067,15 @@ def check_headers_obj(k: str, v: Any) -> Optional[Withheld]:
 # The walk
 # ---------------------------------------------------------------------------
 
-def _leaves(v: Any) -> Iterator[tuple]:
+class _Overflow:
+    """Set when the walk hit a bound (depth, leaf count) before seeing every
+    string: the gate then cannot vouch for the input."""
+
+    def __init__(self):
+        self.hit = False
+
+
+def _leaves(v: Any, overflow: Optional[_Overflow] = None) -> Iterator[tuple]:
     """(kind, key, value) for every key and string leaf, depth-first,
     bounded. kind: "key" (a dict member: key, value) or "str"."""
     stack = [(v, 0)]
@@ -744,11 +1084,15 @@ def _leaves(v: Any) -> Iterator[tuple]:
         cur, depth = stack.pop()
         visited += 1
         if visited > MAX_LEAVES:
+            if overflow is not None:
+                overflow.hit = True
             return
         if isinstance(cur, str):
             yield "str", None, cur
         elif isinstance(cur, dict):
             if depth >= MAX_DEPTH:
+                if cur and overflow is not None:
+                    overflow.hit = True
                 continue
             items = list(cur.items())
             for k, val in items:
@@ -760,24 +1104,54 @@ def _leaves(v: Any) -> Iterator[tuple]:
                 stack.append((val, depth + 1))
         elif isinstance(cur, (list, tuple)):
             if depth >= MAX_DEPTH:
+                if cur and overflow is not None:
+                    overflow.hit = True
                 continue
             for e in reversed(cur):
                 stack.append((e, depth + 1))
+
+
+_HEREDOC = re.compile(r"<<-?[ \t]*([\"']?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\n")
+
+
+def strip_heredocs(s: str) -> str:
+    """A script without its here-document bodies (data, not commands): what
+    runs around a large heredoc is still checked."""
+    out, i = [], 0
+    for _ in range(256):
+        m = _HEREDOC.search(s, i)
+        if not m:
+            break
+        out.append(s[i:m.end()])
+        tag = m.group(2)
+        end = re.compile(r"^[ \t]*" + re.escape(tag) + r"[ \t]*$", re.MULTILINE).search(s, m.end())
+        if not end:
+            i = len(s)
+            break
+        i = end.end()
+    out.append(s[i:])
+    return "".join(out)
+
+
+BOUNDS_WITHHELD = Withheld(REASON_UNREADABLE, "gate.bounds", "input too large or deep to check")
 
 
 def check(tool_name: Any, tool_input: Any, *, cwd: Optional[str] = None, home: Optional[str] = None,
           rules: Optional[Rules] = None) -> Optional[Withheld]:
     """None (capture the call) or the Withheld verdict for it. Looks at
     every key and string in tool_input; never at the tool's name except
-    through the user's deny.tools rule. Never raises for any JSON input."""
+    through the user's deny.tools rule. Never raises for any JSON input.
+    Fails closed: an input the walk could not finish (too deep, too many
+    leaves) is withheld, not captured unchecked."""
     rules = rules or Rules()
     name = tool_name if isinstance(tool_name, str) else ""
     for g in rules.deny_tools:
         if fnmatch.fnmatchcase(name, g):
             return Withheld(REASON_USER, "user.deny-tool", g)
     budget = _Budget()
+    overflow = _Overflow()
     try:
-        for kind, key, val in _leaves(tool_input):
+        for kind, key, val in _leaves(tool_input, overflow):
             if kind == "key":
                 w = check_headers_obj(key, val)
                 if w and w.rule not in rules.allow_rules:
@@ -787,19 +1161,29 @@ def check(tool_name: Any, tool_input: Any, *, cwd: Optional[str] = None, home: O
                     return Withheld(REASON_HEADER, "header.credential", "Authorization / Cookie / API-key header")
                 continue
             s = val
-            if not s or len(s) > MAX_STRING:
+            if not s:
                 continue
+            if len(s) > MAX_STRING:
+                # Content (a Write body), or a script with a large heredoc:
+                # the commands around the heredoc bodies still run.
+                if "<<" not in s:
+                    continue
+                s = strip_heredocs(s)
+                if len(s) > MAX_STRING:
+                    continue
             w = check_url_header(s)
             if w and w.rule not in rules.allow_rules:
+                return w
+            w = check_command(s, rules, cwd=cwd, home=home, budget=budget)
+            if w:
                 return w
             w = check_paths(s, cwd, home, rules, budget)
             if w:
                 return w
-            w = check_command(s, rules)
-            if w:
-                return w
     except RecursionError:
-        return None
+        return BOUNDS_WITHHELD
+    if overflow.hit:
+        return BOUNDS_WITHHELD
     return None
 
 

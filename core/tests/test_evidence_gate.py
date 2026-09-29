@@ -103,6 +103,60 @@ POSITIVE = [
     ("curl -u admin:pw https://x", "arg.userpass"),
     ("PGPASSWORD=pw psql -h db", "env.password"),
     ("mysql -uroot -psecret db", "arg.password"),
+    # adversarial review (secret exfiltration): odd spellings of the same file
+    ("cat .e''nv", "path.dotenv"),
+    ("cat .e\\nv", "path.dotenv"),
+    ('cat ".env"', "path.dotenv"),
+    ("cat .env*", "path.dotenv"),
+    ("cat .e?v", "path.dotenv"),
+    ("cat config/prod.env", "path.dotenv"),
+    ("/Users/dev/.KUBE/Config", "path.kube"),
+    ("/Users/dev/.Aws/credentials", "path.credentials"),
+    ("/Users/dev/.SSH/config", "path.ssh"),
+    ("/root/.kube/config", "path.kube"),
+    ("/home/other/.aws/config", "path.aws"),
+    ("cat $HOME/.kube/config", "path.kube"),
+    ("cat ${HOME}/.kube/config", "path.kube"),
+    ('cat "$HOME"/.docker/config.json', "path.docker"),
+    ("cat ~someone/.kube/config", "path.kube"),
+    ("cat ~/.kube/{config,cache}", "path.kube"),
+    ("cat ~/.kube/conf*", "path.kube"),
+    ("head -5 deploy/secrets/db.yaml", "path.secrets"),
+    ("~/.claude/projects/-repo/abc.jsonl", "path.agent-transcripts"),
+    ("~/.claude/projects/-repo/abc/tool-results/x.txt", "path.agent-transcripts"),
+    ("~/.codex/sessions/2026/09/rollout.jsonl", "path.agent-transcripts"),
+    ("cat repo/.claude/settings.local.json", "path.agent-secrets"),
+    # adversarial review: commands that print secrets without naming a file
+    ("cat $(echo LmVudg== | base64 -d)", "cmd.decoded-exec"),
+    ("echo Y2F0IC5lbnY= | base64 --decode | sh", "cmd.decoded-exec"),
+    ("echo $OPENAI_KEY", "cmd.secret-var"),
+    ('printf "%s" "${GITHUB_TOKEN}"', "cmd.secret-var"),
+    ("kubectl exec -it api-0 -- env", "cmd.env-dump"),
+    ("kubectl exec api-0 -c app -- sh -c 'cat /proc/1/environ'", "path.proc-environ"),
+    ("docker exec -u root web printenv", "cmd.env-dump"),
+    ("docker run --rm -e X=1 alpine env", "cmd.env-dump"),
+    ("ssh -i key.pub bastion env", "cmd.env-dump"),
+    ("ssh bastion 'cat ~/.aws/credentials'", "path.credentials"),
+    ("ps eww -p 1", "cmd.env-dump"),
+    ("ps auxe", "cmd.env-dump"),
+    ("ps -Eww", "cmd.env-dump"),
+    ("k get secret db -o yaml", "cmd.kube-secret"),
+    ("sh <<< 'printenv'", "cmd.env-dump"),
+    ("su -c 'printenv' app", "cmd.env-dump"),
+    ("node -e 'console.log(process.env)'", "cmd.env-dump"),
+    ("python3 -c 'import os; print(os.environ)'", "cmd.env-dump"),
+    ("python3 -c 'import os; print(os.environ[\"STRIPE_KEY\"])'", "cmd.secret-var"),
+    ("ruby -e 'puts ENV.to_h'", "cmd.env-dump"),
+    ("perl -e 'print %ENV'", "cmd.env-dump"),
+    ("python3 - <<'PY'\nimport os\nprint(dict(os.environ))\nPY", "cmd.env-dump"),
+    ("npm config get //registry.npmjs.org/:_authToken", "cmd.config-secret"),
+    ("git config --get github.token", "cmd.git-credential"),
+    ("pip config get global.password", "cmd.config-secret"),
+    # adversarial review: credentials in a URL, spelled otherwise
+    ("https://app.example.com/cb#access_token=abc&state=x", "url.credential-param"),
+    ("https://api.example.com/x?%74oken=abc", "url.credential-param"),
+    ("https://gitlab.com/api/v4/projects?private_token=abc", "url.credential-param"),
+    ("https://x.example.com/?jwt=abc", "url.credential-param"),
 ]
 
 NEGATIVE = [
@@ -128,6 +182,24 @@ NEGATIVE = [
     # prose / file content: a bare mention is not access
     "# Setup\n\nCopy the example file to .env and fill it in.\n",
     "const headers = { Authorization: token };\nfetch(url, { headers });\n",
+    # the adversarial-review rules must not fire on everyday work
+    "rg -n process.env src/",
+    "grep -rn import.meta.env packages/",
+    "node -e 'console.log(process.env.NODE_ENV)'",
+    "python3 -c 'import os; print(os.environ.get(\"HOME\"))'",
+    "ls dist/*",
+    "jq . *.json",
+    "cat src/*.ts",
+    "echo $PATH $HOME $PWD",
+    "https://api.example.com/items?page_token=abc&sort_key=name",
+    "ps aux",
+    "docker exec web ls /app",
+    "kubectl exec api-0 -- ls /",
+    "ssh bastion uptime",
+    "git config --get user.email",
+    "npm config get registry",
+    "cat packages/maestro/src/secrets/index.ts",
+    "echo aGVsbG8= | base64 -d",
 ]
 
 
@@ -196,6 +268,39 @@ class GateTableTests(unittest.TestCase):
             self.assertEqual(gate.check("Bash", {"command": "cat credentials"}, cwd=cwd, home=HOME).rule,
                              "path.credentials")
 
+    def test_a_bare_symlink_word_is_followed(self):
+        with TemporaryDirectory() as t:
+            cwd = os.path.realpath(t)
+            (Path(cwd) / ".env").write_text("X=1")
+            os.symlink(Path(cwd) / ".env", Path(cwd) / "notes.txt")
+            w = gate.check("Bash", {"command": "cat notes.txt"}, cwd=cwd, home=HOME)
+            self.assertIsNotNone(w)
+            self.assertEqual(w.rule, "path.dotenv")
+            (Path(cwd) / "plain.txt").write_text("x")
+            self.assertIsNone(gate.check("Bash", {"command": "cat plain.txt"}, cwd=cwd, home=HOME))
+
+    def test_a_glob_is_matched_against_the_files_it_names_on_disk(self):
+        with TemporaryDirectory() as t:
+            cwd = os.path.realpath(t)
+            (Path(cwd) / "certs").mkdir()
+            (Path(cwd) / "certs" / "prod.pem").write_text("x")
+            self.assertEqual(gate.check("Bash", {"command": "cat certs/*"}, cwd=cwd, home=HOME).rule,
+                             "path.private-key")
+            self.assertIsNone(gate.check("Bash", {"command": "cat docs/*"}, cwd=cwd, home=HOME))
+
+    def test_a_bare_name_env_file_counts_only_when_it_exists(self):
+        with TemporaryDirectory() as t:
+            cwd = os.path.realpath(t)
+            self.assertIsNone(gate.check("Bash", {"command": "cat prod.env"}, cwd=cwd, home=HOME))
+            (Path(cwd) / "prod.env").write_text("X=1")
+            self.assertEqual(gate.check("Bash", {"command": "cat prod.env"}, cwd=cwd, home=HOME).rule, "path.dotenv")
+
+    def test_a_large_heredoc_does_not_hide_the_command_after_it(self):
+        cmd = "cat > big.txt <<'EOF'\n" + "z" * (gate.MAX_STRING + 10) + "\nEOF\ncat .env\n"
+        self.assertEqual(gate.check("Bash", {"command": cmd}, cwd=CWD, home=HOME).rule, "path.dotenv")
+        ok = "cat > big.txt <<'EOF'\n" + "z" * (gate.MAX_STRING + 10) + "\nEOF\nmake test\n"
+        self.assertIsNone(gate.check("Bash", {"command": ok}, cwd=CWD, home=HOME))
+
     def test_long_strings_are_content_not_paths(self):
         body = "x" * (gate.MAX_STRING + 1) + " ~/.aws/credentials printenv"
         self.assertIsNone(gate.check("Write", {"content": body}, home=HOME))
@@ -207,10 +312,15 @@ class GateTableTests(unittest.TestCase):
             cur["a"] = {}
             cur = cur["a"]
         cur["b"] = "printenv"
-        self.assertIsNone(gate.check("t", deep))  # beyond MAX_DEPTH: not visited, no crash
+        # Beyond MAX_DEPTH / MAX_LEAVES the walk stops without crashing, and
+        # the gate fails CLOSED: an input it could not finish checking is
+        # withheld, never captured unchecked (a secret path parked past the
+        # bound must not slip through).
+        self.assertEqual(gate.check("t", deep), gate.BOUNDS_WITHHELD)
         wide = {str(i): "x" for i in range(20000)}
         wide["zz"] = "printenv"
-        gate.check("t", wide)  # bounded by MAX_LEAVES; must not raise
+        self.assertEqual(gate.check("t", wide), gate.BOUNDS_WITHHELD)
+        self.assertIsNone(gate.check("t", {str(i): "x" for i in range(100)}))
         self.assertIsNone(gate.check("t", {"s": "\udcff\x00 $(( `` $( ((("}))
         self.assertIsNone(gate.check("t", {"s": "'" * 10000}))
 

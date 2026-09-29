@@ -670,11 +670,15 @@ def _key_sep_matches(s: str):
         yield start, s[key_start:run_end], end
 
 
-def _redact_key_values(s: str) -> str:
+def _redact_key_values(s: str, pred=None) -> str:
+    """The value of every key=value / key: value pair whose key is a
+    credential key (pred: a wider key test, used by the plugin's own
+    stricter pass; the gateway parity path always uses is_credential_key)."""
+    pred = pred or is_credential_key
     out = []
     last = 0
     for start, key, end in _key_sep_matches(s):
-        if start < last or not is_credential_key(key):
+        if start < last or not pred(key):
             continue
         vs, ve = _value_span(s, end)
         if vs == end:

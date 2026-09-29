@@ -147,7 +147,6 @@ def _random_id(server: str, tool: str, called_at: str) -> str:
 
 _B64_RUN = re.compile(r"[A-Za-z0-9+/=_\-\r\n]+")
 _DATA_URL = re.compile(r"data:[^,;\s]{0,100}(?:;[^,;\s]{0,100}){0,4};base64,", re.IGNORECASE)
-_PATH_LINE = re.compile(r"^([^\s:]{1,1024}):(?!//)(.*)$", re.MULTILINE)
 
 
 class _Local:
@@ -178,19 +177,71 @@ class _Local:
         return s
 
 
+_LINE_HEAD = re.compile(r"^([^\s:]{1,1024})")
+_MAX_HEAD_CUTS = 16
+
+
+def _sensitive(p: str, home: Optional[str], cwd: Optional[str]) -> bool:
+    q = gate._norm(p, cwd, home)
+    return bool(q and gate.full_path_rule(q, home))
+
+
 def _path_lines(s: str, home: Optional[str], cwd: Optional[str]) -> str:
-    """grep/rg `path:line:` output: a line whose leading path is sensitive
-    (the gate's path rules) keeps only `<path>:[withheld]`."""
-    if ":" not in s:
+    """grep/rg output naming a sensitive file keeps only `<path>:[withheld]`
+    for that file's lines: `path:line:text` and `path:text` match lines,
+    `path-line-text` / `path-text` context lines, and rg's --heading form
+    (a line that is only the path, then its lines up to a blank line)."""
+    if ":" not in s and "-" not in s and "/" not in s and "." not in s:
         return s
+    out = []
+    in_block = False
+    seen: dict = {}
 
-    def repl(m):
-        p = gate._norm(m.group(1), cwd, home)
-        if p and gate.full_path_rule(p, home):
-            return m.group(1) + ":[withheld]"
-        return m.group(0)
+    def sensitive(p: str) -> bool:
+        v = seen.get(p)
+        if v is None:
+            if len(seen) > 4096:
+                seen.clear()
+            v = seen[p] = _sensitive(p, home, cwd)
+        return v
 
-    return _PATH_LINE.sub(repl, s)
+    for line in s.split("\n"):
+        if in_block:
+            if line.strip() == "":
+                in_block = False
+                out.append(line)
+            else:
+                out.append("[withheld]")
+            continue
+        m = _LINE_HEAD.match(line)
+        if m and (":" in line or "-" in m.group(1)):
+            head = m.group(1)
+            cut = None
+            if len(head) < len(line) and line[len(head)] == ":" and not line.startswith("//", len(head) + 1) \
+                    and sensitive(head):
+                cut = len(head)
+            else:
+                n = 0
+                for i, c in enumerate(head):
+                    if c == "-" and i > 0:
+                        n += 1
+                        if n > _MAX_HEAD_CUTS:
+                            break
+                        if sensitive(head[:i]):
+                            cut = i
+                            break
+            if cut is not None:
+                out.append(line[:cut] + line[cut] + "[withheld]")
+                continue
+        stripped = line.strip()
+        if stripped and " " not in stripped and sensitive(stripped):
+            # rg --heading: the path alone, then its lines. The heading
+            # itself is kept only when it has no separator in it.
+            out.append(line if ":" not in stripped else "[withheld]")
+            in_block = True
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def _is_base64_blob(s: str) -> bool:
@@ -209,6 +260,24 @@ def _is_base64_blob(s: str) -> bool:
     sample = body[:BASE64_MIN]
     return (any(c.isupper() for c in sample) and any(c.islower() for c in sample)
             and any(c.isdigit() for c in sample) and any(c in "+/-_" for c in sample))
+
+
+_YAML_NAME_VALUE = re.compile(
+    r"(?m)^([ \t]*-?[ \t]*)name:[ \t]*[\"']?([A-Za-z_][A-Za-z0-9_.\-]{0,255})[\"']?[ \t]*\r?\n"
+    r"([ \t]*)value:[ \t]*(?!\[redacted\])(\S[^\n]*)$")
+
+
+def redact_text_wide(s: str) -> str:
+    """The plugin's stricter text pass on top of the gateway's rules: a
+    key=value / key: value pair whose key is secret-ish in the wider sense
+    (OPENAI_KEY=..., tls.key: ...; gate.secretish_name) and a YAML
+    `- name: DB_PASSWORD` / `value: ...` pair (kubectl -o yaml env)."""
+    s = evidence._redact_key_values(s, gate.secretish_name)
+    if "value:" in s and "name:" in s:
+        s = _YAML_NAME_VALUE.sub(
+            lambda m: (m.group(0)[:m.start(4) - m.start(0)] + evidence.REDACTED)
+            if gate.secretish_name(m.group(2)) else m.group(0), s)
+    return s
 
 
 def _looks_json(s: str) -> bool:
@@ -259,7 +328,7 @@ class _Hardener:
             if _looks_json(s):
                 out = evidence.redact_json_text(s)
             else:
-                out = evidence.redact_plain_text(_path_lines(s, self.home, self.cwd))
+                out = redact_text_wide(evidence.redact_plain_text(_path_lines(s, self.home, self.cwd)))
             out = self.local.apply(out)
         self.left -= len(out) + 2
         return out
@@ -275,9 +344,16 @@ class _Hardener:
             except TypeError:
                 items = sorted(v.items(), key=lambda kv: str(kv[0]))
             out = {}
+            # {"name": "OPENAI_KEY", "value": "..."} (k8s env, ECS, docker)
+            nv_secret = isinstance(v.get("name"), str) and gate.secretish_name(v["name"]) and "value" in v
             for k, e in items:
                 if isinstance(k, str):
                     self.left -= len(k) + 3
+                if ((isinstance(k, str) and gate.secretish_name(k)) or (nv_secret and k == "value")) \
+                        and isinstance(e, (str, int, float)) and not isinstance(e, bool) and e != "":
+                    out[k] = evidence.REDACTED
+                    self.left -= len(evidence.REDACTED)
+                    continue
                 out[k] = self.walk(e, depth)
             return out
         if v is not None and not isinstance(v, (bool, int, float)):
@@ -327,7 +403,7 @@ class Captured:
 def _clip_scrubbed(s: Any, n: int, local: _Local) -> Optional[str]:
     if not isinstance(s, str) or not s:
         return None
-    t = local.apply(evidence.redact_plain_text(evidence._nul(s[: n * 4])))
+    t = local.apply(redact_text_wide(evidence.redact_plain_text(evidence._nul(s[: n * 4]))))
     t = " ".join(t.split())
     return t if len(t) <= n else t[: n - 1] + "…"
 
