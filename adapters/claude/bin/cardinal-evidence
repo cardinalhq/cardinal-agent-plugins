@@ -31,9 +31,12 @@ Credentials, in order: the storyboard's evidence token (storyboard__create
 returns it; hooks/storyboard-token.py stores it, 24 h, this storyboard's
 evidence upload only) as `Authorization: CardinalEvidence <token>`, then the
 Cardinal MCP key from ~/.claude/settings.json (or the environment) as
-X-CardinalHQ-API-Key. Either goes only to the origin of CARDINAL_MCP_URL,
-never across a redirect. The upload's org is the storyboard's; it must be
-the org CARDINAL_MCP_URL names.
+X-CardinalHQ-API-Key. Either goes only to the origin of CARDINAL_MCP_URL
+or, when it is unset (the plugin was never connected and its MCP server
+signs in to Cardinal Cloud with OAuth), https://app.cardinalhq.io, the
+default URL of the plugin's .mcp.json, with the evidence token only. Never
+across a redirect. The upload's org is the storyboard's; it must be the org
+CARDINAL_MCP_URL names, when it names one.
 
 Exit codes: 0 every entry promoted (or the command succeeded); 1 some entries
 failed (each is listed); 2 nothing was uploaded (usage, connection, auth, or
@@ -125,14 +128,17 @@ def connection(home: Path, environ: dict) -> dict:
     """{origin, org, key}: the maestro origin and org of CARDINAL_MCP_URL and
     the Cardinal MCP key (None when absent), from ~/.claude/settings.json's
     env block first (Claude Code does not reliably export it to Bash), then
-    the environment. {} when there is no usable URL."""
+    the environment. Without CARDINAL_MCP_URL (never connected), the plugin's
+    .mcp.json default, Cardinal Cloud, with no key: its storyboards come from
+    that server, so their evidence tokens belong to it. {} when the URL is
+    unusable."""
     rp = render_preview()
     env = settings_env(home)
     url, key = env.get("CARDINAL_MCP_URL"), env.get("CARDINAL_MCP_API_KEY")
     if not (isinstance(url, str) and url):
         url, key = environ.get("CARDINAL_MCP_URL"), environ.get("CARDINAL_MCP_API_KEY")
     if not (isinstance(url, str) and url):
-        return {}
+        url, key = rp.DEFAULT_MCP_URL, None
     origin = rp._origin(url)
     if origin is None:
         return {}
@@ -367,8 +373,8 @@ def cmd_promote(args, out=sys.stdout, err=sys.stderr, opener=None, sleep=time.sl
 
     conn = connection(home, os.environ)
     if not conn:
-        err.write("cardinal-evidence: Claude Code is not connected to Cardinal (no CARDINAL_MCP_URL): "
-                  "run /cardinal:connect\n")
+        err.write("cardinal-evidence: CARDINAL_MCP_URL is not a usable http(s) URL: fix it, or run "
+                  "/cardinal:connect\n")
         return EXIT_FAILED
 
     token = None
@@ -393,7 +399,7 @@ def cmd_promote(args, out=sys.stdout, err=sys.stderr, opener=None, sleep=time.sl
     if not auths:
         err.write(f"cardinal-evidence: no credential for storyboard {sb}: no live evidence token was stored "
                   "for it (call storyboard__preview for a fresh one) and there is no Cardinal MCP key "
-                  "(run /cardinal:connect)\n")
+                  "(/cardinal:connect adds one)\n")
         return EXIT_FAILED
 
     client = plugin_client()
@@ -574,7 +580,7 @@ def cmd_status(args, out=sys.stdout, err=sys.stderr) -> int:
         out.write(f"uploads go to: {conn['origin']}" + (f" (org {conn['org']})" if conn.get("org") else "")
                   + (", Cardinal MCP key present" if conn.get("key") else ", no Cardinal MCP key") + "\n")
     else:
-        out.write("uploads go to: nowhere yet (not connected: run /cardinal:connect)\n")
+        out.write("uploads go to: nowhere (CARDINAL_MCP_URL is not a usable http(s) URL)\n")
     return EXIT_OK
 
 

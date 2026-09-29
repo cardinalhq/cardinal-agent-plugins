@@ -33,6 +33,13 @@ Claude also ships opt-in decision capture (`cardinal-decision on`): a
 tagged with engineer, session, repo, branch, PR, anchors, and D18 code
 clusters. See [docs/specs/decision-telemetry.md](docs/specs/decision-telemetry.md).
 
+The Claude plugin works before `/cardinal:connect`: its `cardinal` MCP server
+defaults to Cardinal Cloud's org-less `https://app.cardinalhq.io/mcp`, which
+Claude Code signs in to with MCP OAuth, so storyboards, local preview and
+evidence capture work, while every telemetry, spend-limit, initiative, plan,
+decision, git-state and usage hook stays silent (no context, no network)
+until the user connects. See [adapters/claude/README.md](adapters/claude/README.md).
+
 Claude also ships two model-invocable skills for Cardinal's Investigation
 Storyboards: [`/cardinal:storyboard`](adapters/claude/skills/storyboard/README.md)
 turns an investigation into an evidence-bound, scene-by-scene storyboard

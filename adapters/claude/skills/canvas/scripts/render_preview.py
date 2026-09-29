@@ -4,7 +4,8 @@
 storyboard__preview does not render anything on the server. For each scene it
 returns a reference to one self-contained HTML page (the "preview bundle":
 preview_bundle {url?, path, bytes, sha256, revision} or {unavailable}). This
-script downloads each page with your Cardinal MCP key, loads it in a local,
+script downloads each page with your Cardinal MCP key (/cardinal:connect) or,
+without one, the result's own preview_token, loads it in a local,
 sandboxed, network-locked headless Chromium, steps through the scene's reveal
 steps and writes one PNG per step for Claude to Read and critique.
 
@@ -42,7 +43,7 @@ Exit codes:
   0  ran (per-scene errors, {unavailable} scenes and skipped scenes are in the
      output; exit 0 does not mean every scene rendered)
   2  nothing rendered because of input, connection, auth or fetch problems
-     (not connected, wrong org, stale revision, upgrade Cardinal, ...)
+     (no key or preview token, wrong org, stale revision, upgrade Cardinal, ...)
   3  no usable local Chromium, unsupported platform (Windows) or Chromium could
      not start with its sandbox on: skip the preview, tell the user, keep
      authoring
@@ -143,6 +144,13 @@ BUNDLE_PATH_RE = re.compile(
     r"/preview\.html\?revision=(\d+)$"
 )
 MCP_URL_PATH_RE = re.compile(r"^/api/orgs/([^/?#]+)/mcp(?:/|$)")
+# The plugin's .mcp.json default (`${CARDINAL_MCP_URL:-<this>}`): Cardinal
+# Cloud's org-less MCP endpoint, which Claude Code signs in to with OAuth
+# before /cardinal:connect has run.
+DEFAULT_MCP_URL = "https://app.cardinalhq.io/mcp"
+# storyboard__preview's preview_token (conductor storyboard/scoped-tokens.ts):
+# a compact JWS, sent as `Authorization: CardinalPreview <token>`.
+PREVIEW_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{1,4096}\.[A-Za-z0-9_-]{1,1024}$")
 
 UPGRADE_MESSAGE = (
     "This Cardinal returned no preview_bundle for any scene, so it predates local previews "
@@ -349,6 +357,55 @@ def connect_info(home: Path, environ: dict) -> dict:
     }
 
 
+def configured_mcp_url(home: Path, environ: dict) -> str | None:
+    """CARDINAL_MCP_URL (settings.json env, then the environment), even
+    without a key, when it is a usable http(s) URL."""
+    try:
+        url = json.loads((home / ".claude" / "settings.json").read_text()).get("env", {}).get("CARDINAL_MCP_URL")
+    except (OSError, ValueError, AttributeError):
+        url = None
+    if not (isinstance(url, str) and url):
+        url = environ.get("CARDINAL_MCP_URL")
+    return url if isinstance(url, str) and url and _origin(url) else None
+
+
+def cardinal_mcp_url(home: Path, environ: dict) -> str:
+    """The Cardinal the plugin's MCP server talks to: CARDINAL_MCP_URL when
+    set (connected, or a self-hosted URL), else the .mcp.json default."""
+    return configured_mcp_url(home, environ) or DEFAULT_MCP_URL
+
+
+def preview_token(result) -> str | None:
+    """The result's preview_token when it is JWT-shaped, else None."""
+    tok = result.get("preview_token") if isinstance(result, dict) else None
+    return tok if isinstance(tok, str) and PREVIEW_TOKEN_RE.match(tok) else None
+
+
+def connection(result, home: Path, environ: dict) -> dict:
+    """How to fetch this preview's bundles. With a Cardinal MCP key
+    (/cardinal:connect): {origin, org, key}, as before. Without one:
+    {origin, org: None, key: None, preview_token} with the result's own
+    preview_token (10 min, this storyboard's preview pages only), sent only to
+    the Cardinal the plugin's MCP server talks to (cardinal_mcp_url), never to
+    a URL the result names. {} when there is no key and no usable token."""
+    conn = connect_info(home, environ)
+    if conn:
+        return conn
+    tok = preview_token(result)
+    if tok is None:
+        return {}
+    origin = _origin(cardinal_mcp_url(home, environ))
+    if origin is None:
+        return {}
+    return {"origin": origin, "org": None, "key": None, "preview_token": tok}
+
+
+def auth_headers(conn: dict) -> dict:
+    if conn.get("key"):
+        return {"X-CardinalHQ-API-Key": conn["key"]}
+    return {"Authorization": "CardinalPreview " + conn["preview_token"]}
+
+
 def _origin(url: str) -> str | None:
     try:
         parts = urllib.parse.urlsplit(url)
@@ -383,9 +440,14 @@ def _error_body(err: urllib.error.HTTPError) -> dict:
         return {}
 
 
-def explain_status(status: int, body: dict) -> str:
+def explain_status(status: int, body: dict, token: bool = False) -> str:
     code = str(body.get("error") or "")
     msg = str(body.get("message") or "")
+    if token and status in (401, 403):
+        # Fetched with the result's preview_token, not a key: /cardinal:connect
+        # advice does not apply.
+        return ("the preview token was refused (it lasts 10 minutes and covers only this storyboard): "
+                "call storyboard__preview again and render its new result")
     if status == 400:
         return "maestro rejected the bundle request (no revision): the plugin and this Cardinal disagree on the preview contract; upgrade both"
     if status == 401:
@@ -462,7 +524,7 @@ def fetch_bundle(conn: dict, ref: dict, max_bytes: int, opener=None, sleep=time.
 
     while True:
         req = urllib.request.Request(url, method="GET", headers={
-            "X-CardinalHQ-API-Key": conn["key"],
+            **auth_headers(conn),
             "Accept": "text/html",
         })
         try:
@@ -493,7 +555,8 @@ def fetch_bundle(conn: dict, ref: dict, max_bytes: int, opener=None, sleep=time.
             if 300 <= err.code < 400:
                 raise FetchError(f"maestro redirected the bundle request (HTTP {err.code}); not following it with your key",
                                  status=err.code)
-            raise FetchError(explain_status(err.code, body), status=err.code, code=str(body.get("error") or "") or None)
+            raise FetchError(explain_status(err.code, body, token=not conn.get("key")), status=err.code,
+                             code=str(body.get("error") or "") or None)
         except (urllib.error.URLError, OSError) as err:
             reason = getattr(err, "reason", err)
             raise FetchError(f"could not reach {conn['origin']}: {reason}")
@@ -1255,6 +1318,7 @@ def main(argv: list | None = None) -> int:
 
     # -- input ----------------------------------------------------------------
     pages: list = []   # (scene_id, local path or None, ref or None)
+    result: dict = {}
     problems: list = []
     sb_id, revision, max_bytes = "local", None, DEFAULT_MAX_BUNDLE_BYTES
     viewport, ready_ms, settle_ms = DEFAULT_VIEWPORT, DEFAULT_READY_MS, DEFAULT_SETTLE_MS
@@ -1329,10 +1393,11 @@ def main(argv: list | None = None) -> int:
     first_failure = None
     try:
         if any(ref is not None for _, _, ref in pages):
-            conn = connect_info(home, os.environ)
+            conn = connection(result, home, os.environ)
             if not conn:
-                return finish(EXIT_FETCH, "Claude Code is not connected to Cardinal (no CARDINAL_MCP_URL / "
-                                          "CARDINAL_MCP_API_KEY): run /cardinal:connect, then preview again")
+                return finish(EXIT_FETCH, "no credential to fetch the preview pages: the result carries no "
+                                          "preview_token (upgrade Cardinal, or call storyboard__preview again) "
+                                          "and there is no Cardinal MCP key (/cardinal:connect)")
             for i, (sid, _, ref) in enumerate(pages):
                 if time.monotonic() > deadline - 15:
                     for rest, _, _ in pages[i:]:

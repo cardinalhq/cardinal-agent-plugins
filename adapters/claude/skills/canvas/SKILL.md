@@ -43,7 +43,7 @@ self-contained HTML page) or `{unavailable: "<why>"}`.
 
 **The plugin renders the bundles for you.** After `storyboard__preview` returns, the
 Cardinal plugin's PostToolUse hook passes the result to this skill's renderer, which
-fetches each page with your Cardinal MCP key, renders it in **your local Chrome/Chromium**
+fetches each page with your Cardinal MCP key (or the result's `preview_token`), renders it in **your local Chrome/Chromium**
 (headless, OS sandbox on, network locked off, fresh profile, UTC, reduced motion), steps
 through every reveal step and writes one PNG per step. The hook then reports in your
 context the PNG directory

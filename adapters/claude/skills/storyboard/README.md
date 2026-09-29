@@ -8,8 +8,11 @@ previewing the visuals is the [canvas](../canvas/README.md) skill.
 
 ## Before you start
 
-- **Claude Code** with the **Cardinal plugin**, connected to your org (`/cardinal:connect`).
-  You need the **Member** role (or Owner) in that org to author storyboards.
+- **Claude Code** with the **Cardinal plugin**. You do not need `/cardinal:connect`: before
+  you connect, the plugin's `cardinal` MCP server points at Cardinal Cloud
+  (`https://app.cardinalhq.io/mcp`) and Claude Code signs you in with OAuth the first time
+  (`/mcp` shows it). Self-hosted Cardinal needs `/cardinal:connect --host <url>`.
+  You need the **Member** role (or Owner) in the org to author storyboards.
 - An investigation done with Cardinal's tools in this session, or within the last 14 days.
   Claude cites the *receipts* those tool calls produced. Unpublished receipts expire
   after 14 days.

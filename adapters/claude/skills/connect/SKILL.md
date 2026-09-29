@@ -26,6 +26,29 @@ whose aggregator fans out to whatever integrations are configured —
 adding / removing integrations on the Cardinal side never requires
 re-running this command.
 
+## Before and after connect
+
+The plugin works in two modes:
+
+```
+not connected   `cardinal` MCP server -> https://app.cardinalhq.io/mcp (Cardinal Cloud)
+                Claude Code signs in with standard MCP OAuth (browser, via /mcp)
+                storyboards, local preview, evidence capture/promote: work
+                telemetry, spend limits, initiative/plan/decision/usage hooks: off
+                (silent, no context, no network)
+
+connected       /cardinal:connect wrote CARDINAL_MCP_URL + CARDINAL_MCP_API_KEY and
+                the OTel settings into ~/.claude/settings.json env
+                `cardinal` MCP server -> the org's URL, with the org's API key
+                everything: all org MCP tools, telemetry, Outcomes Dashboard,
+                spend limits, initiative attribution, decisions
+```
+
+Run `/cardinal:connect` to pick the org, get its API key, and turn on
+telemetry and spend features. **Self-hosted (in-VPC) Cardinal must connect**
+(`--host <url>`): the unconnected default URL is Cardinal Cloud.
+`/cardinal:disconnect` returns the plugin to the unconnected mode.
+
 ## How you (Claude) should run this
 
 **You MUST run `cardinal-connect` in the background.** The script
@@ -102,10 +125,10 @@ exits — success, denied, expired, or error.
   already connected, combine with `--rotate`. If the user passes them to
   `/cardinal:connect`, forward them to the script verbatim.
 - `--telemetry-only` — request only the ingest scope. The two
-  `CARDINAL_MCP_*` env vars are NOT written; the plugin's `.mcp.json`
-  is still loaded by Claude Code but with the env vars unset the
-  `cardinal` server entry resolves to empty and silently doesn't
-  connect.
+  `CARDINAL_MCP_*` env vars are NOT written, so the plugin's `cardinal`
+  MCP server stays on its unconnected default (Cardinal Cloud over
+  OAuth; disable it in `/mcp` if you don't want it). Telemetry and spend
+  features still run: the ingest key counts as connected.
 - `--rotate` — proceed even when state shows we're already connected.
   Mints fresh keys; the previous ones stay alive until their TTL or
   until `/cardinal:disconnect` revokes them.
@@ -126,17 +149,20 @@ The plugin's `plugins/cardinal/.mcp.json`:
 {
   "cardinal": {
     "type": "http",
-    "url": "${CARDINAL_MCP_URL}",
-    "headers": { "X-CardinalHQ-API-Key": "${CARDINAL_MCP_API_KEY}" }
+    "url": "${CARDINAL_MCP_URL:-https://app.cardinalhq.io/mcp}",
+    "headers": { "X-CardinalHQ-API-Key": "${CARDINAL_MCP_API_KEY:-}" }
   }
 }
 ```
 
 Claude Code reads `~/.claude/settings.json` `env` at process start and
-substitutes `${VAR}` references in plugin-declared `.mcp.json` files at
-MCP server connect time. So setting `CARDINAL_MCP_URL` and
-`CARDINAL_MCP_API_KEY` in the env block is all that's needed to bring
-the server online — no `~/.claude.json` ownership required.
+substitutes `${VAR}` / `${VAR:-default}` references in plugin-declared
+`.mcp.json` files at MCP server connect time. So setting
+`CARDINAL_MCP_URL` and `CARDINAL_MCP_API_KEY` in the env block is all
+that's needed to point the server at the org — no `~/.claude.json`
+ownership required. Unset, the URL falls back to Cardinal Cloud's
+org-less `/mcp`, the key header is sent empty (maestro treats it as
+absent), and Claude Code runs MCP OAuth against that endpoint.
 
 ## A note about `--no-tool-details`
 

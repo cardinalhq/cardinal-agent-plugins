@@ -279,10 +279,16 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("cardinal", data)
         entry = data["cardinal"]
         self.assertEqual(entry["type"], "http")
-        # The URL and header value MUST be env-var placeholders; a literal
-        # URL would defeat the per-user-key design.
-        self.assertEqual(entry["url"], "${CARDINAL_MCP_URL}")
-        self.assertEqual(entry["headers"]["X-CardinalHQ-API-Key"], "${CARDINAL_MCP_API_KEY}")
+        # Connected: /cardinal:connect's CARDINAL_MCP_URL / _API_KEY win.
+        # Not connected: Cardinal Cloud's org-less /mcp (Claude Code runs MCP
+        # OAuth there) and an empty key header, which maestro treats as absent.
+        self.assertEqual(entry["url"], "${CARDINAL_MCP_URL:-https://app.cardinalhq.io/mcp}")
+        self.assertEqual(entry["headers"], {"X-CardinalHQ-API-Key": "${CARDINAL_MCP_API_KEY:-}"})
+        # One server, named `cardinal`: tool names stay
+        # mcp__plugin_cardinal_cardinal__* in both modes, which the storyboard
+        # hooks' matchers and Cardinal-server lists rely on.
+        self.assertEqual(list(data), ["cardinal"])
+        self.assertEqual(set(entry), {"type", "url", "headers"})
 
     def test_plugin_json_version_is_loaded_at_runtime(self):
         # cardinal-connect resolves PLUGIN_VERSION from plugin.json at
@@ -1386,6 +1392,20 @@ INITIATIVE_CONVENTION_PATH = (
 )
 
 
+def _connected_env(home: Path, connected: bool = True) -> dict:
+    """The hook env for a test HOME. Gated hooks run only when connected
+    (hooks/_connection.py): connected writes the connect state file, and the
+    developer's own CARDINAL_MCP_* / OTEL_* exports never leak in."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("CARDINAL_MCP_") or k.startswith("OTEL_"))}
+    env["HOME"] = str(home)
+    state = home / ".claude" / "cardinal.json"
+    if connected and not state.exists():
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text('{"mode": "telemetry-and-mcp"}\n')
+    return env
+
+
 def _run_initiative_convention(cwd: Path, home: Path | None = None) -> subprocess.CompletedProcess:
     payload = json.dumps({
         "session_id": "sess-1",
@@ -1393,11 +1413,10 @@ def _run_initiative_convention(cwd: Path, home: Path | None = None) -> subproces
         "hook_event_name": "SessionStart",
         "source": "startup",
     })
-    env = os.environ.copy()
     # Hermetic HOME: the hook reads ~/.claude/cardinal.json for the
     # spend-limits standing fetch — never let a test see the developer's
     # real connection state (or hit the real network).
-    env["HOME"] = str(home if home is not None else cwd)
+    env = _connected_env(home if home is not None else cwd)
     return subprocess.run(
         [sys.executable, str(INITIATIVE_CONVENTION_PATH)],
         input=payload, capture_output=True, text=True, timeout=10, env=env,
@@ -1508,8 +1527,7 @@ def _write_verdict(home: Path, session_id: str, verdict: dict) -> None:
 
 
 def _run_gate(home: Path, session_id: str = "sess-1") -> subprocess.CompletedProcess:
-    env = os.environ.copy()
-    env["HOME"] = str(home)
+    env = _connected_env(home)
     payload = json.dumps({
         "session_id": session_id,
         "hook_event_name": "UserPromptSubmit",
