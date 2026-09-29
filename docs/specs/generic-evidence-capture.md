@@ -84,7 +84,7 @@ Real Claude Code result shapes (key sets sampled from this machine's transcripts
  └────────────────────────────────────────┬───────────────────────────────────────────────────┘
                                           ▼
  ┌──────────────── cardinal_core.evidence_capture.capture_call()  (ONE pipeline) ─────────────┐
- │ 0 budget guard: 1.5 s wall (setitimer) · stdin ≤ 32 MiB · fail open, exit 0                 │
+ │ 0 budget guard: 1.4 s wall (setitimer) · stdin ≤ 32 MiB · fail open, exit 0                 │
  │ 1 opt-out?  CARDINAL_EVIDENCE_CAPTURE=0 | ~/.cardinal/evidence/disabled ──► nothing        │
  │ 2 dedupe:   source is Cardinal's own gateway (witnessed receipt exists) ──► nothing         │
  │ 3 SENSITIVITY GATE over every string in tool_input (tool-neutral)                           │
@@ -394,10 +394,19 @@ when source = Cardinal. That's the only thing the dedupe branch does with a Card
 
 **Hook cost (all adapters):**
 - Never blocks or fails the tool: every entry point is wrapped `try/except BaseException → exit 0`.
-- A 1.5 s `setitimer` guard under Claude's 2 s kill. A write interrupted by the guard leaves only a temp file,
-  which gc reaps after 1 h.
+- A 1.4 s `setitimer` guard under Claude's 2 s kill (`capture_call_guarded`, every adapter). A write interrupted
+  by the guard leaves only a temp file, which gc reaps after 1 h.
+- Never silent, never unchecked: when the pipeline cannot finish inside the budget (a pathological input the gate
+  or the scrub cannot get through in time) or fails, the call is recorded as a withheld stub
+  (`reason: unreadable`, `rule: budget` / `error`; 0.3 s of its own), so the agent still gets an id and a reason.
+  A full entry already on disk under the same deterministic id is kept.
 - stdin is read to ≤ 32 MiB. A longer payload isn't parsed: a stub with `withheld.reason="unreadable"`
-  (`rule: size`) is written instead.
+  (`rule: size`) is written instead; a payload nested deeper than the JSON parser goes gets `rule: depth`.
+  Raw control characters inside JSON strings are accepted (`strict=False`).
+- pi/opencode: the plugin bounds what it sends to `cardinal_native.py` (bridge.js `boundEvidenceEvent`): a result
+  field over 1 MiB is cut (Python keeps ≤ 256 KiB of it, marked truncated); an input too large to send whole
+  (event > 4 MiB after the cut) goes as a stub (`rule: size`); batches are ≤ 16 MiB and the queue ≤ 64 MiB, past
+  which a call is queued as a stub (`rule: backlog`), never dropped, because its id was already shown inline.
 - Strings over 2 MiB go through `bounded_scrub`, never a whole walk.
 - gc runs at most every 10 min (was 6 h) with a 250 ms budget.
 - Target: p50 ≤ 60 ms and p99 ≤ 400 ms per call, measured by a perf smoke test.
@@ -407,8 +416,13 @@ when source = Cardinal. That's the only thing the dedupe branch does with a Card
 
 **Spool bounds (gc):**
 - TTL 14 d (unchanged).
-- Total ≤ 256 MiB (spec §18's promise, now implemented; `CARDINAL_EVIDENCE_MAX_MB`), evicting the oldest entries
-  across sessions.
+- Total ≤ 256 MiB (spec §18's promise, now implemented; `CARDINAL_EVIDENCE_MAX_MB`), evicting the least recently
+  active sessions' entries first, oldest first within a session.
+- The bound holds for a spool of any size: per-session totals (bytes, entries, next expiry) are cached in
+  `<spool>/.gc-index.json`, keyed by the session directory's mtime (any entry written, replaced or removed changes
+  it), so a pass lists only sessions that changed or have something due to expire. A pass that runs out of its
+  250 ms keeps what it learned and runs again 30 s later rather than after the 10 min interval. (Before this, a
+  spool too large to list in 250 ms, about 50k entries, was never size-evicted at all.)
 - ≤ 10,000 entries per session.
 - `token.json` and `.hinted` are never size-evicted.
 - `cardinal-evidence status` shows size and caps.
@@ -522,10 +536,11 @@ Validation, gateway and DB need **no change** (finding 6). Changes, all on branc
     - (d) no planted secret substring in the file;
     - (e) `wire_item(entry)` passes a Python port of maestro `EvidenceItemSchema` + `IDENT_RE`, checked against
       shared vectors `core/tests/testdata/evidence_wire_vectors.json` that conductor's test also reads;
-    - (f) ≤ 1.5 s per call;
+    - (f) ≤ 1.4 s per call, else a withheld stub (`rule: budget`);
     - (g) a withheld verdict is stable under key reordering.
 - `test_evidence_spool_bounds.py`:
-  - The 256 MiB cap evicts oldest-first across sessions; the per-session cap applies.
+  - The 256 MiB cap evicts the least recently active sessions first, oldest entries first; the per-session cap
+    applies; the cap holds when no single pass can list the whole spool (index + retry).
   - TTL still works; `token.json`/`.hinted` survive size eviction.
   - Concurrent writers race safely; a stale temp file is reaped.
 - `test_evidence.py` (existing): the scrub parity vectors still pass; new plain-text vectors are added.
