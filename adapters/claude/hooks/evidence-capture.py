@@ -34,7 +34,10 @@ Contract:
   - Opt-out: CARDINAL_EVIDENCE_CAPTURE=0 or the flag file
     ~/.cardinal/evidence/disabled.
   - No network. Fail open: always exits 0, never blocks the tool, never
-    prints an error; gives up after 1.5 s (hooks.json gives it 2 s).
+    prints an error; gives up after 1.4 s (hooks.json gives it 2 s). A
+    call the pipeline could not finish in time (or a payload nested too
+    deep to parse) is still recorded, as a withheld stub (reason
+    "unreadable"), so the agent gets an id and a reason, never silence.
 """
 
 from __future__ import annotations
@@ -42,7 +45,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
+
+START = time.monotonic()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -87,18 +93,27 @@ def main() -> None:
     root = evidence.default_root(home)
     if evidence.capture_disabled(root):
         return
-    raw, complete = cap.read_stdin_bounded()
     spill_root = str(home / ".claude" / "projects")
-    if not complete:
-        entry = cap.unreadable_record(RUNTIME, client(), raw, spill_root)
+    stub = None
+    with cap.time_guard(cap.TIME_BUDGET_S):
+        raw, complete = cap.read_stdin_bounded()
+        if not complete:
+            stub = ("size", f"> {cap.MAX_STDIN_BYTES >> 20} MiB")
+        else:
+            try:
+                payload = json.loads(raw.decode("utf-8", errors="replace"), strict=False) if raw.strip() else {}
+            except RecursionError:
+                # Valid JSON nested deeper than the parser goes (it happens
+                # in MCP results): a stub from the payload's head.
+                stub = ("depth", "nested too deep to read")
+            except ValueError:
+                return
+    if stub is not None:
+        entry = cap.unreadable_record(RUNTIME, client(), raw, spill_root, rule=stub[0], hint=stub[1])
         if entry is not None:
             evidence.write_entry(root, entry)
             if cap.context_enabled():
-                emit("PostToolUse", cap.context_line(entry, False))
-        return
-    try:
-        payload = json.loads(raw.decode("utf-8", errors="replace")) if raw.strip() else {}
-    except (ValueError, UnicodeDecodeError):
+                emit(cap.head_field(raw, "hook_event_name") or "PostToolUse", cap.context_line(entry, False))
         return
     if not isinstance(payload, dict):
         return
@@ -134,20 +149,18 @@ def main() -> None:
         spill_root=spill_root,
         client=client(),
     )
-    got = cap.capture_call(call, home, promote_cmd="cardinal-evidence")
+    budget = max(0.2, cap.TIME_BUDGET_S - (time.monotonic() - START))
+    got = cap.capture_call_guarded(call, home, budget_s=budget, promote_cmd="cardinal-evidence")
     if got is not None:
         emit(event, got.line)
 
 
 if __name__ == "__main__":
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from cardinal_core.evidence_capture import time_guard
-    except BaseException:
-        sys.exit(0)
-    try:
-        with time_guard():
-            main()
+        # Reading and parsing the payload runs under the hook's budget;
+        # capture_call_guarded then spends what is left of it, and keeps a
+        # withheld stub when the pipeline cannot finish.
+        main()
     except BaseException:
         pass
     sys.exit(0)

@@ -82,7 +82,7 @@ REASON_TEXT = {
     REASON_URL: "credential in a URL",
     REASON_HEADER: "credential in a request",
     REASON_USER: "your evidence rule",
-    REASON_UNREADABLE: "too large to read or check",
+    REASON_UNREADABLE: "could not be checked",
 }
 
 

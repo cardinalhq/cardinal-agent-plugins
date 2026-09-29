@@ -85,6 +85,50 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self.assertEqual(res.stdout, "")
         self.assertFalse(self.root.exists() and any(self.root.rglob("ev_*.json")))
 
+    # -- never silent: pathological payloads -----------------------------------
+
+    def _withheld(self, res, event="PostToolUse"):
+        body = json.loads(res.stdout)
+        self.assertEqual(body["hookSpecificOutput"]["hookEventName"], event)
+        m = WITHHELD_RE.match(body["hookSpecificOutput"]["additionalContext"])
+        self.assertIsNotNone(m, body)
+        entry = json.loads((self.root / SESSION / f"{m.group(1)}.json").read_text())
+        self.assertIsNone(entry["args"])
+        self.assertIsNone(entry["result"])
+        return entry
+
+    def test_payload_nested_deeper_than_the_parser_is_a_withheld_stub(self):
+        d = 1_200_000
+        raw = ('{"session_id":"%s","tool_use_id":"toolu_deep","hook_event_name":"PostToolUseFailure",'
+               '"tool_name":"mcp__weird__nest","tool_input":{},"error":' % SESSION) + "[" * d + "]" * d + "}"
+        entry = self._withheld(self._run(raw=raw), event="PostToolUseFailure")
+        self.assertEqual(entry["withheld"]["reason"], "unreadable")
+        self.assertEqual(entry["withheld"]["rule"], "depth")
+        self.assertEqual(entry["tool"], "nest")
+        self.assertEqual(entry["server"], "weird")
+
+    def test_raw_control_characters_in_strings_are_still_captured(self):
+        # A raw tab and a raw U+0001 inside JSON strings: not strict JSON.
+        raw = ('{"session_id":"%s","tool_use_id":"toolu_ctl","hook_event_name":"PostToolUse",'
+               '"tool_name":"AnyTool","tool_input":{"a":"x\ty"},"tool_response":"line1\x01line2"}' % SESSION)
+        with self.assertRaises(ValueError):
+            json.loads(raw)
+        _, _, entry, _ = self._captured(self._run(raw=raw))
+        self.assertEqual(entry["tool"], "AnyTool")
+        self.assertIn("line2", json.dumps(entry["result"]))
+
+    def test_input_too_large_to_check_in_time_is_a_withheld_stub(self):
+        # A very wide input (200k members): the pipeline cannot finish in the
+        # hook's budget, so the call is kept as a stub, not dropped.
+        wide = {f"k{i}": f"v{i}" for i in range(200_000)}
+        t = time.monotonic()
+        res = self._run(self._payload(tool_name="FutureBulkTool", tool_input=wide, tool_response=wide))
+        self.assertLess(time.monotonic() - t, 2.5)
+        entry = self._withheld(res)
+        self.assertEqual(entry["withheld"]["reason"], "unreadable")
+        self.assertIn(entry["withheld"]["rule"], ("budget", "bounds"))
+        self.assertEqual(entry["tool"], "FutureBulkTool")
+
     # -- payload shapes ------------------------------------------------------
 
     def test_string_result_is_captured_with_the_exact_context_line(self):

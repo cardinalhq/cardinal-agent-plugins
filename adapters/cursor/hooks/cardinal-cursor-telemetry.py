@@ -374,8 +374,9 @@ def capture_evidence(payload: dict[str, Any], failed: bool = False) -> str | Non
             cwd=cwd_from_payload(payload),
             client=evidence.client_string("cursor", _first(payload, "cursor_version", "cursorVersion")),
         )
-        with cap.time_guard():
-            got = cap.capture_call(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
+        # Never silent: a call the pipeline cannot finish in time is kept as a
+        # withheld stub (capture_call_guarded).
+        got = cap.capture_call_guarded(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
         return got.line if got is not None else None
     except BaseException:
         return None

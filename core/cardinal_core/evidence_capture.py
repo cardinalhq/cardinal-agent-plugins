@@ -47,8 +47,10 @@ from .evidence_normalizers import Normalized, ToolCall, normalize_call
 
 SCHEMA_V2 = "cardinal.evidence.v2"
 
-# Budget: under the 2 s a Claude Code hook gets.
-TIME_BUDGET_S = 1.5
+# Budget: under the 2 s a Claude Code hook gets, leaving room for
+# interpreter start-up and, when the pipeline runs out of time, the withheld
+# stub capture_call_guarded writes instead (FALLBACK_BUDGET_S).
+TIME_BUDGET_S = 1.4
 MAX_STDIN_BYTES = 32 << 20
 MAX_TOOL_NAME = 256
 HINTED = ".hinted"
@@ -336,8 +338,18 @@ class _Hardener:
     def walk(self, v: Any, depth: int = 0) -> Any:
         if isinstance(v, str):
             return self.string(v, depth)
+        # Past the budget nothing more can reach the stored prefix: the rest
+        # of a container is dropped (cut), not walked, so the scrub after
+        # this pass only sees what can be kept. (A 4 MiB pod list used to
+        # be walked and scrubbed whole: over a second per call.)
         if isinstance(v, list):
-            return [self.walk(e, depth) for e in v]
+            out_l = []
+            for e in v:
+                if self.left <= 0:
+                    self.cut = True
+                    break
+                out_l.append(self.walk(e, depth))
+            return out_l
         if isinstance(v, dict):
             try:
                 items = sorted(v.items(), key=lambda kv: kv[0])
@@ -347,6 +359,9 @@ class _Hardener:
             # {"name": "OPENAI_KEY", "value": "..."} (k8s env, ECS, docker)
             nv_secret = isinstance(v.get("name"), str) and gate.secretish_name(v["name"]) and "value" in v
             for k, e in items:
+                if self.left <= 0:
+                    self.cut = True
+                    break
                 if isinstance(k, str):
                     self.left -= len(k) + 3
                 if ((isinstance(k, str) and gate.secretish_name(k)) or (nv_secret and k == "value")) \
@@ -488,25 +503,30 @@ def build_record(call: ToolCall, *, home: Optional[str] = None, withheld: Option
     return rec
 
 
-def unreadable_record(runtime: str, client: str, head: bytes, spill_root: Optional[str] = None) -> Optional[dict]:
-    """A payload too large to read: a withheld stub (reason "unreadable",
-    rule "size"), with the session and tool pulled from the payload's head
-    when they are there. None when not even the tool name is readable."""
+def head_field(head: bytes, name: str, rx: str = r"[^\"\\]{1,256}") -> Optional[str]:
+    """A top-level string field read from a payload's first 64 KiB without
+    parsing it (a payload too large or too deep to parse)."""
     text = head[: 64 << 10].decode("utf-8", errors="ignore")
+    m = re.search(r'"' + re.escape(name) + r'"\s*:\s*"(' + rx + r')"', text)
+    return m.group(1) if m else None
 
-    def field(name, rx):
-        m = re.search(r'"' + name + r'"\s*:\s*"(' + rx + r')"', text)
-        return m.group(1) if m else None
 
-    tool_name = field("tool_name", r"[^\"\\]{1,256}")
+def unreadable_record(runtime: str, client: str, head: bytes, spill_root: Optional[str] = None, *,
+                      rule: str = "size", hint: Optional[str] = None) -> Optional[dict]:
+    """A payload that cannot be read (too large: rule "size"; nested deeper
+    than the parser goes: rule "depth"): a withheld stub (reason
+    "unreadable"), with the session and tool pulled from the payload's head
+    when they are there. None when not even the tool name is readable."""
+    tool_name = head_field(head, "tool_name")
     if not tool_name:
         return None
     source, tool = classify_mcp_name(tool_name, runtime)
     call = ToolCall(runtime=runtime, tool_name=tool_name, source=source, tool=tool,
-                    session_id=field("session_id", r"[A-Za-z0-9_-]{1,128}"),
-                    tool_use_id=field("tool_use_id", r"[A-Za-z0-9_.:-]{1,256}"), client=client,
+                    session_id=head_field(head, "session_id", r"[A-Za-z0-9_-]{1,128}"),
+                    tool_use_id=head_field(head, "tool_use_id", r"[A-Za-z0-9_.:-]{1,256}"), client=client,
                     spill_root=spill_root)
-    return build_record(call, withheld=gate.Withheld(gate.REASON_UNREADABLE, "size", f"> {MAX_STDIN_BYTES >> 20} MiB"))
+    return build_record(call, withheld=gate.Withheld(gate.REASON_UNREADABLE, rule,
+                                                     hint or f"> {MAX_STDIN_BYTES >> 20} MiB"))
 
 
 # ---------------------------------------------------------------------------
@@ -575,14 +595,78 @@ def capture_call(call: ToolCall, home: Path, *, env: Optional[dict] = None, rule
     if not write:
         return Captured(entry, None, verdict is not None)
     evidence.write_entry(root, entry)
+    # The entry is on disk: from here nothing (not even the budget timer,
+    # see capture_call_guarded) may turn it into a failed capture.
     try:
         evidence.gc(root)
-    except Exception:
+    except BaseException:
         pass
     line = None
-    if context_enabled(env):
-        line = context_line(entry, _first_in_session(root, entry.get("session_id")), promote_cmd)
+    try:
+        if context_enabled(env):
+            line = context_line(entry, _first_in_session(root, entry.get("session_id")), promote_cmd)
+    except BaseException:
+        line = f"[evidence:{entry['evidence_id']}]"
     return Captured(entry, line, verdict is not None)
+
+
+# What a call that could not be processed in time is recorded as.
+FALLBACK_BUDGET_S = 0.3
+
+
+def capture_call_guarded(call: ToolCall, home: Path, *, budget_s: float = TIME_BUDGET_S, env: Optional[dict] = None,
+                         rules: Optional[gate.Rules] = None, promote_cmd: str = "cardinal-evidence",
+                         ) -> Optional[Captured]:
+    """capture_call under a wall-clock budget, for hooks. Never raises.
+
+    Whatever the tool and whatever its input or result, the call is not
+    lost: when the pipeline runs out of budget (a pathological input the
+    gate or the scrub cannot finish in time) or fails, the call is recorded
+    as a withheld stub (reason "unreadable", rule "budget" or "error"; no
+    arguments, no result), so the agent still gets an id and a reason
+    instead of silence. Fail closed: nothing unchecked is ever kept."""
+    rule = hint = None
+    try:
+        with time_guard(budget_s):
+            return capture_call(call, home, env=env, rules=rules, promote_cmd=promote_cmd)
+    except BudgetExceeded:
+        rule, hint = "budget", "too large to check in time"
+    except Exception:
+        rule, hint = "error", "could not be processed"
+    except BaseException:
+        return None
+    try:
+        with time_guard(FALLBACK_BUDGET_S):
+            return write_stub(call, home, gate.Withheld(gate.REASON_UNREADABLE, rule, hint), env, promote_cmd)
+    except BaseException:
+        return None
+
+
+def write_stub(call: ToolCall, home: Path, withheld: "gate.Withheld", env: Optional[dict] = None,
+               promote_cmd: str = "cardinal-evidence") -> Optional[Captured]:
+    """Record a call as a withheld stub only (no arguments, no result): for
+    a call whose content cannot be checked (too large to send or read, or
+    the pipeline could not finish). Same opt-outs and skips as
+    capture_call. A deterministic id already on disk is left alone."""
+    env = os.environ if env is None else env
+    if not isinstance(call, ToolCall) or not _RUNTIME_RE.match(call.runtime or ""):
+        return None
+    root = evidence.default_root(home)
+    if evidence.capture_disabled(root, env):
+        return None
+    if isinstance(call.source, dict) and call.source.get("kind") == SOURCE_CARDINAL:
+        return None
+    entry = build_record(call, home=str(home) if home else None, withheld=withheld)
+    path = evidence.entry_path(root, entry.get("session_id"), entry["evidence_id"])
+    if os.path.lexists(str(path)):
+        # A deterministic id already on disk is the full entry, written just
+        # before the budget ran out: keep it.
+        return Captured(entry, f"[evidence:{entry['evidence_id']}]" if context_enabled(env) else None, False)
+    evidence.write_entry(root, entry)
+    line = None
+    if context_enabled(env):
+        line = context_line(entry, False, promote_cmd)
+    return Captured(entry, line, True)
 
 
 # ---------------------------------------------------------------------------

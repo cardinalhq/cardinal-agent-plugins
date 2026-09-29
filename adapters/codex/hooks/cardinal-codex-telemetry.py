@@ -440,8 +440,9 @@ def handle_tool_evidence(payload: dict[str, Any]) -> None:
         call = evidence_call(payload)
         if call is None:
             return
-        with cap.time_guard():
-            got = cap.capture_call(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
+        # Never silent: a call the pipeline cannot finish in time is kept as a
+        # withheld stub (capture_call_guarded).
+        got = cap.capture_call_guarded(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
     except BaseException:
         return
     if got is None or not got.line:
