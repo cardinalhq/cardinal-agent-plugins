@@ -446,6 +446,64 @@ class PromoteTests(_HomeCase):
         self.assertIn("1 promoted", lines[3])
         self.assertIn("2 failed", lines[3])
 
+    def test_promoting_again_reuses_the_receipt_and_sends_nothing(self):
+        self.connect(self.stub.port)
+        self.store_token()
+        a = self.capture()
+        b = self.capture(tool="other")
+        res = self.run_cli("promote", "--storyboard", SB, a["evidence_id"])
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        first = f"rcpt_{0:024x}"
+        self.assertEqual(len(self.stub.requests), 1)
+        self.assertEqual(stat.S_IMODE((self.root / SESSION / "promoted.json").stat().st_mode), 0o600)
+
+        # Again, alongside a new entry: only the new one is uploaded; the old
+        # one prints the receipt it already has.
+        self.stub.respond = lambda req, body: (200, {"storyboard_id": SB, "results": [
+            {"index": i, "receipt_id": "rcpt_" + "d" * 24} for i in range(len(body["items"]))]}, {})
+        res = self.run_cli("promote", "--storyboard", SB, a["evidence_id"], b["evidence_id"])
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(len(self.stub.requests), 2)
+        self.assertEqual([i["tool"] for i in json.loads(self.stub.requests[1]["raw"])["items"]], ["other"])
+        lines = res.stdout.splitlines()
+        self.assertEqual(lines[0], f"{a['evidence_id']} -> {first}  (grafana/query_prometheus, captured, "
+                                   "already promoted)")
+        self.assertEqual(lines[1], f"{b['evidence_id']} -> rcpt_{'d' * 24}  (grafana/other, captured)")
+        self.assertIn("2 promoted to " + SB + " (1 already, receipt reused)", lines[2])
+
+        # Everything already promoted: no request, and no connection needed.
+        (self.home / ".claude" / "settings.json").unlink()
+        res = self.run_cli("promote", "--storyboard", SB, a["evidence_id"], b["evidence_id"])
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(len(self.stub.requests), 2)
+        self.assertIn(f"{b['evidence_id']} -> rcpt_{'d' * 24}  (grafana/other, captured, already promoted)",
+                      res.stdout)
+
+        # Another storyboard gets its own receipt; --force uploads again.
+        self.connect(self.stub.port)
+        self.store_token(sb=SB2)
+        res = self.run_cli("promote", "--storyboard", SB2, a["evidence_id"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(self.stub.requests), 3)
+        self.assertIn(f"/storyboards/{SB2}/evidence", self.stub.requests[2]["path"])
+        res = self.run_cli("promote", "--storyboard", SB, "--force", a["evidence_id"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(self.stub.requests), 4)
+        self.assertNotIn("already promoted", res.stdout)
+
+    def test_a_failed_entry_is_not_recorded_as_promoted(self):
+        self.connect(self.stub.port)
+        self.store_token()
+        a = self.capture()
+        self.stub.respond = lambda req, body: (200, {"storyboard_id": SB, "results": [
+            {"index": 0, "error": {"code": "invalid_item", "message": "bad"}}]}, {})
+        self.assertEqual(self.run_cli("promote", "--storyboard", SB, a["evidence_id"]).returncode, 2)
+        self.stub.respond = StubEvidenceRoute.ok
+        res = self.run_cli("promote", "--storyboard", SB, a["evidence_id"])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(self.stub.requests), 2)
+        self.assertNotIn("already promoted", res.stdout)
+
     def test_published_storyboard_is_a_whole_request_refusal(self):
         self.connect(self.stub.port)
         self.store_token()

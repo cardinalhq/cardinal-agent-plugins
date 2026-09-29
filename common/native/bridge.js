@@ -238,7 +238,7 @@ export function evidenceContextEnabled(env = process.env) {
 /** The line shown to the agent beside a captured result: a hint on the first capture of a session, the bare id after. */
 export function evidenceLine(runtime, id, first) {
   if (!first) return `[evidence:${id}]`;
-  return `[evidence:${id}] Cardinal keeps this result on this machine. Every tool result in this session gets an id like this and can be cited in a storyboard: \`cardinal-${runtime} evidence promote --storyboard <id> ev_...\` uploads only what you promote; \`cardinal-${runtime} evidence find <text>\` looks an id up. A call that touched something sensitive is kept only as a withheld stub (\`cardinal-${runtime} evidence list --withheld\`).`;
+  return `[evidence:${id}] Cardinal keeps this result on this machine. Every tool result in this session gets an id like this and can be cited in a storyboard: \`cardinal-${runtime} evidence promote --storyboard <id> ev_...\` uploads only what you promote (only what a scene cites; a repeat prints the receipt it already has); \`cardinal-${runtime} evidence find <text>\` looks an id up. A call that touched something sensitive is kept only as a withheld stub (\`cardinal-${runtime} evidence list --withheld\`).`;
 }
 
 async function runEvidencePython(runtime, events) {

@@ -565,7 +565,8 @@ def context_line(entry: dict, first: bool, promote_cmd: str = "cardinal-evidence
         return f"[evidence:{ev_id}]"
     return (f"[evidence:{ev_id}] Cardinal kept this result on this machine. Every tool result in this session gets "
             f"an id like this and can be cited in a storyboard: `{promote_cmd} promote ev_...` uploads only what "
-            f"you promote; `{promote_cmd} find <text>` looks an id up.")
+            f"you promote (only what a scene cites; a repeat prints the receipt it already has); "
+            f"`{promote_cmd} find <text>` looks an id up.")
 
 
 # ---------------------------------------------------------------------------

@@ -690,5 +690,42 @@ class TokenAndListingTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
 
+    def test_promotion_ledger_round_trip_reuse_window_and_gc(self):
+        ev_a, ev_b = "ev_" + "a" * 12, "ev_" + "b" * 12
+        r_a, r_b = "rcpt_" + "1" * 24, "rcpt_" + "2" * 24
+        path = ev.record_promoted(self.root, "s1", self.SB, {ev_a: r_a}, now=self.now)
+        self.assertEqual(path, self.root / "s1" / ev.PROMOTED_FILE)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        ev.record_promoted(self.root, "s1", self.SB, {ev_b: r_b, "ev_bad": r_b, ev_a: "not-a-receipt"},
+                           now=self.now)
+        self.assertEqual(ev.promoted_receipt(self.root, "s1", self.SB, ev_a, now=self.now), r_a, "kept")
+        self.assertEqual(ev.promoted_receipt(self.root, "s1", self.SB, ev_b, now=self.now), r_b)
+        self.assertNotIn("ev_bad", ev.read_promoted(self.root, "s1")[self.SB])
+        # Per storyboard: another storyboard has its own receipts.
+        self.assertIsNone(ev.promoted_receipt(self.root, "s1", "sb_" + "cd" * 12, ev_a, now=self.now))
+        # Past the reuse window (maestro sweeps unreferenced receipts) it is uploaded again.
+        self.assertIsNone(ev.promoted_receipt(self.root, "s1", self.SB, ev_a,
+                                              now=self.now + ev.PROMOTED_REUSE_S + 1))
+        self.assertIsNone(ev.record_promoted(self.root, "s1", self.SB, {}, now=self.now))
+        with self.assertRaises(ValueError):
+            ev.record_promoted(self.root, "s1", "sb_nope", {ev_a: r_a})
+        path.write_text("not json")
+        self.assertEqual(ev.read_promoted(self.root, "s1"), {})
+        ev.record_promoted(self.root, "s1", self.SB, {ev_a: r_a}, now=self.now)
+        os.utime(path, (self.now, self.now))
+        self.assertEqual(ev.gc(self.root, now=self.now + ev.RETENTION_S - 60, force=True), 0)
+        self.assertEqual(ev.gc(self.root, now=self.now + ev.RETENTION_S + 60, force=True), 1)
+        self.assertFalse(path.exists())
+
+    def test_promotion_ledger_keeps_the_newest_storyboards(self):
+        for i in range(ev.MAX_PROMOTED_STORYBOARDS + 3):
+            ev.record_promoted(self.root, "s1", f"sb_{i:024x}", {"ev_" + "a" * 12: "rcpt_" + "1" * 24},
+                               now=self.now + i)
+        kept = ev.read_promoted(self.root, "s1")
+        self.assertEqual(len(kept), ev.MAX_PROMOTED_STORYBOARDS)
+        self.assertIn(f"sb_{ev.MAX_PROMOTED_STORYBOARDS + 2:024x}", kept)
+        self.assertNotIn(f"sb_{0:024x}", kept)
+
+
 if __name__ == "__main__":
     unittest.main()

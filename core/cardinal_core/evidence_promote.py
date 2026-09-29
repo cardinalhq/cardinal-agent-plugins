@@ -7,13 +7,16 @@ storyboard, and Cardinal stores each as a *captured* receipt (rcpt_...) that
 scenes bind like any other receipt.
 
 Commands (main()):
-  promote [--storyboard sb_...] ev_... [ev_...]
+  promote [--storyboard sb_...] [--force] ev_... [ev_...]
       POST <maestro>/api/orgs/<org>/storyboards/<id>/evidence
       {items: [{provenance: "captured", source_server, client,
       client_called_at, tool, args, result}]}. source_server is the MCP
       server, "builtin:<runtime>" for the agent's own tools or
       "tool:<runtime>" where the runtime cannot tell. A withheld entry is
-      refused locally and never sent.
+      refused locally and never sent. An entry already promoted into the
+      same storyboard (the session's promoted.json ledger) is not sent
+      again: its existing receipt is printed ("already promoted"), unless
+      --force.
   list [--session ID | --all] [--limit N] [--tool GLOB] [--grep TEXT] [--withheld]
   find TEXT                  list --grep TEXT
   show ev_...                the scrubbed entry exactly as promote would cite it
@@ -75,7 +78,7 @@ MAX_CLIENT = 64
 
 DEFAULT_MCP_URL = "https://app.cardinalhq.io/mcp"
 MCP_URL_PATH_RE = re.compile(r"^/api/orgs/([^/?#]+)/mcp(?:/|$)")
-RECEIPT_ID_RE = re.compile(r"^rcpt_[0-9a-f]{24}$")
+RECEIPT_ID_RE = evidence.RECEIPT_ID_RE
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -421,6 +424,17 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
             err.write(f"{prog}: " + why + "\n")
             return EXIT_FAILED
 
+    # Already promoted into this storyboard: print the receipt it got, send nothing.
+    reused = 0
+    if not getattr(args, "force", False):
+        for ev_id in list(entries):
+            prior = evidence.promoted_receipt(root, entries[ev_id].get("session_id"), sb, ev_id, now)
+            if prior:
+                results[ev_id] = ("ok", prior, f"{summary_of(entries.pop(ev_id))}, captured, already promoted")
+                reused += 1
+    if not entries:
+        return report(ids, results, out, err, sb, reused)
+
     conn = adapter.connection(home, dict(os.environ))
     if not conn:
         err.write(f"{prog}: not connected to Cardinal (no usable Cardinal MCP URL): run "
@@ -471,6 +485,7 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
         rows.append((ev_id, item, encoded))
 
     planned = batches(rows)
+    ledger: dict = {}
     for bi, batch in enumerate(planned):
         body = b'{"items":[' + b",".join(r[2] for r in batch) + b"]}"
         answer = None
@@ -503,25 +518,39 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
             if r is None:
                 results[ev_id] = ("error", "no_result", "maestro returned no result for this entry")
             elif isinstance(r.get("receipt_id"), str) and RECEIPT_ID_RE.match(r["receipt_id"]):
-                results[ev_id] = ("ok", r["receipt_id"], f"{item['source_server']}/{item['tool']}")
+                results[ev_id] = ("ok", r["receipt_id"], f"{item['source_server']}/{item['tool']}, captured")
+                ledger.setdefault(entries[ev_id].get("session_id"), {})[ev_id] = r["receipt_id"]
             else:
                 e = r.get("error") if isinstance(r.get("error"), dict) else {}
                 results[ev_id] = ("error", clip(e.get("code") or "rejected", 60), clip(e.get("message")))
-    return report(ids, results, out, err, sb)
+    for session, receipts in ledger.items():
+        try:
+            evidence.record_promoted(root, session, sb, receipts, now)
+        except (OSError, ValueError) as e:
+            # The receipts are minted and printed; only the reuse is lost.
+            err.write(f"{prog}: could not record the promotion locally ({type(e).__name__}); "
+                      "promoting these entries again would upload them again\n")
+    return report(ids, results, out, err, sb, reused)
 
 
-def report(ids: list, results: dict, out, err, sb: Optional[str] = None) -> int:
+def summary_of(entry: dict) -> str:
+    return f"{clip(entry.get('server'), 80)}/{clip(entry.get('tool'), 120)}"
+
+
+def report(ids: list, results: dict, out, err, sb: Optional[str] = None, reused: int = 0) -> int:
     ok = 0
     for ev_id in ids:
         kind, a, b = results.get(ev_id, ("error", "not_uploaded", ""))
         if kind == "ok":
             ok += 1
-            out.write(f"{ev_id} -> {a}  ({clip(b, 200)}, captured)\n")
+            out.write(f"{ev_id} -> {a}  ({clip(b, 200)})\n")
         else:
             out.write(f"{ev_id}: error {a}: {b}\n")
     failed = len(ids) - ok
     if ok:
-        out.write(f"{ok} promoted" + (f" to {sb}" if sb else "") + (f", {failed} failed" if failed else "") +
+        out.write(f"{ok} promoted" + (f" to {sb}" if sb else "") +
+                  (f" ({reused} already, receipt reused)" if reused else "") +
+                  (f", {failed} failed" if failed else "") +
                   ". Bind each rcpt_ id like any receipt; the storyboard labels it captured.\n")
     if ok == 0:
         return EXIT_FAILED
@@ -736,6 +765,8 @@ def build_parser(prog: str = "cardinal-evidence") -> argparse.ArgumentParser:
     pr = sub.add_parser("promote", help="upload spool entries to a draft storyboard as captured receipts")
     pr.add_argument("--storyboard", metavar="SB_ID",
                     help="the draft storyboard (sb_...); default: the one storyboard created in this session")
+    pr.add_argument("--force", action="store_true",
+                    help="upload again even when an entry was already promoted into this storyboard")
     pr.add_argument("evidence_ids", nargs="+", metavar="ev_ID")
 
     def scope(sp, limit_default=50):

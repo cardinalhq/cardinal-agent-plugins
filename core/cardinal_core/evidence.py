@@ -36,6 +36,8 @@ What this module owns:
   - gc(): opportunistic, time-bounded removal of entries past retention.
   - store_token()/find_tokens(): a storyboard's evidence token, kept per
     session in token.json for `cardinal-evidence promote`.
+  - record_promoted()/promoted_receipt(): the receipt each promoted entry
+    got, kept per session in promoted.json, so a repeat promote reuses it.
   - list_entries()/session_dirs()/set_capture_disabled(): what the
     `cardinal-evidence list` / `off` / `on` / `status` commands read and write.
   - spill_path()/read_spill(): Claude Code's spill-file follower, shared
@@ -1456,22 +1458,27 @@ def store_token(root: Path, session_id: Any, *, storyboard_id: str, org: str, to
     tokens[storyboard_id] = rec
     keep = sorted(tokens.items(), key=lambda kv: str(kv[1].get("stored_at") or ""), reverse=True)
     body = {"schema": TOKEN_SCHEMA, "storyboards": dict(keep[:MAX_TOKENS_PER_SESSION])}
-    sdir = root / session_dir_name(session_id)
-    ensure_root(root)
+    return _write_session_json(root, session_id, TOKEN_FILE, ".token_", body)
+
+
+def _write_session_json(root: Path, session_id: Any, name: str, tmp_prefix: str, body: dict) -> Path:
+    """Atomically write <root>/<session>/<name> (0600; directories 0700)."""
+    sdir = Path(root) / session_dir_name(session_id)
+    ensure_root(Path(root))
     _ensure_private_dir(sdir)
-    fd, tmp = tempfile.mkstemp(dir=str(sdir), prefix=".token_", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=str(sdir), prefix=tmp_prefix, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps(body, separators=(",", ":")))
         os.chmod(tmp, 0o600)
-        os.replace(tmp, sdir / TOKEN_FILE)
+        os.replace(tmp, sdir / name)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
-    return sdir / TOKEN_FILE
+    return sdir / name
 
 
 def find_tokens(root: Path, storyboard_id: Optional[str] = None, session_id: Any = None) -> list:
@@ -1487,6 +1494,83 @@ def find_tokens(root: Path, storyboard_id: Optional[str] = None, session_id: Any
             if storyboard_id is None or sb == storyboard_id:
                 out.append((s, sb, rec))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Promotion ledger
+#
+# `cardinal-evidence promote` records each receipt it gets back in
+#     <root>/<session_id>/promoted.json    (0600, in the 0700 session dir)
+# keyed by storyboard id, then evidence id, so promoting an entry again into
+# the same storyboard prints the receipt it already has instead of uploading
+# a duplicate. A record is reused for PROMOTED_REUSE_S only: maestro sweeps an
+# unreferenced receipt after 14 days (conductor receipts.ts
+# RECEIPT_RETENTION_DAYS), so an older one is uploaded again.
+# ---------------------------------------------------------------------------
+
+PROMOTED_FILE = "promoted.json"
+PROMOTED_SCHEMA = "cardinal.evidence-promoted.v1"
+PROMOTED_REUSE_S = 7 * 24 * 3600
+MAX_PROMOTED_STORYBOARDS = MAX_TOKENS_PER_SESSION
+RECEIPT_ID_RE = re.compile(r"^rcpt_[0-9a-f]{24}$")
+
+
+def _valid_promotion(ev_id: Any, rec: Any) -> bool:
+    return (isinstance(ev_id, str) and EVIDENCE_ID_RE.match(ev_id) is not None and isinstance(rec, dict)
+            and isinstance(rec.get("receipt_id"), str) and RECEIPT_ID_RE.match(rec["receipt_id"]) is not None
+            and parse_time(rec.get("promoted_at")) is not None)
+
+
+def read_promoted(root: Path, session_id: Any) -> dict:
+    """{storyboard_id: {evidence_id: {receipt_id, promoted_at}}} from a
+    session's ledger; malformed records are dropped."""
+    data = _read_private_json(Path(root) / session_dir_name(session_id) / PROMOTED_FILE)
+    sbs = data.get("storyboards") if isinstance(data, dict) else None
+    if not isinstance(sbs, dict):
+        return {}
+    out = {}
+    for sb, recs in sbs.items():
+        if isinstance(sb, str) and STORYBOARD_ID_RE.match(sb) and isinstance(recs, dict):
+            good = {ev_id: rec for ev_id, rec in recs.items() if _valid_promotion(ev_id, rec)}
+            if good:
+                out[sb] = good
+    return out
+
+
+def promoted_receipt(root: Path, session_id: Any, storyboard_id: str, ev_id: str,
+                     now: Optional[float] = None) -> Optional[str]:
+    """The receipt an entry was promoted to in this storyboard, if that was
+    recent enough to reuse (PROMOTED_REUSE_S); else None."""
+    rec = read_promoted(root, session_id).get(storyboard_id, {}).get(ev_id)
+    if rec is None:
+        return None
+    now = time.time() if now is None else now
+    at = parse_time(rec["promoted_at"])
+    return rec["receipt_id"] if at is not None and now - at < PROMOTED_REUSE_S else None
+
+
+def record_promoted(root: Path, session_id: Any, storyboard_id: str, receipts: dict,
+                    now: Optional[float] = None) -> Optional[Path]:
+    """Add {evidence_id: receipt_id} for one storyboard to the session's
+    ledger (atomic, 0600). At most MAX_PROMOTED_STORYBOARDS storyboards are
+    kept, most recently promoted first."""
+    if not STORYBOARD_ID_RE.match(storyboard_id or ""):
+        raise ValueError("bad storyboard id")
+    now = time.time() if now is None else now
+    stamp = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new = {ev_id: {"receipt_id": r, "promoted_at": stamp} for ev_id, r in receipts.items()}
+    new = {ev_id: rec for ev_id, rec in new.items() if _valid_promotion(ev_id, rec)}
+    if not new:
+        return None
+    ledger = read_promoted(root, session_id)
+    ledger[storyboard_id] = {**ledger.get(storyboard_id, {}), **new}
+
+    def newest(kv):
+        return max(str(r.get("promoted_at") or "") for r in kv[1].values())
+
+    keep = sorted(ledger.items(), key=newest, reverse=True)[:MAX_PROMOTED_STORYBOARDS]
+    body = {"schema": PROMOTED_SCHEMA, "storyboards": dict(keep)}
+    return _write_session_json(root, session_id, PROMOTED_FILE, ".promoted_", body)
 
 
 def set_capture_disabled(root: Path, disabled: bool) -> None:
@@ -1765,7 +1849,7 @@ def _gc_entries(path: str, deadline: float) -> Optional[list]:
 def _gc_session(path: str, now: float, retention_s: float, deadline: float,
                 max_per_session: int) -> Optional[tuple]:
     """List one session directory: remove what expired (entries, token,
-    marker, dead temp files) and the oldest entries beyond max_per_session.
+    promotion ledger, marker, dead temp files) and the oldest entries beyond max_per_session.
     -> (removed, files left, [(mtime, size, path)] of entries kept, the
     time the next file here expires), or None past deadline."""
     removed = 0
@@ -1789,7 +1873,9 @@ def _gc_session(path: str, now: float, retention_s: float, deadline: float,
                     ttl = min(retention_s, TOKEN_RETENTION_S)
                 elif name == HINTED:
                     ttl = retention_s
-                elif name.startswith((".ev_", ".token_")) and name.endswith(".tmp"):
+                elif name == PROMOTED_FILE:
+                    ttl = retention_s
+                elif name.startswith((".ev_", ".token_", ".promoted_")) and name.endswith(".tmp"):
                     ttl = STALE_TMP_S
                 else:
                     ttl = None
