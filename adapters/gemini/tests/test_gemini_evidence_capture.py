@@ -1,12 +1,12 @@
 """Tests for local evidence capture in the Gemini adapter's AfterTool hook.
 
-A successful non-Cardinal MCP result (identified by mcp_context
-{server_name, tool_name}, or an `mcp__<server>__<tool>` name) is recorded in
-the shared spool ~/.cardinal/evidence/<session_id>/ev_<12 hex>.json
-(cardinal_core.evidence) and its id returned as
-hookSpecificOutput.additionalContext. Cardinal's own `cardinal` server,
-non-MCP tools, failed calls, the opt-outs and every failure stay silent.
-Nothing is sent over the network.
+Every tool call (Gemini's own tools and MCP tools, identified by mcp_context
+{server_name, tool_name} or an `mcp__<server>__<tool>` name; succeeded or
+failed) goes through the generic pipeline (cardinal_core.evidence_capture)
+into the shared spool ~/.cardinal/evidence/<session_id>/ev_<12 hex>.json and
+its id is returned as hookSpecificOutput.additionalContext. Cardinal's own
+`cardinal` server, the opt-outs and every failure stay silent. Nothing is
+sent over the network.
 
 Payload shapes follow gemini-cli 0.50 (hooks/hookEventHandler.ts
 fireAfterToolEvent, tools/mcp-tool.ts transformMcpContentToParts +
@@ -34,7 +34,7 @@ ADAPTER = TESTS_DIR.parent
 REPO_ROOT = ADAPTER.parent.parent
 HOOK = ADAPTER / "hooks" / "cardinal-gemini-telemetry.py"
 SESSION = "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
-LINE_RE = re.compile(r"^\[evidence:(ev_[0-9a-f]{12})\] captured locally from grafana/query_prometheus$")
+LINE_RE = re.compile(r"^\[evidence:(ev_[0-9a-f]{12})\]")
 
 if not (ADAPTER / "hooks" / "cardinal_core" / "evidence.py").exists():
     subprocess.run([sys.executable, str(REPO_ROOT / "build" / "vendor.py"), "gemini"],
@@ -137,14 +137,15 @@ class GeminiEvidenceCaptureTests(unittest.TestCase):
     def test_mcp_result_is_spooled_and_its_id_returned(self):
         res = self._run()
         ev_id, ctx, entry, path = self._captured(res)
-        self.assertEqual(ctx, f"[evidence:{ev_id}] captured locally from grafana/query_prometheus")
-        self.assertEqual(entry["schema"], "cardinal.evidence.v1")
+        self.assertIn("scripts/cardinal-evidence promote ev_", ctx)
+        self.assertEqual(entry["schema"], "cardinal.evidence.v2")
+        self.assertEqual(entry["source"], {"kind": "mcp", "server": "grafana", "runtime": "gemini"})
         self.assertEqual(entry["tier"], "captured")
         self.assertEqual(entry["session_id"], SESSION)
         self.assertEqual(entry["server"], "grafana")
         self.assertEqual(entry["tool"], "query_prometheus")
         self.assertEqual(entry["tool_name"], "mcp__grafana__query_prometheus")
-        self.assertEqual(entry["agent"], "gemini")
+        self.assertEqual(entry["client"], "gemini")
         self.assertEqual(entry["args"], {"expr": "rate(http_requests_total[5m])", "datasourceUid": "prom"})
         # Gemini's <untrusted_context> wrapper is not part of the result; the
         # one JSON text left is the tool's structured result.
@@ -161,17 +162,17 @@ class GeminiEvidenceCaptureTests(unittest.TestCase):
     def test_client_names_the_installed_gemini_cli_version(self):
         self._fake_gemini("0.50.0")
         _, _, entry, _ = self._captured(self._run())
-        self.assertEqual(entry["agent"], "gemini/0.50.0")
+        self.assertEqual(entry["client"], "gemini/0.50.0")
 
     def test_client_ignores_a_foreign_or_unclean_package(self):
         self._fake_gemini("9.9.9", name="not-gemini")
         _, _, entry, _ = self._captured(self._run())
-        self.assertEqual(entry["agent"], "gemini")
+        self.assertEqual(entry["client"], "gemini")
 
     def test_client_ignores_an_unclean_version(self):
         self._fake_gemini("0.50.0\nX-Injected: 1")
         _, _, entry, _ = self._captured(self._run())
-        self.assertEqual(entry["agent"], "gemini")
+        self.assertEqual(entry["client"], "gemini")
 
     def test_mcp_double_underscore_name_without_context(self):
         payload = self._payload(tool_name="mcp__grafana__query_prometheus")
@@ -214,25 +215,52 @@ class GeminiEvidenceCaptureTests(unittest.TestCase):
         payload.pop("mcp_context")
         self._assert_no_capture(self._run(payload))
 
-    def test_failed_calls_are_skipped(self):
+    def test_failed_calls_are_captured_as_errors(self):
         payload = self._payload(tool_response={
-            "llmContent": "MCP tool 'query_prometheus' reported tool error ...",
+            "llmContent": "MCP tool 'query_prometheus' reported tool error: 403 api_key=sk-LEAKabcdefghijklmnop",
             "returnDisplay": "Error: MCP tool 'query_prometheus' reported an error.",
             "error": {"type": "mcp_tool_error", "message": "boom"},
         })
-        self._assert_no_capture(self._run(payload))
+        _, _, entry, path = self._captured(self._run(payload))
+        self.assertEqual(entry["status"], "error")
+        self.assertIs(entry["is_error"], True)
+        self.assertIn("reported tool error: 403", entry["result"]["text"][0])
+        self.assertNotIn("LEAK", path.read_text())
 
     def test_unparseable_result_is_skipped(self):
         payload = self._payload(tool_response={"llmContent": [{"text": "[Error: Could not parse tool response]"}],
                                                "returnDisplay": "```json\n[]\n```"})
         self._assert_no_capture(self._run(payload))
 
-    def test_non_mcp_tools_are_skipped(self):
-        for name in ("run_shell_command", "read_file", "mcp_grafana_query_prometheus"):
+    def test_gemini_own_and_unknown_tools_are_captured(self):
+        for name in ("run_shell_command", "read_file", "mcp_grafana_query_prometheus", "some_future_tool"):
             with self.subTest(name=name):
-                payload = self._payload(tool_name=name)
+                payload = self._payload(tool_name=name, tool_input={"command": "npm test"},
+                                        tool_response={"llmContent": "Command: npm test\nOutput: 12 passing\n"
+                                                                     "Exit Code: 0", "returnDisplay": "12 passing"})
                 payload.pop("mcp_context")
-                self._assert_no_capture(self._run(payload))
+                _, _, entry, _ = self._captured(self._run(payload))
+                self.assertEqual(entry["source"], {"kind": "builtin", "runtime": "gemini"})
+                self.assertEqual(entry["server"], "builtin:gemini")
+                self.assertEqual(entry["tool"], name)
+                self.assertIn("12 passing", entry["result"]["text"][0])
+
+    def test_failed_shell_call_is_captured(self):
+        payload = self._payload(tool_name="run_shell_command", tool_input={"command": "make test"},
+                                tool_response={"llmContent": "Command: make test\nExit Code: 2",
+                                               "returnDisplay": "", "error": {"message": "exit 2"}})
+        payload.pop("mcp_context")
+        _, _, entry, _ = self._captured(self._run(payload))
+        self.assertEqual(entry["status"], "error")
+
+    def test_sensitive_call_is_withheld(self):
+        payload = self._payload(tool_name="run_shell_command", tool_input={"command": "printenv"},
+                                tool_response={"llmContent": "HOME=/x\nAPI_TOKEN=SECRET-zz9", "returnDisplay": ""})
+        payload.pop("mcp_context")
+        res = self._run(payload)
+        ctx = json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertRegex(ctx, r"^\[evidence:ev_[0-9a-f]{12} withheld: secret command")
+        self.assertNotIn("SECRET-zz9", "".join(p.read_text() for p in self.root.rglob("ev_*.json")))
 
     def test_opt_out_env(self):
         for v in ("0", "false", "off", "no"):

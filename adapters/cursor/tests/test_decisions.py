@@ -173,7 +173,9 @@ class CursorDecisionBase(unittest.TestCase):
 
     def env(self, inline: bool = True, **extra) -> dict:
         path = f"{self.bin}:{os.path.dirname(GIT)}:/usr/bin:/bin"
-        env = {"HOME": str(self.home), "PATH": path, **extra}
+        # Evidence capture (every tool call) has its own tests; these pin
+        # the decision output alone.
+        env = {"HOME": str(self.home), "PATH": path, "CARDINAL_EVIDENCE_CAPTURE": "0", **extra}
         if inline:
             env["CARDINAL_CURSOR_BACKGROUND_INLINE"] = "1"
         return env

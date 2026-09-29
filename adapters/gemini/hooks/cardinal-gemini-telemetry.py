@@ -26,10 +26,12 @@ Event dispatch (payload shapes: packages/core/src/hooks/types.ts):
                   background: cardinal.git_state (+PR) + verdict refresh
   AfterModel    → api_request + cardinal.turn_usage, final chunk only
                   (fires per streamed chunk; non-final chunks exit early)
-  AfterTool     → cardinal.turn_tool + tool_result (per tool call); a
-                  non-Cardinal MCP result is also captured in the local
-                  evidence spool (~/.cardinal/evidence, cardinal_core.evidence)
-                  and its [evidence:ev_…] id returned as additionalContext
+  AfterTool     → cardinal.turn_tool + tool_result (per tool call); every
+                  tool call (built-in or MCP, succeeded or failed; not
+                  Cardinal's own) is also captured in the local evidence
+                  spool through the generic pipeline
+                  (cardinal_core.evidence_capture) and its [evidence:ev_…]
+                  id returned as additionalContext
   AfterAgent    → cardinal.subagent_usage for subagent-shaped payloads only;
                   not registered by cardinal-connect (Gemini fires it per
                   main-agent turn with {prompt, prompt_response})
@@ -535,13 +537,17 @@ def tool_success(payload: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# AfterTool — evidence capture (the Gemini side of the local evidence spool)
+# AfterTool — evidence capture (the Gemini side of the generic evidence
+# pipeline, cardinal_core.evidence_capture): every tool call, built-in or
+# MCP, succeeded or failed
 # ---------------------------------------------------------------------------
 
 # Cardinal's own MCP server, as the extension manifest and cardinal-connect
 # name it (mcpServers.cardinal). Its gateway mints a *witnessed* receipt for
-# every call, so evidence capture skips it.
+# every call, so evidence capture skips it (the only tool it skips).
 CARDINAL_MCP_SERVERS = ("cardinal",)
+# The evidence CLI a capture's context line points the agent at.
+EVIDENCE_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-evidence"
 
 # Gemini CLI wraps each MCP text block it hands the model (tools/mcp-tool.ts
 # wrapUntrusted, gemini-cli 0.50): "<untrusted_context>\n" + text with its
@@ -663,42 +669,93 @@ def mcp_server_and_tool(payload: dict[str, Any], raw_name: str) -> tuple[str, st
     return evidence.split_mcp_tool(raw_name)
 
 
-def capture_evidence(payload: dict[str, Any]) -> str | None:
-    """Record a successful non-Cardinal MCP result in the local evidence
-    spool and return the `[evidence:ev_…]` context line; None for a non-MCP
-    or Cardinal tool, a failed call, when the user opted out
-    (CARDINAL_EVIDENCE_CAPTURE=0 or ~/.cardinal/evidence/disabled), or on
-    any failure. Local file work only; never raises."""
-    try:
-        raw_name = payload.get("tool_name") or payload.get("toolName")
-        if not isinstance(raw_name, str) or not raw_name:
-            return None
-        parts = mcp_server_and_tool(payload, raw_name)
-        if parts is None:
-            return None
+def gemini_error_text(tool_response: Any) -> str | None:
+    """The failure text of an AfterTool call that failed (a present
+    `error`): what the model saw (llmContent text), else the error's
+    message. None for a call that did not fail."""
+    if not isinstance(tool_response, dict) or not tool_response.get("error"):
+        return None
+    llm = tool_response.get("llmContent")
+    if isinstance(llm, str) and llm.strip():
+        return _unwrap_untrusted(llm)
+    if isinstance(llm, dict) and isinstance(llm.get("text"), str) and llm["text"].strip():
+        return _unwrap_untrusted(llm["text"])
+    err = tool_response.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg
+    if isinstance(err, str) and err.strip():
+        return err
+    display = tool_response.get("returnDisplay")
+    if isinstance(display, str) and display.strip():
+        return display
+    return "error"
+
+
+def evidence_call(payload: dict[str, Any]):
+    """A ToolCall for any AfterTool payload (built-in tool or MCP), or None
+    when there is nothing to record (no tool name, Gemini's own "could not
+    parse" placeholder)."""
+    from cardinal_core import evidence_capture as cap
+
+    raw_name = payload.get("tool_name") or payload.get("toolName")
+    if not isinstance(raw_name, str) or not raw_name:
+        return None
+    parts = mcp_server_and_tool(payload, raw_name)
+    if parts is not None:
         server, tool = parts
-        if server in CARDINAL_MCP_SERVERS:
-            return None
-        response = gemini_tool_response(payload.get("tool_response"))
+        tool_name = f"mcp__{server}__{tool}"
+        kind = "cardinal" if server in CARDINAL_MCP_SERVERS else "mcp"
+        source = {"kind": kind, "server": server, "runtime": "gemini"}
+    else:
+        tool, tool_name = raw_name, raw_name
+        source = cap.builtin_source("gemini")
+    tool_response = payload.get("tool_response")
+    error = gemini_error_text(tool_response)
+    response = None
+    if error is None:
+        response = gemini_tool_response(tool_response)
         if response is None:
             return None
-        tool_input = payload.get("tool_input")
-        if tool_input is None:
-            tool_input = payload.get("toolInput")
-        entry = evidence.capture(
-            Path.home(),
-            server=server,
-            tool=tool,
-            tool_name=f"mcp__{server}__{tool}",
-            tool_input=tool_input,
-            tool_response=response,
-            session_id=session_id_from_payload(payload),
-            agent=evidence.client_string("gemini", gemini_version()),
-        )
-        if entry is None:
+    tool_input = payload.get("tool_input")
+    if tool_input is None:
+        tool_input = payload.get("toolInput")
+    tuid = payload.get("tool_call_id") or payload.get("toolCallId") or payload.get("tool_use_id")
+    cwd = payload.get("cwd")
+    return cap.ToolCall(
+        runtime="gemini",
+        tool_name=tool_name,
+        source=source,
+        tool=tool,
+        tool_input=tool_input,
+        response=response,
+        error=error,
+        session_id=session_id_from_payload(payload),
+        tool_use_id=tuid if isinstance(tuid, str) else None,
+        cwd=cwd if isinstance(cwd, str) else None,
+        client=evidence.client_string("gemini", gemini_version()),
+    )
+
+
+def capture_evidence(payload: dict[str, Any]) -> str | None:
+    """Record one tool call (any tool, succeeded or failed) in the local
+    evidence spool through the generic pipeline and return the context
+    line (`[evidence:ev_...]`, or `[evidence:ev_... withheld: ...]`); None
+    for Cardinal's own tools, when the user opted out
+    (CARDINAL_EVIDENCE_CAPTURE=0 or ~/.cardinal/evidence/disabled), with
+    CARDINAL_EVIDENCE_CONTEXT=0, or on any failure. Local file work only;
+    never raises."""
+    try:
+        from cardinal_core import evidence_capture as cap
+
+        call = evidence_call(payload)
+        if call is None:
             return None
-        return evidence.captured_line(entry["evidence_id"], server, tool)
-    except Exception:
+        with cap.time_guard():
+            got = cap.capture_call(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
+        return got.line if got is not None else None
+    except BaseException:
         return None
 
 

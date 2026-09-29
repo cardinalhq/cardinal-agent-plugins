@@ -1,10 +1,12 @@
-"""Tests for local evidence capture in the Cursor adapter's postToolUse hook.
+"""Tests for local evidence capture in the Cursor adapter's postToolUse and
+postToolUseFailure hooks.
 
-A non-Cardinal MCP result (tool name `mcp__<server>__<tool>`) is recorded in
-the shared spool ~/.cardinal/evidence/<conversation_id>/ev_<12 hex>.json
-(cardinal_core.evidence) and its id handed back to the agent via
-`additional_context`. Cardinal's own `cardinal` server, non-MCP tools, the
-opt-outs and every failure stay silent. Nothing is sent over the network.
+Every tool call (MCP `mcp__<server>__<tool>` or Cursor's own tools) goes
+through the generic pipeline (cardinal_core.evidence_capture) into the shared
+spool ~/.cardinal/evidence/<conversation_id>/ev_<12 hex>.json and its id is
+handed back to the agent via `additional_context`. Cardinal's own `cardinal`
+server, the opt-outs and every failure stay silent. Nothing is sent over the
+network.
 
 Each test runs the hook as a subprocess with HOME pointed at a temp dir that
 has no Cardinal connection state (capture does not need one).
@@ -31,7 +33,7 @@ ADAPTER = TESTS_DIR.parent
 REPO_ROOT = ADAPTER.parent.parent
 HOOK = ADAPTER / "hooks" / "cardinal-cursor-telemetry.py"
 CONV = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
-LINE_RE = re.compile(r"^\[evidence:(ev_[0-9a-f]{12})\] captured locally from grafana/query_prometheus$")
+LINE_RE = re.compile(r"^\[evidence:(ev_[0-9a-f]{12})\]")
 
 if not (ADAPTER / "hooks" / "cardinal_core" / "evidence.py").exists():
     subprocess.run([sys.executable, str(REPO_ROOT / "build" / "vendor.py"), "cursor"],
@@ -114,15 +116,18 @@ class CursorEvidenceCaptureTests(unittest.TestCase):
     def test_non_cardinal_mcp_result_is_spooled_and_its_id_returned(self):
         res = self._run()
         ev_id, ctx, entry, path = self._captured(res)
-        self.assertEqual(ctx, f"[evidence:{ev_id}] captured locally from grafana/query_prometheus")
-        self.assertEqual(entry["schema"], "cardinal.evidence.v1")
+        self.assertIn("scripts/cardinal-evidence promote ev_", ctx)
+        _, ctx2, _, _ = self._captured(self._run(self._payload(tool_use_id="call_2")))
+        self.assertRegex(ctx2, r"^\[evidence:ev_[0-9a-f]{12}\]$")
+        self.assertEqual(entry["schema"], "cardinal.evidence.v2")
+        self.assertEqual(entry["source"], {"kind": "mcp", "server": "grafana", "runtime": "cursor"})
         self.assertEqual(entry["tier"], "captured")
         self.assertEqual(entry["evidence_id"], ev_id)
         self.assertEqual(entry["session_id"], CONV)
         self.assertEqual(entry["server"], "grafana")
         self.assertEqual(entry["tool"], "query_prometheus")
         self.assertEqual(entry["tool_name"], "mcp__grafana__query_prometheus")
-        self.assertEqual(entry["agent"], "cursor/1.7.29")
+        self.assertEqual(entry["client"], "cursor/1.7.29")
         self.assertEqual(entry["tool_use_id"], "call_01ABC")
         self.assertEqual(entry["args"], {"expr": "rate(http_requests_total[5m])", "datasourceUid": "prom"})
         # tool_output's JSON string was decoded: structure kept, the text
@@ -144,7 +149,7 @@ class CursorEvidenceCaptureTests(unittest.TestCase):
             "toolUseId": "call_camel",
         }
         _, _, entry, _ = self._captured(self._run(payload))
-        self.assertEqual(entry["agent"], "cursor/1.8.0")
+        self.assertEqual(entry["client"], "cursor/1.8.0")
         self.assertEqual(entry["tool_use_id"], "call_camel")
         self.assertEqual(entry["args"], {"expr": "up"})
         self.assertEqual(entry["result"], {"text": ["plain text result"]})
@@ -157,7 +162,7 @@ class CursorEvidenceCaptureTests(unittest.TestCase):
                 if version is None:
                     payload.pop("cursor_version")
                 _, _, entry, path = self._captured(self._run(payload))
-                self.assertEqual(entry["agent"], "cursor")
+                self.assertEqual(entry["client"], "cursor")
                 path.unlink()
 
     def test_credentials_are_scrubbed_before_they_reach_disk(self):
@@ -193,8 +198,8 @@ class CursorEvidenceCaptureTests(unittest.TestCase):
             json.dumps({"message": "You are at 60% of session budget.", "band": 1, "staged_at": 0}))
         res = self._run()
         ev_id, ctx, _, _ = self._captured(res)
-        self.assertEqual(ctx, f"[evidence:{ev_id}] captured locally from grafana/query_prometheus"
-                              "\n\nYou are at 60% of session budget.")
+        self.assertTrue(ctx.startswith(f"[evidence:{ev_id}]"), ctx)
+        self.assertTrue(ctx.endswith("\n\nYou are at 60% of session budget."), ctx)
 
     # -- not captured -------------------------------------------------------
 
@@ -205,11 +210,47 @@ class CursorEvidenceCaptureTests(unittest.TestCase):
         self._assert_no_capture(res)
         self.assertEqual(res.stdout, "")
 
-    def test_non_mcp_tools_are_skipped(self):
-        for name in ("run_terminal_cmd", "read_file", "MCP:query_prometheus", "mcp__grafana", "mcp____x"):
+    def test_cursor_own_and_unknown_tools_are_captured(self):
+        shell = self._payload(tool_name="Shell", tool_use_id="call_sh",
+                              tool_input={"command": "npm test"},
+                              tool_output=json.dumps({"stdout": "12 passing", "stderr": "", "exitCode": 0}))
+        _, _, entry, _ = self._captured(self._run(shell))
+        self.assertEqual(entry["source"], {"kind": "builtin", "runtime": "cursor"})
+        self.assertEqual(entry["server"], "builtin:cursor")
+        self.assertEqual(entry["normalizer"], "shell")
+        self.assertEqual(entry["exit_code"], 0)
+        self.assertEqual(entry["result"]["structured"]["stdout"], "12 passing")
+        for i, name in enumerate(("run_terminal_cmd", "read_file", "MCP:query_prometheus", "mcp__grafana",
+                                  "SomeFutureTool")):
             with self.subTest(name=name):
-                res = self._run(self._payload(tool_name=name))
-                self._assert_no_capture(res)
+                _, _, entry, _ = self._captured(self._run(self._payload(tool_name=name, tool_use_id=f"c{i}")))
+                self.assertEqual(entry["source"]["kind"], "builtin")
+                self.assertEqual(entry["tool"], name)
+
+    def test_sensitive_call_is_withheld(self):
+        payload = self._payload(tool_name="read_file", tool_use_id="call_env",
+                                tool_input={"target_file": str(self.home / ".env")},
+                                tool_output="API_TOKEN=SECRET-zz9")
+        res = self._run(payload)
+        ctx = json.loads(res.stdout)["additional_context"]
+        self.assertRegex(ctx, r"^\[evidence:ev_[0-9a-f]{12} withheld: sensitive path \(\.env\*\)\]")
+        self.assertNotIn("SECRET-zz9", "".join(p.read_text() for p in self.root.rglob("ev_*.json")))
+
+    def test_failed_tool_call_is_captured_as_an_error(self):
+        payload = self._payload(hook_event_name="postToolUseFailure", tool_name="Shell", tool_use_id="call_f",
+                                tool_input={"command": "npm test"}, error="Exit code 1\n1 failing")
+        payload.pop("tool_output")
+        res = subprocess.run([sys.executable, str(HOOK), "--event", "postToolUseFailure"], input=json.dumps(payload),
+                             capture_output=True, text=True, timeout=30, env=self._env(), cwd=str(self.home))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        _, _, entry, _ = self._captured(res)
+        self.assertEqual(entry["status"], "error")
+        self.assertEqual(entry["exit_code"], 1)
+        # No error text at all: nothing to capture.
+        payload.pop("error")
+        res = subprocess.run([sys.executable, str(HOOK), "--event", "postToolUseFailure"], input=json.dumps(payload),
+                             capture_output=True, text=True, timeout=30, env=self._env(), cwd=str(self.home))
+        self.assertEqual(res.stdout, "")
 
     def test_opt_out_env(self):
         for v in ("0", "false", "off", "no"):

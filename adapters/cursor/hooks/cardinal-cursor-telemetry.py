@@ -19,11 +19,13 @@ specific:
     escalation of warn to block;
   * length-only turn_thought / turn_response emission (Divergence J);
   * the preCompact context-window plan_usage slice (Divergence K);
-  * local evidence capture on postToolUse: a non-Cardinal MCP result is
-    recorded in the shared spool (~/.cardinal/evidence, cardinal_core.
-    evidence) and its `[evidence:ev_…]` id handed back via
-    `additional_context`, so a storyboard can cite it as *captured*
-    evidence. Nothing is sent over the network.
+  * local evidence capture on postToolUse and postToolUseFailure: every
+    tool call (built-in or MCP, except Cardinal's own gateway) goes through
+    the shared generic pipeline (cardinal_core.evidence_capture) into the
+    spool ~/.cardinal/evidence, and its `[evidence:ev_…]` id is handed back
+    via `additional_context`, so a storyboard can cite it as *captured*
+    evidence (scripts/cardinal-evidence promotes it). Nothing is sent over
+    the network.
 
 There is NO turn_usage / api_request emission on Cursor — the product
 never exposes per-model-call token counts (parity spec gap D). Failures
@@ -97,6 +99,8 @@ PR_RESOLVE_TIMEOUT_SEC = 1.5
 
 # The decision-capture CLI the sessionStart context tells the agent to run.
 DECISION_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-decision"
+# The evidence CLI a capture's context line points the agent at.
+EVIDENCE_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-evidence"
 
 # postToolUse does only local work; its network sends run in a detached
 # `--background <spool>` child. Test-only: run that job inline instead.
@@ -107,7 +111,7 @@ EXIT_CODE_RE = re.compile(r"(?:exit(?:ed)?|status)[ :]+(-?\d+)", re.IGNORECASE)
 
 # Cardinal's own MCP server as cardinal-connect registers it
 # (mcpServers.cardinal). Its gateway mints a *witnessed* receipt for every
-# call, so evidence capture skips it.
+# call, so evidence capture skips it (the only tool it skips).
 CARDINAL_MCP_SERVERS = ("cardinal",)
 
 
@@ -285,9 +289,11 @@ def output_success(tool_output: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Evidence capture (postToolUse) — the Cursor side of the local evidence
-# spool (cardinal_core.evidence). Cursor names MCP tools
-# `mcp__<server>__<tool>` and fires postToolUse only after a tool succeeds.
+# Evidence capture (postToolUse / postToolUseFailure) — the Cursor side of the
+# generic evidence pipeline (cardinal_core.evidence_capture.capture_call).
+# EVERY tool call is captured (built-in tools, any MCP server, tools Cursor
+# adds later); the only skip is Cardinal's own gateway, whose calls already
+# carry witnessed receipts. Cursor names MCP tools `mcp__<server>__<tool>`.
 # ---------------------------------------------------------------------------
 
 def _decode_json_container(value: Any) -> Any:
@@ -308,44 +314,81 @@ def _decode_json_container(value: Any) -> Any:
     return value
 
 
-def capture_evidence(payload: dict[str, Any]) -> str | None:
-    """Record a non-Cardinal MCP result in the local evidence spool and
-    return the `[evidence:ev_…]` context line for the agent; None for a
-    non-MCP or Cardinal tool, when the user opted out
-    (CARDINAL_EVIDENCE_CAPTURE=0 or ~/.cardinal/evidence/disabled), or on
-    any failure. Local file work only; never raises."""
+def _first(payload: dict[str, Any], *keys: str) -> Any:
+    for k in keys:
+        v = payload.get(k)
+        if v is not None:
+            return v
+    return None
+
+
+def failure_text(payload: dict[str, Any]) -> str | None:
+    """The error of a postToolUseFailure payload. Cursor documents the
+    event but not (yet, as observed) its exact fields: the first non-empty
+    string among the likely spellings, else the tool output."""
+    for k in ("error", "error_message", "errorMessage", "failure", "message"):
+        v = payload.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+        if isinstance(v, dict):
+            m = v.get("message")
+            if isinstance(m, str) and m.strip():
+                return m
+    out = _first(payload, "tool_output", "toolOutput")
+    if isinstance(out, str) and out.strip():
+        return out
+    return None
+
+
+def capture_evidence(payload: dict[str, Any], failed: bool = False) -> str | None:
+    """Record one tool call (any tool) in the local evidence spool and
+    return the context line for the agent (`[evidence:ev_...]`, or
+    `[evidence:ev_... withheld: ...]` for a call that touched something
+    sensitive); None for Cardinal's own tools, when the user opted out
+    (CARDINAL_EVIDENCE_CAPTURE=0 or ~/.cardinal/evidence/disabled), with
+    CARDINAL_EVIDENCE_CONTEXT=0, or on any failure. Local file work only;
+    never raises."""
     try:
-        raw_name = payload.get("tool_name") or payload.get("toolName")
-        parts = evidence.split_mcp_tool(raw_name)
-        if parts is None:
+        from cardinal_core import evidence_capture as cap
+
+        raw_name = _first(payload, "tool_name", "toolName")
+        if not isinstance(raw_name, str) or not raw_name:
             return None
-        server, tool = parts
-        if server in CARDINAL_MCP_SERVERS:
+        source, tool = cap.classify_mcp_name(raw_name, "cursor", CARDINAL_MCP_SERVERS)
+        tool_input = _decode_json_container(_first(payload, "tool_input", "toolInput"))
+        error = failure_text(payload) if failed else None
+        if failed and error is None:
             return None
-        tool_input = payload.get("tool_input")
-        if tool_input is None:
-            tool_input = payload.get("toolInput")
-        tool_output = payload.get("tool_output")
-        if tool_output is None:
-            tool_output = payload.get("toolOutput")
-        entry = evidence.capture(
-            Path.home(),
-            server=server,
-            tool=tool,
+        response = None if failed else _decode_json_container(_first(payload, "tool_output", "toolOutput"))
+        tuid = _first(payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
+        call = cap.ToolCall(
+            runtime="cursor",
             tool_name=raw_name,
-            tool_input=_decode_json_container(tool_input),
-            tool_response=_decode_json_container(tool_output),
+            source=source,
+            tool=tool,
+            tool_input=tool_input,
+            response=response,
+            error=error,
             session_id=conv_id_from_payload(payload),
-            tool_use_id=payload.get("tool_use_id") or payload.get("toolUseId"),
-            agent=evidence.client_string(
-                "cursor", payload.get("cursor_version") or payload.get("cursorVersion")
-            ),
+            tool_use_id=tuid if isinstance(tuid, str) else None,
+            cwd=cwd_from_payload(payload),
+            client=evidence.client_string("cursor", _first(payload, "cursor_version", "cursorVersion")),
         )
-        if entry is None:
-            return None
-        return evidence.captured_line(entry["evidence_id"], server, tool)
-    except Exception:
+        with cap.time_guard():
+            got = cap.capture_call(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
+        return got.line if got is not None else None
+    except BaseException:
         return None
+
+
+def handle_post_tool_use_failure(payload: dict[str, Any]) -> None:
+    """A failed tool call is evidence too (a failing test, a 403): captured
+    with status "error", its id returned as additional_context."""
+    dump_debug_payload("postToolUseFailure", payload)
+    line = capture_evidence(payload, failed=True)
+    if line:
+        sys.stdout.write(json.dumps({"additional_context": line}))
+        sys.stdout.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -880,7 +923,7 @@ def post_tool_use_background(job: dict[str, Any]) -> None:
 def handle_post_tool_use(payload: dict[str, Any]) -> None:
     """Emit cardinal.turn_tool + tool_result from one payload; piggyback
     any staged notify message as `additional_context` output (once per
-    band per turn). A non-Cardinal MCP result is first captured in the
+    band per turn). The tool call (any tool) is first captured in the
     local evidence spool and its id prepended to that output."""
     dump_debug_payload("postToolUse", payload)
     evidence_line = capture_evidence(payload)
@@ -1182,6 +1225,7 @@ HANDLERS = {
     "sessionStart": handle_session_start,
     "beforeSubmitPrompt": handle_before_submit_prompt,
     "postToolUse": handle_post_tool_use,
+    "postToolUseFailure": handle_post_tool_use_failure,
     "preCompact": handle_pre_compact,
     "stop": handle_stop,
     "subagentStop": handle_subagent_stop,

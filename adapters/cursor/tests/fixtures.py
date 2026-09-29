@@ -118,8 +118,11 @@ def build_sandbox(root: Path, ingest_endpoint: str) -> dict[str, Any]:
 def hook_env(home: Path) -> dict[str, str]:
     # postToolUse hands its OTLP posts to a detached child; run that job
     # inline so each step's batches are captured deterministically.
+    # The goldens pin the telemetry contract of the pre-migration plugin;
+    # evidence capture (every tool call, since generic capture) has its own
+    # tests (test_cursor_evidence_capture.py) and would add a context line.
     env = {**os.environ, "HOME": str(home), **_GIT_ENV,
-           "CARDINAL_CURSOR_BACKGROUND_INLINE": "1"}
+           "CARDINAL_CURSOR_BACKGROUND_INLINE": "1", "CARDINAL_EVIDENCE_CAPTURE": "0"}
     bin_dir = home / "bin"
     if bin_dir.is_dir():
         env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
