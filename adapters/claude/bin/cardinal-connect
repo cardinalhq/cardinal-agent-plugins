@@ -446,8 +446,8 @@ def main() -> int:
     p.add_argument(
         "--telemetry-only", action="store_true",
         help="Skip the MCP side. With CARDINAL_MCP_URL unset, the plugin's "
-             "`cardinal` server stays on its unconnected default (Cardinal "
-             "Cloud's /mcp over OAuth).",
+             "`cardinal` server has no URL and stays off (/mcp lists it as "
+             "missing CARDINAL_MCP_URL).",
     )
     p.add_argument(
         # Legacy no-op: maestro:act is requested by default now.

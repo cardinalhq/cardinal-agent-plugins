@@ -20,11 +20,8 @@ so once per session.
 `storyboard__preview` and does the following:
 
 1. Downloads each scene's self-contained preview page from your Cardinal, using the key
-   `/cardinal:connect` stored or, before you connect, the result's own `preview_token`
-   (10 minutes, this storyboard's pages only). It only ever sends either to the Cardinal
-   the plugin's MCP server talks to (`CARDINAL_MCP_URL`, else Cardinal Cloud), never to a
-   URL the result names, and it checks every page's size and SHA-256 against the preview
-   result.
+   `/cardinal:connect` stored. It only ever sends that key to the Cardinal you are
+   connected to, and it checks every page's size and SHA-256 against the preview result.
 2. Opens the page in **your local Chrome/Chromium**, headless, with its OS sandbox **on**,
    networking locked off (no DNS, all connections to a dead proxy, every request refused),
    a throwaway profile, UTC and reduced motion.

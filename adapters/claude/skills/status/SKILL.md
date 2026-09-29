@@ -37,11 +37,12 @@ and reports:
   substitutes at MCP server connect time), and a reachability probe.
 
 If `~/.claude/cardinal.json` doesn't exist, surfaces "not connected",
-says storyboards still work without connecting (the `cardinal` server
-uses Cardinal Cloud; sign in via `/mcp`), and suggests
+says the plugin is local-only (the `cardinal` server is off; `/mcp`
+lists it as missing `CARDINAL_MCP_URL`) and how to get write access:
+sign up at `https://app.cardinalhq.io`, create an API key, run
 `/cardinal:connect`. In either state it warns when
 `CARDINAL_MCP_API_KEY` is set but `CARDINAL_MCP_URL` is not — the
-plugin's `.mcp.json` then sends that key to Cardinal Cloud — and names
-the fixes (`/cardinal:connect [--host <url>]`, or unset the key). If state says connected but the
+`cardinal` server then has no URL, so Cardinal's tools are missing —
+and names the fixes (`/cardinal:connect [--host <url>]`, or unset the key). If state says connected but the
 matching env vars are absent or a probe returns 401/403, surfaces a
 clear repair hint (`/cardinal:connect --rotate`).

@@ -19,7 +19,7 @@ The first usage snapshot of a session is always written by plan-state.py
 at SessionStart.
 
 Not connected (hooks/_connection.py: /cardinal:connect never ran, the
-plugin's MCP server is on OAuth to Cardinal Cloud): exits 0 at once, with
+plugin is local-only and its MCP server has no URL): exits 0 at once, with
 no output and no network.
 """
 

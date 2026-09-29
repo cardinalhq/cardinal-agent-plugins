@@ -1,21 +1,21 @@
-"""Would Claude Code send a Cardinal API key to Cardinal Cloud by default?
+"""Is a Cardinal MCP key set without a URL (a stray key)?
 
 The plugin's .mcp.json is
 
-    "url":     "${CARDINAL_MCP_URL:-https://app.cardinalhq.io/mcp}"
+    "url":     "${CARDINAL_MCP_URL}"
     "headers": {"X-CardinalHQ-API-Key": "${CARDINAL_MCP_API_KEY:-}"}
 
-and cannot express "send the key only with a configured URL". So when
-CARDINAL_MCP_API_KEY is set (exported in a shell profile for a manual Codex
-config, or a self-hosted maestro's key) but CARDINAL_MCP_URL is not,
-Claude Code sends that key to Cardinal Cloud. /cardinal:connect always writes
-both, so a connected install never hits this; a stray key does.
+so without CARDINAL_MCP_URL the `cardinal` server has no URL and never
+connects, whatever key is set: the key is sent nowhere. But a key on its own
+(exported in a shell profile for a manual Codex config, or a self-hosted
+maestro's key) makes hooks/_connection.py count this machine as connected,
+while Cardinal's tools stay missing. /cardinal:connect always writes both, so
+a connected install never hits this; a stray key does.
 
 key_without_url() detects it from ~/.claude/settings.json `env` (which Claude
 Code applies to its own environment) and the process environment, the same
 two places Claude Code substitutes from. An empty or blank value counts as
-unset, as `${VAR:-default}` does for the URL and as an empty header does for
-the key.
+unset.
 
 Used by storyboard-session.py (SessionStart, runs connected or not) and
 bin/cardinal-status. Reads only local files; never raises.
@@ -29,15 +29,13 @@ from pathlib import Path
 
 MCP_URL_ENV = "CARDINAL_MCP_URL"
 MCP_KEY_ENV = "CARDINAL_MCP_API_KEY"
-CLOUD_MCP_URL = "https://app.cardinalhq.io/mcp"
 
 WARNING = (
-    "Cardinal: CARDINAL_MCP_API_KEY is set but CARDINAL_MCP_URL is not, so "
-    "Claude Code sends that API key to Cardinal Cloud (" + CLOUD_MCP_URL + ") "
-    "when it connects the cardinal MCP server. Run /cardinal:connect (or "
-    "/cardinal:connect --host <your maestro URL> for self-hosted Cardinal), "
-    "or unset CARDINAL_MCP_API_KEY (check your shell profile and "
-    "~/.claude/settings.json env)."
+    "Cardinal: CARDINAL_MCP_API_KEY is set but CARDINAL_MCP_URL is not, so the "
+    "cardinal MCP server has no URL and Cardinal's tools are missing. Run "
+    "/cardinal:connect (or /cardinal:connect --host <your maestro URL> for "
+    "self-hosted Cardinal), or unset CARDINAL_MCP_API_KEY (check your shell "
+    "profile and ~/.claude/settings.json env)."
 )
 
 
@@ -77,9 +75,9 @@ def key_without_url(home: Path | None = None, environ: dict | None = None) -> bo
         return False
 
 
-def mcp_url(home: Path | None = None, environ: dict | None = None) -> str:
-    """The URL .mcp.json resolves to: CARDINAL_MCP_URL, else Cardinal Cloud."""
+def mcp_url(home: Path | None = None, environ: dict | None = None) -> str | None:
+    """The URL .mcp.json resolves to: CARDINAL_MCP_URL, else None (no server)."""
     try:
-        return _value(_sources(home, environ), MCP_URL_ENV) or CLOUD_MCP_URL
+        return _value(_sources(home, environ), MCP_URL_ENV)
     except Exception:
-        return CLOUD_MCP_URL
+        return None

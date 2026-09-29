@@ -14,11 +14,18 @@ Contract:
     fires on resume / clear / compact, so the id survives compaction.
   - No session-id sentence when there is no id, or the id is not one maestro accepts
     (^[A-Za-z0-9_-]{1,128}$, routes/storyboards-mcp-tools.ts CreateSchema).
-  - Key-without-URL warning (_key_disclosure.py): when CARDINAL_MCP_API_KEY
-    is set but CARDINAL_MCP_URL is not, the plugin's .mcp.json sends that key
-    to Cardinal Cloud. This hook runs connected or not, so it adds a short
-    "tell the user" note to the context — at most once per session id
-    (marker under ~/.cardinal/key-warning/; without an id, only on startup).
+  - Not connected (hooks/_connection.py: no Cardinal key, ingest key or
+    connect state): one line on how to get write access (sign up at
+    app.cardinalhq.io, create an API key, /cardinal:connect) and why /mcp
+    lists `cardinal` as missing CARDINAL_MCP_URL. The first unconnected
+    startup on this machine phrases it as "tell the user once" (marker
+    ~/.cardinal/connect-hint); later sessions keep it as context only, for
+    Claude to use if the user asks about Cardinal or storyboards.
+  - Stray-key warning (_stray_key.py): when CARDINAL_MCP_API_KEY is set but
+    CARDINAL_MCP_URL is not, the cardinal server has no URL although the
+    hooks count the machine as connected. Adds a short "tell the user" note
+    to the context — at most once per session id (marker under
+    ~/.cardinal/key-warning/; without an id, only on startup).
   - Fail open: never blocks or delays session start, never prints an error.
 """
 
@@ -32,11 +39,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _key_disclosure  # noqa: E402
+import _connection  # noqa: E402
+import _stray_key  # noqa: E402
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 WARNED_DIR = Path(".cardinal") / "key-warning"
 WARNED_TTL_S = 30 * 86400
+HINT_MARKER = Path(".cardinal") / "connect-hint"
 
 
 def session_id(payload: dict) -> str | None:
@@ -77,11 +86,44 @@ def _first_warning(sid: str | None, source) -> bool:
 
 
 def key_warning(sid: str | None, source) -> str | None:
-    if not _key_disclosure.key_without_url():
+    if not _stray_key.key_without_url():
         return None
     if not _first_warning(sid, source):
         return None
-    return "Tell the user, briefly: " + _key_disclosure.WARNING
+    return "Tell the user, briefly: " + _stray_key.WARNING
+
+
+CONNECT_HINT = (
+    "Cardinal is not connected: the cardinal MCP server is off (/mcp lists it as missing "
+    "CARDINAL_MCP_URL; expected) and evidence capture stays local. For write access "
+    "(publishing storyboards, Cardinal's tools): " + _connection.CONNECT_STEPS + "."
+)
+
+
+def _first_hint(source) -> bool:
+    """True once per machine: the first unconnected startup (marker
+    ~/.cardinal/connect-hint). resume / clear / compact never count."""
+    if source not in (None, "startup"):
+        return False
+    try:
+        home = Path(os.environ.get("HOME") or str(Path.home()))
+        marker = home / HINT_MARKER
+        if marker.exists():
+            return False
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass  # can't record it: say it anyway
+    return True
+
+
+def connect_hint(source) -> str | None:
+    """One line for an unconnected machine, else None."""
+    if _connection.is_connected():
+        return None
+    if _first_hint(source):
+        return "Tell the user once, briefly: " + CONNECT_HINT
+    return CONNECT_HINT + " Mention it only if the user asks about Cardinal or storyboards."
 
 
 def main() -> None:
@@ -105,6 +147,12 @@ def main() -> None:
         warning = None
     if warning:
         parts.append(warning)
+    try:
+        hint = connect_hint(payload.get("source"))
+    except Exception:
+        hint = None
+    if hint:
+        parts.append(hint)
     if not parts:
         return
     sys.stdout.write(json.dumps({

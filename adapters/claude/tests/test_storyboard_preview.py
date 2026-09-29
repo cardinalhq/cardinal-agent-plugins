@@ -41,9 +41,6 @@ TESTDATA = Path(__file__).resolve().parent / "testdata"
 SB_ID = "sb_0123456789abcdef01234567"
 ORG = "org-1"
 KEY = "cardinal-mcp-key-123"
-# storyboard__preview's preview_token: a compact JWS (conductor
-# storyboard/scoped-tokens.ts), sent as `Authorization: CardinalPreview <token>`.
-PREVIEW_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkNhcmRpbmFsUHJldmlldyJ9.eyJzYiI6InNiIn0.cHJldmlldy1zaWc"
 TINY_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
@@ -213,8 +210,7 @@ class StubMaestro:
                 pass
 
             def do_GET(self):
-                stub.requests.append({"path": self.path, "key": self.headers.get("X-CardinalHQ-API-Key"),
-                                      "authorization": self.headers.get("Authorization")})
+                stub.requests.append({"path": self.path, "key": self.headers.get("X-CardinalHQ-API-Key")})
                 if stub.script:
                     status, headers, body = stub.script.pop(0)
                     self.send_response(status)
@@ -225,9 +221,7 @@ class StubMaestro:
                     return
                 scene = self.path.split("/scenes/", 1)[-1].split("/", 1)[0]
                 body = stub.pages.get(scene)
-                authorized = (self.headers.get("X-CardinalHQ-API-Key") == KEY
-                              or self.headers.get("Authorization") == "CardinalPreview " + PREVIEW_TOKEN)
-                if body is None or not authorized:
+                if body is None or self.headers.get("X-CardinalHQ-API-Key") != KEY:
                     self.send_response(404)
                     self.end_headers()
                     self.wfile.write(b'{"error":"scene_not_found"}')
@@ -534,42 +528,6 @@ class FetchTests(unittest.TestCase):
             write_settings(home, "https://app.cardinalhq.io", org="o-1", key="k2")
             info = rp.connect_info(home, env)
             self.assertEqual(info, {"origin": "https://app.cardinalhq.io", "org": "o-1", "key": "k2"})
-
-    def test_connection_without_a_key_uses_the_preview_token_on_cardinal_cloud(self):
-        with TemporaryDirectory() as t:
-            home = Path(t)
-            result = {"preview_token": PREVIEW_TOKEN, "view_url": "https://evil.example/storyboards/x"}
-            # Never connected: the .mcp.json default, Cardinal Cloud, never a
-            # URL the result names.
-            self.assertEqual(rp.connection(result, home, {}), {
-                "origin": "https://app.cardinalhq.io", "org": None, "key": None, "preview_token": PREVIEW_TOKEN})
-            self.assertEqual(rp.auth_headers(rp.connection(result, home, {})),
-                             {"Authorization": "CardinalPreview " + PREVIEW_TOKEN})
-            # CARDINAL_MCP_URL without a key (self-hosted URL): its origin.
-            conn = rp.connection(result, home, {"CARDINAL_MCP_URL": "https://cardinal.acme.internal/mcp"})
-            self.assertEqual(conn["origin"], "https://cardinal.acme.internal")
-            # No token, no key: nothing to fetch with.
-            self.assertEqual(rp.connection({}, home, {}), {})
-            # Only a JWT-shaped token is sent (no header injection).
-            for bad in ("a.b.c\r\nX-Evil: 1", "a.b", "", 7, "a b.c.d", "x" * 9000):
-                self.assertEqual(rp.connection({"preview_token": bad}, home, {}), {}, bad)
-            # Connected: the key, as before.
-            write_settings(home, "https://app.cardinalhq.io", org="o-1", key="k2")
-            conn = rp.connection(result, home, {})
-            self.assertEqual(conn, {"origin": "https://app.cardinalhq.io", "org": "o-1", "key": "k2"})
-            self.assertEqual(rp.auth_headers(conn), {"X-CardinalHQ-API-Key": "k2"})
-
-    def test_default_url_matches_the_plugin_mcp_json(self):
-        entry = json.loads((PLUGIN_ROOT / ".mcp.json").read_text())["cardinal"]
-        self.assertEqual(entry["url"], "${CARDINAL_MCP_URL:-" + rp.DEFAULT_MCP_URL + "}")
-
-    def test_fetches_with_the_preview_token_and_never_the_key_header(self):
-        conn = {"origin": self.maestro.origin, "org": None, "key": None, "preview_token": PREVIEW_TOKEN}
-        ref = bundle_ref("s1", self.body, url=self.foreign.origin + "/api/orgs/org-1/storyboards/x")
-        self.assertEqual(rp.fetch_bundle(conn, ref, 1 << 20), self.body)
-        self.assertEqual(self.maestro.requests[0]["authorization"], "CardinalPreview " + PREVIEW_TOKEN)
-        self.assertIsNone(self.maestro.requests[0]["key"])
-        self.assertEqual(self.foreign.requests, [], "the token never reaches a URL the result names")
 
 
 # ---------------------------------------------------------------------------
@@ -931,54 +889,12 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("not supported on Windows", out.getvalue())
 
-    def test_no_key_and_no_preview_token_exits_2(self):
+    def test_not_connected_exits_2(self):
         (self.home / ".claude" / "settings.json").unlink()
         result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
         res, lines = run_renderer([], self._env(), stdin=json.dumps(result))
         self.assertEqual(res.returncode, 2)
-        msg = lines[-1]["summary"]["message"]
-        self.assertIn("no preview_token", msg)
-        self.assertIn("/cardinal:connect", msg)
-        self.assertEqual(self.maestro.requests, [])
-
-    def _unconnected(self):
-        """The plugin before /cardinal:connect, pointed at the stub: a Cardinal
-        URL (the .mcp.json default stands in for it) and no key."""
-        (self.home / ".claude" / "settings.json").write_text(json.dumps({
-            "env": {"CARDINAL_MCP_URL": f"{self.maestro.origin}/mcp"}}))
-
-    def test_unconnected_renders_with_the_preview_token(self):
-        self._unconnected()
-        result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
-        result["preview_token"] = PREVIEW_TOKEN
-        res, lines = run_renderer([], self._env(), stdin=json.dumps(result))
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(lines[-1]["summary"]["rendered"], 2)
-        self.assertEqual(self.maestro.requests[0]["authorization"], "CardinalPreview " + PREVIEW_TOKEN)
-        self.assertIsNone(self.maestro.requests[0]["key"])
-        self.assertNotIn(PREVIEW_TOKEN, res.stdout + res.stderr)
-
-    def test_the_key_wins_over_the_preview_token(self):
-        result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
-        result["preview_token"] = PREVIEW_TOKEN
-        res, lines = run_renderer([], self._env(), stdin=json.dumps(result))
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(self.maestro.requests[0]["key"], KEY)
-        self.assertIsNone(self.maestro.requests[0]["authorization"])
-
-    def test_refused_preview_token_says_preview_again(self):
-        self._unconnected()
-        self.maestro.script.append((401, {}, b'{"error":"invalid_token"}'))
-        result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)},
-                                 {"id": "two", "preview_bundle": bundle_ref("two", self.body)}])
-        result["preview_token"] = PREVIEW_TOKEN
-        res, lines = run_renderer([], self._env(), stdin=json.dumps(result))
-        self.assertEqual(res.returncode, 2)
-        self.assertEqual(len(self.maestro.requests), 1)
-        err = [ln for ln in lines if ln.get("scene_id") == "rhythm"][0]["error"]
-        self.assertIn("preview token was refused", err)
-        self.assertIn("storyboard__preview again", err)
-        self.assertNotIn("/cardinal:connect", err)
+        self.assertIn("/cardinal:connect", lines[-1]["summary"]["message"])
 
     def test_forbidden_stops_after_the_first_scene(self):
         self.maestro.script.append((403, {}, b'{"error":"forbidden"}'))
@@ -1195,7 +1111,9 @@ def _run_storyboard_session(cwd: Path, payload: dict | None = None, env_extra: d
         "hook_event_name": "SessionStart",
         "source": "startup",
     }
-    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")
+           and not k.startswith(("CARDINAL_MCP_", "OTEL_"))}
     env["HOME"] = str(cwd)
     env.update(env_extra or {})
     return subprocess.run([sys.executable, str(SESSION_HOOK)], input=json.dumps(body), capture_output=True,
@@ -1203,9 +1121,14 @@ def _run_storyboard_session(cwd: Path, payload: dict | None = None, env_extra: d
 
 
 class StoryboardSessionHookTests(unittest.TestCase):
+    """The session-id sentence, on a connected machine (connect state file).
+    The unconnected connect hint: test_unconnected_mode."""
+
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        (self.root / ".claude").mkdir()
+        (self.root / ".claude" / "cardinal.json").write_text("{}")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1246,6 +1169,7 @@ class StoryboardSessionHookTests(unittest.TestCase):
 
     def test_garbage_stdin_fails_open(self):
         env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")}
+        env["HOME"] = str(self.root)  # connected (setUp): no connect hint
         res = subprocess.run([sys.executable, str(SESSION_HOOK)], input="{not json", capture_output=True, text=True,
                              timeout=10, env=env)
         self.assertEqual(res.returncode, 0)
@@ -1484,31 +1408,15 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         for launch in [e for e in read_log(self.log) if e["kind"] == "argv"]:
             self.assertNotIn("--no-sandbox", launch["argv"])
 
-    def test_no_credential_relays_the_renderer_message(self):
+    def test_not_connected_relays_the_renderer_message(self):
         (self.home / ".claude" / "settings.json").unlink()
         ctx = self._context(self._run())
         self.assertIn("could not be rendered locally", ctx)
-        self.assertIn("no preview_token", ctx)
+        self.assertIn("/cardinal:connect", ctx)
         self.assertEqual(self.maestro.requests, [])
 
-    def test_unconnected_plugin_renders_with_the_preview_token(self):
-        # Before /cardinal:connect: no key; the result's preview_token goes
-        # to the Cardinal the plugin's server talks to (the stub stands in
-        # for the .mcp.json default), never the key header.
-        (self.home / ".claude" / "settings.json").write_text(json.dumps({
-            "env": {"CARDINAL_MCP_URL": f"{self.maestro.origin}/mcp"}}))
-        result = self._result()
-        result["preview_token"] = PREVIEW_TOKEN
-        payload = self._payload(tool_name="mcp__plugin_cardinal_cardinal__storyboard__preview",
-                                tool_response={"content": json.dumps(result), "structuredContent": result})
-        ctx = self._context(self._run(payload))
-        self.assertIn("- shipping: shipping-0.png, shipping-1.png", ctx)
-        self.assertEqual([(r["key"], r["authorization"]) for r in self.maestro.requests],
-                         [(None, "CardinalPreview " + PREVIEW_TOKEN)])
-        self.assertNotIn(PREVIEW_TOKEN, ctx)
-
     def test_another_servers_storyboard_preview_never_reaches_the_renderer(self):
-        # The result carries a credential and names the pages to fetch: only
+        # The result names the pages to fetch with the Cardinal key: only
         # Cardinal's own server (`cardinal` / `plugin_cardinal_cardinal`) counts.
         for name in ("mcp__evil__storyboard__preview", "mcp__plugin_other_cardinal__storyboard__preview",
                      "mcp__plugin_cardinal_cardinal__x__storyboard__preview", "storyboard__preview"):
