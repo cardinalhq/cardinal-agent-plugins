@@ -47,9 +47,10 @@ connected       /cardinal:connect wrote CARDINAL_MCP_URL + CARDINAL_MCP_API_KEY 
 
 Writing to Cardinal (Cardinal's tools, publishing storyboards) needs an
 API key; there is no OAuth sign-in. A new user signs up at
-`https://app.cardinalhq.io` (a personal workspace is created), creates an
-API key there, then runs `/cardinal:connect` to pick the org, store its
-key, and turn on telemetry and spend features. Self-hosted (in-VPC)
+`https://app.cardinalhq.io` (a personal workspace is created), then runs
+`/cardinal:connect`: approving it in the browser picks the org, creates
+an API key for this machine and stores it, and turns on telemetry and
+spend features. Self-hosted (in-VPC)
 Cardinal: `/cardinal:connect --host <url>`. `/cardinal:disconnect` returns
 the plugin to the local-only mode.
 

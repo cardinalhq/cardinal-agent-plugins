@@ -1108,7 +1108,7 @@ class StatusTests(unittest.TestCase):
         # Local-only: the server is off, and how to get write access.
         self.assertIn("Local-only", res.stdout)
         self.assertIn("missing", res.stdout)
-        self.assertIn("sign up at https://app.cardinalhq.io, create an API key, then run /cardinal:connect",
+        self.assertIn("sign up at https://app.cardinalhq.io, then run /cardinal:connect and approve it in the browser",
                       res.stdout)
         for s in ("OAuth", "sign in via /mcp", "app.cardinalhq.io/mcp"):
             self.assertNotIn(s, res.stdout)

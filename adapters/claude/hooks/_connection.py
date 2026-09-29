@@ -15,8 +15,8 @@ The plugin works in two modes:
                   state file ~/.claude/cardinal.json). Everything runs.
 
 Write access (publishing storyboards, Cardinal's tools) needs an API key:
-sign up at https://app.cardinalhq.io, create an API key, run
-/cardinal:connect. There is no OAuth sign-in.
+sign up at https://app.cardinalhq.io, then run /cardinal:connect, whose
+device-code approval creates and stores one. There is no OAuth sign-in.
 
 Connected means any Cardinal credential or connect state is configured:
 
@@ -87,6 +87,7 @@ def is_connected(home: Path | None = None, environ: dict | None = None) -> bool:
 
 SIGNUP_URL = "https://app.cardinalhq.io"
 CONNECT_STEPS = (
-    f"sign up at {SIGNUP_URL}, create an API key, then run /cardinal:connect "
-    "(self-hosted Cardinal: /cardinal:connect --host <your maestro URL>)"
+    f"sign up at {SIGNUP_URL}, then run /cardinal:connect and approve it in the "
+    "browser, which stores an API key for this machine (self-hosted Cardinal: "
+    "/cardinal:connect --host <your maestro URL>)"
 )

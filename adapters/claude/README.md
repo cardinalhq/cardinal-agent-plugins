@@ -32,8 +32,9 @@ git-state, usage
   for later sessions; `/cardinal:status` says the same.
 - **Getting write access.** Writes (Cardinal's tools, publishing
   storyboards) need an API key; there is no OAuth sign-in. Sign up at
-  `https://app.cardinalhq.io` (a personal workspace is created), create an
-  API key, then run `/cardinal:connect`. Self-hosted Cardinal:
+  `https://app.cardinalhq.io` (a personal workspace is created), then run
+  `/cardinal:connect` and approve it in the browser: that creates an API
+  key for this machine and stores it. Self-hosted Cardinal:
   `/cardinal:connect --host <url>`. Published storyboards are read without
   an account through a public link when the org allows them.
 - **Evidence capture.** In either mode, `hooks/evidence-capture.py` stores

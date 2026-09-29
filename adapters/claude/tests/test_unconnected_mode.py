@@ -486,7 +486,7 @@ class StoryboardHooksUnconnectedTests(_GuardedCase):
         hint = ctx[ctx.index("Tell the user once"):]
         self.assertNotIn("\n", hint, "one line")
         self.assertIn("Cardinal is not connected", hint)
-        self.assertIn("sign up at https://app.cardinalhq.io, create an API key, then run /cardinal:connect", hint)
+        self.assertIn("sign up at https://app.cardinalhq.io, then run /cardinal:connect and approve it in the browser", hint)
         self.assertIn("missing CARDINAL_MCP_URL", hint)
         for s in ("OAuth", "sign in", "authenticate", "app.cardinalhq.io/mcp"):
             self.assertNotIn(s, hint)

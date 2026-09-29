@@ -38,7 +38,7 @@ server has no URL and never connects, evidence capture keeps other MCP servers'
 results on the machine, and every telemetry, spend-limit, initiative, plan,
 decision, git-state and usage hook stays silent (no context, no network).
 Writing to Cardinal needs an API key (sign up at https://app.cardinalhq.io,
-create a key, run `/cardinal:connect`); there is no OAuth sign-in. See
+then `/cardinal:connect` creates one for the machine); there is no OAuth sign-in. See
 [adapters/claude/README.md](adapters/claude/README.md).
 
 Claude also ships two model-invocable skills for Cardinal's Investigation

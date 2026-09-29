@@ -39,8 +39,8 @@ and reports:
 If `~/.claude/cardinal.json` doesn't exist, surfaces "not connected",
 says the plugin is local-only (the `cardinal` server is off; `/mcp`
 lists it as missing `CARDINAL_MCP_URL`) and how to get write access:
-sign up at `https://app.cardinalhq.io`, create an API key, run
-`/cardinal:connect`. In either state it warns when
+sign up at `https://app.cardinalhq.io`, then run `/cardinal:connect`
+(approving it in the browser stores an API key for this machine). In either state it warns when
 `CARDINAL_MCP_API_KEY` is set but `CARDINAL_MCP_URL` is not — the
 `cardinal` server then has no URL, so Cardinal's tools are missing —
 and names the fixes (`/cardinal:connect [--host <url>]`, or unset the key). If state says connected but the

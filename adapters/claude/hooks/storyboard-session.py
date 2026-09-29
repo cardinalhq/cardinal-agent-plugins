@@ -16,7 +16,7 @@ Contract:
     (^[A-Za-z0-9_-]{1,128}$, routes/storyboards-mcp-tools.ts CreateSchema).
   - Not connected (hooks/_connection.py: no Cardinal key, ingest key or
     connect state): one line on how to get write access (sign up at
-    app.cardinalhq.io, create an API key, /cardinal:connect) and why /mcp
+    app.cardinalhq.io, then /cardinal:connect, which stores an API key) and why /mcp
     lists `cardinal` as missing CARDINAL_MCP_URL. The first unconnected
     startup on this machine phrases it as "tell the user once" (marker
     ~/.cardinal/connect-hint); later sessions keep it as context only, for

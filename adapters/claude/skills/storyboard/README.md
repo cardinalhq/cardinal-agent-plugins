@@ -10,8 +10,8 @@ previewing the visuals is the [canvas](../canvas/README.md) skill.
 
 - **Claude Code** with the **Cardinal plugin**, connected to your org (`/cardinal:connect`).
   Publishing needs an API key; there is no OAuth sign-in. New to Cardinal? Sign up at
-  `https://app.cardinalhq.io` (you get a personal workspace), create an API key, then run
-  `/cardinal:connect`. You need the **Member** role (or Owner) in that org to author
+  `https://app.cardinalhq.io` (you get a personal workspace), then run `/cardinal:connect`
+  and approve it in the browser; it stores an API key for this machine. You need the **Member** role (or Owner) in that org to author
   storyboards. Readers need no account when the org allows public links.
 - An investigation done with Cardinal's tools in this session, or within the last 14 days.
   Claude cites the *receipts* those tool calls produced. Unpublished receipts expire
