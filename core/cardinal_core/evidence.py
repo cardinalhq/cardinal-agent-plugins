@@ -272,7 +272,8 @@ _TOKEN_SHAPES = [re.compile(p, re.ASCII) for p in (
     r"\bpbkdf2_sha(?:1|256|512)\$\d+\$[^" + _WS + r"$]+\$[A-Za-z0-9+/=]{20,}",                         # Django
     # A PEM private key block, header to footer; a block cut before its
     # footer (a capped prefix) loses the base64 run after its header.
-    r"-----BEGIN[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----(?:(?s:.)*?-----END[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----|[A-Za-z0-9+/=\s\\:,.\-]*)",  # PEM
+    r"-----BEGIN[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----(?:(?s:.)*?-----END[A-Z0-9 ]{0,40} PRIVATE KEY(?: BLOCK)?-----"
+    r"|[A-Za-z0-9+/=" + _WS + r"\\:,.\-]*)",                                                                  # PEM
 )]
 _SK_HOST_NAME = re.compile(r"^sk(?:-[a-z0-9]+){2,}$")
 _VALUE_STOP = " \t\r\n\"'&,;)}]<>"

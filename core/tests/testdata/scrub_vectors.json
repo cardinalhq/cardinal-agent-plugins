@@ -1,5 +1,5 @@
 {
- "_comment": "Port-parity vectors for cardinal_core.evidence.scrub, a Python port of conductor's receipt credential scrub (cardinalhq/conductor packages/mcp-gateway/storyboard/receipts/receipts.go scrub/isCredentialKey and errors.go redactValueShapes/RedactErrorText). 'keys' is copied from conductor's receipts/testdata/credential_keys.json (gateway classification: 'credential' and 'headers' keys match, 'evidence_both' and 'evidence_gateway_only' keys do not, 'secret_pair_names' {name, value} pairs are redacted and 'plain_pair_names' kept). 'scrub' (scrub), 'text' (scrubText) and 'plain' (RedactErrorText on non-JSON text) outputs were produced by the Go implementation at conductor 9d8bd031. When conductor's scrub changes, regenerate from Go and update the port in the same change.",
+ "_comment": "Port-parity vectors for cardinal_core.evidence.scrub, a Python port of conductor's receipt credential scrub (cardinalhq/conductor packages/mcp-gateway/storyboard/receipts/receipts.go scrub/isCredentialKey and errors.go redactValueShapes/RedactErrorText). 'keys' is copied from conductor's receipts/testdata/credential_keys.json (gateway classification: 'credential' and 'headers' keys match, 'evidence_both' and 'evidence_gateway_only' keys do not, 'secret_pair_names' {name, value} pairs are redacted and 'plain_pair_names' kept). 'scrub' (scrub), 'text' (scrubText) and 'plain' (RedactErrorText on non-JSON text) outputs were produced by the Go implementation at conductor 9d8bd031. When conductor's scrub changes, regenerate from Go and update the port in the same change. The PEM private-key vectors were produced by the Go implementation on conductor branch fix/receipt-scrub-pem-private-keys (tokenShapes PEM).",
  "keys": {
   "credential": [
    "x-cardinalhq-api-key",
@@ -428,6 +428,18 @@
     "argon": "[redacted]",
     "django": "[redacted]"
    }
+  },
+  {
+   "in": {
+    "cert": "-----BEGIN CERTIFICATE-----\nMIID\n-----END CERTIFICATE-----",
+    "note": "k: -----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY----- end",
+    "pem": "-----BEGIN EC PRIVATE KEY-----\nMHcLEAK\n-----END EC PRIVATE KEY-----"
+   },
+   "out": {
+    "cert": "-----BEGIN CERTIFICATE-----\nMIID\n-----END CERTIFICATE-----",
+    "note": "k: [redacted] end",
+    "pem": "[redacted]"
+   }
   }
  ],
  "text": [
@@ -466,6 +478,30 @@
   {
    "in": "line sep {\"x\":1}",
    "out": "line sep {\"x\":1}"
+  },
+  {
+   "in": "key=-----BEGIN RSA PRIVATE KEY-----\nMIIEowLEAKIBAAKCAQEA7\n-----END RSA PRIVATE KEY----- tail",
+   "out": "key=[redacted] tail"
+  },
+  {
+   "in": "-----BEGIN PRIVATE KEY-----\nMIIEvLEAK\n-----END PRIVATE KEY-----",
+   "out": "[redacted]"
+  },
+  {
+   "in": "cut: -----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFLEAK==",
+   "out": "cut: [redacted]"
+  },
+  {
+   "in": "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBLEAK\n-----END PGP PRIVATE KEY BLOCK-----\nafter",
+   "out": "[redacted]\nafter"
+  },
+  {
+   "in": "{\"k\":\"-----BEGIN OPENSSH PRIVATE KEY-----\\nb3BlbnNzaLEAK\\n-----END OPENSSH PRIVATE KEY-----\"}",
+   "out": "{\"k\":\"[redacted]\"}"
+  },
+  {
+   "in": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----",
+   "out": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----"
   }
  ],
  "plain": [
@@ -500,6 +536,30 @@
   {
    "in": "\"client_secret\":\"LEAK-UNTERMINATED",
    "out": "\"client_secret\":\"[redacted]"
+  },
+  {
+   "in": "key=-----BEGIN RSA PRIVATE KEY-----\nMIIEowLEAKIBAAKCAQEA7\n-----END RSA PRIVATE KEY----- tail",
+   "out": "key=[redacted] tail"
+  },
+  {
+   "in": "-----BEGIN PRIVATE KEY-----\nMIIEvLEAK\n-----END PRIVATE KEY-----",
+   "out": "[redacted]"
+  },
+  {
+   "in": "cut: -----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFLEAK==",
+   "out": "cut: [redacted]"
+  },
+  {
+   "in": "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBLEAK\n-----END PGP PRIVATE KEY BLOCK-----\nafter",
+   "out": "[redacted]\nafter"
+  },
+  {
+   "in": "{\"k\":\"-----BEGIN OPENSSH PRIVATE KEY-----\\nb3BlbnNzaLEAK\\n-----END OPENSSH PRIVATE KEY-----\"}",
+   "out": "{\"k\":\"[redacted]\"}"
+  },
+  {
+   "in": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----",
+   "out": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----"
   }
  ]
 }
