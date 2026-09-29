@@ -25,6 +25,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -97,9 +98,34 @@ class _SlimCase(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         (d / name).write_text(json.dumps(body))
 
-    def enable_full_plugin(self, on: bool = True) -> None:
-        self.settings(enabledPlugins={"cardinal@cardinalhq-claude-plugin": on,
-                                      "cardinal-storyboards@cardinalhq-claude-plugin": True})
+    def enable_full_plugin(self, on: bool = True, connected: bool = True) -> None:
+        """Both plugins enabled; the full one connected (/cardinal:connect's key
+        in settings.json env) unless `connected` is False."""
+        body = {"enabledPlugins": {"cardinal@cardinalhq-claude-plugin": on,
+                                   "cardinal-storyboards@cardinalhq-claude-plugin": True}}
+        if connected:
+            body["env"] = {"CARDINAL_MCP_API_KEY": API_KEY}
+        self.settings(**body)
+
+    def install(self, slim_root: Path) -> None:
+        """installed_plugins.json (v2) listing the full plugin (this repo's
+        adapters/claude) and the slim one at `slim_root`."""
+        d = self.home / ".claude" / "plugins"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {
+            "cardinal@cardinalhq-claude-plugin": [{"scope": "user", "installPath": str(PLUGIN_ROOT)}],
+            "cardinal-storyboards@cardinalhq-claude-plugin": [{"scope": "user", "installPath": str(slim_root)}],
+        }}))
+
+    def slim_at(self, mcp_url: str) -> Path:
+        """A copy of the built slim plugin whose .mcp.json names `mcp_url`
+        (a local stub standing in for https://app.cardinalhq.io/mcp)."""
+        dest = self.home / "plugins-cache" / "cardinal-storyboards"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(self.slim, dest)
+        (dest / ".mcp.json").write_text(json.dumps({"cardinal": {"type": "http", "url": mcp_url}}))
+        return dest
 
     def run_hook(self, root: Path, script: str, payload: dict, env: dict | None = None):
         res = subprocess.run([sys.executable, str(root / "hooks" / script)], input=json.dumps(payload),
@@ -157,9 +183,19 @@ class PluginModeTests(_SlimCase):
         self.enable_full_plugin(True)
         self.assertTrue(self.active())
         self.enable_full_plugin(False)
+        self.assertFalse(self.active())
         # Off in enabledPlugins wins over a key left in settings.
         self.settings(enabledPlugins={"cardinal@m": False}, env={"CARDINAL_MCP_API_KEY": API_KEY})
         self.assertFalse(self.active({"CARDINAL_MCP_API_KEY": API_KEY}))
+
+    def test_enabled_but_never_connected_is_not_active(self):
+        # /plugin install turns the full plugin on before /cardinal:connect ran:
+        # its copy has no Cardinal URL, so the slim hooks must keep working.
+        self.enable_full_plugin(True, connected=False)
+        self.assertFalse(self.active())
+        self.assertTrue(self.active({"CARDINAL_MCP_API_KEY": API_KEY}))
+        (self.home / ".claude" / "cardinal.json").write_text(json.dumps({"mcp_key_id": "k_1"}))
+        self.assertTrue(self.active())
 
     def test_project_and_local_settings_override_user_settings(self):
         project = self.home / "repo"
@@ -203,6 +239,56 @@ class PluginModeTests(_SlimCase):
         self.enable_full_plugin(True)
         self.assertTrue(self.pm.slim_should_yield(self.home, {}, None, root=self.slim))
         self.assertFalse(self.pm.slim_should_yield(self.home, {}, None, root=PLUGIN_ROOT))
+        self.assertEqual(self.yields(), (True, False))
+
+    def yields(self, environ=None, cwd=None) -> tuple:
+        """(slim copy yields, full copy yields)."""
+        return (self.pm.should_yield(self.home, environ or {}, cwd, root=self.slim),
+                self.pm.should_yield(self.home, environ or {}, cwd, root=PLUGIN_ROOT))
+
+    def test_full_copy_yields_while_never_connected_and_the_slim_plugin_is_enabled(self):
+        self.enable_full_plugin(True, connected=False)
+        self.assertEqual(self.yields(), (False, True))
+        self.assertTrue(self.pm.full_should_yield(self.home, {}, None, root=PLUGIN_ROOT))
+        self.assertFalse(self.pm.full_should_yield(self.home, {}, None, root=self.slim))
+        # Connected: the full copy runs and the slim copy yields.
+        self.assertEqual(self.yields({"CARDINAL_MCP_API_KEY": API_KEY}), (True, False))
+
+    def test_full_copy_keeps_running_without_the_slim_plugin(self):
+        # Never connected, slim plugin absent / off / unreadable: the full copy
+        # is the only one, so it never yields.
+        self.settings(enabledPlugins={"cardinal@m": True})
+        self.assertEqual(self.yields(), (False, False))
+        self.settings(enabledPlugins={"cardinal@m": True, "cardinal-storyboards@m": False})
+        self.assertEqual(self.yields(), (False, False))
+        (self.home / ".claude" / "plugins").mkdir()
+        (self.home / ".claude" / "plugins" / "installed_plugins.json").write_text("{not json")
+        self.settings(enabledPlugins={"cardinal@m": True})
+        self.assertEqual(self.yields(), (False, False))
+        # Only the exact slim name counts.
+        self.settings(enabledPlugins={"cardinal@m": True, "cardinal-storyboards-x@m": True})
+        self.assertEqual(self.yields(), (False, False))
+
+    def test_slim_listed_only_in_installed_plugins_counts_as_enabled(self):
+        self.install(self.slim)
+        self.assertEqual(self.yields(), (False, True))
+        self.settings("settings.json", base=self.home / "repo", enabledPlugins={"cardinal-storyboards@m": False})
+        self.assertEqual(self.yields(cwd=self.home / "repo"), (False, False))
+
+    def test_at_most_one_copy_runs_in_every_state(self):
+        for full_on in (True, False, None):
+            for slim_on in (True, False, None):
+                for connected in (True, False):
+                    plugins = {}
+                    if full_on is not None:
+                        plugins["cardinal@m"] = full_on
+                    if slim_on is not None:
+                        plugins["cardinal-storyboards@m"] = slim_on
+                    body = {"enabledPlugins": plugins}
+                    if connected:
+                        body["env"] = {"CARDINAL_MCP_API_KEY": API_KEY}
+                    self.settings(**body)
+                    self.assertNotEqual(self.yields(), (True, True), (full_on, slim_on, connected))
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +508,139 @@ class PreviewTokenTests(_SlimCase):
                             env=self.env(CARDINAL_MCP_URL=f"{self.maestro.origin}/mcp"))
         self.assertEqual(res.stdout, "")
         self.assertEqual(self.maestro.requests, [])
+
+
+# ---------------------------------------------------------------------------
+# Both installed, the full plugin enabled but never connected (/plugin install
+# without /cardinal:connect): every storyboard call goes to the slim plugin's
+# server, and the slim copy (not the full one) handles it, exactly once.
+# ---------------------------------------------------------------------------
+
+class FullEnabledNeverConnectedTests(_SlimCase):
+    def setUp(self):
+        super().setUp()
+        self.enable_full_plugin(True, connected=False)
+        self.install(self.slim)
+
+    def load(self, root: Path, rel: str, tag: str):
+        return _load(f"{tag}_{hashlib.sha1(str(root).encode()).hexdigest()[:8]}", root / rel)
+
+    def rp(self, root: Path):
+        return self.load(root, "skills/canvas/scripts/render_preview.py", "rp")
+
+    def cli(self, root: Path):
+        return self.load(root, "bin/cardinal-evidence", "cli")
+
+    def preview_result(self, body: bytes) -> dict:
+        r = tsp.preview_result([{"id": "shipping", "ok": True, "preview_bundle": tsp.bundle_ref("shipping", body)}])
+        r["preview_token"] = PREVIEW_TOKEN
+        return r
+
+    def test_either_copy_fetches_and_uploads_against_app_cardinalhq_io(self):
+        result = self.preview_result(b"x")
+        for root in (self.slim, PLUGIN_ROOT):
+            self.assertEqual(self.rp(root).connection(result, self.home, {}),
+                             {"origin": "https://app.cardinalhq.io", "org": None, "key": None,
+                              "preview_token": PREVIEW_TOKEN}, str(root))
+            self.assertEqual(self.cli(root).connection(self.home, {}),
+                             {"origin": "https://app.cardinalhq.io", "org": None, "key": None}, str(root))
+
+    def test_full_copy_falls_back_only_to_a_real_slim_install(self):
+        rp = self.rp(PLUGIN_ROOT)
+        result = self.preview_result(b"x")
+        installed = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        evil = self.home / "evil"
+        (evil / ".claude-plugin").mkdir(parents=True)
+        (evil / ".claude-plugin" / "plugin.json").write_text('{"name": "evil"}')
+        (evil / ".mcp.json").write_text('{"cardinal": {"type": "http", "url": "https://evil.example/mcp"}}')
+        for plugins in (
+            {},  # slim not installed
+            {"cardinal-storyboards@m": [{"installPath": str(evil)}]},  # not a cardinal-storyboards manifest
+            {"cardinal-storyboards-x@m": [{"installPath": str(self.slim)}]},  # another plugin's id
+            {"cardinal-storyboards@m": [{"installPath": 7}, {}]},
+        ):
+            installed.write_text(json.dumps({"version": 2, "plugins": plugins}))
+            self.assertEqual(rp.connection(result, self.home, {}), {}, plugins)
+            self.assertEqual(self.cli(PLUGIN_ROOT).connection(self.home, {}), {}, plugins)
+        # A URL the result names is never used.
+        installed.write_text(json.dumps({"version": 2, "plugins": {}}))
+        r = tsp.preview_result([{"id": "shipping", "ok": True,
+                                 "preview_bundle": tsp.bundle_ref("shipping", b"x", url="https://evil.example/x")}])
+        r["preview_token"] = PREVIEW_TOKEN
+        self.assertEqual(rp.connection(r, self.home, {}), {})
+        # v1 layout (one record per plugin) still resolves.
+        installed.write_text(json.dumps({"version": 1, "plugins": {
+            "cardinal-storyboards@m": {"installPath": str(self.slim)}}}))
+        self.assertEqual(rp.connection(result, self.home, {})["origin"], "https://app.cardinalhq.io")
+
+    def test_capture_session_and_token_hooks_run_exactly_once(self):
+        # evidence-capture
+        full = self.run_hook(PLUGIN_ROOT, "evidence-capture.py", self.capture_payload())
+        self.assertEqual(full.stdout, "")
+        self.assertEqual(self.spooled(), [])
+        slim = self.run_hook(self.slim, "evidence-capture.py", self.capture_payload())
+        self.assertIn("[evidence:ev_", slim.stdout)
+        self.assertEqual(len(self.spooled()), 1)
+        # storyboard-session
+        payload = {"session_id": SESSION, "cwd": str(self.home), "hook_event_name": "SessionStart"}
+        self.assertEqual(self.run_hook(PLUGIN_ROOT, "storyboard-session.py", payload).stdout, "")
+        self.assertIn(SESSION, self.run_hook(self.slim, "storyboard-session.py", payload).stdout)
+        # storyboard-token
+        create = SlimHookTests.create_payload(self, SLIM_TOOL + "storyboard__create")
+        token_file = self.spool / SESSION / "token.json"
+        self.run_hook(PLUGIN_ROOT, "storyboard-token.py", create)
+        self.assertFalse(token_file.exists())
+        self.run_hook(self.slim, "storyboard-token.py", create)
+        self.assertEqual(json.loads(token_file.read_text())["storyboards"][SB]["evidence_token"], EV_TOKEN)
+
+    def test_a_slim_server_preview_renders_exactly_once_with_the_token(self):
+        body = b"<!doctype html><html data-cv-state=loading>shipping</html>"
+        maestro = TokenMaestro({"shipping": body})
+        self.addCleanup(maestro.close)
+        slim = self.slim_at(f"{maestro.origin}/mcp")
+        self.install(slim)
+        (self.home / "empty-bin").mkdir()
+        chrome = tsp.make_fake_chromium(self.home)
+        result = self.preview_result(body)
+        payload = {"session_id": SESSION, "cwd": str(self.home), "hook_event_name": "PostToolUse",
+                   "tool_name": SLIM_TOOL + "storyboard__preview", "tool_input": {},
+                   "tool_response": {"content": json.dumps(result), "structuredContent": result}}
+        env = tsp.hermetic_env(self.home, CARDINAL_CHROMIUM=str(chrome), FAKE_CHROME_LOG=str(self.home / "c.log"))
+        outs = [self.run_hook(root, "storyboard-preview.py", payload, env=env).stdout for root in (PLUGIN_ROOT, slim)]
+        self.assertEqual(outs[0], "", "the never-connected full copy steps aside")
+        ctx = json.loads(outs[1])["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("rendered locally", ctx)
+        self.assertIn("shipping-0.png", ctx)
+        self.assertEqual([(r["authorization"], r["key"]) for r in maestro.requests],
+                         [("CardinalPreview " + PREVIEW_TOKEN, None)])
+        # The full copy's renderer, run by hand (the canvas skill's glob can pick
+        # it), reaches the same Cardinal through the slim install.
+        rp = self.rp(PLUGIN_ROOT)
+        conn = rp.connection(result, self.home, {})
+        self.assertEqual(conn["origin"], maestro.origin)
+        self.assertEqual(rp.fetch_bundle(conn, tsp.bundle_ref("shipping", body), 1 << 20), body)
+        self.assertEqual(maestro.requests[-1]["authorization"], "CardinalPreview " + PREVIEW_TOKEN)
+
+    def test_promote_from_the_full_copy_reaches_the_slim_plugins_cardinal(self):
+        import test_evidence_promote as tep
+        stub = tep.StubEvidenceRoute()
+        self.addCleanup(stub.close)
+        slim = self.slim_at(f"http://127.0.0.1:{stub.port}/mcp")
+        self.install(slim)
+        self.run_hook(slim, "storyboard-token.py", SlimHookTests.create_payload(self, SLIM_TOOL + "storyboard__create"))
+        self.run_hook(slim, "evidence-capture.py", self.capture_payload())
+        [name] = self.spooled()
+        ev_id = name[:-len(".json")]
+        for root in (PLUGIN_ROOT, slim):
+            res = subprocess.run([sys.executable, str(root / "bin" / "cardinal-evidence"), "promote",
+                                  "--storyboard", SB, ev_id],
+                                 capture_output=True, text=True, timeout=60, env=self.env(), cwd=str(self.home))
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            req = stub.requests[-1]
+            self.assertEqual(req["path"], f"/api/orgs/{ORG}/storyboards/{SB}/evidence")
+            self.assertEqual(req["headers"]["authorization"], "CardinalEvidence " + EV_TOKEN)
+            self.assertNotIn("x-cardinalhq-api-key", req["headers"])
+        self.assertEqual(len(stub.requests), 2)
 
 
 # ---------------------------------------------------------------------------

@@ -150,6 +150,7 @@ PREVIEW_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{1,4096}\.[
 # plugins it ships in (hooks/_plugin_mode.py FULL_PLUGIN / SLIM_PLUGIN).
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 CARDINAL_PLUGIN_NAMES = ("cardinal", "cardinal-storyboards")
+SLIM_PLUGIN = "cardinal-storyboards"
 
 UPGRADE_MESSAGE = (
     "This Cardinal returned no preview_bundle for any scene, so it predates local previews "
@@ -375,6 +376,37 @@ def plugin_mcp_url(root: Path = PLUGIN_ROOT) -> str | None:
     return url
 
 
+def slim_plugin_mcp_url(home: Path) -> str | None:
+    """The literal MCP URL of an installed slim cardinal-storyboards plugin
+    (its installPath in ~/.claude/plugins/installed_plugins.json, whose own
+    plugin.json must name cardinal-storyboards), or None.
+
+    The full plugin's copy of this file falls back to it when the full plugin
+    was never connected: every storyboard call then goes to the slim plugin's
+    server, and its preview_token belongs to that Cardinal."""
+    try:
+        data = json.loads((home / ".claude" / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
+        plugins = data.get("plugins") if isinstance(data, dict) else None
+        if not isinstance(plugins, dict):
+            return None
+        for plugin_id, installs in plugins.items():
+            if not (isinstance(plugin_id, str) and plugin_id.split("@", 1)[0] == SLIM_PLUGIN):
+                continue
+            for rec in installs if isinstance(installs, list) else [installs]:
+                path = rec.get("installPath") if isinstance(rec, dict) else None
+                if not (isinstance(path, str) and path):
+                    continue
+                root = Path(path)
+                manifest = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+                if isinstance(manifest, dict) and manifest.get("name") == SLIM_PLUGIN:
+                    url = plugin_mcp_url(root)
+                    if url:
+                        return url
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    return None
+
+
 def _configured_mcp_url(home: Path, environ: dict) -> str | None:
     """CARDINAL_MCP_URL (settings.json env, then the environment), even without a key."""
     try:
@@ -399,14 +431,15 @@ def connection(result, home: Path, environ: dict, root: Path = PLUGIN_ROOT) -> d
     preview_token (10 min, this storyboard's preview pages only). A token
     only ever goes to a Cardinal this machine chose, never to a URL the result
     names: CARDINAL_MCP_URL's origin, else the URL of the MCP server this
-    plugin bundles. {} when neither works."""
+    plugin bundles, else (the full plugin, never connected) the URL the
+    installed slim cardinal-storyboards plugin bundles. {} when neither works."""
     conn = connect_info(home, environ)
     if conn:
         return conn
     tok = preview_token(result)
     if tok is None:
         return {}
-    url = _configured_mcp_url(home, environ) or plugin_mcp_url(root)
+    url = _configured_mcp_url(home, environ) or plugin_mcp_url(root) or slim_plugin_mcp_url(home)
     origin = _origin(url) if url else None
     if origin is None:
         return {}
@@ -1408,10 +1441,15 @@ def main(argv: list | None = None) -> int:
         if any(ref is not None for _, _, ref in pages):
             conn = connection(result, home, os.environ)
             if not conn:
-                return finish(EXIT_FETCH, "no credential to fetch the preview pages: the result carries no "
-                                          "preview_token (upgrade Cardinal) and there is no Cardinal MCP key "
-                                          "(CARDINAL_MCP_URL / CARDINAL_MCP_API_KEY; the full plugin's "
-                                          "/cardinal:connect)")
+                if preview_token(result) is None:
+                    return finish(EXIT_FETCH, "no credential to fetch the preview pages: the result carries no "
+                                              "preview_token (upgrade Cardinal) and there is no Cardinal MCP key "
+                                              "(CARDINAL_MCP_URL / CARDINAL_MCP_API_KEY; the full plugin's "
+                                              "/cardinal:connect)")
+                return finish(EXIT_FETCH, "no Cardinal to fetch the preview pages from: the result's "
+                                          "preview_token only goes to a Cardinal this machine chose, and none "
+                                          "is configured (run /cardinal:connect, or install the "
+                                          "cardinal-storyboards plugin)")
             for i, (sid, _, ref) in enumerate(pages):
                 if time.monotonic() > deadline - 15:
                     for rest, _, _ in pages[i:]:

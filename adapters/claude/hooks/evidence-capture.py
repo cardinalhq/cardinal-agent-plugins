@@ -22,8 +22,10 @@ Contract:
   - Output: hookSpecificOutput.additionalContext, one line:
     "[evidence:ev_xxx] captured locally from <server>/<tool>; to cite it in
     a storyboard run cardinal-evidence promote ev_xxx".
-  - In the slim cardinal-storyboards plugin: silent while the full cardinal
-    plugin is active (hooks/_plugin_mode.py), which captures instead.
+  - Exactly one of the two plugins' copies runs (hooks/_plugin_mode.py
+    should_yield): the slim cardinal-storyboards copy is silent while the full
+    cardinal plugin is active and connected; the full copy is silent while it
+    was never connected and cardinal-storyboards is enabled.
   - Opt-out: CARDINAL_EVIDENCE_CAPTURE=0 or the flag file
     ~/.cardinal/evidence/disabled. Silent when disabled, for a Cardinal tool
     or a non-MCP tool, or when the payload is unreadable.
@@ -72,7 +74,7 @@ def main() -> None:
         return
     if not isinstance(payload, dict):
         return
-    if _plugin_mode and _plugin_mode.slim_should_yield(home_dir(), cwd=payload.get("cwd")):
+    if _plugin_mode and _plugin_mode.should_yield(home_dir(), cwd=payload.get("cwd")):
         return
     from cardinal_core import evidence
 

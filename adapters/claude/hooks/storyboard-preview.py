@@ -29,8 +29,10 @@ Contract:
     mcp__plugin_cardinal_cardinal__ or the slim plugin's
     mcp__plugin_cardinal-storyboards_cardinal__), the result is an error or
     has no scenes, or the payload is unreadable.
-  - In the slim cardinal-storyboards plugin: silent while the full cardinal
-    plugin is active (hooks/_plugin_mode.py), which renders instead.
+  - Exactly one of the two plugins' copies runs (hooks/_plugin_mode.py
+    should_yield): the slim cardinal-storyboards copy is silent while the full
+    cardinal plugin is active and connected; the full copy is silent while it
+    was never connected and cardinal-storyboards is enabled.
   - Credentials: the renderer uses the Cardinal MCP key when /cardinal:connect
     stored one, else the result's own preview_token (10 min, this
     storyboard's preview pages only) as `Authorization: CardinalPreview`.
@@ -369,7 +371,7 @@ def main() -> None:
         return
     if not is_cardinal_preview(payload.get("tool_name")):
         return
-    if _plugin_mode and _plugin_mode.slim_should_yield(home_dir(), cwd=payload.get("cwd")):
+    if _plugin_mode and _plugin_mode.should_yield(home_dir(), cwd=payload.get("cwd")):
         return
     result = preview_result(payload.get("tool_response"))
     if result is None or not RENDERER.is_file():

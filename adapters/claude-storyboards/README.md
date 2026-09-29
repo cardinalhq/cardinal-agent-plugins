@@ -28,9 +28,15 @@ hooks.
 
 ## With the full `cardinal` plugin
 
-Install one or the other. If the full `cardinal` plugin is enabled (or connected
-with `/cardinal:connect`), this plugin's hooks do nothing and the full plugin's
-hooks handle storyboards, so evidence is never captured twice.
+Install one or the other. If both are installed, exactly one plugin's storyboard
+hooks run, so evidence is never captured twice and each preview renders once:
+
+- Full plugin connected (`/cardinal:connect`): this plugin's hooks do nothing and
+  the full plugin's hooks handle storyboards.
+- Full plugin enabled but never connected: its storyboard hooks do nothing and this
+  plugin's hooks handle storyboards against `https://app.cardinalhq.io`. The full
+  plugin's `cardinal-evidence` and preview renderer also fall back to this plugin's
+  Cardinal, so `promote` works whichever copy is on your `PATH`.
 
 ## Turn capture off
 

@@ -20,6 +20,12 @@ Migration is code-complete; the mirror repos still ship the pre-migration
 releases until the release-mirror CI lands and each adapter is cut as a
 release. CORE_GAPS reconciliation plan: `../docs/specs/core-gaps-followup.md`.
 
+`claude-storyboards/` has no code of its own: it ships copies of files under
+`claude/`. A fix to those shared files (the storyboard hooks,
+`hooks/_plugin_mode.py`, `bin/cardinal-evidence`, the storyboard/canvas skills)
+reaches slim users only when `claude-storyboards/.claude-plugin/plugin.json` is
+bumped too; bumping `claude/` alone releases just the full plugin.
+
 Layout convention per adapter: `hooks/`, `scripts/`, `tests/goldens/`,
 plus each ecosystem's manifest files. `build/vendor.py` copies
 `cardinal_core/` into `hooks/` at build time.
