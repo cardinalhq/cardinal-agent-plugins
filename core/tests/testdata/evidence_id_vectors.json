@@ -1,0 +1,47 @@
+{
+ "_comment": "cardinal.evidence.v2 ids: ev_ + sha256('cardinal.evidence.v2|' + runtime + '|' + session + '|' + tool_use_id)[:12], session = the id when it matches ^[A-Za-z0-9_-]{1,128}$ else 'no-session'. Shared by core/tests (Python) and tests/native (JS bridge).",
+ "vectors": [
+  {
+   "runtime": "claude-code",
+   "session_id": "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f",
+   "tool_use_id": "toolu_01ABC",
+   "evidence_id": "ev_17636d1ec6b1"
+  },
+  {
+   "runtime": "pi",
+   "session_id": "sess_1",
+   "tool_use_id": "call_9",
+   "evidence_id": "ev_a07ea35be754"
+  },
+  {
+   "runtime": "opencode",
+   "session_id": "ses_abc",
+   "tool_use_id": "call_1",
+   "evidence_id": "ev_3686902cb96c"
+  },
+  {
+   "runtime": "codex",
+   "session_id": "019a-thread",
+   "tool_use_id": "call_x",
+   "evidence_id": "ev_e5ae8605d994"
+  },
+  {
+   "runtime": "claude-code",
+   "session_id": null,
+   "tool_use_id": "toolu_02",
+   "evidence_id": "ev_584cb0067946"
+  },
+  {
+   "runtime": "claude-code",
+   "session_id": "bad session!",
+   "tool_use_id": "toolu_03",
+   "evidence_id": "ev_21df12ef20f3"
+  },
+  {
+   "runtime": "gemini",
+   "session_id": "s",
+   "tool_use_id": "télé-😀",
+   "evidence_id": "ev_0225b11860f5"
+  }
+ ]
+}

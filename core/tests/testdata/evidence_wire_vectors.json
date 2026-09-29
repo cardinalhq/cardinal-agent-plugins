@@ -1,0 +1,548 @@
+{
+ "_comment": "Spool entries (cardinal.evidence.v2) and the upload item cardinal_core.evidence_promote.wire_item makes of each. Every item must parse under conductor's EvidenceItemSchema (packages/maestro/src/storyboard/evidence-upload.ts) and be accepted by the gateway's BuildExternal; conductor keeps a copy of this file in its tests.",
+ "vectors": [
+  {
+   "name": "builtin-bash",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_3478e89dae6d",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "builtin",
+     "runtime": "claude-code"
+    },
+    "server": "builtin:claude-code",
+    "tool": "Bash",
+    "tool_name": "Bash",
+    "client": "claude-code/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "shell",
+    "args": {
+     "command": "make test"
+    },
+    "result": {
+     "structured": {
+      "stderr": "",
+      "stdout": "42 passed"
+     }
+    },
+    "truncated": false,
+    "summary": "make test"
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "builtin:claude-code",
+    "client": "claude-code/1.2.3",
+    "tool": "Bash",
+    "result": {
+     "structured_content": {
+      "stderr": "",
+      "stdout": "42 passed"
+     }
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "command": "make test"
+    }
+   }
+  },
+  {
+   "name": "builtin-bash-failed",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_3478e89dae6d",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "builtin",
+     "runtime": "claude-code"
+    },
+    "server": "builtin:claude-code",
+    "tool": "Bash",
+    "tool_name": "Bash",
+    "client": "claude-code/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "error",
+    "normalizer": "shell",
+    "args": {
+     "command": "make test"
+    },
+    "result": {
+     "structured": {
+      "exit_code": 2,
+      "output": "FAIL a.test.ts"
+     }
+    },
+    "truncated": false,
+    "is_error": true,
+    "exit_code": 2,
+    "summary": "make test"
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "builtin:claude-code",
+    "client": "claude-code/1.2.3",
+    "tool": "Bash",
+    "result": {
+     "structured_content": {
+      "exit_code": 2,
+      "output": "FAIL a.test.ts"
+     },
+     "is_error": true
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "command": "make test"
+    }
+   }
+  },
+  {
+   "name": "builtin-read",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_3478e89dae6d",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "builtin",
+     "runtime": "claude-code"
+    },
+    "server": "builtin:claude-code",
+    "tool": "Read",
+    "tool_name": "Read",
+    "client": "claude-code/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "generic",
+    "args": {
+     "file_path": "./a.py"
+    },
+    "result": {
+     "structured": {
+      "file": {
+       "content": "x = 1\n",
+       "filePath": "./a.py"
+      },
+      "type": "text"
+     }
+    },
+    "truncated": false,
+    "summary": "./a.py"
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "builtin:claude-code",
+    "client": "claude-code/1.2.3",
+    "tool": "Read",
+    "result": {
+     "structured_content": {
+      "file": {
+       "content": "x = 1\n",
+       "filePath": "./a.py"
+      },
+      "type": "text"
+     }
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "file_path": "./a.py"
+    }
+   }
+  },
+  {
+   "name": "builtin-edit",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_3478e89dae6d",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "builtin",
+     "runtime": "claude-code"
+    },
+    "server": "builtin:claude-code",
+    "tool": "Edit",
+    "tool_name": "Edit",
+    "client": "claude-code/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "file-edit",
+    "args": {
+     "file_path": "./a.py",
+     "new_string": "2",
+     "old_string": "1"
+    },
+    "result": {
+     "structured": {
+      "file_path": "./a.py",
+      "patch": [
+       {
+        "lines": [
+         "-x = 1",
+         "+x = 2"
+        ],
+        "oldStart": 1
+       }
+      ],
+      "replace_all": false,
+      "user_modified": false
+     }
+    },
+    "truncated": false,
+    "summary": "./a.py"
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "builtin:claude-code",
+    "client": "claude-code/1.2.3",
+    "tool": "Edit",
+    "result": {
+     "structured_content": {
+      "file_path": "./a.py",
+      "patch": [
+       {
+        "lines": [
+         "-x = 1",
+         "+x = 2"
+        ],
+        "oldStart": 1
+       }
+      ],
+      "replace_all": false,
+      "user_modified": false
+     }
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "file_path": "./a.py",
+     "new_string": "2",
+     "old_string": "1"
+    }
+   }
+  },
+  {
+   "name": "builtin-unknown-tool",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_3478e89dae6d",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "builtin",
+     "runtime": "claude-code"
+    },
+    "server": "builtin:claude-code",
+    "tool": "FrobnicateWidgets_v9",
+    "tool_name": "FrobnicateWidgets_v9",
+    "client": "claude-code/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "generic",
+    "args": {
+     "x": [
+      1,
+      {
+       "y": "z"
+      }
+     ]
+    },
+    "result": {
+     "structured": {
+      "weird": {
+       "n": 1
+      }
+     }
+    },
+    "truncated": false
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "builtin:claude-code",
+    "client": "claude-code/1.2.3",
+    "tool": "FrobnicateWidgets_v9",
+    "result": {
+     "structured_content": {
+      "weird": {
+       "n": 1
+      }
+     }
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "x": [
+      1,
+      {
+       "y": "z"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "builtin-non-object-args",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_3478e89dae6d",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "builtin",
+     "runtime": "claude-code"
+    },
+    "server": "builtin:claude-code",
+    "tool": "Whatever",
+    "tool_name": "Whatever",
+    "client": "claude-code/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "generic",
+    "args": [
+     "a",
+     1
+    ],
+    "result": {
+     "text": [
+      "plain text"
+     ]
+    },
+    "truncated": false
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "builtin:claude-code",
+    "client": "claude-code/1.2.3",
+    "tool": "Whatever",
+    "result": {
+     "content": [
+      {
+       "type": "text",
+       "text": "plain text"
+      }
+     ]
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "input": [
+      "a",
+      1
+     ]
+    }
+   }
+  },
+  {
+   "name": "mcp-grafana",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_3478e89dae6d",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "mcp",
+     "server": "grafana",
+     "runtime": "claude-code"
+    },
+    "server": "grafana",
+    "tool": "query_prometheus",
+    "tool_name": "mcp__grafana__query_prometheus",
+    "client": "claude-code/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "mcp-content",
+    "args": {
+     "expr": "up"
+    },
+    "result": {
+     "other_blocks": 1,
+     "text": [
+      "series: 3"
+     ]
+    },
+    "truncated": false,
+    "summary": "up"
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "grafana",
+    "client": "claude-code/1.2.3",
+    "tool": "query_prometheus",
+    "result": {
+     "content": [
+      {
+       "type": "text",
+       "text": "series: 3"
+      },
+      {
+       "type": "other"
+      }
+     ]
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "expr": "up"
+    }
+   }
+  },
+  {
+   "name": "mcp-odd-names",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_3478e89dae6d",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "mcp",
+     "server": "my:srv",
+     "runtime": "claude-code"
+    },
+    "server": "my_srv",
+    "tool": "do thing!",
+    "tool_name": "mcp__my:srv__do thing!",
+    "client": "claude-code/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "mcp-content",
+    "args": {},
+    "result": {
+     "text": [
+      "ok"
+     ]
+    },
+    "truncated": false
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "my_srv",
+    "client": "claude-code/1.2.3",
+    "tool": "do thing_",
+    "result": {
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {}
+   }
+  },
+  {
+   "name": "codex-bash",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_8bf979f66a48",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "builtin",
+     "runtime": "codex"
+    },
+    "server": "builtin:codex",
+    "tool": "Bash",
+    "tool_name": "Bash",
+    "client": "codex/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "generic",
+    "args": {
+     "command": "echo three"
+    },
+    "result": {
+     "text": [
+      "three"
+     ]
+    },
+    "truncated": false,
+    "summary": "echo three"
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "builtin:codex",
+    "client": "codex/1.2.3",
+    "tool": "Bash",
+    "result": {
+     "content": [
+      {
+       "type": "text",
+       "text": "three"
+      }
+     ]
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "command": "echo three"
+    }
+   }
+  },
+  {
+   "name": "opencode-tool",
+   "entry": {
+    "schema": "cardinal.evidence.v2",
+    "evidence_id": "ev_540a28134b87",
+    "tier": "captured",
+    "session_id": "sess-vectors",
+    "source": {
+     "kind": "tool",
+     "runtime": "opencode"
+    },
+    "server": "tool:opencode",
+    "tool": "bash",
+    "tool_name": "bash",
+    "client": "opencode/1.2.3",
+    "called_at": "2026-09-29T17:02:11.123456Z",
+    "tool_use_id": "toolu_v",
+    "status": "ok",
+    "normalizer": "generic",
+    "args": {
+     "command": "ls"
+    },
+    "result": {
+     "text": [
+      "a\nb"
+     ]
+    },
+    "truncated": false,
+    "summary": "ls"
+   },
+   "client": "claude-code/9.9.9",
+   "item": {
+    "provenance": "captured",
+    "source_server": "tool:opencode",
+    "client": "opencode/1.2.3",
+    "tool": "bash",
+    "result": {
+     "content": [
+      {
+       "type": "text",
+       "text": "a\nb"
+      }
+     ]
+    },
+    "client_called_at": "2026-09-29T17:02:11.123456Z",
+    "args": {
+     "command": "ls"
+    }
+   }
+  }
+ ]
+}
