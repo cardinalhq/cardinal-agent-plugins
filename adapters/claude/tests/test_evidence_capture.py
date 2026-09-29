@@ -126,7 +126,7 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self.assertLess(time.monotonic() - t, 2.5)
         entry = self._withheld(res)
         self.assertEqual(entry["withheld"]["reason"], "unreadable")
-        self.assertIn(entry["withheld"]["rule"], ("budget", "bounds"))
+        self.assertIn(entry["withheld"]["rule"], ("budget", "gate.bounds"))
         self.assertEqual(entry["tool"], "FutureBulkTool")
 
     # -- payload shapes ------------------------------------------------------
