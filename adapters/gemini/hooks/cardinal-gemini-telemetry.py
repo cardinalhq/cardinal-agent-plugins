@@ -712,12 +712,20 @@ def evidence_call(payload: dict[str, Any]):
         tool, tool_name = raw_name, raw_name
         source = cap.builtin_source("gemini")
     tool_response = payload.get("tool_response")
+    if tool_response is None:
+        tool_response = payload.get("toolResponse")
     error = gemini_error_text(tool_response)
     response = None
     if error is None:
-        response = gemini_tool_response(tool_response)
-        if response is None:
-            return None
+        if isinstance(tool_response, dict) and ("llmContent" in tool_response or "returnDisplay" in tool_response):
+            response = gemini_tool_response(tool_response)
+            if response is None:
+                return None
+        else:
+            # Any other shape (a future Gemini CLI, another tool API) is kept
+            # as it came, through the generic normalizer: an unfamiliar
+            # result is never dropped.
+            response = tool_response
     tool_input = payload.get("tool_input")
     if tool_input is None:
         tool_input = payload.get("toolInput")
@@ -752,8 +760,9 @@ def capture_evidence(payload: dict[str, Any]) -> str | None:
         call = evidence_call(payload)
         if call is None:
             return None
-        with cap.time_guard():
-            got = cap.capture_call(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
+        # Never silent: a call the pipeline cannot finish in time is kept as a
+        # withheld stub (capture_call_guarded).
+        got = cap.capture_call_guarded(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
         return got.line if got is not None else None
     except BaseException:
         return None

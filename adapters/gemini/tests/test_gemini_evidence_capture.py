@@ -245,6 +245,26 @@ class GeminiEvidenceCaptureTests(unittest.TestCase):
                 self.assertEqual(entry["tool"], name)
                 self.assertIn("12 passing", entry["result"]["text"][0])
 
+    def test_unfamiliar_response_shapes_are_captured_not_dropped(self):
+        # Not Gemini's {llmContent, returnDisplay}: a string, a list, a dict
+        # of some future shape, null. Kept as they came (generic normalizer).
+        cases = (
+            ("plain string", "12 passing", lambda r: self.assertEqual(r["text"], ["12 passing"])),
+            ("list", [1, {"a": 2}], lambda r: self.assertEqual(r["structured"], [1, {"a": 2}])),
+            ("future dict", {"output": {"rows": 3}}, lambda r: self.assertEqual(r["structured"],
+                                                                                {"output": {"rows": 3}})),
+            ("null", None, lambda r: self.assertEqual(r["text"], [""])),
+        )
+        for i, (label, response, check) in enumerate(cases):
+            with self.subTest(label=label):
+                payload = self._payload(tool_name="some_future_tool", tool_input={"q": "x"},
+                                        tool_response=response, tool_call_id=f"call_{i}")
+                payload.pop("mcp_context")
+                _, _, entry, _ = self._captured(self._run(payload))
+                self.assertEqual(entry["tool"], "some_future_tool")
+                self.assertEqual(entry["status"], "ok")
+                check(entry["result"])
+
     def test_failed_shell_call_is_captured(self):
         payload = self._payload(tool_name="run_shell_command", tool_input={"command": "make test"},
                                 tool_response={"llmContent": "Command: make test\nExit Code: 2",
