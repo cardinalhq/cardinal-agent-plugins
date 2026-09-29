@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+import _key_disclosure  # noqa: E402
 import _otel_settings  # noqa: E402
 from cardinal_core.initiative import git_facts  # noqa: E402
 from cardinal_core.limits import fetch_status, standing_lines  # noqa: E402
@@ -83,9 +84,29 @@ def probe_mcp(mcp_url: str, key: str) -> str:
         return f"✗ MCP network error: {e}"
 
 
+def key_disclosure_lines() -> list[str]:
+    """The key-without-URL caveat (hooks/_key_disclosure.py), or nothing."""
+    if not _key_disclosure.key_without_url():
+        return []
+    return [
+        "  ⚠ CARDINAL_MCP_API_KEY is set but CARDINAL_MCP_URL is not: Claude Code",
+        f"    sends that API key to Cardinal Cloud ({_key_disclosure.CLOUD_MCP_URL}).",
+        "    Run /cardinal:connect (or /cardinal:connect --host <your maestro URL>),",
+        "    or unset CARDINAL_MCP_API_KEY (shell profile / settings.json env).",
+    ]
+
+
 def main() -> int:
+    warning = key_disclosure_lines()
     if not STATE_PATH.exists():
         print("✗ Not connected. Run /cardinal:connect to wire up.")
+        url = _key_disclosure.mcp_url()
+        where = "Cardinal Cloud" if url == _key_disclosure.CLOUD_MCP_URL else "CARDINAL_MCP_URL"
+        print("  Storyboards work without connecting: the cardinal MCP server")
+        print(f"  uses {where} ({url}); sign in via /mcp.")
+        print("  Connecting turns on telemetry, spend limits and the other hooks.")
+        for line in warning:
+            print(line)
         return 1
 
     state = load_or_die(STATE_PATH, "cardinal.json")
@@ -105,6 +126,9 @@ def main() -> int:
                 print("  ⚠  Connection is older than 90 days — consider /cardinal:connect --rotate")
         except Exception:
             pass
+
+    for line in warning:
+        print(line)
 
     settings = load_or_die(SETTINGS_PATH, "settings.json")
     env = settings.get("env", {}) if isinstance(settings.get("env"), dict) else {}

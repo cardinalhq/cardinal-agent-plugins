@@ -245,8 +245,12 @@ class StubMaestro:
 # ---------------------------------------------------------------------------
 
 def run_plugin(bin_path: Path, args: list[str], home: Path, env_overrides: dict | None = None,
-               timeout: int = 30) -> subprocess.CompletedProcess:
+               timeout: int = 30, hermetic: bool = False) -> subprocess.CompletedProcess:
+    """hermetic=True drops CARDINAL_MCP_* from the inherited environment
+    (Claude Code exports CARDINAL_MCP_API_KEY to its children)."""
     env = os.environ.copy()
+    if hermetic:
+        env = {k: v for k, v in env.items() if not k.startswith("CARDINAL_MCP_")}
     env["HOME"] = str(home)
     if env_overrides:
         env.update(env_overrides)
@@ -279,10 +283,16 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("cardinal", data)
         entry = data["cardinal"]
         self.assertEqual(entry["type"], "http")
-        # The URL and header value MUST be env-var placeholders; a literal
-        # URL would defeat the per-user-key design.
-        self.assertEqual(entry["url"], "${CARDINAL_MCP_URL}")
-        self.assertEqual(entry["headers"]["X-CardinalHQ-API-Key"], "${CARDINAL_MCP_API_KEY}")
+        # Connected: /cardinal:connect's CARDINAL_MCP_URL / _API_KEY win.
+        # Not connected: Cardinal Cloud's org-less /mcp (Claude Code runs MCP
+        # OAuth there) and an empty key header, which maestro treats as absent.
+        self.assertEqual(entry["url"], "${CARDINAL_MCP_URL:-https://app.cardinalhq.io/mcp}")
+        self.assertEqual(entry["headers"], {"X-CardinalHQ-API-Key": "${CARDINAL_MCP_API_KEY:-}"})
+        # One server, named `cardinal`: tool names stay
+        # mcp__plugin_cardinal_cardinal__* in both modes, which the storyboard
+        # hooks' matchers and Cardinal-server lists rely on.
+        self.assertEqual(list(data), ["cardinal"])
+        self.assertEqual(set(entry), {"type", "url", "headers"})
 
     def test_plugin_json_version_is_loaded_at_runtime(self):
         # cardinal-connect resolves PLUGIN_VERSION from plugin.json at
@@ -1045,6 +1055,19 @@ class DisconnectTests(unittest.TestCase):
         self.assertIn("Could not remove", res.stdout)
         self.assertTrue(secrets_path.exists())
 
+    def test_disconnect_says_the_server_falls_back_to_cardinal_cloud(self):
+        # No CARDINAL_MCP_* left: .mcp.json resolves to Cardinal Cloud's /mcp
+        # over OAuth, not to "nothing". The closing output says so.
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("falls back to Cardinal Cloud", res.stdout)
+        self.assertIn("https://app.cardinalhq.io/mcp", res.stdout)
+        self.assertIn("disable it in /mcp", res.stdout)
+        skill = (PLUGIN_BIN.parent / "skills" / "disconnect" / "SKILL.md").read_text()
+        self.assertNotIn("empty URL", skill)
+        self.assertIn("falls back to Cardinal Cloud", skill)
+        self.assertIn("disable `cardinal` in `/mcp`", skill)
+
     def test_no_state_file_no_op(self):
         self.state.unlink()
         if self.settings.exists():
@@ -1070,9 +1093,47 @@ class StatusTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_zero_state_says_not_connected(self):
-        res = run_plugin(STATUS, [], self.home)
+        res = run_plugin(STATUS, [], self.home, hermetic=True)
         self.assertEqual(res.returncode, 1)
         self.assertIn("not connected", res.stdout.lower())
+        # Storyboards work unconnected: say so, and where to sign in.
+        self.assertIn("Storyboards work without connecting", res.stdout)
+        self.assertIn("Cardinal Cloud (https://app.cardinalhq.io/mcp)", res.stdout)
+        self.assertIn("sign in via /mcp", res.stdout)
+        self.assertNotIn("CARDINAL_MCP_API_KEY is set", res.stdout)
+
+    def test_unconnected_status_warns_when_a_key_would_go_to_cardinal_cloud(self):
+        for label, settings, overrides in (
+            ("process env", None, {"CARDINAL_MCP_API_KEY": "ck_from_shell"}),
+            ("settings env", {"CARDINAL_MCP_API_KEY": "ck_in_settings"}, None),
+        ):
+            with self.subTest(label):
+                path = self.home / ".claude" / "settings.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"env": settings or {}}))
+                res = run_plugin(STATUS, [], self.home, env_overrides=overrides, hermetic=True)
+                self.assertEqual(res.returncode, 1)
+                self.assertIn("CARDINAL_MCP_API_KEY is set but CARDINAL_MCP_URL is not", res.stdout)
+                self.assertIn("/cardinal:connect --host", res.stdout)
+                self.assertNotIn("ck_", res.stdout, "never echo the key")
+        # With a URL the key goes there: no warning, and the server's URL is shown.
+        res = run_plugin(STATUS, [], self.home, hermetic=True, env_overrides={
+            "CARDINAL_MCP_API_KEY": "ck_1", "CARDINAL_MCP_URL": "https://maestro.example/mcp"})
+        self.assertNotIn("CARDINAL_MCP_API_KEY is set", res.stdout)
+        self.assertIn("CARDINAL_MCP_URL (https://maestro.example/mcp)", res.stdout)
+
+    def test_connected_status_warns_about_a_stray_key_only_without_a_url(self):
+        # Telemetry-only connect writes no MCP vars; a key exported in the
+        # shell would then go to Cardinal Cloud.
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--telemetry-only"], self.home, timeout=15, hermetic=True)
+        res = run_plugin(STATUS, [], self.home, hermetic=True, env_overrides={"CARDINAL_MCP_API_KEY": "ck_x"})
+        self.assertIn("telemetry-only", res.stdout)
+        self.assertIn("CARDINAL_MCP_API_KEY is set but CARDINAL_MCP_URL is not", res.stdout)
+        # A full connect writes both vars: no warning.
+        run_plugin(CONNECT, ["--host", self.stub.url(), "--rotate"], self.home, timeout=15, hermetic=True)
+        res = run_plugin(STATUS, [], self.home, hermetic=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("CARDINAL_MCP_API_KEY is set", res.stdout)
 
     def test_after_connect_renders_both_sides(self):
         run_plugin(CONNECT, ["--host", self.stub.url()], self.home, timeout=15)
@@ -1386,6 +1447,20 @@ INITIATIVE_CONVENTION_PATH = (
 )
 
 
+def _connected_env(home: Path, connected: bool = True) -> dict:
+    """The hook env for a test HOME. Gated hooks run only when connected
+    (hooks/_connection.py): connected writes the connect state file, and the
+    developer's own CARDINAL_MCP_* / OTEL_* exports never leak in."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("CARDINAL_MCP_") or k.startswith("OTEL_"))}
+    env["HOME"] = str(home)
+    state = home / ".claude" / "cardinal.json"
+    if connected and not state.exists():
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text('{"mode": "telemetry-and-mcp"}\n')
+    return env
+
+
 def _run_initiative_convention(cwd: Path, home: Path | None = None) -> subprocess.CompletedProcess:
     payload = json.dumps({
         "session_id": "sess-1",
@@ -1393,11 +1468,10 @@ def _run_initiative_convention(cwd: Path, home: Path | None = None) -> subproces
         "hook_event_name": "SessionStart",
         "source": "startup",
     })
-    env = os.environ.copy()
     # Hermetic HOME: the hook reads ~/.claude/cardinal.json for the
     # spend-limits standing fetch — never let a test see the developer's
     # real connection state (or hit the real network).
-    env["HOME"] = str(home if home is not None else cwd)
+    env = _connected_env(home if home is not None else cwd)
     return subprocess.run(
         [sys.executable, str(INITIATIVE_CONVENTION_PATH)],
         input=payload, capture_output=True, text=True, timeout=10, env=env,
@@ -1508,8 +1582,7 @@ def _write_verdict(home: Path, session_id: str, verdict: dict) -> None:
 
 
 def _run_gate(home: Path, session_id: str = "sess-1") -> subprocess.CompletedProcess:
-    env = os.environ.copy()
-    env["HOME"] = str(home)
+    env = _connected_env(home)
     payload = json.dumps({
         "session_id": session_id,
         "hook_event_name": "UserPromptSubmit",

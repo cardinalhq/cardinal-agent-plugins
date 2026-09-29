@@ -404,12 +404,34 @@ class PromoteTests(_HomeCase):
         self.assertIn("no credential", res.stderr)
         self.assertEqual(self.stub.requests, [])
 
-    def test_not_connected(self):
-        a = self.capture()
+    def test_not_connected_uploads_to_cardinal_cloud_with_the_token_only(self):
+        # Never connected: the plugin's MCP server is Cardinal Cloud's /mcp
+        # (OAuth), so its storyboards and evidence tokens are Cardinal Cloud's.
+        # Checked in-process: the CLI itself would reach the real host.
+        cli = _load_cli()
+        self.assertEqual(cli.connection(self.home, {}),
+                         {"origin": "https://app.cardinalhq.io", "org": None, "key": None})
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "settings.json").write_text(json.dumps({"env": {"THEME": "dark"}}))
+        self.assertEqual(cli.connection(self.home, {})["origin"], "https://app.cardinalhq.io")
+        # A key without a URL is not sent to the default host.
+        self.assertIsNone(cli.connection(self.home, {"CARDINAL_MCP_API_KEY": API_KEY})["key"])
+        # CARDINAL_MCP_URL (connected, or self-hosted) still wins.
+        conn = cli.connection(self.home, {"CARDINAL_MCP_URL": f"https://cardinal.acme.internal/api/orgs/{ORG}/mcp"})
+        self.assertEqual(conn, {"origin": "https://cardinal.acme.internal", "org": ORG, "key": None})
+        # An unusable URL: nothing.
+        self.assertEqual(cli.connection(self.home, {"CARDINAL_MCP_URL": "ftp://x"}), {})
+
+    def test_url_without_key_promotes_with_the_evidence_token(self):
+        # The unconnected mode's shape against a stub: a Cardinal URL, no key.
+        self.connect(self.stub.port, key=None)
         self.store_token()
+        a = self.capture()
         res = self.run_cli("promote", "--storyboard", SB, a["evidence_id"])
-        self.assertEqual(res.returncode, 2)
-        self.assertIn("/cardinal:connect", res.stderr)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        h = self.stub.requests[0]["headers"]
+        self.assertEqual(h["authorization"], "CardinalEvidence " + TOKEN)
+        self.assertNotIn("x-cardinalhq-api-key", h)
 
     def test_token_for_another_org_than_the_connection_is_refused(self):
         # A token file naming another org must not redirect evidence there.

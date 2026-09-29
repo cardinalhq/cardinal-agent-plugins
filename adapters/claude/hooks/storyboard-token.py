@@ -8,7 +8,7 @@ storyboard/scoped-tokens.ts; `Authorization: CardinalEvidence <token>` on
 POST /api/orgs/<org>/storyboards/<id>/evidence). storyboard__preview returns a
 fresh one while the storyboard is a draft. This hook keeps it, so
 `cardinal-evidence promote` can upload captured evidence without the org
-API key.
+API key (before /cardinal:connect, the only credential it has).
 
 Contract:
   - Input on stdin: Claude Code's PostToolUse payload {tool_name,
