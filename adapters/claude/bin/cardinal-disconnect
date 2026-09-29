@@ -209,6 +209,9 @@ def main() -> int:
 
     print()
     print("✓ Local config updated. Restart Claude Code so it picks up the change.")
+    print("  After restart the cardinal MCP server falls back to Cardinal Cloud")
+    print("  (https://app.cardinalhq.io/mcp, OAuth sign-in); disable it in /mcp")
+    print("  if you don't want it.")
     return 0
 
 

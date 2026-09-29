@@ -48,6 +48,9 @@ Tell the user:
 2. The ingest key is still active server-side; revoke it via
    `https://<host>/settings/api-keys` for a clean disconnect.
 3. Restart Claude Code so it picks up the env-block change. Without
-   the `CARDINAL_MCP_*` env vars the plugin's `.mcp.json` resolves to
-   an empty URL and the `cardinal` server won't connect — effectively
-   off on the next launch.
+   the `CARDINAL_MCP_*` env vars the plugin's `cardinal` MCP server
+   falls back to Cardinal Cloud's `https://app.cardinalhq.io/mcp` over
+   MCP OAuth (the unconnected mode: storyboards still work). If Claude
+   Code holds an OAuth token for it from an earlier sign-in, it may
+   reconnect without prompting. To turn the server off entirely,
+   disable `cardinal` in `/mcp` (or disable the plugin).

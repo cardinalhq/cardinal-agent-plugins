@@ -152,6 +152,49 @@ class ConnectionHelperTests(unittest.TestCase):
             self.assertTrue(self.conn.is_connected())
 
 
+class KeyDisclosureHelperTests(unittest.TestCase):
+    """hooks/_key_disclosure.py: the key-without-URL check."""
+
+    def setUp(self):
+        self.mod = _load("_key_disclosure")
+        self.tmp = TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        (self.home / ".claude").mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def settings(self, env) -> None:
+        (self.home / ".claude" / "settings.json").write_text(json.dumps({"env": env}))
+
+    def test_key_without_url(self):
+        self.assertFalse(self.mod.key_without_url(self.home, {}))
+        self.assertTrue(self.mod.key_without_url(self.home, {"CARDINAL_MCP_API_KEY": "ck"}))
+        self.assertFalse(self.mod.key_without_url(
+            self.home, {"CARDINAL_MCP_API_KEY": "ck", "CARDINAL_MCP_URL": "https://m.example/mcp"}))
+        # `${CARDINAL_MCP_URL:-default}`: an empty URL is the default.
+        self.assertTrue(self.mod.key_without_url(self.home, {"CARDINAL_MCP_API_KEY": "ck", "CARDINAL_MCP_URL": ""}))
+        self.settings({"CARDINAL_MCP_API_KEY": "ck"})
+        self.assertTrue(self.mod.key_without_url(self.home, {}))
+        self.assertFalse(self.mod.key_without_url(self.home, {"CARDINAL_MCP_URL": "https://m.example/mcp"}))
+        self.settings({"CARDINAL_MCP_API_KEY": "ck", "CARDINAL_MCP_URL": "https://m.example/mcp"})
+        self.assertFalse(self.mod.key_without_url(self.home, {}))
+
+    def test_mcp_url_and_unreadable_settings(self):
+        self.assertEqual(self.mod.mcp_url(self.home, {}), "https://app.cardinalhq.io/mcp")
+        self.assertEqual(self.mod.mcp_url(self.home, {"CARDINAL_MCP_URL": "https://m.example/mcp"}),
+                         "https://m.example/mcp")
+        (self.home / ".claude" / "settings.json").write_text("{not json")
+        self.assertTrue(self.mod.key_without_url(self.home, {"CARDINAL_MCP_API_KEY": "ck"}))
+        self.assertFalse(self.mod.key_without_url(self.home, {}))
+
+    def test_warning_names_the_fixes_and_matches_the_mcp_json_default(self):
+        mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text())["cardinal"]
+        self.assertEqual(mcp["url"], "${CARDINAL_MCP_URL:-" + self.mod.CLOUD_MCP_URL + "}")
+        for s in ("/cardinal:connect", "--host", "unset CARDINAL_MCP_API_KEY", self.mod.CLOUD_MCP_URL):
+            self.assertIn(s, self.mod.WARNING)
+
+
 class HookRegistrationTests(unittest.TestCase):
     def test_every_hook_is_classified_and_every_gated_hook_checks_the_connection(self):
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
@@ -197,8 +240,11 @@ class _GuardedCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def guarded_run(self, hook_path: Path, payload, env: dict, timeout: float = 30.0):
+    def guarded_run(self, hook_path: Path, payload, env: dict, timeout: float = 30.0, raw_env: dict | None = None):
+        """`env` is made hermetic; `raw_env` is added after, as-is (to put a
+        CARDINAL_MCP_* var in the hook's process environment on purpose)."""
         env = hermetic(dict(env))
+        env.update(raw_env or {})
         env["NET_GUARD_LOG"] = str(self.guard_log)
         return subprocess.run([sys.executable, str(self.guard), str(hook_path)],
                               input=json.dumps(payload) if not isinstance(payload, str) else payload,
@@ -277,15 +323,22 @@ class GatedHooksUnconnectedTests(_GuardedCase):
         self.assertIn("Cardinal decision capture is on", json.loads(proc.stdout)
                       ["hookSpecificOutput"]["additionalContext"])
 
-    def test_initiative_convention_never_mentions_cardinal_when_not_connected(self):
+    def test_initiative_convention_is_silent_in_a_git_repo_when_not_connected(self):
+        # A git repo on a feature branch is exactly where the connected hook
+        # speaks (the initiative convention); not connected it says nothing.
         home = self.guard_dir / "home"
         repo = fixtures.make_git_repo(self.guard_dir / "repo", "feat/x")
         payload = {"session_id": "s1", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"}
-        env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-               "CARDINAL_MCP_API_KEY": "leaks-from-a-shell-but-is-stripped"}
+        env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         proc = self.guarded_run(HOOKS / "initiative-convention.py", payload, env)
         self.assertEqual((proc.returncode, proc.stdout), (0, ""))
         self.assertEqual(self.guard_lines(), [])
+        # The control: connected, the same repo gets the convention prompt.
+        (home / ".claude").mkdir(parents=True, exist_ok=True)
+        (home / ".claude" / "cardinal.json").write_text("{}")
+        proc = self.guarded_run(HOOKS / "initiative-convention.py", payload, env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"])
 
 
 class StoryboardHooksUnconnectedTests(_GuardedCase):
@@ -304,6 +357,68 @@ class StoryboardHooksUnconnectedTests(_GuardedCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn(SESSION, json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(self.guard_lines(), [])
+
+    def _session(self, sid=SESSION, source="startup", raw_env=None) -> str:
+        payload = {"hook_event_name": "SessionStart", "source": source}
+        if sid:
+            payload["session_id"] = sid
+        proc = self.guarded_run(HOOKS / "storyboard-session.py", payload, self.env, raw_env=raw_env)
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+        self.assertEqual(self.guard_lines(), [])
+        return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"] if proc.stdout else ""
+
+    def _settings(self, env: dict) -> None:
+        (self.home / ".claude" / "settings.json").write_text(json.dumps({"env": env}))
+
+    def test_session_hook_warns_once_when_a_key_would_go_to_cardinal_cloud(self):
+        # Key in settings.json env, no URL: .mcp.json sends it to Cardinal Cloud.
+        self._settings({"CARDINAL_MCP_API_KEY": "ck_selfhosted"})
+        ctx = self._session()
+        self.assertIn(SESSION, ctx)
+        self.assertIn("Tell the user", ctx)
+        self.assertIn("CARDINAL_MCP_API_KEY is set but CARDINAL_MCP_URL is not", ctx)
+        self.assertIn("https://app.cardinalhq.io/mcp", ctx)
+        self.assertIn("/cardinal:connect --host", ctx)
+        self.assertNotIn("ck_selfhosted", ctx, "never echo the key")
+        # resume / clear / compact of the same session: the id again, no repeat.
+        for source in ("resume", "clear", "compact"):
+            ctx = self._session(source=source)
+            self.assertIn(SESSION, ctx)
+            self.assertNotIn("CARDINAL_MCP_API_KEY", ctx, source)
+        # A new session is warned again.
+        self.assertIn("CARDINAL_MCP_API_KEY", self._session(sid="another-session"))
+
+    def test_session_hook_warns_for_a_key_in_the_process_environment(self):
+        # Exported in a shell profile (the Codex manual-config docs' route).
+        ctx = self._session(raw_env={"CARDINAL_MCP_API_KEY": "ck_from_shell"})
+        self.assertIn("CARDINAL_MCP_API_KEY is set but CARDINAL_MCP_URL is not", ctx)
+        self.assertNotIn("ck_from_shell", ctx)
+        # URL from settings.json + key from the shell: the key goes to that URL.
+        self._settings({"CARDINAL_MCP_URL": "https://maestro.example/mcp"})
+        ctx = self._session(sid="s2", raw_env={"CARDINAL_MCP_API_KEY": "ck_from_shell"})
+        self.assertNotIn("CARDINAL_MCP_API_KEY", ctx)
+
+    def test_session_hook_does_not_warn_when_connected_or_keyless(self):
+        cases = (
+            ("nothing", {}, None),
+            ("connected", {"CARDINAL_MCP_URL": "https://app.cardinalhq.io/api/orgs/o1/mcp",
+                           "CARDINAL_MCP_API_KEY": "ck_1"}, None),
+            ("empty key", {"CARDINAL_MCP_API_KEY": ""}, None),
+            ("blank key", {"CARDINAL_MCP_API_KEY": "  "}, None),
+            ("url only", {"CARDINAL_MCP_URL": "https://maestro.example/mcp"}, None),
+            ("url from shell", {"CARDINAL_MCP_API_KEY": "ck_1"}, {"CARDINAL_MCP_URL": "https://maestro.example/mcp"}),
+        )
+        for i, (label, settings, raw_env) in enumerate(cases):
+            with self.subTest(label):
+                self._settings(settings)
+                ctx = self._session(sid=f"s-{i}", raw_env=raw_env)
+                self.assertIn(f"s-{i}", ctx)
+                self.assertNotIn("CARDINAL_MCP_API_KEY", ctx)
+
+    def test_session_hook_warns_without_a_session_id_on_startup_only(self):
+        self._settings({"CARDINAL_MCP_API_KEY": "ck_1"})
+        self.assertIn("CARDINAL_MCP_API_KEY", self._session(sid=None, source="startup"))
+        self.assertEqual(self._session(sid=None, source="compact"), "")
 
     def test_evidence_capture_records_other_servers_and_skips_cardinal(self):
         base = {"session_id": SESSION, "hook_event_name": "PostToolUse", "tool_input": {"expr": "up"},
