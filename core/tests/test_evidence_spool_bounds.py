@@ -93,6 +93,59 @@ class SpoolBoundsTests(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertTrue(fresh.exists())
 
+    def test_size_cap_holds_when_one_pass_cannot_list_the_whole_spool(self):
+        # A spool too big to list inside one pass's budget (a heavy user:
+        # every tool call of every subagent for 14 days). A pass that runs
+        # out of budget used to skip the size bound entirely, forever; now
+        # the per-session totals persist in the gc index and passes converge.
+        sessions = [f"s{k:02d}" for k in range(30)]
+        paths = {}
+        for k, s in enumerate(sessions):
+            paths[s] = [self.put(s, k * 1000 + i, 1000, 100000 - k * 1000 - i) for i in range(40)]
+        cap_bytes = 200 * 1000
+        passes = 0
+        while passes < 2000:
+            passes += 1
+            evidence.gc(self.root, now=self.now, force=True, max_bytes=cap_bytes, budget_s=0.003)
+            live = sum(p.exists() for ps in paths.values() for p in ps)
+            if live * 1000 <= cap_bytes:
+                break
+        self.assertLessEqual(sum(p.exists() for ps in paths.values() for p in ps) * 1000, cap_bytes)
+        # The most recently active session is the last to lose anything.
+        self.assertTrue(all(p.exists() for p in paths[sessions[-1]]))
+        self.assertFalse(any(p.exists() for p in paths[sessions[0]]))
+
+    def test_incomplete_pass_retries_soon_and_index_is_reused(self):
+        for k in range(5):
+            for i in range(5):
+                self.put(f"s{k}", k * 10 + i, 10, 100 + i)
+        evidence.gc(self.root, now=self.now, force=True, budget_s=0)
+        # Out of budget: the next hook call inside GC_RETRY_S is skipped, one
+        # after it runs, without waiting out GC_INTERVAL_S.
+        stamp = (self.root / evidence.GC_STAMP).stat().st_mtime
+        self.assertLess(stamp, self.now)
+        old = self.put("s0", 99, 10, 30 * 24 * 3600)
+        evidence.gc(self.root, now=self.now + evidence.GC_RETRY_S + 1)
+        self.assertFalse(old.exists())
+        idx = evidence._gc_index_load(self.root)
+        self.assertEqual(sorted(idx), [f"s{k}" for k in range(5)])
+        self.assertEqual(idx["s1"][1:3], [50, 5])
+        # A garbage index is ignored (every session is listed again).
+        (self.root / evidence.GC_INDEX).write_text("{not json")
+        self.assertEqual(evidence._gc_index_load(self.root), {})
+        (self.root / evidence.GC_INDEX).write_text('{"sessions": {"../x": [1, 2, 3, 4, 5], "s1": ["a"]}}')
+        self.assertEqual(evidence._gc_index_load(self.root), {})
+        evidence.gc(self.root, now=self.now, force=True, max_bytes=100)
+        self.assertLessEqual(evidence.spool_usage(self.root)[1], 100)
+
+    def test_cached_session_still_expires(self):
+        p = self.put("s1", 1, 10, 13 * 24 * 3600)
+        evidence.gc(self.root, now=self.now, force=True)
+        self.assertTrue(p.exists())
+        # Nothing in s1 changed, but its oldest entry is now past the TTL.
+        evidence.gc(self.root, now=self.now + 2 * 24 * 3600, force=True)
+        self.assertFalse(p.exists())
+
     def test_usage(self):
         self.put("s1", 1, 100, 1)
         self.put("s2", 2, 50, 1)
