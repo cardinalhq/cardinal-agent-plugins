@@ -13,7 +13,7 @@ name to a draft storyboard, and Cardinal stores each as a *captured* receipt
 (rcpt_…) that scenes bind like any other receipt.
 
 Commands:
-  promote [--storyboard sb_…] ev_… [ev_…]
+  promote [--storyboard sb_…] [--force] ev_… [ev_…]
       Upload spool entries to the storyboard's evidence route,
       POST <maestro>/api/orgs/<org>/storyboards/<id>/evidence
       (conductor routes/storyboards-evidence.ts), as {items: [{provenance:
@@ -22,7 +22,9 @@ Commands:
       server, or "builtin:claude-code" for Claude Code's own tools. Prints
       one line per entry: "ev_… -> rcpt_…" or "ev_…: error <code>:
       <message>". Without --storyboard, the one storyboard whose evidence
-      token was stored in the entries' session is used.
+      token was stored in the entries' session is used. An entry already
+      promoted into that storyboard is not sent again: its existing receipt
+      is printed ("already promoted"); --force uploads it anyway.
   list [--session ID | --all] [--limit N] [--tool GLOB] [--grep TEXT] [--withheld]
       This session's captured entries (the newest session when Claude Code
       does not say which), plus the storyboards that have a stored token.

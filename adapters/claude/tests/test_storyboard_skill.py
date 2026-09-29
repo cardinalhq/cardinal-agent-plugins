@@ -150,6 +150,19 @@ class StoryboardSkillTextTests(unittest.TestCase):
         ):
             self.assertIn(needle, text)
 
+    def test_storyboard_skill_keeps_evidence_hygiene(self):
+        # From the release E2E: the agent promoted entries it never cited,
+        # re-promoted instead of reusing receipts, and called redacted
+        # (citable) results "withheld".
+        text = _flat(STORYBOARD_SKILL)
+        for needle in (
+            "only those, as you write the scene that cites them",
+            "prints its existing receipt (`already promoted`): reuse that id",
+            "**Redacted is not withheld.**",
+            "cite it and call it redacted, never withheld; claim nothing about masked values",
+        ):
+            self.assertIn(needle, text)
+
     def test_canvas_skill_keeps_the_local_preview_loop(self):
         text = _flat(CANVAS_SKILL)
         for needle in (
@@ -172,12 +185,14 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # The craft moved to the server (conductor #1975); the skills keep only
         # the Claude Code parts. Before: 477 lines / 4909 words (plugin 0.34.0).
         # After the slim: 202 lines / 1932 words. The caps leave a little room,
-        # not enough to paste a guide back in.
+        # not enough to paste a guide back in. The evidence-hygiene bullets
+        # (promote only what is cited, reuse receipts, redacted != withheld)
+        # took the word cap from 2100 to 2175.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)
         self.assertLessEqual(total, 220)
         words = sum(len(p.read_text().split()) for p in paths)
-        self.assertLessEqual(words, 2100)
+        self.assertLessEqual(words, 2175)
 
 
 if __name__ == "__main__":

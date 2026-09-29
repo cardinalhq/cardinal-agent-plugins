@@ -45,13 +45,16 @@ Captured evidence stays on this machine meanwhile and can be cited after connect
   `git`, `make`), file reads and edits, searches, web fetches, subagents, other MCP
   servers, any tool. The plugin's hook keeps each result on this machine and prints
   `[evidence:ev_…]`. Nothing is uploaded until a storyboard cites it. Lost an id? Run
-  `cardinal-evidence find <text>`. After `create`,
-  promote the ones you cite before binding them:
+  `cardinal-evidence find <text>`. After `create`, promote the ones you cite before binding
+  them, only those, as you write the scene that cites them:
   `cardinal-evidence promote --storyboard <id> ev_… [ev_…]` prints `ev_… -> rcpt_…` per
   entry (or its error); bind that receipt. Exit 1 means some entries failed: read the errors.
+  An entry promoted before prints its existing receipt (`already promoted`): reuse that id.
 - **Withheld.** `[evidence:ev_… withheld: …]` means the call touched something sensitive
   (a `.env`, a key, a credential command). Nothing was kept and it cannot be cited: say so
   plainly instead of paraphrasing its result.
+- **Redacted is not withheld.** A captured result showing `[redacted]` was kept with its
+  secrets masked: cite it and call it redacted, never withheld; claim nothing about masked values.
 - **Never claim more than the output shows.** A captured result is the client's record,
   labeled "reported by <client>". Exit 0 shows a command succeeded, not that the feature
   works. `cardinal-evidence show ev_…` prints what you would cite; bind the exact field
