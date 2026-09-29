@@ -84,6 +84,24 @@ Telemetry is best-effort with bounded queues and deduplication history; no
 delivery retry is attempted. Prompts, assistant text, tool outputs and raw shell
 commands are not emitted. Unknown cost is omitted; a runtime-reported zero is retained.
 
+## Evidence capture (storyboards)
+
+Every tool call (built-in and extension tools, from Pi's `tool_result` event, failures included) is recorded in the local evidence spool shared with
+the other Cardinal adapters, `~/.cardinal/evidence/<session>/ev_<id>.json`,
+through the shared generic pipeline (`cardinal_core.evidence_capture`,
+reached via `lib/cardinal_native.py evidence-capture`): a call that touches
+something sensitive (a `.env` or key file, `printenv`, `gh auth token`, a
+credentialed URL or header) is kept only as a *withheld* stub; everything
+else is scrubbed, capped at 256 KiB and removed after 14 days. This is the
+one path where tool input and output reach the Python side, and it never
+leaves the machine. The id is appended to the result the model sees as `[evidence:ev_…]` (Pi's result-modifying `tool_result` event); the first capture of a session also explains how to cite it. Calls upload with source
+`builtin:pi`. Cardinal's own tools are skipped (witnessed already).
+`cardinal-pi evidence promote --storyboard sb_… ev_…` uploads only what a
+storyboard cites, with the connection's MCP key; `cardinal-pi evidence
+list | find <text> | show ev_… | off | on | status`. Opt out with
+`CARDINAL_EVIDENCE_CAPTURE=0`; `CARDINAL_EVIDENCE_CONTEXT=0` keeps capturing
+without the inline ids.
+
 ## Decision capture
 
 Off by default. `cardinal-pi decision on|off|status [--session ID]` toggles it;

@@ -22,6 +22,8 @@ async function fixture(t, runtime) {
   await writeFile(join(bin, "gh"), `#!/bin/sh\necho '{"number":42,"url":"https://github.com/cardinalhq/fixture/pull/42"}'\n`, { mode: 0o755 });
   const priorPath = process.env.PATH; process.env.PATH = `${bin}:${priorPath}`;
   const priorDecisions = process.env.CARDINAL_DECISIONS; delete process.env.CARDINAL_DECISIONS;
+  // Evidence capture writes to ~/.cardinal/evidence: keep it in the fixture.
+  const priorHome = process.env.HOME; process.env.HOME = dir;
   const bodies = [];
   const server = createServer(async (req, res) => {
     assert.equal(req.headers["x-cardinalhq-api-key"], "test-ingest-key");
@@ -33,6 +35,7 @@ async function fixture(t, runtime) {
     prior === undefined ? delete process.env[key] : process.env[key] = prior;
     process.env.PATH = priorPath;
     if (priorDecisions !== undefined) process.env.CARDINAL_DECISIONS = priorDecisions;
+    process.env.HOME = priorHome;
     await new Promise(r => server.close(r)); await rm(dir, { recursive: true, force: true }); await rm(bin, { recursive: true, force: true });
   });
   await writeFile(join(dir, "cardinal.json"), JSON.stringify({ ingest_endpoint: `http://127.0.0.1:${server.address().port}`, user_email: "test@example.com", org_slug: "fixture" }));

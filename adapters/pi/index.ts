@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createBridge, DECISION_TOOL, decisionContext, recordDecision } from "./lib/bridge.js";
+import { createBridge, createEvidenceSink, DECISION_TOOL, decisionContext, evidenceCaptureEnabled,
+  evidenceContextEnabled, evidenceId, evidenceLine, recordDecision } from "./lib/bridge.js";
 import { cardinalMcp } from "./mcp.js";
 
 const ids = (description: string) => Type.Optional(Type.Array(Type.String(), { description }));
@@ -9,6 +10,10 @@ const ids = (description: string) => Type.Optional(Type.Array(Type.String(), { d
 export default function cardinal(pi: ExtensionAPI) {
   let notify = (_message: string) => {};
   const bridge = createBridge("pi", { warn: (message: string) => notify(message) });
+  const evidence = createEvidenceSink("pi");
+  // Sessions that already got the full evidence hint in this process.
+  const hinted = new Set<string>();
+  const CARDINAL_TOOLS = new Set(["cardinal_call_tool", "cardinal_list_tools", DECISION_TOOL.name]);
   const mcp = cardinalMcp();
   let run = randomUUID();
   let modelCall = "";
@@ -53,7 +58,25 @@ export default function cardinal(pi: ExtensionAPI) {
       duration_ms: prior ? Date.now() - prior.start : undefined,
       mcp_server_name: prior?.mcpTool ? "cardinal" : undefined, mcp_tool_name: prior?.mcpTool });
   });
-  pi.on("session_shutdown", async () => { await bridge.flush(); await mcp.close(); tools.clear(); });
+  // Generic evidence capture: every tool call (built-in or extension tool;
+  // Cardinal's own are already witnessed) goes to the local evidence spool
+  // through cardinal_native.py, and its id is appended to the result the
+  // model sees. tool_result is Pi's result-modifying event
+  // (ToolResultEventResult.content).
+  pi.on("tool_result", async (event, ctx) => {
+    try {
+      if (CARDINAL_TOOLS.has(event.toolName) || !evidenceCaptureEnabled()) return undefined;
+      const sessionId = ctx.sessionManager.getSessionId();
+      evidence.send({ kind: "evidence", session_id: sessionId, cwd: ctx.cwd, tool_name: event.toolName,
+        tool_call_id: event.toolCallId, input: event.input, content: event.content, is_error: event.isError });
+      const id = evidenceId("pi", sessionId, event.toolCallId);
+      if (!id || !evidenceContextEnabled()) return undefined;
+      const first = !hinted.has(sessionId);
+      if (first) { if (hinted.size >= 1024) hinted.clear(); hinted.add(sessionId); }
+      return { content: [...(event.content ?? []), { type: "text" as const, text: evidenceLine("pi", id, first) }] };
+    } catch { return undefined; }
+  });
+  pi.on("session_shutdown", async () => { await bridge.flush(); await evidence.flush(); await mcp.close(); tools.clear(); });
 
   pi.registerTool({
     name: "cardinal_list_tools", label: "Cardinal tools",

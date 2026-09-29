@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -189,4 +191,60 @@ async function runPython(runtime, events) {
     child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify(events));
   });
+}
+
+// ---------------------------------------------------------------------------
+// Evidence capture: every tool call, kept locally so a storyboard can cite it.
+// The JS side only forwards the call (input + result) to cardinal_native.py
+// `evidence-capture`, which runs the shared generic pipeline
+// (cardinal_core.evidence_capture: sensitivity gate, scrub, cap, spool). No
+// network, no connection needed. The id is computed here too, so the plugin
+// can show it inline before Python has written the file.
+// ---------------------------------------------------------------------------
+
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const OFF = new Set(["0", "false", "off", "no"]);
+
+/** cardinal.evidence.v2 id: ev_ + sha256("cardinal.evidence.v2|runtime|session|tool_use_id")[:12].
+ *  Pinned to the Python implementation by core/tests/testdata/evidence_id_vectors.json. */
+export function evidenceId(runtime, sessionId, toolUseId) {
+  if (typeof toolUseId !== "string" || !toolUseId || toolUseId.length > 256) return undefined;
+  const session = typeof sessionId === "string" && SESSION_ID_RE.test(sessionId) ? sessionId : "no-session";
+  const h = createHash("sha256").update(["cardinal.evidence.v2", runtime || "", session, toolUseId].join("|"), "utf8").digest("hex");
+  return `ev_${h.slice(0, 12)}`;
+}
+
+/** Mirrors cardinal_core.evidence.capture_disabled so the "capture off" case spawns nothing. */
+export function evidenceCaptureEnabled(env = process.env) {
+  if (OFF.has(String(env.CARDINAL_EVIDENCE_CAPTURE ?? "").trim().toLowerCase())) return false;
+  try { return !existsSync(join(env.HOME || homedir(), ".cardinal", "evidence", "disabled")); } catch { return false; }
+}
+
+/** CARDINAL_EVIDENCE_CONTEXT=0 keeps capturing but shows no ids inline. */
+export function evidenceContextEnabled(env = process.env) {
+  return !OFF.has(String(env.CARDINAL_EVIDENCE_CONTEXT ?? "").trim().toLowerCase());
+}
+
+/** The line shown to the agent beside a captured result: a hint on the first capture of a session, the bare id after. */
+export function evidenceLine(runtime, id, first) {
+  if (!first) return `[evidence:${id}]`;
+  return `[evidence:${id}] Cardinal keeps this result on this machine. Every tool result in this session gets an id like this and can be cited in a storyboard: \`cardinal-${runtime} evidence promote --storyboard <id> ev_...\` uploads only what you promote; \`cardinal-${runtime} evidence find <text>\` looks an id up. A call that touched something sensitive is kept only as a withheld stub (\`cardinal-${runtime} evidence list --withheld\`).`;
+}
+
+async function runEvidencePython(runtime, events) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.env.CARDINAL_PYTHON || "python3", pythonArgs(runtime, "evidence-capture"), {
+      stdio: ["pipe", "ignore", "ignore"], windowsHide: true,
+    });
+    const timeout = setTimeout(() => child.kill(), 10000);
+    child.on("error", reject);
+    child.on("close", (code) => { clearTimeout(timeout); code === 0 ? resolve() : reject(new Error("evidence capture failed")); });
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify(events));
+  });
+}
+
+/** Bounded, ordered, fire-and-forget queue of tool calls for the local evidence spool. */
+export function createEvidenceSink(runtime, { warn = (_message) => {}, run = runEvidencePython } = {}) {
+  return createBridge(runtime, { warn, run });
 }
