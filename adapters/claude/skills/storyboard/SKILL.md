@@ -6,9 +6,8 @@ description: Turn a finished (or stalled) Cardinal investigation into an Investi
 # storyboard — explain the investigation
 
 Every investigation gets its own interface. You author the view and the argument; Cardinal
-owns the runtime and the evidence. That gives you complete freedom over presentation and no
-freedom to invent evidence. This skill is the storytelling half. The **canvas** skill is the
-visual half, and it covers how to draw a scene and how to render the previews.
+owns the runtime and the evidence. This skill is the storytelling half. The **canvas** skill
+is the visual half, and it covers how to draw a scene and how to render the previews.
 
 > Rendered pixels may suggest a hypothesis but never establish a factual claim. Any quantitative or population-level statement must resolve to evidence from a receipt or deterministic derivation over receipts.
 
@@ -18,9 +17,8 @@ visual half, and it covers how to draw a scene and how to render the previews.
 bindings, receipts, derived values, libraries, static source checks, and the numbers in each
 statement against the resolved bindings. It never renders anything or inspects pixels.
 Rendering is authoring feedback, done locally by the plugin (canvas skill); a skipped preview
-is a quality problem, not a trust violation. Storyboards are on for every org. This skill
-targets Cardinal (maestro) **v1.97.15 or newer**; an older one rejects `select` and `ref`,
-so ask the user to upgrade.
+is a quality problem, not a trust violation. This skill targets Cardinal (maestro)
+**v1.97.15 or newer**; an older one rejects `select` and `ref`, so ask the user to upgrade.
 
 ## Receipts: collect them while you investigate
 
@@ -40,8 +38,12 @@ transport failures and kube Secret reads get no receipt. Credentials can never b
   as written. A text-only result pages by line with `rows` alone (readable, not bindable).
 - Receipts expire after **14 days** unless a *published* storyboard cites them; a draft
   citing an expired one fails with `receipt_not_found`: re-run the query, cite the new one.
-- If a preview shows you a pattern you never measured, measure it with a tool call, then
-  cite that receipt.
+- If a preview shows a pattern you never measured, measure it, then cite that receipt.
+
+**Other MCP servers' results** (Grafana, Datadog, …) have no receipt: the plugin keeps each
+on this machine as `[evidence:ev_…]`. After `create`, promote the ones you cite before
+binding them: `cardinal-evidence promote --storyboard <id> ev_… [ev_…]` prints
+`ev_… -> rcpt_…` per entry (or its error); bind that receipt, labelled captured.
 
 ## Tools and shapes
 
@@ -166,8 +168,8 @@ investigation (collect receipt ids)
 You do not run the renderer: Read the PNG paths the hook reports (every step, first and
 last included). The canvas skill covers the critique and the manual fallback.
 
-- **The first preview materializes datasets.** It runs bounded re-executions of the
-  receipted queries, so it can be slow. Later previews reuse them.
+- **The first preview materializes datasets** (bounded re-runs of the receipted
+  queries), so it can be slow; later ones reuse them.
 - Preview and publish share a **per-org limiter** (burst 10, then 6/min, plus a
   concurrency cap). A 429 `validation_busy` means wait a few seconds and retry. Batch edits
   instead of previewing after each one.
@@ -205,17 +207,14 @@ new storyboard.
   `execute_logs_query` / `execute_metrics_query` / `execute_spans_query` with
   `latest_only: true` over the full window and a rolling range equal to the window (e.g.
   `sum by (processor)(count_over_time({…} [24h]))` over 24h). You get one row per group
-  at its last step, instead of a 70–600 KB series you would dig rows out of. Stale groups
-  are listed in the result, and ddsketches are omitted. Aggregate queries only, and not
-  combinable with `series_reduction`.
+  at its last step, not a 70–600 KB series. Stale groups are listed in the result, and
+  ddsketches are omitted. Aggregate queries only, not combinable with `series_reduction`.
 - **Range selectors must be a multiple of Lakerunner's step** for the window, or the
   gateway rejects the query (Lakerunner itself would return nothing): over 24h (5m step)
   use `[5m]`, `[30m]` or `[24h]`, never `[28m]`. The tool descriptions list the steps.
 
 ## Handing it over
 
-Give the user the `view_url`. It is absolute when the Cardinal install sets
-`MAESTRO_BASE_URL` (app.cardinalhq.io does). A self-hosted install may return an
-app-relative path; prefix it with the Cardinal host the user is connected to. Draft
-storyboards are visible to org members at the same link. Say which scenes stayed `open`
-and why.
+Give the user the `view_url`; if it is app-relative (a self-hosted install without
+`MAESTRO_BASE_URL`), prefix the Cardinal host. Org members see drafts at the same link.
+Say which scenes stayed `open` and why.

@@ -13,6 +13,10 @@ previewing the visuals is the [canvas](../canvas/README.md) skill.
 - An investigation done with Cardinal's tools in this session, or within the last 14 days.
   Claude cites the *receipts* those tool calls produced. Unpublished receipts expire
   after 14 days.
+- Results from other MCP servers (Grafana, Datadog, …) can be cited too. The plugin keeps
+  them on your machine and uploads only the ones a storyboard cites
+  (`cardinal-evidence promote`); the storyboard labels them *captured*. `cardinal-evidence
+  off` stops the local capture.
 - For visual previews: **Google Chrome or Chromium** (version 112+) on macOS or Linux.
   Without it Claude still authors and publishes, but can't look at the scenes first.
 - Cardinal (maestro) v1.97.15 or newer. On an older install, row lookups by identity

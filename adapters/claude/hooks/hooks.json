@@ -54,6 +54,16 @@
         ]
       },
       {
+        "matcher": "mcp__(plugin_cardinal_)?cardinal__storyboard__(create|preview)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-token.py",
+            "timeout": 3
+          }
+        ]
+      },
+      {
         "matcher": "mcp__.*",
         "hooks": [
           {

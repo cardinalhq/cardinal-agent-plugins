@@ -33,6 +33,10 @@ What this module owns:
     build, write, gc), shared by the Claude, Cursor and Gemini adapters;
     client_string() spells the entry's client ("cursor/1.7.29").
   - gc(): opportunistic, time-bounded removal of entries past retention.
+  - store_token()/find_tokens(): a storyboard's evidence token, kept per
+    session in token.json for `cardinal-evidence promote`.
+  - list_entries()/session_dirs()/set_capture_disabled(): what the
+    `cardinal-evidence list` / `off` / `on` / `status` commands read and write.
   - spill_path()/read_spill(): Claude Code's spill-file follower, shared
     with the storyboard preview hook.
 
@@ -1133,6 +1137,188 @@ def read_entry(root: Path, ev_id: str) -> Optional[dict]:
     return None
 
 
+def _read_private_json(path: Path) -> Any:
+    """A regular file's JSON (a symlink is refused), or None."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            return json.loads(f.read(1 << 20))
+    except (OSError, ValueError):
+        return None
+
+
+def session_dirs(root: Path) -> list:
+    """The spool's session directories (real directories, never a link),
+    most recently modified first: [(name, path)]."""
+    out = []
+    try:
+        with os.scandir(root) as it:
+            for d in it:
+                if d.is_dir(follow_symlinks=False) and (SESSION_ID_RE.match(d.name) or d.name == NO_SESSION):
+                    try:
+                        out.append((d.stat(follow_symlinks=False).st_mtime, d.name, Path(d.path)))
+                    except OSError:
+                        continue
+    except OSError:
+        return []
+    out.sort(key=lambda t: (-t[0], t[1]))
+    return [(name, path) for _, name, path in out]
+
+
+def list_entries(root: Path, session_id: Any) -> list:
+    """Every readable entry in one session directory, oldest call first."""
+    sdir = Path(root) / session_dir_name(session_id)
+    try:
+        if not stat.S_ISDIR(os.lstat(sdir).st_mode):
+            return []
+        names = sorted(n for n in os.listdir(sdir) if n.startswith("ev_") and n.endswith(".json"))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        if not EVIDENCE_ID_RE.match(n[:-len(".json")]):
+            continue
+        data = _read_private_json(sdir / n)
+        if isinstance(data, dict) and data.get("evidence_id") == n[:-len(".json")]:
+            out.append(data)
+    out.sort(key=lambda e: (str(e.get("called_at") or ""), e["evidence_id"]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Storyboard evidence tokens
+#
+# storyboard__create (and, while a draft, storyboard__preview) returns an
+# evidence_token: a 24 h JWT that can upload evidence for that one
+# storyboard and nothing else (conductor storyboard/scoped-tokens.ts). The
+# Claude adapter's hooks/storyboard-token.py keeps it in
+#     <root>/<session_id>/token.json     (0600, in the 0700 session dir)
+# keyed by storyboard id, so `cardinal-evidence promote` can upload without
+# the org API key.
+# ---------------------------------------------------------------------------
+
+TOKEN_FILE = "token.json"
+TOKEN_SCHEMA = "cardinal.evidence-token.v1"
+# A token file outlives its tokens (24 h) by a day, then gc() removes it.
+TOKEN_RETENTION_S = 2 * 24 * 3600
+MAX_TOKENS_PER_SESSION = 20
+STORYBOARD_ID_RE = re.compile(r"^sb_[0-9a-f]{24}$")
+EVIDENCE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{1,4096}\.[A-Za-z0-9_-]{0,1024}$")
+ORG_ID_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}$")
+_RFC3339_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$")
+
+
+def parse_time(s: Any) -> Optional[float]:
+    """An RFC 3339 timestamp -> epoch seconds, or None."""
+    if not isinstance(s, str) or not _RFC3339_RE.match(s):
+        return None
+    t = s.replace("Z", "+00:00")
+    # Python 3.9's fromisoformat takes 3 or 6 fractional digits only.
+    m = re.match(r"^(.*T\d\d:\d\d:\d\d)(?:\.(\d+))?(.*)$", t)
+    if m:
+        frac = (m.group(2) or "")[:6]
+        t = m.group(1) + ("." + frac.ljust(6, "0") if frac else "") + m.group(3)
+    try:
+        return datetime.fromisoformat(t).timestamp()
+    except ValueError:
+        return None
+
+
+def token_live(rec: Any, now: Optional[float] = None, slack_s: float = 60) -> bool:
+    """True when a stored token record has not expired (with slack_s to
+    spare). A record with no parseable expiry counts as live; the server
+    decides."""
+    if not isinstance(rec, dict):
+        return False
+    exp = parse_time(rec.get("expires_at"))
+    now = time.time() if now is None else now
+    return exp is None or exp - slack_s > now
+
+
+def _valid_token_record(sb: Any, rec: Any) -> bool:
+    return (isinstance(sb, str) and STORYBOARD_ID_RE.match(sb) is not None and isinstance(rec, dict)
+            and isinstance(rec.get("org"), str) and ORG_ID_RE.match(rec["org"]) is not None
+            and isinstance(rec.get("evidence_token"), str)
+            and EVIDENCE_TOKEN_RE.match(rec["evidence_token"]) is not None)
+
+
+def read_tokens(root: Path, session_id: Any) -> dict:
+    """{storyboard_id: {org, evidence_token, expires_at?, stored_at}} from a
+    session's token file; malformed records are dropped."""
+    data = _read_private_json(Path(root) / session_dir_name(session_id) / TOKEN_FILE)
+    sbs = data.get("storyboards") if isinstance(data, dict) else None
+    if not isinstance(sbs, dict):
+        return {}
+    return {sb: rec for sb, rec in sbs.items() if _valid_token_record(sb, rec)}
+
+
+def store_token(root: Path, session_id: Any, *, storyboard_id: str, org: str, token: str,
+                expires_at: Any = None, now: Optional[float] = None) -> Path:
+    """Record one storyboard's evidence token in the session's token file
+    (atomic, 0600; directories 0700). Expired records are dropped and at
+    most MAX_TOKENS_PER_SESSION are kept, newest first."""
+    now = time.time() if now is None else now
+    rec = {"org": org, "evidence_token": token, "stored_at": datetime.fromtimestamp(now, timezone.utc)
+           .strftime("%Y-%m-%dT%H:%M:%SZ")}
+    if parse_time(expires_at) is not None:
+        rec["expires_at"] = expires_at
+    if not _valid_token_record(storyboard_id, rec):
+        raise ValueError("bad storyboard token record")
+    root = Path(root)
+    tokens = {sb: r for sb, r in read_tokens(root, session_id).items() if sb != storyboard_id and token_live(r, now, 0)}
+    tokens[storyboard_id] = rec
+    keep = sorted(tokens.items(), key=lambda kv: str(kv[1].get("stored_at") or ""), reverse=True)
+    body = {"schema": TOKEN_SCHEMA, "storyboards": dict(keep[:MAX_TOKENS_PER_SESSION])}
+    sdir = root / session_dir_name(session_id)
+    ensure_root(root)
+    _ensure_private_dir(sdir)
+    fd, tmp = tempfile.mkstemp(dir=str(sdir), prefix=".token_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(body, separators=(",", ":")))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, sdir / TOKEN_FILE)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return sdir / TOKEN_FILE
+
+
+def find_tokens(root: Path, storyboard_id: Optional[str] = None, session_id: Any = None) -> list:
+    """[(session, storyboard_id, record)] across the spool (or one session),
+    newest session first, optionally for one storyboard."""
+    if session_id is not None:
+        sessions = [session_dir_name(session_id)]
+    else:
+        sessions = [name for name, _ in session_dirs(root)]
+    out = []
+    for s in sessions:
+        for sb, rec in read_tokens(root, s).items():
+            if storyboard_id is None or sb == storyboard_id:
+                out.append((s, sb, rec))
+    return out
+
+
+def set_capture_disabled(root: Path, disabled: bool) -> None:
+    """Write (disabled) or remove the opt-out flag file <root>/disabled."""
+    root = Path(root)
+    flag = root / DISABLED_FLAG
+    if disabled:
+        ensure_root(root)
+        fd = os.open(str(flag), os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        os.close(fd)
+        return
+    try:
+        os.unlink(flag)
+    except FileNotFoundError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Client capture: one MCP call, as a client hook records it
 # ---------------------------------------------------------------------------
@@ -1194,8 +1380,9 @@ def capture(home: Path, *, server: str, tool: str, tool_name: str, tool_input: A
 
 def gc(root: Path, now: Optional[float] = None, retention_s: float = RETENTION_S,
        budget_s: float = GC_BUDGET_S, interval_s: float = GC_INTERVAL_S, force: bool = False) -> int:
-    """Remove spool entries older than retention_s (by mtime), temp files of
-    dead writes and emptied session directories. Opportunistic: at most once
+    """Remove spool entries older than retention_s (by mtime), token files
+    older than TOKEN_RETENTION_S, temp files of dead writes and emptied
+    session directories. Opportunistic: at most once
     per interval_s (a stamp file under root) unless force, and stops after
     budget_s. Never raises. Returns the number of files removed."""
     now = time.time() if now is None else now
@@ -1238,7 +1425,9 @@ def gc(root: Path, now: Optional[float] = None, retention_s: float = RETENTION_S
                         name = f.name
                         old = now - fst.st_mtime
                         stale = ((name.startswith("ev_") and name.endswith(".json") and old > retention_s)
-                                 or (name.startswith(".ev_") and name.endswith(".tmp") and old > STALE_TMP_S))
+                                 or (name == TOKEN_FILE and old > min(retention_s, TOKEN_RETENTION_S))
+                                 or (name.startswith((".ev_", ".token_")) and name.endswith(".tmp")
+                                     and old > STALE_TMP_S))
                         if stale and not stat.S_ISDIR(fst.st_mode):
                             try:
                                 os.unlink(f.path)

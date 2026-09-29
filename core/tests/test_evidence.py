@@ -547,5 +547,70 @@ class GCTests(unittest.TestCase):
         self.assertEqual(ev.gc(Path(self.tmp.name) / "missing", force=True), 0)
 
 
+class TokenAndListingTests(unittest.TestCase):
+    SB = "sb_" + "ab" * 12
+    TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzYiI6MX0.c2ln"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "evidence"
+        self.now = time.time()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_store_and_find_tokens(self):
+        path = ev.store_token(self.root, "s1", storyboard_id=self.SB, org="org-1", token=self.TOKEN,
+                              expires_at="2099-01-01T00:00:00Z", now=self.now)
+        self.assertEqual(path, self.root / "s1" / ev.TOKEN_FILE)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.root / "s1").stat().st_mode), 0o700)
+        found = ev.find_tokens(self.root, self.SB)
+        self.assertEqual([(s, sb, r["org"]) for s, sb, r in found], [("s1", self.SB, "org-1")])
+        self.assertEqual(ev.find_tokens(self.root, "sb_" + "cd" * 12), [])
+        self.assertTrue(ev.token_live(found[0][2], self.now))
+        self.assertFalse(ev.token_live({"expires_at": "2000-01-01T00:00:00Z"}, self.now))
+        self.assertTrue(ev.token_live({}, self.now), "no expiry: the server decides")
+        # An invalid session id lands in no-session, like an entry.
+        ev.store_token(self.root, "../x", storyboard_id=self.SB, org="org-1", token=self.TOKEN, now=self.now)
+        self.assertTrue((self.root / ev.NO_SESSION / ev.TOKEN_FILE).is_file())
+
+    def test_keeps_at_most_the_newest_records(self):
+        for i in range(ev.MAX_TOKENS_PER_SESSION + 5):
+            ev.store_token(self.root, "s1", storyboard_id=f"sb_{i:024x}", org="o", token=self.TOKEN,
+                           now=self.now + i)
+        kept = ev.read_tokens(self.root, "s1")
+        self.assertEqual(len(kept), ev.MAX_TOKENS_PER_SESSION)
+        self.assertIn(f"sb_{ev.MAX_TOKENS_PER_SESSION + 4:024x}", kept)
+        self.assertNotIn(f"sb_{0:024x}", kept)
+
+    def test_list_entries_and_session_dirs(self):
+        for sid, tool, at in (("s1", "a", "2026-09-28T15:00:00Z"), ("s1", "b", "2026-09-28T14:00:00Z"),
+                              ("s2", "c", "2026-09-28T16:00:00Z")):
+            ev.write_entry(self.root, ev.build_entry(server="g", tool=tool, tool_name=f"mcp__g__{tool}",
+                                                     tool_input={}, tool_response="x", session_id=sid,
+                                                     called_at=at))
+        (self.root / "s1" / "ev_000000000000.json").write_text("{}")  # id mismatch: skipped
+        self.assertEqual([e["tool"] for e in ev.list_entries(self.root, "s1")], ["b", "a"])
+        os.utime(self.root / "s1", (self.now - 100, self.now - 100))
+        self.assertEqual([n for n, _ in ev.session_dirs(self.root)], ["s2", "s1"])
+        (self.root / "link").symlink_to(self.root / "s2")
+        self.assertNotIn("link", [n for n, _ in ev.session_dirs(self.root)])
+
+    def test_capture_flag_round_trip(self):
+        ev.set_capture_disabled(self.root, True)
+        self.assertTrue(ev.capture_disabled(self.root, {}))
+        self.assertEqual(stat.S_IMODE((self.root / ev.DISABLED_FLAG).stat().st_mode), 0o600)
+        ev.set_capture_disabled(self.root, False)
+        self.assertFalse(ev.capture_disabled(self.root, {}))
+        ev.set_capture_disabled(self.root, False)  # idempotent
+
+    def test_gc_removes_old_token_files(self):
+        path = ev.store_token(self.root, "s1", storyboard_id=self.SB, org="o", token=self.TOKEN, now=self.now)
+        self.assertEqual(ev.gc(self.root, now=self.now + ev.TOKEN_RETENTION_S - 60, force=True), 0)
+        self.assertEqual(ev.gc(self.root, now=self.now + ev.TOKEN_RETENTION_S + 60, force=True), 1)
+        self.assertFalse(path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
