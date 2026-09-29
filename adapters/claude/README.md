@@ -37,11 +37,16 @@ git-state, usage
   key for this machine and stores it. Self-hosted Cardinal:
   `/cardinal:connect --host <url>`. Published storyboards are read without
   an account through a public link when the org allows them.
-- **Evidence capture.** In either mode, `hooks/evidence-capture.py` stores
-  the results of calls to *other* MCP servers locally, under
+- **Evidence capture.** In either mode, `hooks/evidence-capture.py`
+  (PostToolUse and PostToolUseFailure, matcher `.*`) stores the result of
+  every tool call except Cardinal's own (Bash, Read, Edit/Write, Grep,
+  WebFetch, Agent, other MCP servers, any tool) locally, under
   `~/.cardinal/evidence/<session_id>/` (credentials scrubbed, removed after
-  14 days). Nothing is uploaded automatically: only a result a storyboard
-  cites is uploaded, by `cardinal-evidence promote`, which needs a connection.
+  14 days). A call that touches something sensitive (`.env`, keys, a
+  credential command) is kept as a withheld stub only. Nothing is uploaded
+  automatically: only a result a storyboard cites is uploaded, by
+  `cardinal-evidence promote`, which needs a connection.
+  `cardinal-evidence find <text>` / `show ev_…` look entries up.
 - **Connected.** `/cardinal:connect` picks the org, writes its MCP URL and API
   key and the OTel ingest settings into `~/.claude/settings.json` `env`, and
   turns on telemetry (Outcomes Dashboard), spend limits, initiative, plan,

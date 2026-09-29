@@ -540,6 +540,101 @@ class PromoteUnitTests(_HomeCase):
 
 
 # ---------------------------------------------------------------------------
+# Generic capture (v2 entries): built-in tools, withheld stubs, find/show
+# ---------------------------------------------------------------------------
+
+class GenericEvidenceTests(_HomeCase):
+    def setUp(self):
+        super().setUp()
+        self.stub = StubEvidenceRoute()
+        self.addCleanup(self.stub.close)
+        from cardinal_core import evidence_capture
+        self.cap = evidence_capture
+
+    def capture_call(self, tool_name, tool_input, response=None, error=None, tuid="toolu_x", cwd=None):
+        source, tool = self.cap.classify_mcp_name(tool_name, "claude-code", ("cardinal", "plugin_cardinal_cardinal"))
+        call = self.cap.ToolCall(runtime="claude-code", tool_name=tool_name, source=source, tool=tool,
+                                 tool_input=tool_input, response=response, error=error, session_id=SESSION,
+                                 tool_use_id=tuid, cwd=cwd, client="claude-code/0.0.1-test")
+        return self.cap.capture_call(call, self.home, env={}).entry
+
+    def test_builtin_entry_uploads_as_a_builtin_source(self):
+        self.connect(self.stub.port)
+        self.store_token()
+        e = self.capture_call("Bash", {"command": "make test"},
+                              {"stdout": "42 passed", "stderr": "", "interrupted": False})
+        res = self.run_cli("promote", e["evidence_id"])
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        (item,) = json.loads(self.stub.requests[0]["raw"])["items"]
+        self.assertEqual(item["source_server"], "builtin:claude-code")
+        self.assertEqual(item["tool"], "Bash")
+        self.assertEqual(item["client"], "claude-code/0.0.1-test")
+        self.assertEqual(item["args"], {"command": "make test"})
+        self.assertEqual(item["result"], {"structured_content": {"stdout": "42 passed", "stderr": ""}})
+        self.assertIn("(builtin:claude-code/Bash, captured)", res.stdout)
+
+    def test_odd_tool_names_and_non_object_args_fit_the_wire(self):
+        e = self.capture_call("mcp__my-srv__do thing!", ["a", 1], "ok", tuid="t_odd")
+        cli = _load_cli()
+        item = cli.wire_item(e, "claude-code/1.0")
+        self.assertEqual(item["source_server"], "my-srv")
+        self.assertEqual(item["tool"], "do thing_")
+        self.assertEqual(item["args"], {"input": ["a", 1]})
+        e = self.capture_call("Whatever", None, None, error="Exit code 3", tuid="t_err")
+        item = cli.wire_item(e, "claude-code/1.0")
+        self.assertIs(item["result"]["is_error"], True)
+
+    def test_withheld_entry_is_refused_locally_and_nothing_is_sent(self):
+        self.connect(self.stub.port)
+        self.store_token()
+        w = self.capture_call("Read", {"file_path": str(self.home / ".aws" / "config")},
+                              {"file": {"content": "aws_secret_access_key=x"}}, tuid="t_w")
+        self.assertEqual(w["withheld"]["rule"], "path.aws")
+        res = self.run_cli("promote", "--storyboard", SB, w["evidence_id"])
+        self.assertEqual(res.returncode, 2)
+        self.assertIn(f"{w['evidence_id']}: error withheld: sensitive_path (path.aws)", res.stdout)
+        self.assertEqual(self.stub.requests, [])
+        # Mixed with a citable entry: only the citable one is sent.
+        ok = self.capture_call("Grep", {"pattern": "TODO"}, {"mode": "content", "content": "a.py:1:TODO"},
+                               tuid="t_ok")
+        res = self.run_cli("promote", "--storyboard", SB, w["evidence_id"], ok["evidence_id"])
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertEqual(len(json.loads(self.stub.requests[0]["raw"])["items"]), 1)
+        with self.assertRaises(ValueError):
+            _load_cli().wire_item(w, "claude-code/1.0")
+
+    def test_list_filters_find_and_show(self):
+        a = self.capture_call("Bash", {"command": "make check-maestro"},
+                              {"stdout": "Tests  512 passed", "stderr": ""}, tuid="t1")
+        b = self.capture_call("Read", {"file_path": "/repo/a.py"}, {"file": {"content": "x = 1"}}, tuid="t2")
+        w = self.capture_call("Bash", {"command": "printenv"}, {"stdout": "HOME=/x", "stderr": ""}, tuid="t3")
+        res = self.run_cli("list", "--tool", "Bash")
+        self.assertIn(a["evidence_id"], res.stdout)
+        self.assertNotIn(b["evidence_id"], res.stdout)
+        self.assertIn(f"{w['evidence_id']}", res.stdout)
+        self.assertIn("WITHHELD secret_command", res.stdout)
+        self.assertIn("make check-maestro", res.stdout)
+        res = self.run_cli("find", "512 passed")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn(a["evidence_id"], res.stdout)
+        self.assertNotIn(b["evidence_id"], res.stdout)
+        res = self.run_cli("list", "--withheld")
+        self.assertIn(w["evidence_id"], res.stdout)
+        self.assertNotIn(a["evidence_id"], res.stdout)
+        res = self.run_cli("show", a["evidence_id"])
+        self.assertEqual(res.returncode, 0)
+        shown = json.loads(res.stdout)
+        self.assertEqual(shown["result"]["structured"]["stdout"], "Tests  512 passed")
+        res = self.run_cli("show", w["evidence_id"])
+        self.assertIn("cannot be cited", res.stdout)
+        self.assertNotIn("HOME=/x", res.stdout)
+        big = self.capture_call("Bash", {"command": "cat big"}, {"stdout": "y" * 100000, "stderr": ""}, tuid="t4")
+        res = self.run_cli("show", big["evidence_id"])
+        self.assertIn("Outline of result", res.stdout)
+        self.assertLess(len(res.stdout), 30 * 1024)
+
+
+# ---------------------------------------------------------------------------
 # list / off / on / status
 # ---------------------------------------------------------------------------
 

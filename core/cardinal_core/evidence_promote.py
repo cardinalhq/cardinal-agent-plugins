@@ -423,7 +423,7 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
 
     conn = adapter.connection(home, dict(os.environ))
     if not conn:
-        err.write(f"{prog}: the Cardinal MCP URL is not a usable http(s) URL: fix it, or run "
+        err.write(f"{prog}: not connected to Cardinal (no usable Cardinal MCP URL): run "
                   f"{adapter.connect_hint}\n")
         return EXIT_FAILED
 
@@ -449,7 +449,7 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
     if not auths:
         err.write(f"{prog}: no credential for storyboard {sb}: no live evidence token was stored "
                   f"for it (call storyboard__preview for a fresh one) and there is no Cardinal MCP key "
-                  f"({adapter.connect_hint} adds one)\n")
+                  f"(run {adapter.connect_hint})\n")
         return EXIT_FAILED
 
     rows = []
@@ -722,7 +722,7 @@ def cmd_status(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr) ->
         out.write(f"uploads go to: {conn['origin']}" + (f" (org {conn['org']})" if conn.get("org") else "")
                   + (", Cardinal MCP key present" if conn.get("key") else ", no Cardinal MCP key") + "\n")
     else:
-        out.write("uploads go to: nowhere (no usable Cardinal MCP URL)\n")
+        out.write(f"uploads go to: nowhere yet (not connected: run {adapter.connect_hint})\n")
     return EXIT_OK
 
 

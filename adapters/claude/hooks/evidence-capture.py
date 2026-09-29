@@ -1,37 +1,40 @@
 #!/usr/bin/env python3
 """cardinal evidence capture — PostToolUse and PostToolUseFailure hook on
-every MCP tool (mcp__.*).
+EVERY tool (matcher ".*").
 
-Records the result of a call to a non-Cardinal MCP server in the local
-evidence spool (cardinal_core.evidence), so a storyboard can later cite it as
-*captured* evidence. Cardinal's own gateway tools (mcp__cardinal__*,
-mcp__plugin_cardinal_cardinal__*) are skipped: the gateway already mints a
-*witnessed* receipt for them.
+Records the result of any tool call (Bash, Read, Edit/Write, Grep, Glob,
+WebFetch, WebSearch, Agent, TodoWrite, any MCP server's tool, and any tool
+Claude Code adds later) in the local evidence spool, so a storyboard can later
+cite it as *captured* evidence. The capture decision is the shared, tool-
+neutral pipeline cardinal_core.evidence_capture.capture_call; this file only
+turns Claude Code's hook payload into a ToolCall. Cardinal's own gateway tools
+(mcp__cardinal__*, mcp__plugin_cardinal_cardinal__*) are skipped: the gateway
+already mints a *witnessed* receipt for them.
 
 Contract:
-  - Input on stdin: Claude Code's PostToolUse payload {tool_name, tool_input,
-    tool_response, tool_use_id, session_id, ...}, or its PostToolUseFailure
-    payload {..., error, is_interrupt} for a call that returned an error
-    result (MCP isError): the error text is captured as the result, the
-    entry is marked is_error and redacted with the error-text rules; an
-    interrupt is skipped. tool_response is whatever
-    the MCP tool returned, in any shape cardinal_core.evidence.normalize
-    accepts (a string, {content, structuredContent}, a list of content
-    blocks, or Claude Code's "Output has been saved to <file>" spill notice,
-    followed only when the file resolves under ~/.claude/projects/).
+  - Input on stdin (read to at most 32 MiB): Claude Code's PostToolUse
+    payload {tool_name, tool_input, tool_response, tool_use_id, session_id,
+    cwd, ...}, or its PostToolUseFailure payload {..., error, is_interrupt}:
+    the error text is captured as the result and the entry marked
+    status "error"; an interrupt is skipped. A larger payload is recorded as
+    a withheld stub (reason "unreadable").
+  - A call whose input names something sensitive (a .env or key file,
+    ~/.aws, a secret-dumping command, a credentialed URL or header; see
+    cardinal_core.evidence_gate) is recorded as a withheld stub: tool,
+    status and the rule that fired, no arguments, no result.
   - Writes ~/.cardinal/evidence/<session_id>/ev_<12 hex>.json: directories
     0700, file 0600, written atomically. Arguments and result are scrubbed
-    of credentials (the gateway's receipt scrub, ported) and the result is
-    capped at 256 KiB. Entries older than 14 days are removed
-    opportunistically (time-bounded).
-  - Output: hookSpecificOutput.additionalContext, one line:
-    "[evidence:ev_xxx] captured locally from <server>/<tool>; to cite it in
-    a storyboard run cardinal-evidence promote ev_xxx".
+    (the gateway's receipt scrub plus plain-text key=value rules, base64
+    blobs and local paths) and capped (64 KiB / 256 KiB). The spool is kept
+    under 14 days, 256 MiB and 10,000 entries per session.
+  - Output: hookSpecificOutput.additionalContext, one line: the first
+    capture of a session explains how to cite; later ones are just
+    "[evidence:ev_…]" (or "[evidence:ev_… withheld: <reason>]").
+    CARDINAL_EVIDENCE_CONTEXT=0 keeps capturing but prints nothing.
   - Opt-out: CARDINAL_EVIDENCE_CAPTURE=0 or the flag file
-    ~/.cardinal/evidence/disabled. Silent when disabled, for a Cardinal tool
-    or a non-MCP tool, or when the payload is unreadable.
+    ~/.cardinal/evidence/disabled.
   - No network. Fail open: always exits 0, never blocks the tool, never
-    prints an error. hooks.json gives it ~2 s.
+    prints an error; gives up after 1.5 s (hooks.json gives it 2 s).
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+RUNTIME = "claude-code"
 # Cardinal's own MCP servers, as Claude Code names them (a user-scope
 # `cardinal` server, or the plugin's bundled one). The gateway mints
 # witnessed receipts for these.
@@ -53,73 +57,97 @@ def home_dir() -> Path:
     return Path(os.environ.get("HOME") or str(Path.home()))
 
 
-def context_line(ev_id: str, server: str, tool: str) -> str:
-    return (f"[evidence:{ev_id}] captured locally from {server}/{tool}; "
-            f"to cite it in a storyboard run cardinal-evidence promote {ev_id}")
+def client() -> str:
+    from cardinal_core import evidence
+    try:
+        from _plugin_version import plugin_version
+        version = plugin_version()
+    except Exception:
+        version = None
+    return evidence.client_string(RUNTIME, version)
+
+
+def emit(event: str, line) -> None:
+    if not line:
+        return
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": line,
+        }
+    }))
+    sys.stdout.flush()
 
 
 def main() -> None:
-    raw = sys.stdin.read()
-    try:
-        payload = json.loads(raw) if raw.strip() else {}
-    except ValueError:
-        return
-    if not isinstance(payload, dict):
-        return
     from cardinal_core import evidence
+    from cardinal_core import evidence_capture as cap
 
-    tool_name = payload.get("tool_name")
-    parts = evidence.split_mcp_tool(tool_name)
-    if parts is None:
-        return
-    server, tool = parts
-    if server in CARDINAL_SERVERS:
-        return
-    event = payload.get("hook_event_name") or "PostToolUse"
-    failed = event == "PostToolUseFailure"
-    if failed:
-        # An MCP isError result reaches hooks only here, as the error text.
-        # A user interrupt is not the tool's answer.
-        error = payload.get("error")
-        if payload.get("is_interrupt") is True or not isinstance(error, str) or not error.strip():
-            return
-        response = error
-    elif event == "PostToolUse":
-        response = payload.get("tool_response")
-    else:
-        return
     home = home_dir()
     root = evidence.default_root(home)
     if evidence.capture_disabled(root):
         return
-    entry = evidence.build_entry(
-        server=server,
-        tool=tool,
-        tool_name=tool_name,
-        tool_input=payload.get("tool_input"),
-        tool_response=response,
-        session_id=payload.get("session_id"),
-        spill_root=home / ".claude" / "projects",
-        tool_use_id=payload.get("tool_use_id"),
-        agent="claude-code",
-        is_error=failed,
-    )
-    evidence.write_entry(root, entry)
+    raw, complete = cap.read_stdin_bounded()
+    spill_root = str(home / ".claude" / "projects")
+    if not complete:
+        entry = cap.unreadable_record(RUNTIME, client(), raw, spill_root)
+        if entry is not None:
+            evidence.write_entry(root, entry)
+            if cap.context_enabled():
+                emit("PostToolUse", cap.context_line(entry, False))
+        return
     try:
-        evidence.gc(root)
-    except Exception:
-        pass
-    sys.stdout.write(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": event,
-            "additionalContext": context_line(entry["evidence_id"], server, tool),
-        }
-    }))
+        payload = json.loads(raw.decode("utf-8", errors="replace")) if raw.strip() else {}
+    except (ValueError, UnicodeDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    event = payload.get("hook_event_name") or "PostToolUse"
+    error = None
+    response = None
+    if event == "PostToolUseFailure":
+        # A failed call reaches hooks only here, as the error text. A user
+        # interrupt is not the tool's answer.
+        error = payload.get("error")
+        if payload.get("is_interrupt") is True or not isinstance(error, str) or not error.strip():
+            return
+    elif event == "PostToolUse":
+        response = payload.get("tool_response")
+    else:
+        return
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        return
+    source, tool = cap.classify_mcp_name(tool_name, RUNTIME, CARDINAL_SERVERS)
+    cwd = payload.get("cwd")
+    call = cap.ToolCall(
+        runtime=RUNTIME,
+        tool_name=tool_name,
+        source=source,
+        tool=tool,
+        tool_input=payload.get("tool_input"),
+        response=response,
+        error=error,
+        session_id=payload.get("session_id") if isinstance(payload.get("session_id"), str) else None,
+        tool_use_id=payload.get("tool_use_id") if isinstance(payload.get("tool_use_id"), str) else None,
+        cwd=cwd if isinstance(cwd, str) else None,
+        spill_root=spill_root,
+        client=client(),
+    )
+    got = cap.capture_call(call, home, promote_cmd="cardinal-evidence")
+    if got is not None:
+        emit(event, got.line)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from cardinal_core.evidence_capture import time_guard
+    except BaseException:
+        sys.exit(0)
+    try:
+        with time_guard():
+            main()
     except BaseException:
         pass
     sys.exit(0)

@@ -64,7 +64,7 @@
         ]
       },
       {
-        "matcher": "mcp__.*",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
@@ -76,7 +76,7 @@
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "mcp__.*",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
