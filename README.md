@@ -58,9 +58,16 @@ Claude also ships local evidence capture for storyboards: a synchronous
 0600, credentials scrubbed with a port of the gateway's receipt scrub,
 results capped at 256 KiB, entries removed after 14 days) and tells Claude
 the `ev_…` id. Nothing leaves the machine: only a result cited in a
-storyboard is uploaded, by an explicit `cardinal-evidence promote`. Cardinal's
-own gateway tools are skipped; they already get witnessed receipts. Opt out
-with `CARDINAL_EVIDENCE_CAPTURE=0` or the flag file
+storyboard is uploaded, by an explicit
+`cardinal-evidence promote --storyboard sb_… ev_…` (`bin/cardinal-evidence`),
+which posts it to the draft's evidence route as a *captured* receipt. It
+authenticates with the storyboard's own 24 h evidence token, which a
+`PostToolUse` hook on Cardinal's `storyboard__create` / `storyboard__preview`
+(`hooks/storyboard-token.py`) keeps in the session's `token.json` (0600), and
+falls back to the Cardinal MCP key. Cardinal's own gateway tools are skipped;
+they already get witnessed receipts. `cardinal-evidence list` shows the
+session's captures; opt out with `cardinal-evidence off`,
+`CARDINAL_EVIDENCE_CAPTURE=0` or the flag file
 `~/.cardinal/evidence/disabled`. The spool lives in
 `core/cardinal_core/evidence.py`. The Cursor (`postToolUse`) and Gemini
 (`AfterTool`) adapters write the same spool from their telemetry hooks.

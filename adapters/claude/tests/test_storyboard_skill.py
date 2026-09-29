@@ -198,6 +198,18 @@ class StoryboardSkillTextTests(unittest.TestCase):
         text = " ".join(STORYBOARD_SKILL.read_text().split())
         self.assertIn('**Titles are findings, not topics**, in about one clause, with no fixed prefix', text)
 
+    def test_storyboard_skill_teaches_promoting_captured_evidence(self):
+        # bin/cardinal-evidence promote: results from non-Cardinal MCP servers
+        # become captured receipts only once promoted into the draft.
+        text = " ".join(STORYBOARD_SKILL.read_text().split())
+        for needle in (
+            "`[evidence:ev_…]`",
+            "promote the ones you cite before binding them",
+            "`cardinal-evidence promote --storyboard <id> ev_… [ev_…]`",
+            "`ev_… -> rcpt_…`",
+        ):
+            self.assertIn(needle, text)
+
     def test_combined_skill_length_does_not_grow(self):
         # rjha, 2026-09-28: no new visual-style doctrine, and the skills must not
         # grow; new tool shapes replace superseded text. Baseline: plugin 0.33.1,
