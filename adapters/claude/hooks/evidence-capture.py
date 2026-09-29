@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""cardinal evidence capture — PostToolUse hook on every MCP tool (mcp__.*).
+"""cardinal evidence capture — PostToolUse and PostToolUseFailure hook on
+every MCP tool (mcp__.*).
 
 Records the result of a call to a non-Cardinal MCP server in the local
 evidence spool (cardinal_core.evidence), so a storyboard can later cite it as
@@ -9,7 +10,11 @@ mcp__plugin_cardinal_cardinal__*) are skipped: the gateway already mints a
 
 Contract:
   - Input on stdin: Claude Code's PostToolUse payload {tool_name, tool_input,
-    tool_response, tool_use_id, session_id, ...}. tool_response is whatever
+    tool_response, tool_use_id, session_id, ...}, or its PostToolUseFailure
+    payload {..., error, is_interrupt} for a call that returned an error
+    result (MCP isError): the error text is captured as the result, the
+    entry is marked is_error and redacted with the error-text rules; an
+    interrupt is skipped. tool_response is whatever
     the MCP tool returned, in any shape cardinal_core.evidence.normalize
     accepts (a string, {content, structuredContent}, a list of content
     blocks, or Claude Code's "Output has been saved to <file>" spill notice,
@@ -70,6 +75,19 @@ def main() -> None:
     server, tool = parts
     if server in CARDINAL_SERVERS:
         return
+    event = payload.get("hook_event_name") or "PostToolUse"
+    failed = event == "PostToolUseFailure"
+    if failed:
+        # An MCP isError result reaches hooks only here, as the error text.
+        # A user interrupt is not the tool's answer.
+        error = payload.get("error")
+        if payload.get("is_interrupt") is True or not isinstance(error, str) or not error.strip():
+            return
+        response = error
+    elif event == "PostToolUse":
+        response = payload.get("tool_response")
+    else:
+        return
     home = home_dir()
     root = evidence.default_root(home)
     if evidence.capture_disabled(root):
@@ -79,11 +97,12 @@ def main() -> None:
         tool=tool,
         tool_name=tool_name,
         tool_input=payload.get("tool_input"),
-        tool_response=payload.get("tool_response"),
+        tool_response=response,
         session_id=payload.get("session_id"),
         spill_root=home / ".claude" / "projects",
         tool_use_id=payload.get("tool_use_id"),
         agent="claude-code",
+        is_error=failed,
     )
     evidence.write_entry(root, entry)
     try:
@@ -92,7 +111,7 @@ def main() -> None:
         pass
     sys.stdout.write(json.dumps({
         "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
+            "hookEventName": event,
             "additionalContext": context_line(entry["evidence_id"], server, tool),
         }
     }))
