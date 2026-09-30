@@ -119,7 +119,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
         for needle in (
             # SessionStart hook (hooks/storyboard-session.py)
             '"Cardinal session id for this session: …"',
-            "Pass it to `storyboard__create`",
+            "Pass it to `storyboard__create`, `storyboard__find` and `storyboard__add_act`",
             # PostToolUse preview hook (hooks/storyboard-preview.py)
             "a plugin hook renders each scene with your local Chromium and reports the PNG paths",
             "Read every PNG",
@@ -163,6 +163,101 @@ class StoryboardSkillTextTests(unittest.TestCase):
         ):
             self.assertIn(needle, text)
 
+    def test_storyboard_skill_updates_instead_of_duplicating(self):
+        # find -> continue / add_act / create (conductor storyboard__find and
+        # storyboard__add_act; plan v2 C5). Feature-detected: an older Cardinal
+        # without the tools gets a new storyboard, never an unknown argument.
+        text = _flat(STORYBOARD_SKILL)
+        for needle in (
+            "## Update, don't duplicate",
+            "cardinal-storyboard context",
+            "storyboard__find",
+            "on every storyboard request, before `storyboard__create`",
+            "storyboard__find {session_id, context}",
+            "follow its `rule`",
+            "same_session",
+            "`yours` both true",
+            "storyboard__add_act",
+            "`storyboard__add_act {storyboard_id, title, session_id, context}`",
+            "no `storyboard__add_act` listed",
+            "No `storyboard__find` (an older Cardinal): create without `context`",
+            # Public links: ask the person unless they already said to update what they shared.
+            "public_links",
+            "public_links_decision_required",
+            "unless they already said to update what they shared",
+            '`public_links: "extend"` or `"keep"`',
+            # The "already said to update what they shared" exemption covers
+            # only the public_links choice; raw evidence always needs a fresh
+            # yes from the person (plan v2 C4).
+            "(that covers only this choice)",
+            "raw_evidence_confirmation_required",
+            "confirm_raw_evidence",
+            "always ask the person, listing the bindings it names",
+            "never set `confirm_raw_evidence` yourself, even if they said to update what they shared",
+            "Only their yes sends `confirm_raw_evidence: true`",
+            "published acts are immutable; storyboard__add_act adds the next act to the same storyboard and link",
+        ):
+            self.assertIn(needle, text)
+        self.assertNotIn("a published storyboard is immutable", text)
+
+    def test_storyboard_skill_asks_before_adding_to_a_match(self):
+        # rjha 2026-09-29 (plan v2 P9, "Ask before adding to an existing
+        # storyboard"): offer strong matches (<=3) or one recent weak match,
+        # always with a way out, and fall back to a new storyboard when
+        # nobody can be asked.
+        text = _flat(STORYBOARD_SKILL)
+        for needle in (
+            "### Ask before adding to an existing storyboard",
+            "AskUserQuestion",
+            "numbered question",
+            "Start a new storyboard",
+            "Continue open act <n> of \"<question>\"",
+            'label `Add to "<question, first 40 chars>"`',
+            "description `<why> · <act_count> acts · updated <relative time>`",
+            # <why>, exactly one of:
+            "`same session`",
+            "same PR",
+            "`same PR <repo>#<pr_number>`",
+            "same branch",
+            "`same branch <branch>`",
+            "same directory",
+            "`same directory <repo_path>`",
+            "`same repo <repo>`",
+            "`same working directory`",
+            "`your storyboard`",
+            # which matches: strong <= 3, else one weak one from the last 7 days
+            "strong matches (`match` session, pr, branch, repo_path), at most 3",
+            "at most 1 weak match (repo, workdir, actor)",
+            "7 days",
+            "create without asking",
+            # skip the prompt: a named target, or find's silent-continue case
+            "Skip it if the person named a target",
+            "continue silently only an `open_act` with `same_session` and `yours` both true",
+            # non-interactive
+            "`claude -p`",
+            "name the best match in your final message",
+            "say: add this to <storyboard>",
+        ):
+            self.assertIn(needle, text)
+
+    def test_ask_before_adding_comes_before_storyboard_create(self):
+        # The skill's flow block asks before its first storyboard__create, and
+        # the section that says how sits above the flow block.
+        raw = STORYBOARD_SKILL.read_text()
+        self.assertLess(raw.index("### Ask before adding to an existing storyboard"), raw.index("```"))
+        flow = raw.split("```")[1]
+        self.assertIn("storyboard__create", flow)
+        self.assertLess(flow.index("find"), flow.index("ask before adding"))
+        self.assertLess(flow.index("ask before adding"), flow.index("storyboard__create"))
+
+    def test_storyboard_readme_explains_acts(self):
+        readme = _flat(STORYBOARD_SKILL.parent / "README.md")
+        self.assertNotIn("To change one, ask for a new storyboard", readme)
+        for needle in ("Published acts are immutable", "cardinal-storyboard context",
+                       "An update adds an act to the same storyboard, so the id and link stay the same",
+                       "never an absolute path"):
+            self.assertIn(needle, readme)
+
     def test_canvas_skill_keeps_the_local_preview_loop(self):
         text = _flat(CANVAS_SKILL)
         for needle in (
@@ -187,12 +282,18 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # After the slim: 202 lines / 1932 words. The caps leave a little room,
         # not enough to paste a guide back in. The evidence-hygiene bullets
         # (promote only what is cited, reuse receipts, redacted != withheld)
-        # took the word cap from 2100 to 2175.
+        # took the word cap from 2100 to 2175. "Update, don't duplicate" plus
+        # "Ask before adding to an existing storyboard" (find -> ask ->
+        # continue / add_act / create, the public-links question; plugin
+        # 0.36.0) took it to 2425 words (+250, the most the acts plan allows)
+        # and 255 lines, including the raw-evidence rule (never set
+        # confirm_raw_evidence yourself): 2424 / 254 when it landed. No
+        # headroom left: trim before adding.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)
-        self.assertLessEqual(total, 220)
+        self.assertLessEqual(total, 255)
         words = sum(len(p.read_text().split()) for p in paths)
-        self.assertLessEqual(words, 2175)
+        self.assertLessEqual(words, 2425)
 
 
 if __name__ == "__main__":

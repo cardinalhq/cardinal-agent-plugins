@@ -281,7 +281,7 @@ class HookRegistrationTests(unittest.TestCase):
         tool = "mcp__plugin_cardinal_cardinal__storyboard__"
         by_cmd = {h["command"].rsplit("/", 1)[-1]: g["matcher"] for g in hooks for h in g["hooks"]}
         self.assertTrue(re.fullmatch(by_cmd["storyboard-preview.py"], tool + "preview"))
-        for t in ("create", "preview"):
+        for t in ("create", "preview", "add_act"):
             self.assertTrue(re.fullmatch(by_cmd["storyboard-token.py"], tool + t))
         self.assertTrue(re.fullmatch(by_cmd["evidence-capture.py"], tool + "create"))
         for name in ("evidence-capture", "storyboard-token", "storyboard-preview"):
