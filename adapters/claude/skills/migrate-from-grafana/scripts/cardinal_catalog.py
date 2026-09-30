@@ -323,16 +323,26 @@ def rule_states(c, instance_slug):
     """{rule id: True/False (enabled)} as Cardinal reports it now, or None if unknown.
     Read back through the MCP tool when connected to this org (it states enabled/
     disabled per rule), else from the REST listing's `enabled` field."""
+    code, body = c.req("GET", f"/api/orgs/{c.org}/alert-rules")
+    rules = body if isinstance(body, list) else (body or {}).get("rules", []) if isinstance(body, dict) else []
+    rules = rules if code == 200 else []
     mcp = mcp_for(c.org)
     if mcp:
         text, err = mcp.call("lakerunner__manage_alert_rules", {"instance": instance_slug, "action": "list"})
         if not err:
-            return {m.group(1): m.group(2) == "enabled"
-                    for m in re.finditer(r"id=([0-9a-f-]+),[^)]*\b(enabled|disabled)\)", text)}
+            # the MCP lists lakerunner rule ids; key them by Maestro's rule id, as callers do
+            by_lr = {m.group(1): m.group(2) == "enabled"
+                     for m in re.finditer(r"id=([0-9a-f-]+),[^)]*\b(enabled|disabled)\)", text)}
+            return {r.get("id"): by_lr[r["lakerunnerRuleId"]] for r in rules if r.get("lakerunnerRuleId") in by_lr}
+    states = {r.get("id"): r["enabled"] for r in rules if isinstance(r.get("enabled"), bool)}
+    return states or None
+
+
+def lakerunner_rule_id(c, rule_id):
+    """Maestro's alert-rule id -> the lakerunner rule id the MCP tool expects (None if not synced yet)."""
     code, body = c.req("GET", f"/api/orgs/{c.org}/alert-rules")
     rules = body if isinstance(body, list) else (body or {}).get("rules", []) if isinstance(body, dict) else []
-    states = {r.get("id"): r["enabled"] for r in rules if isinstance(r.get("enabled"), bool)}
-    return states if code == 200 and states else None
+    return next((r.get("lakerunnerRuleId") for r in rules if r.get("id") == rule_id), None) if code == 200 else None
 
 
 def set_rule_enabled(c, instance_slug, rule_id, enabled):
@@ -343,8 +353,11 @@ def set_rule_enabled(c, instance_slug, rule_id, enabled):
     if not mcp:
         return ("can't switch it " + ("on" if enabled else "off") + " without /cardinal:connect to this org; "
                 "do it in Cardinal's Alerts page")
+    lr_id = lakerunner_rule_id(c, rule_id)
+    if not lr_id:
+        return "Cardinal hasn't synced the rule to the data lake yet; re-run this step shortly"
     text, err = mcp.call("lakerunner__manage_alert_rules",
-                         {"instance": instance_slug, "action": "enable" if enabled else "disable", "rule_id": rule_id})
+                         {"instance": instance_slug, "action": "enable" if enabled else "disable", "rule_id": lr_id})
     if err:
         return text[:200]
     state = (rule_states(c, instance_slug) or {}).get(rule_id)
