@@ -53,7 +53,9 @@ up to three close matches (same session, PR, branch or directory), or one looser
 updated in the last 7 days, always with *Start a new storyboard* as an option. Without
 anyone to ask (`claude -p`) it starts a new storyboard and names the match. An update adds
 an act to the same storyboard, so the id and link stay the same. Public links keep showing
-the acts they showed until you say to extend them to the new act. A Cardinal without
+the acts they showed until you say to extend them to the new act. If a link shares raw
+evidence the new act binds, Claude always asks you first, even if you said to update what
+you shared. A Cardinal without
 `storyboard__add_act` gets a new storyboard instead.
 
 ## What is (and isn't) checked

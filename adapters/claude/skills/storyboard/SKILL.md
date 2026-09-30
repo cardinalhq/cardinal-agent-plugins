@@ -19,14 +19,13 @@ problem, not a trust violation.
 
 ## Fetch the guides first
 
-Cardinal serves the craft itself, so every client authors the same way. Before the first
-storyboard tool call, call `storyboard__describe_grammar` with `{section: "authoring"}` and
-`{section: "evidence"}`, and `{section: "canvas"}` before drawing (its `canvas.design` is
-the design guide). Fetch the reference (no section, or `schema` / `bindings` / `prefabs` /
-`libraries` / `rules`) as you need it. They are the only source for scene titles and
-states, claim kinds, the prose-number rule, units, `select` / `ref` / `reduce.where`, the
-warnings to fix, the pre-publish critique and handover. Follow them; do not work from
-memory. This skill adds only what is specific to Claude Code with the Cardinal plugin.
+Before the first storyboard tool call, call `storyboard__describe_grammar` with
+`{section: "authoring"}` and `{section: "evidence"}`, and `{section: "canvas"}` before
+drawing (its `canvas.design` is the design guide). Fetch the reference (no section, or
+`schema` / `bindings` / `prefabs` / `libraries` / `rules`) as you need it. They are the
+only source for scene titles, claims, units, bindings, warnings, the pre-publish critique
+and handover. Follow them; do not work from memory. This skill adds only what is specific
+to Claude Code with the Cardinal plugin.
 
 Needs Cardinal (maestro) newer than v1.97.16. An older one rejects `section: "authoring"`
 as invalid: ask the user to upgrade.
@@ -64,8 +63,7 @@ Captured evidence stays on this machine meanwhile and can be cited after connect
 
 ## Update, don't duplicate
 
-An update is a new act (same storyboard id and link). If `storyboard__find` is
-listed, on every storyboard request, before `storyboard__create`:
+If `storyboard__find` is listed, on every storyboard request, before `storyboard__create`:
 1. Run `cardinal-storyboard context`; it prints `{"context": {…}}`.
 2. Call `storyboard__find {session_id, context}` and follow its `rule`: continue silently
    only an `open_act` with `same_session` and `yours` both true.
@@ -73,8 +71,11 @@ listed, on every storyboard request, before `storyboard__create`:
    session_id, context}`; an open act you can write: continue it. New, or no
    `storyboard__add_act` listed: `storyboard__create` with `context`.
 4. Publish answers `public_links_decision_required`: ask the person if public links should
-   show this act, unless they already said to update what they shared; publish again with
-   `public_links: "extend"` or `"keep"`.
+   show this act, unless they already said to update what they shared (that covers only
+   this choice); publish again with `public_links: "extend"` or `"keep"`.
+5. `raw_evidence_confirmation_required`: always ask the person, listing the bindings it names;
+   never set `confirm_raw_evidence` yourself, even if they said to update what they shared.
+   Only their yes sends `confirm_raw_evidence: true`.
 
 No `storyboard__find` (an older Cardinal): create without `context`.
 

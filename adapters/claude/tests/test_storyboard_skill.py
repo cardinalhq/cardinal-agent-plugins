@@ -186,6 +186,15 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "public_links_decision_required",
             "unless they already said to update what they shared",
             '`public_links: "extend"` or `"keep"`',
+            # The "already said to update what they shared" exemption covers
+            # only the public_links choice; raw evidence always needs a fresh
+            # yes from the person (plan v2 C4).
+            "(that covers only this choice)",
+            "raw_evidence_confirmation_required",
+            "confirm_raw_evidence",
+            "always ask the person, listing the bindings it names",
+            "never set `confirm_raw_evidence` yourself, even if they said to update what they shared",
+            "Only their yes sends `confirm_raw_evidence: true`",
             "published acts are immutable; storyboard__add_act adds the next act to the same storyboard and link",
         ):
             self.assertIn(needle, text)
@@ -277,8 +286,9 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # "Ask before adding to an existing storyboard" (find -> ask ->
         # continue / add_act / create, the public-links question; plugin
         # 0.36.0) took it to 2425 words (+250, the most the acts plan allows)
-        # and 255 lines: 2425 / 253 when it landed. No headroom left: trim
-        # before adding.
+        # and 255 lines, including the raw-evidence rule (never set
+        # confirm_raw_evidence yourself): 2424 / 254 when it landed. No
+        # headroom left: trim before adding.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)
         self.assertLessEqual(total, 255)
