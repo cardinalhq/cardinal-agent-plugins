@@ -1,0 +1,32 @@
+name: Shared skills sync
+
+# Shared skill cores (common/<skill>/) must be byte-identical in every
+# adapter's skills/<skill>/, because each adapter ships as a self-contained
+# plugin. build/sync_skills.py is the source of truth; --check fails on drift.
+
+on:
+  pull_request:
+    paths:
+      - "common/migrate-from-grafana/**"
+      - "adapters/*/skills/migrate-from-grafana/**"
+      - "build/sync_skills.py"
+      - ".github/workflows/skills-sync.yml"
+  push:
+    branches: [main]
+    paths:
+      - "common/migrate-from-grafana/**"
+      - "adapters/*/skills/migrate-from-grafana/**"
+      - "build/sync_skills.py"
+      - ".github/workflows/skills-sync.yml"
+  workflow_dispatch:
+
+jobs:
+  check-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify shared skill cores are in sync across adapters
+        run: python3 build/sync_skills.py --check
