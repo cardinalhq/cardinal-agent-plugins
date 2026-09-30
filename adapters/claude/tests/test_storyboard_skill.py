@@ -172,6 +172,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "## Update, don't duplicate",
             "cardinal-storyboard context",
             "storyboard__find",
+            "on every storyboard request, before `storyboard__create`",
             "storyboard__find {session_id, context}",
             "follow its `rule`",
             "same_session",
@@ -189,6 +190,56 @@ class StoryboardSkillTextTests(unittest.TestCase):
         ):
             self.assertIn(needle, text)
         self.assertNotIn("a published storyboard is immutable", text)
+
+    def test_storyboard_skill_asks_before_adding_to_a_match(self):
+        # rjha 2026-09-29 (plan v2 P9, "Ask before adding to an existing
+        # storyboard"): offer strong matches (<=3) or one recent weak match,
+        # always with a way out, and fall back to a new storyboard when
+        # nobody can be asked.
+        text = _flat(STORYBOARD_SKILL)
+        for needle in (
+            "### Ask before adding to an existing storyboard",
+            "AskUserQuestion",
+            "numbered question",
+            "Start a new storyboard",
+            "Continue open act <n> of \"<question>\"",
+            'label `Add to "<question, first 40 chars>"`',
+            "description `<why> · <act_count> acts · updated <relative time>`",
+            # <why>, exactly one of:
+            "`same session`",
+            "same PR",
+            "`same PR <repo>#<pr_number>`",
+            "same branch",
+            "`same branch <branch>`",
+            "same directory",
+            "`same directory <repo_path>`",
+            "`same repo <repo>`",
+            "`same working directory`",
+            "`your storyboard`",
+            # which matches: strong <= 3, else one weak one from the last 7 days
+            "strong matches (`match` session, pr, branch, repo_path), at most 3",
+            "at most 1 weak match (repo, workdir, actor)",
+            "7 days",
+            "create without asking",
+            # skip the prompt: a named target, or find's silent-continue case
+            "Skip it if the person named a target",
+            "continue silently only an `open_act` with `same_session` and `yours` both true",
+            # non-interactive
+            "`claude -p`",
+            "name the best match in your final message",
+            "say: add this to <storyboard>",
+        ):
+            self.assertIn(needle, text)
+
+    def test_ask_before_adding_comes_before_storyboard_create(self):
+        # The skill's flow block asks before its first storyboard__create, and
+        # the section that says how sits above the flow block.
+        raw = STORYBOARD_SKILL.read_text()
+        self.assertLess(raw.index("### Ask before adding to an existing storyboard"), raw.index("```"))
+        flow = raw.split("```")[1]
+        self.assertIn("storyboard__create", flow)
+        self.assertLess(flow.index("find"), flow.index("ask before adding"))
+        self.assertLess(flow.index("ask before adding"), flow.index("storyboard__create"))
 
     def test_storyboard_readme_explains_acts(self):
         readme = _flat(STORYBOARD_SKILL.parent / "README.md")
@@ -222,15 +273,17 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # After the slim: 202 lines / 1932 words. The caps leave a little room,
         # not enough to paste a guide back in. The evidence-hygiene bullets
         # (promote only what is cited, reuse receipts, redacted != withheld)
-        # took the word cap from 2100 to 2175. "Update, don't duplicate" (find
-        # -> continue / add_act / create, the public-links question; plugin
-        # 0.36.0) took it to 2325 words (+150, the most the acts plan allows)
-        # and 240 lines: 2321 / 238 when it landed.
+        # took the word cap from 2100 to 2175. "Update, don't duplicate" plus
+        # "Ask before adding to an existing storyboard" (find -> ask ->
+        # continue / add_act / create, the public-links question; plugin
+        # 0.36.0) took it to 2425 words (+250, the most the acts plan allows)
+        # and 255 lines: 2425 / 253 when it landed. No headroom left: trim
+        # before adding.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)
-        self.assertLessEqual(total, 240)
+        self.assertLessEqual(total, 255)
         words = sum(len(p.read_text().split()) for p in paths)
-        self.assertLessEqual(words, 2325)
+        self.assertLessEqual(words, 2425)
 
 
 if __name__ == "__main__":

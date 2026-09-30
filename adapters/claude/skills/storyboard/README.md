@@ -48,7 +48,10 @@ storyboard."*). Claude runs `cardinal-storyboard context` (repo, path in the rep
 PR, commit, a hashed directory id and your Cardinal account email; never an absolute path)
 and asks Cardinal for storyboards written from the same session, PR, branch or repo. Org
 members see these labels; public links never show them. Claude continues a draft only
-when it is this session's own; otherwise it shows you the matches and asks. An update adds
+when it is this session's own. Otherwise, if something matches, it asks before adding to it:
+up to three close matches (same session, PR, branch or directory), or one looser match
+updated in the last 7 days, always with *Start a new storyboard* as an option. Without
+anyone to ask (`claude -p`) it starts a new storyboard and names the match. An update adds
 an act to the same storyboard, so the id and link stay the same. Public links keep showing
 the acts they showed until you say to extend them to the new act. A Cardinal without
 `storyboard__add_act` gets a new storyboard instead.
