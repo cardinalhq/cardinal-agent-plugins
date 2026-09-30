@@ -1142,7 +1142,8 @@ class StoryboardSessionHookTests(unittest.TestCase):
     def test_emits_session_id_outside_a_git_repo(self):
         ctx = self._context(_run_storyboard_session(self.root))
         self.assertEqual(ctx, "Cardinal session id for this session: 0f6e2a9c-1b2d-4e5f-8a7b-9c0d1e2f3a4b. "
-                              "Pass it as session_id to storyboard__create.")
+                              "Pass it as session_id to storyboard__create, storyboard__find and "
+                              "storyboard__add_act.")
 
     def test_emits_session_id_inside_a_git_repo(self):
         subprocess.run(["git", "init", "-q"], cwd=str(self.root), check=True)

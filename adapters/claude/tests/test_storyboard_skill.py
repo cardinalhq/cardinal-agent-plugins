@@ -119,7 +119,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
         for needle in (
             # SessionStart hook (hooks/storyboard-session.py)
             '"Cardinal session id for this session: …"',
-            "Pass it to `storyboard__create`",
+            "Pass it to `storyboard__create`, `storyboard__find` and `storyboard__add_act`",
             # PostToolUse preview hook (hooks/storyboard-preview.py)
             "a plugin hook renders each scene with your local Chromium and reports the PNG paths",
             "Read every PNG",
@@ -163,6 +163,41 @@ class StoryboardSkillTextTests(unittest.TestCase):
         ):
             self.assertIn(needle, text)
 
+    def test_storyboard_skill_updates_instead_of_duplicating(self):
+        # find -> continue / add_act / create (conductor storyboard__find and
+        # storyboard__add_act; plan v2 C5). Feature-detected: an older Cardinal
+        # without the tools gets a new storyboard, never an unknown argument.
+        text = _flat(STORYBOARD_SKILL)
+        for needle in (
+            "## Update, don't duplicate",
+            "cardinal-storyboard context",
+            "storyboard__find",
+            "storyboard__find {session_id, context}",
+            "follow its `rule`",
+            "same_session",
+            "`yours` both true",
+            "storyboard__add_act",
+            "`storyboard__add_act {storyboard_id, title, session_id, context}`",
+            "no `storyboard__add_act` listed",
+            "No `storyboard__find` (an older Cardinal): create without `context`",
+            # Public links: ask the person unless they already said to update what they shared.
+            "public_links",
+            "public_links_decision_required",
+            "unless they already said to update what they shared",
+            '`public_links: "extend"` or `"keep"`',
+            "published acts are immutable; storyboard__add_act adds the next act to the same storyboard and link",
+        ):
+            self.assertIn(needle, text)
+        self.assertNotIn("a published storyboard is immutable", text)
+
+    def test_storyboard_readme_explains_acts(self):
+        readme = _flat(STORYBOARD_SKILL.parent / "README.md")
+        self.assertNotIn("To change one, ask for a new storyboard", readme)
+        for needle in ("Published acts are immutable", "cardinal-storyboard context",
+                       "An update adds an act to the same storyboard, so the id and link stay the same",
+                       "never an absolute path"):
+            self.assertIn(needle, readme)
+
     def test_canvas_skill_keeps_the_local_preview_loop(self):
         text = _flat(CANVAS_SKILL)
         for needle in (
@@ -187,12 +222,15 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # After the slim: 202 lines / 1932 words. The caps leave a little room,
         # not enough to paste a guide back in. The evidence-hygiene bullets
         # (promote only what is cited, reuse receipts, redacted != withheld)
-        # took the word cap from 2100 to 2175.
+        # took the word cap from 2100 to 2175. "Update, don't duplicate" (find
+        # -> continue / add_act / create, the public-links question; plugin
+        # 0.36.0) took it to 2325 words (+150, the most the acts plan allows)
+        # and 240 lines: 2321 / 238 when it landed.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)
-        self.assertLessEqual(total, 220)
+        self.assertLessEqual(total, 240)
         words = sum(len(p.read_text().split()) for p in paths)
-        self.assertLessEqual(words, 2175)
+        self.assertLessEqual(words, 2325)
 
 
 if __name__ == "__main__":

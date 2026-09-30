@@ -1,6 +1,6 @@
 ---
 name: storyboard
-description: Turn a finished (or stalled) Cardinal investigation into an Investigation Storyboard — an evidence-bound, scene-by-scene explanation with its own interactive visuals, published in Cardinal and shareable by link. Use whenever the user wants to explain, write up, present, share, hand off, post-mortem or "storyboard" what an investigation found (an incident, a regression, a cost jump, a canary verdict), or asks for a visual walkthrough of the evidence — even if they only say "write this up for the team" or "show me how we got here" after using Cardinal tools. Covers the storyboard__* tools (describe_grammar, create, define_surface, upsert_scene, preview, publish, get_receipt), receipts and captured evidence, and the Claude Code preview → critique → publish loop. Not for dashboards or ongoing monitoring.
+description: Turn a finished (or stalled) Cardinal investigation into an Investigation Storyboard — an evidence-bound, scene-by-scene explanation with its own interactive visuals, published in Cardinal and shareable by link. Use whenever the user wants to explain, write up, present, share, hand off, post-mortem or "storyboard" what an investigation found (an incident, a regression, a cost jump, a canary verdict), or asks for a visual walkthrough of the evidence — even if they only say "write this up for the team" or "show me how we got here" after using Cardinal tools. Also for updating a storyboard. Covers the storyboard__* tools (describe_grammar, find, create, add_act, define_surface, upsert_scene, preview, publish, get_receipt), receipts and captured evidence, and the Claude Code preview → critique → publish loop. Not for dashboards or ongoing monitoring.
 ---
 
 # storyboard — explain the investigation
@@ -65,8 +65,8 @@ Captured evidence stays on this machine meanwhile and can be cited after connect
 ## Claude Code specifics
 
 - **session_id:** a SessionStart hook puts this session's id in your context ("Cardinal
-  session id for this session: …"). Pass it to `storyboard__create`. It labels the
-  storyboard row only.
+  session id for this session: …"). Pass it to `storyboard__create`, `storyboard__find` and
+  `storyboard__add_act`. It labels the storyboard or act only.
 - **The preview loop is local.** After every `storyboard__preview`, a plugin hook renders
   each scene with your local Chromium and reports the PNG paths. Read every PNG (every
   reveal step, the first and last included) and critique it against the authoring guide
@@ -76,11 +76,29 @@ Captured evidence stays on this machine meanwhile and can be cited after connect
 
 ```
 investigation (note rcpt_ / ev_ ids)
-  → describe_grammar {authoring, evidence} → create (session_id) → promote cited ev_ ids
+  → describe_grammar {authoring, evidence} → context → find → create or add_act → promote
   → define_surface / upsert_scene → storyboard__preview
     ↳ plugin hook: local Chromium → PNG per scene per reveal step
   → Read every PNG → critique → revise → preview … → critique the whole → storyboard__publish
 ```
 
-Publishing is final: a published storyboard is immutable. Hand over the `view_url`; if it is
-app-relative (a self-hosted install without `MAESTRO_BASE_URL`), prefix the Cardinal host.
+## Update, don't duplicate
+
+An update is a new act of the same storyboard (same id and link). If `storyboard__find` is
+listed:
+1. Run `cardinal-storyboard context`; it prints `{"context": {…}}` (never an absolute path).
+2. Call `storyboard__find {session_id, context}` and follow its `rule`: continue only a match
+   whose `open_act` has `same_session` and `yours` both true; otherwise show the person the
+   top matches and ask whether to update one or start a new storyboard.
+3. To update a match whose acts are all published: `storyboard__add_act {storyboard_id,
+   title, session_id, context}`, then author the act as usual. New storyboard, or no
+   `storyboard__add_act` listed: `storyboard__create` with the same `context`.
+4. If publish answers `public_links_decision_required`, ask the person whether the public
+   links should show this act (unless they already said to update what they shared), then
+   publish again with `public_links: "extend"` or `"keep"`.
+
+No `storyboard__find` (an older Cardinal): create without `context`.
+
+Publishing is final for that act: published acts are immutable; storyboard__add_act adds the
+next act to the same storyboard and link. Hand over the `view_url`; if it is app-relative (a
+self-hosted install without `MAESTRO_BASE_URL`), prefix the Cardinal host.

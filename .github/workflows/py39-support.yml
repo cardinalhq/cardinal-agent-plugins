@@ -70,6 +70,7 @@ jobs:
           import cardinal_core.evidence_normalizers
           import cardinal_core.evidence_capture
           import cardinal_core.evidence_promote
+          import cardinal_core.storyboard_context
           print('ok: all core modules import under 3.9')
           "
 

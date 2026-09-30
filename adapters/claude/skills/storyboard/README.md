@@ -41,8 +41,17 @@ regression, with visuals."*
 Claude drafts the scenes and validates them with `storyboard__preview`. The plugin then
 renders each scene locally and hands Claude the pictures, which it critiques before it
 revises and publishes. You get a `view_url` to open or
-share. Published storyboards are immutable, and they keep every receipt they cite. To
-change one, ask for a new storyboard.
+share. Published acts are immutable, and they keep every receipt they cite.
+
+To update a storyboard, ask Claude to add to it (*"Add the rollback to the checkout
+storyboard."*). Claude runs `cardinal-storyboard context` (repo, path in the repo, branch,
+PR, commit, a hashed directory id and your Cardinal account email; never an absolute path)
+and asks Cardinal for storyboards written from the same session, PR, branch or repo. Org
+members see these labels; public links never show them. Claude continues a draft only
+when it is this session's own; otherwise it shows you the matches and asks. An update adds
+an act to the same storyboard, so the id and link stay the same. Public links keep showing
+the acts they showed until you say to extend them to the new act. A Cardinal without
+`storyboard__add_act` gets a new storyboard instead.
 
 ## What is (and isn't) checked
 
