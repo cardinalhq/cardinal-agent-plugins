@@ -1,0 +1,49 @@
+// OTLP in, converted to Prometheus / Loki on the way out (common in k8s-monitoring).
+otelcol.receiver.otlp "default" {
+  http { endpoint = "0.0.0.0:4318" }
+  output {
+    metrics = [
+      otelcol.processor.batch.default.input,
+    ]
+    logs = [
+      otelcol.processor.batch.default.input,
+    ]
+    traces = [
+      otelcol.processor.batch.default.input,
+    ]
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    metrics = [
+      otelcol.exporter.prometheus.default.input,
+    ]
+    logs = [
+      otelcol.exporter.loki.default.input,
+    ]
+    traces = [
+      otelcol.exporter.otlp.tempo.input,
+    ]
+  }
+}
+
+otelcol.exporter.prometheus "default" {
+  forward_to = [prometheus.remote_write.mimir.receiver]
+}
+
+otelcol.exporter.loki "default" {
+  forward_to = [loki.write.grafana.receiver]
+}
+
+prometheus.remote_write "mimir" {
+  endpoint { url = "http://mimir-distributor.mimir.svc:8080/api/v1/push" }
+}
+
+loki.write "grafana" {
+  endpoint { url = "http://loki-gateway.loki.svc/loki/api/v1/push" }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client { endpoint = "tempo-distributor.tempo.svc:4317" }
+}

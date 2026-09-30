@@ -34,6 +34,7 @@ COMMON_DIR = ROOT / "common"
 # skill name -> files/dirs (relative to common/<skill>/) copied into each adapter.
 SKILLS = {
     "migrate-from-grafana": ["CORE.md", "scripts", "references"],
+    "onboard-alloy": ["CORE.md", "scripts"],
 }
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")

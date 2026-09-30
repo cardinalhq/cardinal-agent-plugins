@@ -9,6 +9,9 @@ on:
     paths:
       - "common/migrate-from-grafana/**"
       - "adapters/*/skills/migrate-from-grafana/**"
+      - "common/onboard-alloy/**"
+      - "adapters/*/skills/onboard-alloy/**"
+      - "tests/onboard_alloy/**"
       - "build/sync_skills.py"
       - ".github/workflows/skills-sync.yml"
   push:
@@ -16,6 +19,9 @@ on:
     paths:
       - "common/migrate-from-grafana/**"
       - "adapters/*/skills/migrate-from-grafana/**"
+      - "common/onboard-alloy/**"
+      - "adapters/*/skills/onboard-alloy/**"
+      - "tests/onboard_alloy/**"
       - "build/sync_skills.py"
       - ".github/workflows/skills-sync.yml"
   workflow_dispatch:
@@ -30,3 +36,13 @@ jobs:
           python-version: "3.12"
       - name: Verify shared skill cores are in sync across adapters
         run: python3 build/sync_skills.py --check
+
+  onboard-alloy-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: onboard-alloy scripts (parser, inventory, render, lint)
+        run: python3 -m unittest discover -s tests/onboard_alloy -v

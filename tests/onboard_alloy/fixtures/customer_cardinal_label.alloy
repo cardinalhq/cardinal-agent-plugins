@@ -1,0 +1,30 @@
+// The customer already labels their own components "cardinal" (here: an OTLP entry
+// point fed by a Cardinal collector). The skill must leave them alone.
+otelcol.receiver.otlp "cardinal" {
+  grpc { endpoint = "127.0.0.1:4317" }
+  output {
+    metrics = [otelcol.processor.batch.cardinal.input]
+    logs    = [otelcol.processor.batch.cardinal.input]
+    traces  = [otelcol.processor.batch.cardinal.input]
+  }
+}
+
+otelcol.processor.batch "cardinal" {
+  output {
+    metrics = [otelcol.exporter.otlphttp.grafana_cloud.input]
+    logs    = [otelcol.exporter.otlphttp.grafana_cloud.input]
+    traces  = [otelcol.exporter.otlphttp.grafana_cloud.input]
+  }
+}
+
+otelcol.auth.basic "grafana_cloud" {
+  username = "123456"
+  password = "glc_eyJvIjoiMTIzIiwibiI6InN0YWNrIn0="
+}
+
+otelcol.exporter.otlphttp "grafana_cloud" {
+  client {
+    endpoint = "https://otlp-gateway-prod-us-east-0.grafana.net/otlp"
+    auth     = otelcol.auth.basic.grafana_cloud.handler
+  }
+}
