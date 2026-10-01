@@ -42,7 +42,7 @@ SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
 
 GATED_HOOKS = (
     "initiative-convention.py", "plan-state.py", "git-state.py", "limits-gate.py", "decision-prompt.py",
-    "turn-usage.py", "plan-usage.py", "subagent-usage.py",
+    "turn-usage.py", "plan-usage.py", "subagent-usage.py", "storyboard-discovery.py",
 )
 # Run in both modes: storyboards work before connect.
 STORYBOARD_HOOKS = ("storyboard-session.py", "storyboard-preview.py", "storyboard-token.py", "evidence-capture.py")
@@ -383,6 +383,17 @@ class GatedHooksUnconnectedTests(_GuardedCase):
         proc = self.guarded_run(HOOKS / "decision-prompt.py", payload, env)
         self.assertIn("Cardinal decision capture is on", json.loads(proc.stdout)
                       ["hookSpecificOutput"]["additionalContext"])
+
+    def test_storyboard_discovery_is_silent_in_a_git_repo_when_not_connected(self):
+        home = self.guard_dir / "home"
+        (home / ".claude").mkdir(parents=True, exist_ok=True)
+        repo = fixtures.make_git_repo(self.guard_dir / "repo", "feat/x")
+        env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        for event in ("SessionStart", "UserPromptSubmit"):
+            payload = {"session_id": "s1", "cwd": str(repo), "hook_event_name": event}
+            proc = self.guarded_run(HOOKS / "storyboard-discovery.py", payload, env)
+            self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""), event)
+        self.assertEqual(self.guard_lines(), [], "no network and no subprocess")
 
     def test_initiative_convention_is_silent_in_a_git_repo_when_not_connected(self):
         # A git repo on a feature branch is exactly where the connected hook
