@@ -29,6 +29,10 @@ class ScrubVectorTests(unittest.TestCase):
     def test_vectors_name_their_conductor_source(self):
         self.assertIn("packages/mcp-gateway/storyboard/receipts/receipts.go", VECTORS["_comment"])
         self.assertIn("credential_keys.json", VECTORS["_comment"])
+        # The `go test -v` status-line vectors came from conductor's R1 merge
+        # (isGoTestStatus, cardinalhq/conductor#2014).
+        self.assertIn("bc5d0d16", VECTORS["_comment"])
+        self.assertIn("--- PASS: TestX (0.01s)", [c["in"] for c in VECTORS["plain"]])
         for section in ("scrub", "text", "plain"):
             self.assertGreater(len(VECTORS[section]), 5, section)
 
@@ -66,6 +70,60 @@ class ScrubVectorTests(unittest.TestCase):
         keep = {"input_tokens": 12, "nextPageToken": "cursor-1", "automountServiceAccountToken": True,
                 "commit_hash": "deadbeef"}
         self.assertEqual(ev.scrub(keep), keep)
+
+
+class GoTestStatusTests(unittest.TestCase):
+    """PASS is a credential key, but `go test -v` writes "--- PASS: TestX
+    (0.01s)" for every passing test. Exactly that shape keeps its test name
+    (conductor isGoTestStatus); every near miss is still a credential, under
+    the parity key test and the plugin's wider one (gate.secretish_name)."""
+
+    KEPT = (
+        "--- PASS: TestX (0.01s)",
+        "    --- PASS: TestX/sub_case (0.00s)",
+        "x\\n    --- PASS: TestY (0.02s)",
+        "x\n    --- PASS: TestY (0.02s)",
+        "\t--- PASS:\tTestTab (0.00s)",
+        '{"Action":"output","Output":"--- PASS: TestX (0.00s)\\n"}',
+        "=== RUN   TestX\n--- PASS: TestX (0.01s)\nPASS\nok  \texample.com/pkg\t0.012s",
+    )
+    REDACTED = (
+        "PASS:hunter2", "PASS : hunter2", "environment:\n  PASS: s3cret", "Pass: s3cret", "pass: hunter2",
+        "PASS=hunter2", "PASS => x", '"PASS": "x"', '\\"PASS\\":\\"x\\"', "DB_PASS: x", "DB_PASS=x",
+        "--- PASS=x", "--- PASS:x", '--- PASS: "x"', '--- PASS: \\"x\\"', "--- DB_PASS: x",
+        "user=bob pass=Xy9", "Authorization: Bearer abcdefgh123",
+    )
+
+    def test_status_line_survives_the_plain_and_the_wide_pass(self):
+        from cardinal_core import evidence_capture as cap
+        line = "--- PASS: TestX (0.01s)"
+        self.assertEqual(cap.redact_text_wide(ev.redact_plain_text(line)), line)
+        for s in self.KEPT:
+            self.assertEqual(ev.redact_plain_text(s), s, repr(s))
+            self.assertEqual(ev.redact_error_text(s), s, repr(s))
+            self.assertEqual(cap.redact_text_wide(ev.redact_plain_text(s)), s, repr(s))
+
+    def test_near_misses_stay_redacted(self):
+        from cardinal_core import evidence_capture as cap
+        self.assertEqual(ev.redact_plain_text("DB_PASS=x"), "DB_PASS=[redacted]")
+        self.assertEqual(cap.redact_text_wide("DB_PASS=x"), "DB_PASS=[redacted]")
+        for s in self.REDACTED:
+            self.assertIn(ev.REDACTED, ev.redact_plain_text(s), repr(s))
+            self.assertIn(ev.REDACTED, cap.redact_text_wide(s), repr(s))
+        # A credential later on a status line is still redacted.
+        self.assertEqual(ev.redact_plain_text("--- PASS: TestX (0.01s) password=hunter2"),
+                         "--- PASS: TestX (0.01s) password=[redacted]")
+        # The wide key test (gate.secretish_name) is True for PASS as well;
+        # the exemption sits after it, so a near miss is still caught there.
+        self.assertEqual(cap.redact_text_wide("--- PASS=x"), "--- PASS=[redacted]")
+
+    def test_shape_predicate(self):
+        s = "--- PASS: TestX"
+        self.assertTrue(ev._is_go_test_status(s, 4, 8, 10))
+        self.assertFalse(ev._is_go_test_status("PASS: TestX", 0, 4, 6))       # column 0 (TAP/automake)
+        self.assertFalse(ev._is_go_test_status("--- Pass: TestX", 4, 8, 10))  # not upper case
+        self.assertFalse(ev._is_go_test_status("--- PASS:", 4, 8, 9))         # nothing after ':'
+        self.assertFalse(ev._is_go_test_status('--- PASS: "x"', 4, 8, 10))    # quoted value
 
 
 class LinearScannerParityTests(unittest.TestCase):

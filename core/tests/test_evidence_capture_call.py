@@ -376,6 +376,37 @@ class PipelineTests(_Case):
         self.assertIn("see ./src/a.py and ~/notes and [local file]", s)
         self.assertNotIn(str(self.home), json.dumps(e))
 
+    def test_go_test_status_lines_keep_their_test_names(self):
+        # PASS is a credential key; `go test -v` / `-json` status lines are
+        # the one exempt shape (conductor isGoTestStatus), through the
+        # _Hardener's wide pass and the error-text pass alike.
+        verbose = ("=== RUN   TestX\n--- PASS: TestX (0.01s)\n=== RUN   TestY\n"
+                   "    --- PASS: TestY/sub_case (0.00s)\nPASS\nok  \texample.com/pkg\t0.012s\n")
+        e = self.capture("Bash", {"command": "go test -v ./..."}, {"stdout": verbose, "stderr": ""})
+        self.assertEqual(e["result"]["structured"]["stdout"], verbose)
+        self.assertNotIn(evidence.REDACTED, json.dumps(e))
+
+        events = ('{"Action":"output","Package":"p","Test":"TestX","Output":"--- PASS: TestX (0.00s)\\n"}\n'
+                  '{"Action":"pass","Package":"p","Test":"TestX","Elapsed":0}\n')
+        e = self.capture("Bash", {"command": "go test -json ./..."}, {"stdout": events, "stderr": ""})
+        self.assertEqual(e["result"]["structured"]["stdout"], events)
+
+        one = '{"Action":"output","Package":"p","Test":"TestX","Output":"--- PASS: TestX (0.00s)\\n"}'
+        e = self.capture("mcp__ci__run", {"cmd": "go test -json"}, {"content": [{"type": "text", "text": one}]})
+        self.assertEqual(e["result"]["structured"]["Output"], "--- PASS: TestX (0.00s)\n")
+
+        failing = "Exit code 1\n--- PASS: TestAlpha (0.00s)\n--- FAIL: TestBeta (0.01s)\n    x_test.go:9: password=hunter2\nFAIL\n"
+        e = self.capture("Bash", {"command": "go test -v ./..."}, None, error=failing)
+        out = e["result"]["structured"]["output"]
+        self.assertIn("--- PASS: TestAlpha (0.00s)", out)
+        self.assertIn("--- FAIL: TestBeta (0.01s)", out)
+        self.assertNotIn("hunter2", json.dumps(e))
+
+        # Near misses are still credentials.
+        e = self.capture("Bash", {"command": "cat run.log"}, {"stdout": "DB_PASS=x\n--- PASS=y\nPASS: z\n", "stderr": ""})
+        self.assertEqual(e["result"]["structured"]["stdout"],
+                         "DB_PASS=[redacted]\n--- PASS=[redacted]\nPASS: [redacted]\n")
+
     def test_json_text_leaves_get_the_text_rules_too(self):
         doc = json.dumps({"items": [{"env": "DB_PASSWORD=hunter2", "log": "ok"}]}, indent=2)
         e = self.capture("Bash", {"command": "kubectl get x -o json"}, {"stdout": doc, "stderr": ""})
