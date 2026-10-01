@@ -27,6 +27,8 @@ HOOK = HOOKS / "storyboard-discovery.py"
 VENDORED = HOOKS / "cardinal_core" / "storyboard_discovery.py"
 
 SB1 = "sb_0123456789abcdef01234567"
+# hooks.json's timeout for the hook: the backstop, well clear of its own cap.
+HOOK_TIMEOUT = 6
 SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
 
 
@@ -307,7 +309,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["matcher"], "", "every agent type")
         entry = [h for h in groups[0]["hooks"] if h["command"].endswith("/storyboard-discovery.py")][0]
-        self.assertLessEqual(entry["timeout"], 3)
+        self.assertEqual(entry["timeout"], HOOK_TIMEOUT)
         self.assertFalse(entry.get("async", False), "the context must land before the subagent runs")
 
     def test_registered_on_every_event_sync(self):
@@ -315,11 +317,36 @@ class RegistrationTests(unittest.TestCase):
         for event in ("SessionStart", "UserPromptSubmit", "SubagentStart"):
             entries = [h for g in hooks[event] for h in g["hooks"] if h["command"].endswith("/storyboard-discovery.py")]
             self.assertEqual(len(entries), 1, event)
-            self.assertLessEqual(entries[0]["timeout"], 3, event)
+            self.assertEqual(entries[0]["timeout"], HOOK_TIMEOUT, event)
             self.assertFalse(entries[0].get("async", False), f"{event}: the context must land before the model runs")
         text = (HOOKS / "hooks.json").read_text()
         self.assertEqual(text.count("storyboard-discovery"), 3)
         self.assertTrue(os.access(HOOK, os.X_OK))
+
+
+class DeadlineTests(unittest.TestCase):
+    """The hook's budget is measured from its process start."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sbd_hook", HOOK)
+        self.hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.hook)
+
+    def test_budget_counts_from_process_start(self):
+        h = self.hook
+        self.assertEqual(h.deadlines(now=100.2, started=100.0), (100.0 + h.BUDGET_S, 100.0 + h.DELIVER_BY_S))
+
+    def test_a_slow_startup_still_gets_a_minimum_network_window_but_never_past_the_cap(self):
+        h = self.hook
+        self.assertEqual(h.deadlines(now=102.5, started=100.0)[0], 102.5 + h.MIN_NETWORK_S)
+        self.assertEqual(h.deadlines(now=104.0, started=100.0)[0], 100.0 + h.HARD_CAP_S)
+
+    def test_the_cap_and_delivery_leave_room_under_the_hooks_json_timeout(self):
+        h = self.hook
+        self.assertLess(h.BUDGET_S, h.HARD_CAP_S)
+        self.assertLess(h.HARD_CAP_S, h.DELIVER_BY_S)
+        self.assertLessEqual(h.DELIVER_BY_S, HOOK_TIMEOUT - 1)
 
 
 if __name__ == "__main__":

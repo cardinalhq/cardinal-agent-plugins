@@ -504,8 +504,15 @@ class SessionCacheTests(unittest.TestCase):
             old = d / "old.json"
             old.write_text("{}")
             os.utime(old, (1, 1))
+            stale_tmp = d / "s1.jsonab12cd.tmp"
+            stale_tmp.write_text("{")
+            os.utime(stale_tmp, (1, 1))
+            fresh_tmp = d / "s3.jsonef34gh.tmp"
+            fresh_tmp.write_text("{")
             sd.record_run(d, "s2", None, None)
             self.assertFalse(old.exists())
+            self.assertFalse(stale_tmp.exists(), "a temp file a killed write left behind")
+            self.assertTrue(fresh_tmp.exists(), "a write in progress elsewhere")
             self.assertTrue((d / "s2.json").exists())
 
 
@@ -653,22 +660,76 @@ class FetchAndDiscoverTests(_RepoCase):
         self.assertEqual((opener.calls, self.fake.requests), (0, []))
         self.assertFalse(self.state.exists(), "SubagentStart records nothing")
 
-    def test_a_no_match_or_failed_look_clears_the_stored_block(self):
+    def test_a_no_match_clears_the_stored_block_but_a_failed_look_keeps_it(self):
         cases = {
-            "zero matches": lambda: self.fake.routes.__setitem__("find", (200, {"matches": []})),
-            "500": lambda: self.fake.routes.__setitem__("find", (500, {"error": "boom"})),
+            "zero matches": (lambda: self.fake.routes.__setitem__("find", (200, {"matches": []})), False),
+            "403": (lambda: self.fake.routes.__setitem__("find", (403, {"error": "insufficient_scope"})), False),
+            "500": (lambda: self.fake.routes.__setitem__("find", (500, {"error": "boom"})), True),
+            "timeout": (lambda: setattr(self.fake, "delay", 5.0), True),
         }
-        for i, (name, arrange) in enumerate(cases.items()):
+        for i, (name, (arrange, kept)) in enumerate(cases.items()):
             with self.subTest(name):
                 session = f"sess-clear-{i}"
+                self.fake.delay = 0.0
                 self.fake.routes.clear()
                 self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
                 self.fake.routes["get"] = get_route({SB1: [scene(1)]})
-                self.assertIsNotNone(self.discover(session=session))
-                self.assertIsNotNone(self.discover(event="SubagentStart", session=session))
+                block = self.discover(session=session)
+                self.assertIsNotNone(block)
                 arrange()
-                self.assertIsNone(self.discover(session=session))
-                self.assertIsNone(self.discover(event="SubagentStart", session=session))
+                self.assertIsNone(self.discover(session=session, deadline=time.monotonic() + 0.5))
+                self.assertEqual(self.discover(event="SubagentStart", session=session), block if kept else None)
+                self.fake.delay = 0.0
+
+    def test_a_failed_look_is_retried_after_the_backoff_and_a_4xx_is_not(self):
+        for i, (route, retried) in enumerate([((500, {"error": "boom"}), True),
+                                              ((403, {"error": "insufficient_scope"}), False)]):
+            with self.subTest(route[0]):
+                session = f"sess-retry-{i}"
+                self.fake.routes.clear()
+                self.fake.routes["find"] = route
+                self.assertIsNone(self.discover(session=session, now=1000.0))
+                self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
+                self.fake.routes["get"] = get_route({SB1: [scene(1)]})
+                n = len(self.fake.requests)
+                self.assertIsNone(self.discover(event="UserPromptSubmit", session=session, now=1000.0 + 30))
+                self.assertEqual(len(self.fake.requests), n, "inside the backoff: no request")
+                later = self.discover(event="UserPromptSubmit", session=session, now=1000.0 + sd.FAILURE_RETRY_S + 1)
+                if retried:
+                    self.assertIn(SB1, later)
+                    self.assertGreater(len(self.fake.requests), n)
+                else:
+                    self.assertIsNone(later)
+                    self.assertEqual(len(self.fake.requests), n)
+
+    def test_a_block_ready_after_deliver_by_is_held_for_the_next_prompt(self):
+        self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
+        self.fake.routes["get"] = get_route({SB1: [scene(1)]})
+        self.assertIsNone(self.discover(deliver_by=time.monotonic() - 1), "too late to print")
+        self.assertTrue(json.loads((self.state / "sess-1.json").read_text()).get("pending"))
+        n = len(self.fake.requests)
+        block = self.discover(event="UserPromptSubmit")
+        self.assertIn(SB1, block)
+        self.assertEqual(len(self.fake.requests), n, "delivered from the state file, no request")
+        self.assertNotIn("pending", json.loads((self.state / "sess-1.json").read_text()))
+        self.assertIsNone(self.discover(event="UserPromptSubmit"), "delivered once")
+        self.assertEqual(self.discover(event="SubagentStart"), block)
+
+    def test_an_absolute_deadline_bounds_the_whole_look(self):
+        self.fake.routes["find"] = (200, {"matches": [match()]})
+        self.fake.delay = 5.0
+        t0 = time.monotonic()
+        self.assertIsNone(self.discover(deadline=t0 + 0.4))
+        self.assertLess(time.monotonic() - t0, 0.8)
+
+    def test_subagent_start_on_another_branch_gets_nothing(self):
+        self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
+        self.fake.routes["get"] = get_route({SB1: [scene(1)]})
+        block = self.discover()
+        self.assertEqual(self.discover(event="SubagentStart"), block)
+        other = self.dir / "wt"
+        _git(self.repo, "worktree", "add", "-q", "-b", "other-branch", str(other))
+        self.assertIsNone(self.discover(cwd=other, event="SubagentStart"))
 
     def test_user_prompt_runs_again_after_a_commit(self):
         self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
