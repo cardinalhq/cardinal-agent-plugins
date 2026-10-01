@@ -306,6 +306,37 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self.assertNotIn("hunter2", path.read_text())
         self.assertNotIn("exit_code", entry)
 
+    def test_bash_writing_to_the_session_scratchpad_golden(self):
+        # Claude Code's session temp dir is <TMPDIR>/claude-<uid>/<cwd with
+        # non-alphanumerics as "-">/<session>/scratchpad: the encoded cwd
+        # names the user, so it is rewritten by shape, and the dash-encoded
+        # home elsewhere becomes [home]. Golden: the whole stored call.
+        cwd = self.home / "git" / "app"
+        cwd.mkdir(parents=True)
+        enc_cwd = re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+        enc_home = re.sub(r"[^A-Za-z0-9]", "-", str(self.home))
+        out = f"/private/tmp/claude-501/{enc_cwd}/{SESSION}/scratchpad/out.txt"
+        payload = self._payload(
+            tool_name="Bash", cwd=str(cwd),
+            tool_input={"command": f"go test ./... > {out} 2>&1; wc -l {out}", "description": "run tests"},
+            tool_response={"stdout": f"      12 {out}\nsee also {enc_home}-other/notes\n", "stderr": "",
+                           "interrupted": False, "isImage": False, "noOutputExpected": False})
+        _, _, entry, path = self._captured(self._run(payload))
+        stored = f"/private/tmp/claude-501/[session tmp]/{SESSION}/scratchpad/out.txt"
+        golden = {
+            "normalizer": "shell",
+            "status": "ok",
+            "args": {"command": f"go test ./... > {stored} 2>&1; wc -l {stored}", "description": "run tests"},
+            "result": {"structured": {"stdout": f"      12 {stored}\nsee also [home]-other/notes\n", "stderr": ""}},
+            "truncated": False,
+            "summary": f"go test ./... > {stored} 2>&1; wc …",
+        }
+        self.assertEqual({k: entry.get(k) for k in golden}, golden)
+        text = path.read_text()
+        self.assertNotIn(enc_cwd, text)
+        self.assertNotIn(enc_home, text)
+        self.assertNotIn(self.home.name, text)
+
     def test_failed_bash_records_its_exit_code(self):
         body = self._payload(tool_name="Bash", tool_input={"command": "make test"}, hook_event_name="PostToolUseFailure",
                              error="Exit code 2\nFAIL src/a.test.ts", is_interrupt=False)
