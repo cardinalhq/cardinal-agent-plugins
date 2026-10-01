@@ -94,10 +94,64 @@ class ContextCliTests(unittest.TestCase):
         ctx = self.context("--cwd", str(self.home / "missing"), cwd=self.home)
         self.assertLessEqual(set(ctx), {"workdir_hash", "client", "actor_email"})
 
+    def test_discover_json_exits_zero_when_the_network_fails(self):
+        (self.home / ".claude" / "settings.json").write_text(json.dumps({"env": {
+            "CARDINAL_MCP_URL": "http://127.0.0.1:9/api/orgs/o1/mcp", "CARDINAL_MCP_API_KEY": "ck"}}))
+        res = self.run_cli("discover", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout), {"block": None})
+        res = self.run_cli("discover")
+        self.assertEqual((res.returncode, res.stdout), (0, ""))
+
+    def test_discover_json_unconnected_prints_null(self):
+        res = self.run_cli("discover", "--json", "--cwd", str(self.repo / "svc"), cwd=self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout), {"block": None})
+
+    def test_discover_prints_the_block(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        sid = "sb_0123456789abcdef01234567"
+        answers = {
+            "find": {"matches": [{"storyboard_id": sid, "question": "Q?", "status": "published", "act_count": 1,
+                                  "match": "branch", "context": {"repo": "acme/widgets", "branch": "fix/checkout"}}]},
+            "get": {"storyboard_id": sid, "scenes": [{"act": 1, "act_status": "published", "state": "open",
+                                                      "title": "T", "statement": "S"}]},
+        }
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("content-length") or 0))
+                data = json.dumps(answers[self.path.rsplit("/", 1)[-1]]).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        (self.home / ".claude" / "settings.json").write_text(json.dumps({"env": {
+            "CARDINAL_MCP_URL": f"http://127.0.0.1:{server.server_port}/api/orgs/o1/mcp",
+            "CARDINAL_MCP_API_KEY": "ck"}}))
+        res = self.run_cli("discover", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        block = json.loads(res.stdout)["block"]
+        self.assertIn(f"{sid} · same branch fix/checkout · published, 1 act", block)
+        self.assertIn("- [open] T: S", block)
+        res = self.run_cli("discover")
+        self.assertEqual(res.stdout, block + "\n")
+
     def test_help_and_usage(self):
         res = self.run_cli("--help")
         self.assertEqual(res.returncode, 0)
         self.assertIn("context", res.stdout)
+        self.assertIn("discover", res.stdout)
         self.assertEqual(self.run_cli().returncode, 2)
         self.assertTrue(os.access(CLI, os.X_OK))
 
