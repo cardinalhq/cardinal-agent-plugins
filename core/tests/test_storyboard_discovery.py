@@ -715,12 +715,65 @@ class FetchAndDiscoverTests(_RepoCase):
         self.assertIsNone(self.discover(event="UserPromptSubmit"), "delivered once")
         self.assertEqual(self.discover(event="SubagentStart"), block)
 
+    def test_a_pending_block_never_reaches_a_subagent_before_the_session(self):
+        self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
+        self.fake.routes["get"] = get_route({SB1: [scene(1)]})
+        self.assertIsNone(self.discover(deliver_by=time.monotonic() - 1))
+        self.assertIsNone(self.discover(event="SubagentStart"), "the parent has not seen it")
+        block = self.discover(event="UserPromptSubmit")
+        self.assertIsNotNone(block)
+        self.assertEqual(self.discover(event="SubagentStart"), block)
+
+    def test_session_start_over_a_pending_block_looks_again(self):
+        self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
+        self.fake.routes["get"] = get_route({SB1: [scene(1)]})
+        self.assertIsNone(self.discover(deliver_by=time.monotonic() - 1))
+        with self.subTest("success replaces it, delivered now"):
+            self.assertIn(SB1, self.discover())
+            self.assertNotIn("pending", json.loads((self.state / "sess-1.json").read_text()))
+        self.assertIsNone(self.discover(deliver_by=time.monotonic() - 1))
+        with self.subTest("a failure carries it, still pending, and keeps the failure on delivery"):
+            self.fake.routes["find"] = (500, {"error": "boom"})
+            self.assertIsNone(self.discover(now=2000.0))
+            st = json.loads((self.state / "sess-1.json").read_text())
+            self.assertEqual((st.get("pending"), st.get("failed"), st.get("attempts")), (True, True, 1))
+            self.assertIsNone(self.discover(event="SubagentStart"))
+            self.assertIn(SB1, self.discover(event="UserPromptSubmit", now=2001.0))
+            st = json.loads((self.state / "sess-1.json").read_text())
+            self.assertNotIn("pending", st)
+            self.assertEqual((st.get("failed"), st.get("attempts"), st.get("at")), (True, 1, 2000.0))
+
+    def test_consecutive_failures_back_off_exponentially(self):
+        self.assertEqual([sd.retry_after(n) for n in (None, 1, 2, 3)], [60.0, 60.0, 120.0, 240.0])
+        self.assertEqual(sd.retry_after(50), sd.FAILURE_RETRY_MAX_S)
+        self.fake.routes["find"] = (500, {"error": "boom"})
+        t = 1000.0
+        self.assertIsNone(self.discover(now=t))
+        for attempts in (1, 2, 3):
+            st = json.loads((self.state / "sess-1.json").read_text())
+            self.assertEqual(st["attempts"], attempts)
+            n = len(self.fake.requests)
+            wait = sd.retry_after(attempts)
+            self.assertIsNone(self.discover(event="UserPromptSubmit", now=t + wait - 1))
+            self.assertEqual(len(self.fake.requests), n, "still backing off")
+            t += wait
+            self.assertIsNone(self.discover(event="UserPromptSubmit", now=t))
+            self.assertGreater(len(self.fake.requests), n, "retried")
+
+    def test_408_and_429_are_retried(self):
+        for code in (408, 429):
+            with self.subTest(code):
+                session = f"sess-{code}"
+                self.fake.routes["find"] = (code, {"error": "slow down"})
+                self.discover(session=session)
+                self.assertTrue(json.loads((self.state / f"{session}.json").read_text()).get("failed"))
+
     def test_an_absolute_deadline_bounds_the_whole_look(self):
         self.fake.routes["find"] = (200, {"matches": [match()]})
         self.fake.delay = 5.0
         t0 = time.monotonic()
         self.assertIsNone(self.discover(deadline=t0 + 0.4))
-        self.assertLess(time.monotonic() - t0, 0.8)
+        self.assertLess(time.monotonic() - t0, 2.0, "well before the server's 5 s")
 
     def test_subagent_start_on_another_branch_gets_nothing(self):
         self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})

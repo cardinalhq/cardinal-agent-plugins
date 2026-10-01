@@ -9,7 +9,8 @@ UserPromptSubmit and SubagentStart (adapters/claude/hooks/storyboard-discovery.p
 Flow (conductor routes/storyboards-mcp-tools.ts find / get):
   1. `should_run`: SessionStart always runs; UserPromptSubmit runs only when
      (branch, HEAD) differs from this session's last attempt, or the last
-     attempt FAILED (timeout, network error, 5xx) at least FAILURE_RETRY_S ago.
+     attempt FAILED (timeout, network error, 5xx) and its backoff has passed
+     (`retry_after`: FAILURE_RETRY_S, doubling per consecutive failure).
      A block the last attempt rendered too late to be delivered (`pending`) is
      emitted on the next UserPromptSubmit from the state file, no network.
   2. `storyboard_context.collect` (the PR comes from the adapter's resolver;
@@ -71,9 +72,14 @@ MAX_BLOCK_BYTES = 2048
 DEADLINE_S = 2.0
 FIND_LIMIT = 5
 STATE_TTL_S = 7 * 86400
-# A failed look (timeout, network error, 5xx) is retried on a later prompt,
-# at most this often; a 4xx (no read routes, bad key) is not a failure.
+# A failed look (timeout, network error, 5xx, 408, 429) is retried on a later
+# prompt after FAILURE_RETRY_S, doubling per consecutive failure on the same
+# branch/HEAD up to FAILURE_RETRY_MAX_S: a maestro that hangs (VPN down,
+# packets dropped) costs a prompt a timeout rarely, not every minute. Any
+# other 4xx (no read routes, bad key) is an answer, not a failure.
 FAILURE_RETRY_S = 60.0
+FAILURE_RETRY_MAX_S = 1800.0
+RETRYABLE_4XX = (408, 429)
 # A temp file atomic_write_json_compact left behind (killed mid-write).
 STALE_TMP_S = 3600.0
 MAX_RESPONSE_BYTES = 256 << 10
@@ -190,9 +196,9 @@ def should_run(state_dir: Optional[Path], session_id: Optional[str], branch: Opt
                head_sha: Optional[str], event: str, now: Optional[float] = None) -> bool:
     """SessionStart always runs (startup, resume, clear, compact).
     UserPromptSubmit runs when (branch, head_sha) differs from this session's
-    last attempt, or there was none, or the last attempt failed at least
-    FAILURE_RETRY_S ago. Without a session id or a state dir there is nothing
-    to compare with: prompts never run."""
+    last attempt, or there was none, or the last attempt failed and its
+    backoff (`retry_after`) has passed. Without a session id or a state dir
+    there is nothing to compare with: prompts never run."""
     if event == SESSION_START:
         return True
     if event != USER_PROMPT_SUBMIT or not session_id or state_dir is None:
@@ -205,17 +211,25 @@ def should_run(state_dir: Optional[Path], session_id: Optional[str], branch: Opt
     if last.get("failed") is True:
         at = last.get("at")
         now = time.time() if now is None else now
-        return not isinstance(at, (int, float)) or now - at >= FAILURE_RETRY_S
+        return not isinstance(at, (int, float)) or now - at >= retry_after(last.get("attempts"))
     return False
+
+
+def retry_after(attempts: Any) -> float:
+    """Seconds before retrying after `attempts` consecutive failures."""
+    n = attempts if isinstance(attempts, int) and not isinstance(attempts, bool) and attempts > 0 else 1
+    return min(FAILURE_RETRY_S * (2 ** min(n - 1, 16)), FAILURE_RETRY_MAX_S)
 
 
 def record_run(state_dir: Optional[Path], session_id: Optional[str], branch: Optional[str],
                head_sha: Optional[str], now: Optional[float] = None,
-               block: Optional[str] = None, *, failed: bool = False, pending: bool = False) -> None:
+               block: Optional[str] = None, *, failed: bool = False, pending: bool = False,
+               attempts: int = 0) -> None:
     """Remember this attempt, whatever it returned (atomic: tmp + replace),
     with the block to keep for this branch/HEAD: None clears the one an
     earlier attempt stored, so a subagent never gets a stale block. `failed`:
-    the attempt timed out or errored (should_run retries it later).
+    the attempt timed out or errored (should_run retries it later; `attempts`
+    consecutive failures on this branch/HEAD set the backoff).
     `pending`: the block was not delivered (the next prompt emits it).
     Prunes other sessions' files older than STATE_TTL_S, and temp files a
     killed write left behind."""
@@ -229,6 +243,7 @@ def record_run(state_dir: Optional[Path], session_id: Optional[str], branch: Opt
             state["pending"] = True
     if failed:
         state["failed"] = True
+        state["attempts"] = max(1, attempts)
     try:
         state_dir = Path(state_dir)
         atomic_write_json_compact(_state_path(state_dir, session_id), state)
@@ -330,8 +345,10 @@ def fetch(conn: dict, ctx: dict, *, deadline: float, opener=None) -> Fetched:
         found = _post(conn, "find", {"context": ctx, "status": "any", "limit": FIND_LIMIT},
                       deadline=deadline, opener=opener)
     except _HttpFailure as err:
-        # A 4xx is an answer (no read routes, bad key): not worth retrying.
-        return Fetched([], {}, True, failed=not (isinstance(err.status, int) and 400 <= err.status < 500))
+        # A 4xx is an answer (no read routes, bad key): not worth retrying,
+        # except a timeout or rate limit.
+        final = isinstance(err.status, int) and 400 <= err.status < 500 and err.status not in RETRYABLE_4XX
+        return Fetched([], {}, True, failed=not final)
     except Exception:
         return Fetched([], {}, True, failed=True)
     matches = _keep_matches(found.get("matches"))
@@ -596,9 +613,13 @@ def discover(
         branch, head_sha = head_state(cwd)
         last = _read_state(state_dir, session_id) or {}
         same_head = bool(last) and (last.get("branch"), last.get("head_sha")) == (branch, head_sha)
+        last_failed = same_head and last.get("failed") is True
+        last_attempts = last.get("attempts") if isinstance(last.get("attempts"), int) else 1
         if event == USER_PROMPT_SUBMIT and same_head and last.get("pending") is True and _storable(last.get("block")):
-            # The last look finished too late to be delivered: deliver it now.
-            record_run(state_dir, session_id, branch, head_sha, now, block=last["block"])
+            # The last look finished too late to be delivered: deliver it now
+            # (keeping a failure's backoff, if the look after it failed).
+            record_run(state_dir, session_id, branch, head_sha, last.get("at") if last_failed else now,
+                       block=last["block"], failed=last_failed, attempts=last_attempts if last_failed else 0)
             return last["block"]
         if not should_run(state_dir, session_id, branch, head_sha, event, now):
             return None
@@ -611,18 +632,21 @@ def discover(
                 keep = last["block"]  # a transient failure does not take a good block away
             late = block is not None and deliver_by is not None and time.monotonic() > deliver_by
             record_run(state_dir, session_id, branch, head_sha, now, block=keep, failed=failed,
-                       pending=late or (failed and keep is not None and last.get("pending") is True))
+                       pending=late or (failed and keep is not None and last.get("pending") is True),
+                       attempts=(last_attempts + 1 if last_failed else 1) if failed else 0)
         return None if late else block
     except Exception:
         return None
 
 
 def _subagent_block(cwd: str, state_dir: Optional[Path], session_id: Optional[str]) -> Optional[str]:
-    """The stored block, unless cwd is in a git work tree on a branch other
-    than the one it was found for (a worktree-isolated subagent)."""
+    """The stored block, unless it is still pending (the session itself has
+    not seen it yet: a subagent must not know more than its parent) or cwd is
+    in a git work tree on a branch other than the one it was found for (a
+    worktree-isolated subagent; a git failure falls back to the block)."""
     state = _read_state(state_dir, session_id) or {}
     block = state.get("block")
-    if not _storable(block):
+    if not _storable(block) or state.get("pending") is True:
         return None
     stored_branch = state.get("branch")
     if isinstance(stored_branch, str) and stored_branch:

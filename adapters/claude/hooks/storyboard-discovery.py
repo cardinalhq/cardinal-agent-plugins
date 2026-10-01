@@ -27,7 +27,7 @@ Contract:
   - Silent no-op (exit 0, no output, no network) when not connected, when
     the connection has no MCP key (telemetry-only), outside a git repo with
     an origin, or with CARDINAL_STORYBOARD_DISCOVERY=0.
-  - Bounded, from PROCESS START (interpreter startup and imports count: when
+  - Bounded, from INTERPRETER START (imports and settings reads count: when
     several sessions start at once they alone can take most of a second): the
     network work ends by STARTED + BUDGET_S (at least MIN_NETWORK_S after the
     imports, never past STARTED + HARD_CAP_S). hooks.json's timeout (6) is
@@ -58,7 +58,10 @@ EVENTS = ("SessionStart", "UserPromptSubmit", "SubagentStart")
 BUDGET_S = 2.1
 MIN_NETWORK_S = 1.0
 HARD_CAP_S = 4.0
-DELIVER_BY_S = 5.0
+# Before hooks.json's 6 with room for what the clock cannot see: the
+# interpreter's own startup before STARTED, and record_run + print after the
+# late check.
+DELIVER_BY_S = 4.5
 
 
 def deadlines(now: float, started: float = STARTED) -> tuple:
