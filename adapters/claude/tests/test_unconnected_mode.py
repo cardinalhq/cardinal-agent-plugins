@@ -389,7 +389,7 @@ class GatedHooksUnconnectedTests(_GuardedCase):
         (home / ".claude").mkdir(parents=True, exist_ok=True)
         repo = fixtures.make_git_repo(self.guard_dir / "repo", "feat/x")
         env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
-        for event in ("SessionStart", "UserPromptSubmit"):
+        for event in ("SessionStart", "UserPromptSubmit", "SubagentStart"):
             payload = {"session_id": "s1", "cwd": str(repo), "hook_event_name": event}
             proc = self.guarded_run(HOOKS / "storyboard-discovery.py", payload, env)
             self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""), event)
