@@ -458,6 +458,179 @@ class SaasEnvFileTest(unittest.TestCase):
             self.assertEqual((rj["target"], rj["alloy"]["stability_level"]), ("saas", "public-preview"))
 
 
+class ConnectionPrefillTest(unittest.TestCase):
+    """--init --from-connection / --set: fill in what's already known, flag a stale file."""
+
+    def conn(self, d, host="https://app.cardinalhq.io", **over):
+        state = {"schema_version": 4, "host": host, "org_id": ORG, "org_slug": "acme",
+                 "ingest_endpoint": INGEST + "/", "ingest_key_prefix": "a9d48cbe", **over}
+        path = os.path.join(d, "cardinal.json")
+        with open(path, "w") as f:
+            json.dump(state, f)
+        return path
+
+    def run_main(self, args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = onboard_env.main(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_saas_connection_prefills_target_org_endpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env.onboard-alloy")
+            code, out, _ = self.run_main(["--init", env, "--from-connection", self.conn(d)])
+            self.assertEqual(code, 0)
+            vals = onboard_env.read(env)
+            self.assertEqual((vals["TARGET"], vals["CARDINAL_ORG_ID"], vals["CARDINAL_INGEST_ENDPOINT"]),
+                             ("saas", ORG, INGEST))
+            self.assertIn("prefilled TARGET=saas", out)
+            self.assertEqual(os.stat(env).st_mode & 0o777, 0o600)
+
+    def test_self_hosted_connection_prefills_only_org(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env.onboard-alloy")
+            self.run_main(["--init", env, "--from-connection", self.conn(d, host="https://maestro.acme.internal")])
+            vals = onboard_env.read(env)
+            self.assertEqual((vals["TARGET"], vals["CARDINAL_ORG_ID"], vals["CARDINAL_INGEST_ENDPOINT"]),
+                             ("s3", ORG, ""))
+
+    def test_not_connected_leaves_template(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env.onboard-alloy")
+            code, out, _ = self.run_main(["--init", env, "--from-connection", os.path.join(d, "missing.json")])
+            self.assertEqual(code, 0)
+            self.assertIn("not connected", out)
+            with open(env) as f:
+                self.assertEqual(f.read(), onboard_env.TEMPLATE)
+
+    def test_agent_home_lookup(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.conn(d)
+            old = os.environ.get("CARDINAL_AGENT_HOME")
+            os.environ["CARDINAL_AGENT_HOME"] = d
+            try:
+                self.assertEqual(onboard_env.connection()["org_slug"], "acme")
+            finally:
+                if old is None:
+                    del os.environ["CARDINAL_AGENT_HOME"]
+                else:
+                    os.environ["CARDINAL_AGENT_HOME"] = old
+
+    def test_set_and_runtime_guess(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env.onboard-alloy")
+            self.run_main(["--init", env, "--set", "ALLOY_CONFIG=/opt/homebrew/etc/alloy/config.alloy",
+                           "--set", "CLUSTER_NAME=alloy-local"])
+            vals = onboard_env.read(env)
+            self.assertEqual((vals["RUNTIME"], vals["CLUSTER_NAME"]), ("host", "alloy-local"))
+            env2 = os.path.join(d, "two")
+            self.run_main(["--init", env2, "--set", "ALLOY_CONFIG=/etc/alloy/config.alloy",
+                           "--set", "RUNTIME=kubernetes"])
+            self.assertEqual(onboard_env.read(env2)["RUNTIME"], "kubernetes")
+            env3 = os.path.join(d, "three")
+            self.run_main(["--init", env3, "--set", "ALLOY_CONFIG=gitops/alloy/config.alloy"])
+            self.assertEqual(onboard_env.read(env3)["RUNTIME"], "kubernetes")
+
+    def test_bad_set_rejected_without_echo(self):
+        key = "ck_live_9f8e7d6c5b4a39281706f5e4d3c2b1a0"
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env.onboard-alloy")
+            for pair in (f"CARDINAL_API_KEY_ENV={key}", "AWS_SECRET_ACCESS_KEY=x", "TARGET"):
+                with self.subTest(pair=pair):
+                    code, out, err = self.run_main(["--init", env, "--set", pair])
+                    self.assertEqual(code, 2)
+                    self.assertNotIn(key, out + err)
+                    self.assertFalse(os.path.exists(env))
+
+    def test_stale_file_differs_then_replace(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env.onboard-alloy")
+            # An older template (no TARGET or RUNTIME line) for another org.
+            old = "\n".join(f"{k}=" for k in onboard_env.KEYS if k not in ("TARGET", "RUNTIME"))
+            old = old.replace("CARDINAL_ORG_ID=", "CARDINAL_ORG_ID=6f5e586d-6286-475e-9bd7-1a54391d3115")
+            with open(env, "w") as f:
+                f.write(old + "\n")
+            conn = self.conn(d)
+            code, out, _ = self.run_main(["--init", env, "--from-connection", conn])
+            self.assertEqual(code, onboard_env.EXIT_DIFFERS)
+            self.assertIn("DIFFERS  file is from an older template: no TARGET, RUNTIME line", out)
+            self.assertIn(f"DIFFERS  CARDINAL_ORG_ID: file has 6f5e586d", out)
+            with open(env) as f:
+                self.assertEqual(f.read(), old + "\n")   # untouched
+            code, out, _ = self.run_main(["--init", env, "--from-connection", conn, "--replace"])
+            self.assertEqual(code, 0)
+            self.assertEqual(onboard_env.read(env)["CARDINAL_ORG_ID"], ORG)
+            baks = [n for n in os.listdir(d) if n.startswith(".env.onboard-alloy.bak-")]
+            self.assertEqual(len(baks), 1)
+            with open(os.path.join(d, baks[0])) as f:
+                self.assertEqual(f.read(), old + "\n")
+            # Now it matches: re-running is a no-op.
+            self.assertEqual(self.run_main(["--init", env, "--from-connection", conn])[0], 0)
+
+    def test_check_compares_with_connection(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = EnvFileTest.write(self, d, TARGET="saas", ALLOY_CONFIG=os.path.join(FIXTURES, "prom_loki.alloy"),
+                                     CLUSTER_NAME=CLUSTER, CARDINAL_INGEST_ENDPOINT=INGEST,
+                                     CARDINAL_ORG_ID="6f5e586d-6286-475e-9bd7-1a54391d3115")
+            code, out, _ = self.run_main(["--check", path, "--from-connection", self.conn(d)])
+            self.assertEqual(code, 0)   # a note, not a problem: another org can be intended
+            self.assertIn("CARDINAL_ORG_ID is 6f5e586d", out)
+            self.assertIn("connection (acme on https://app.cardinalhq.io)", out)
+            self.assertNotIn("CARDINAL_INGEST_ENDPOINT is", out)
+
+    def test_check_notes_older_template_and_host_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env.onboard-alloy")
+            with open(path, "w") as f:
+                f.write("ALLOY_CONFIG=/opt/homebrew/etc/alloy/config.alloy\n")
+            _, notes = onboard_env.check(path, onboard_env.read(path))
+            self.assertTrue(any("older template" in n and "TARGET" in n for n in notes), notes)
+            self.assertTrue(any("RUNTIME=host may fit better" in n for n in notes), notes)
+
+
+class HostRuntimeTest(unittest.TestCase):
+    """RUNTIME=host: Homebrew / Linux-package Alloy, no Kubernetes."""
+
+    def test_host_turns_off_k8sattributes_and_says_env_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = EnvFileTest.write(self, d, TARGET="saas", ALLOY_CONFIG=os.path.join(FIXTURES, "otel_converters.alloy"),
+                                     CLUSTER_NAME="alloy-local", CARDINAL_INGEST_ENDPOINT=INGEST, RUNTIME="host")
+            out = os.path.join(d, "onboard")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(inv.main(["--env-file", path, "--out", out]), 0)
+            with open(os.path.join(out, "plan.json")) as f:
+                plan = json.load(f)
+            self.assertEqual((plan["runtime"], plan["k8sattributes"]), ("host", False))
+            # An older plan.json that still says true is overridden by the file.
+            plan["k8sattributes"] = True
+            with open(os.path.join(out, "plan.json"), "w") as f:
+                json.dump(plan, f)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(render.main(["--env-file", path, "--plan", os.path.join(out, "plan.json"),
+                                              "--out", os.path.join(out, "out")]), 0)
+            text = buf.getvalue()
+            self.assertNotIn("Kubernetes Secret", text)
+            self.assertIn("in the env file the Alloy service loads", text)
+            self.assertIn("K8S_CLUSTER_NAME, CARDINAL_INGEST_ENDPOINT, CARDINAL_API_KEY in the env file", text)
+            with open(os.path.join(out, "out", "cardinal.alloy")) as f:
+                self.assertNotIn("k8sattributes", f.read())
+            with open(os.path.join(out, "out", "env.json")) as f:
+                self.assertIn("env file the Alloy service loads", json.load(f)["CARDINAL_API_KEY"])
+
+    def test_kubernetes_wording_unchanged(self):
+        src = fixture("otlp_grafana_cloud")
+        r = render.render(src, saas_plan_for(src))
+        self.assertIn("Kubernetes Secret", r["env"]["CARDINAL_API_KEY"])
+
+    def test_bad_runtime_plans(self):
+        src = fixture("otel_converters")
+        for over in ({"runtime": "vm"}, {"runtime": "host", "k8sattributes": True}):
+            with self.subTest(over=over), self.assertRaises(render.PlanError):
+                render.render(src, saas_plan_for(src, **over))
+        render.render(src, saas_plan_for(src, runtime="host", k8sattributes=False))
+
+
 class SaasRenderTest(unittest.TestCase):
     def test_existing_cardinal_exporter_not_tapped(self):
         # A hand-written SaaS exporter (the pre-skill workaround) isn't Grafana-bound.
