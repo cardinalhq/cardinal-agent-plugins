@@ -13,8 +13,12 @@ Phase 1 — happy path. Asserts:
 Phase 2 — S3 down (fault injection). Asserts Grafana still receives everything and
 Alloy keeps running.
 
+With --target saas, the S3 store is replaced by a Cardinal SaaS intake stub (a small
+OTLP/HTTP server that rejects requests without the right x-cardinalhq-api-key), and
+the same checks run against what it received; phase 2 stops the intake instead.
+
 Usage:
-  python3 tests/onboard_alloy/e2e/run_e2e.py [--workdir DIR] [--keep] [--alloy-image grafana/alloy:latest]
+  python3 tests/onboard_alloy/e2e/run_e2e.py [--target s3|saas] [--workdir DIR] [--keep] [--alloy-image grafana/alloy:latest]
 
 Needs Docker. Pulls public images only; touches no cloud account. Exit 0 = PASS.
 """
@@ -49,7 +53,9 @@ S3_IMAGE = "chrislusf/seaweedfs:latest"
 STUB_IMAGE = "otel/opentelemetry-collector-contrib:latest"
 AWS_IMAGE = "amazon/aws-cli:latest"
 GEN_IMAGE = "ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest"
-CONTAINERS = ("oa-alloy", "grafana-stub", "oa-s3")
+INTAKE_IMAGE = "python:3.12-alpine"
+API_KEY = "e2e-test-key"
+CONTAINERS = ("oa-alloy", "grafana-stub", "oa-s3", "oa-intake")
 AWS_ENV = ["-e", "AWS_ACCESS_KEY_ID=test", "-e", "AWS_SECRET_ACCESS_KEY=test", "-e", "AWS_DEFAULT_REGION=us-east-1"]
 
 STUB_CONFIG = """receivers:
@@ -65,6 +71,30 @@ service:
     metrics: { receivers: [otlp], exporters: [file/metrics] }
     logs: { receivers: [otlp], exporters: [file/logs] }
     traces: { receivers: [otlp], exporters: [file/traces] }
+"""
+
+# Cardinal SaaS intake stub: stores each accepted OTLP/HTTP request body (protobuf,
+# gunzipped) as /out/<signal>_<n>.pb; counts requests with a wrong or missing key.
+INTAKE_SERVER = r"""
+import gzip, http.server, itertools, os
+KEY = os.environ["EXPECTED_KEY"]
+SIGNALS = {"/v1/logs": "logs", "/v1/metrics": "metrics", "/v1/traces": "traces"}
+n = itertools.count()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.headers.get("x-cardinalhq-api-key") != KEY:
+            open("/out/unauthorized", "a").write(self.path + "\n")
+            self.send_response(401); self.end_headers(); return
+        if self.headers.get("Content-Encoding") == "gzip":
+            body = gzip.decompress(body)
+        sig = SIGNALS.get(self.path)
+        if sig is None:
+            self.send_response(404); self.end_headers(); return
+        open(f"/out/{sig}_{next(n)}.pb", "wb").write(body)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-protobuf"); self.end_headers()
+http.server.ThreadingHTTPServer(("0.0.0.0", 4318), H).serve_forever()
 """
 
 
@@ -101,11 +131,11 @@ def send_all() -> float:
     return time.time() - t0
 
 
-def export_failures() -> List[str]:
-    """awss3 export failures. Alloy logs these at level=info ("Exporting failed. Will retry…")."""
+def export_failures(exporter: str = render.S3) -> List[str]:
+    """Cardinal export failures. Alloy logs these at level=info ("Exporting failed. Will retry…")."""
     p = sh("docker", "logs", "oa-alloy", check=False)
     return [l for l in (p.stdout + p.stderr).splitlines()
-            if "otelcol.exporter.awss3.cardinal_onboard" in l and "Exporting failed" in l]
+            if exporter in l and "Exporting failed" in l]
 
 
 def alloy_running() -> bool:
@@ -229,19 +259,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--workdir")
     ap.add_argument("--keep", action="store_true", help="leave containers running")
     ap.add_argument("--alloy-image", default="grafana/alloy:latest")
-    ap.add_argument("--stability-level", default="experimental",
-                    help="Alloy --stability.level (awss3 is experimental as of Alloy v1.20)")
+    ap.add_argument("--target", choices=("s3", "saas"), default="s3")
+    ap.add_argument("--stability-level",
+                    help="Alloy --stability.level (default: what render.py requires for the target)")
     args = ap.parse_args(argv)
+    saas = args.target == "saas"
     work = args.workdir or tempfile.mkdtemp(prefix="onboard-alloy-e2e-")
     shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(os.path.join(work, "stub-out"))
-    os.chmod(os.path.join(work, "stub-out"), 0o777)
+    for d in ("stub-out", "intake-out"):
+        os.makedirs(os.path.join(work, d))
+        os.chmod(os.path.join(work, d), 0o777)
 
     # Render exactly as the skill would.
     src = open(FIXTURE, encoding="utf-8").read()
     plan = inv.suggested_plan(inv.inventory(ac.graph(ac.parse(src))), ORG, CLUSTER)
-    plan.update(values="literal", bucket=BUCKET, region="us-east-1", endpoint="http://oa-s3:8333", k8sattributes=False)
+    if saas:
+        plan.update(target="saas", values="literal", ingest_endpoint="http://oa-intake:4318",
+                    api_key_env="CARDINAL_API_KEY", k8sattributes=False)
+    else:
+        plan.update(values="literal", bucket=BUCKET, region="us-east-1", endpoint="http://oa-s3:8333", k8sattributes=False)
     r = render.render(src, plan)
+    level = args.stability_level or r["stability_level"]
+    exporter = render.exporter_id(plan)
     if any(f.severity == "error" for f in r["findings"]):
         print("render lint failed:", *r["findings"], sep="\n  ")
         return 1
@@ -249,24 +288,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     open(cfg, "w").write(r["config"])
     stub = os.path.join(work, "stub.yaml")
     open(stub, "w").write(STUB_CONFIG)
+    intake = os.path.join(work, "intake.py")
+    open(intake, "w").write(INTAKE_SERVER)
 
     c = Checks()
     cleanup()
     try:
         alloy_ver = sh("docker", "run", "--rm", args.alloy_image, "--version").stdout.splitlines()[0]
-        print(f"{alloy_ver}; --stability.level={args.stability_level}")
+        print(f"{alloy_ver}; target {args.target}; --stability.level={level or '(default)'}")
         sh("docker", "network", "create", NET)
-        sh("docker", "run", "-d", "--name", "oa-s3", "--network", NET, S3_IMAGE, "server", "-s3", "-dir=/data")
         sh("docker", "run", "-d", "--name", "grafana-stub", "--network", NET, "-v", f"{stub}:/etc/stub.yaml",
            "-v", f"{work}/stub-out:/out", STUB_IMAGE, "--config", "/etc/stub.yaml")
-        for _ in range(30):
-            if sh("docker", "run", "--rm", "--network", NET, *AWS_ENV, AWS_IMAGE, "--endpoint-url",
-                  "http://oa-s3:8333", "s3", "mb", f"s3://{BUCKET}", check=False).returncode == 0:
-                break
-            time.sleep(2)
+        if saas:
+            sh("docker", "run", "-d", "--name", "oa-intake", "--network", NET, "-e", f"EXPECTED_KEY={API_KEY}",
+               "-v", f"{intake}:/intake.py", "-v", f"{work}/intake-out:/out", INTAKE_IMAGE, "python3", "-u", "/intake.py")
+        else:
+            sh("docker", "run", "-d", "--name", "oa-s3", "--network", NET, S3_IMAGE, "server", "-s3", "-dir=/data")
+            for _ in range(30):
+                if sh("docker", "run", "--rm", "--network", NET, *AWS_ENV, AWS_IMAGE, "--endpoint-url",
+                      "http://oa-s3:8333", "s3", "mb", f"s3://{BUCKET}", check=False).returncode == 0:
+                    break
+                time.sleep(2)
+        alloy_env = ["-e", f"CARDINAL_API_KEY={API_KEY}"] if saas else AWS_ENV
         sh("docker", "run", "-d", "--name", "oa-alloy", "--network", NET, "-v", f"{cfg}:/etc/alloy/config.alloy",
-           *AWS_ENV, args.alloy_image, "run", "/etc/alloy/config.alloy",
-           "--server.http.listen-addr=0.0.0.0:12345", f"--stability.level={args.stability_level}")
+           *alloy_env, args.alloy_image, "run", "/etc/alloy/config.alloy",
+           "--server.http.listen-addr=0.0.0.0:12345", *([f"--stability.level={level}"] if level else []))
         time.sleep(6)
         if not alloy_running():
             print(sh("docker", "logs", "oa-alloy", check=False).stderr[-3000:])
@@ -278,10 +324,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         base_secs = send_all()
         print(f"  (sent in {base_secs:.1f}s)")
         time.sleep(16)   # Cardinal batch timeout is 10s
-        files = s3_download(os.path.join(work, "s3"))
-        prefix = os.path.join(work, "s3", "otel-raw", ORG, CLUSTER) + os.sep
-        c.check(bool(files) and all(f.startswith(prefix) for f in files),
-                f"{len(files)} object(s), all under otel-raw/{ORG}/{CLUSTER}/")
+        if saas:
+            files = sorted(glob.glob(os.path.join(work, "intake-out", "*.pb")))
+            c.check(bool(files), f"{len(files)} request(s) accepted by the intake")
+            c.check(not os.path.exists(os.path.join(work, "intake-out", "unauthorized")),
+                    "every request carried the right x-cardinalhq-api-key")
+        else:
+            files = s3_download(os.path.join(work, "s3"))
+            prefix = os.path.join(work, "s3", "otel-raw", ORG, CLUSTER) + os.sep
+            c.check(bool(files) and all(f.startswith(prefix) for f in files),
+                    f"{len(files)} object(s), all under otel-raw/{ORG}/{CLUSTER}/")
         by_signal: Dict[str, Dict] = {}
         for sig in ("logs", "metrics", "traces"):
             mine = [f for f in files if os.path.basename(f).startswith(sig + "_")]
@@ -289,15 +341,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             gz_ok = True
             for f in mine:
                 raw = open(f, "rb").read()
-                gz_ok &= raw[:2] == b"\x1f\x8b"
-                s = summarize_proto(sig, gzip.decompress(raw))
+                if not saas:
+                    gz_ok &= raw[:2] == b"\x1f\x8b"
+                    raw = gzip.decompress(raw)
+                s = summarize_proto(sig, raw)
                 agg["items"] += s["items"]
                 agg["temporality"] |= s["temporality"]
                 agg["clusters"] |= s["clusters"]
             by_signal[sig] = agg
-            c.check(bool(mine) and gz_ok, f"{sig}: {len(mine)} file(s) named {sig}_*, gzip")
-        others = [f for f in files if not os.path.basename(f).split("_")[0] in ("logs", "metrics", "traces")]
-        c.check(not others, f"no unexpected file names {[os.path.basename(f) for f in others][:3]}")
+            c.check(bool(mine) and gz_ok, f"{sig}: {len(mine)} {'request(s)' if saas else 'file(s) named ' + sig + '_*, gzip'}")
+        if not saas:
+            others = [f for f in files if not os.path.basename(f).split("_")[0] in ("logs", "metrics", "traces")]
+            c.check(not others, f"no unexpected file names {[os.path.basename(f) for f in others][:3]}")
 
         stub_s = {sig: summarize_json(sig, os.path.join(work, "stub-out", f"{sig}.json"))
                   for sig in ("logs", "metrics", "traces")}
@@ -308,15 +363,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         # cumulativetodelta may drop the first point of each series (no previous value).
         c.check(m_graf > 0 and m_graf - 1 <= m_card <= m_graf,
                 f"metrics: Cardinal {m_card} data points vs Grafana {m_graf} (first point may be dropped)")
-        c.check(by_signal["metrics"]["temporality"] == {1}, f"metrics in S3 are delta (temporality {by_signal['metrics']['temporality']})")
+        c.check(by_signal["metrics"]["temporality"] == {1}, f"metrics at Cardinal are delta (temporality {by_signal['metrics']['temporality']})")
         c.check(stub_s["metrics"]["temporality"] == {2}, f"metrics at Grafana still cumulative (temporality {stub_s['metrics']['temporality']})")
-        c.check(all(by_signal[s]["clusters"] == {CLUSTER} for s in by_signal), "k8s.cluster.name set on every S3 record")
+        c.check(all(by_signal[s]["clusters"] == {CLUSTER} for s in by_signal), "k8s.cluster.name set on every Cardinal record")
         c.check(all(stub_s[s]["clusters"] == {""} for s in stub_s), "Grafana data has no added k8s.cluster.name")
 
-        print("Phase 2 — S3 down")
-        sh("docker", "stop", "oa-s3")
+        down = "oa-intake" if saas else "oa-s3"
+        print(f"Phase 2 — {'Cardinal intake' if saas else 'S3'} down")
+        sh("docker", "stop", down)
         before = {s: stub_s[s]["items"] for s in stub_s}
-        failures_before = len(export_failures())
+        failures_before = len(export_failures(exporter))
         send_secs = send_all()
         time.sleep(20)
         after = {sig: summarize_json(sig, os.path.join(work, "stub-out", f"{sig}.json"))["items"]
@@ -327,14 +383,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         c.check(alloy_running(), "Alloy still running")
         # Blocking would show as the send taking far longer than with S3 up.
         limit = max(2 * base_secs, base_secs + 15)
-        c.check(send_secs <= limit, f"senders not slowed: {send_secs:.1f}s with S3 down vs {base_secs:.1f}s with S3 up (limit {limit:.1f}s)")
+        c.check(send_secs <= limit, f"senders not slowed: {send_secs:.1f}s with Cardinal down vs {base_secs:.1f}s with it up (limit {limit:.1f}s)")
         failures: List[str] = []
-        for _ in range(30):   # batch timeout + S3 client retries can take a while
-            failures = export_failures()[failures_before:]
+        for _ in range(30):   # batch timeout + client retries can take a while
+            failures = export_failures(exporter)[failures_before:]
             if failures:
                 break
             time.sleep(2)
-        c.check(bool(failures), f"fault really hit: {len(failures)} failed S3 upload(s) logged while S3 was down")
+        c.check(bool(failures), f"fault really hit: {len(failures)} failed export(s) logged while {down} was down")
     finally:
         if not args.keep:
             cleanup()
