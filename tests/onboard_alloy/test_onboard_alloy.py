@@ -4,9 +4,12 @@ Run: python3 -m unittest discover -s tests/onboard_alloy -v
 """
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -34,6 +37,17 @@ def plan_for(src: str, **over) -> dict:
     g = ac.graph(ac.parse(src))
     p = inv.suggested_plan(inv.inventory(g), ORG, CLUSTER)
     p.update(bucket="acme-cardinal-lake", region="us-east-1")
+    p.update(over)
+    return p
+
+
+INGEST = "https://otelhttp.intake.us-east-2.aws.cardinalhq.io"
+
+
+def saas_plan_for(src: str, **over) -> dict:
+    g = ac.graph(ac.parse(src))
+    p = inv.suggested_plan(inv.inventory(g), None, CLUSTER)
+    p.update(target="saas", ingest_endpoint=INGEST, api_key_env="CARDINAL_API_KEY")
     p.update(over)
     return p
 
@@ -313,7 +327,7 @@ class EnvFileTest(unittest.TestCase):
         with open(path) as f:
             text = f.read()
         for k, v in vals.items():
-            text = text.replace(f"\n{k}=\n", f"\n{k}={v}\n").replace(f"\n{k}=env\n", f"\n{k}={v}\n")
+            text = re.sub(rf"(?m)^{k}=.*$", lambda _: f"{k}={v}", text)
         with open(path, "w") as f:
             f.write(text)
         return path
@@ -330,7 +344,8 @@ class EnvFileTest(unittest.TestCase):
             self.assertEqual(set(vals), set(onboard_env.KEYS))
             self.assertEqual(vals["VALUES_MODE"], "env")
             problems, _ = onboard_env.check(path, vals)
-            self.assertEqual(len(problems), len(onboard_env.REQUIRED))
+            self.assertEqual(vals["TARGET"], "s3")
+            self.assertEqual(len(problems), len(onboard_env.REQUIRED["s3"]))
             with open(path, "a") as f:
                 f.write("# keep me\n")
             onboard_env.main(["--init", path])   # never overwrites
@@ -381,6 +396,140 @@ class EnvFileTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 inv.main(["--env-file", path, "--out", os.path.join(d, "o")])
             self.assertEqual(cm.exception.code, 3)
+
+
+class SaasEnvFileTest(unittest.TestCase):
+    """TARGET=saas: no bucket/region; ingest endpoint and the API key's env var name instead."""
+
+    write = EnvFileTest.write
+
+    def good(self):
+        return dict(TARGET="saas", ALLOY_CONFIG=os.path.join(FIXTURES, "prom_loki.alloy"),
+                    CLUSTER_NAME=CLUSTER, CARDINAL_INGEST_ENDPOINT=INGEST)
+
+    def test_saas_needs_no_bucket_or_org(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = self.write(d, **self.good())
+            self.assertEqual(onboard_env.main(["--check", path]), 0)
+
+    def test_saas_required_and_bad_values(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = self.write(d, TARGET="saas")
+            problems, _ = onboard_env.check(path, onboard_env.read(path))
+            self.assertIn("CARDINAL_INGEST_ENDPOINT is empty", problems)
+            self.assertNotIn("S3_BUCKET is empty", problems)
+            self.assertNotIn("CARDINAL_ORG_ID is empty", problems)
+        cases = {"CARDINAL_INGEST_ENDPOINT": INGEST + "/v1/logs", "TARGET": "cloud",
+                 "CARDINAL_API_KEY_ENV": "ck_live_9f8e7d6c5b4a39281706f5e4d3c2b1a0", "CARDINAL_ORG_ID": "ORG-1"}
+        for key, bad in cases.items():
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as d:
+                path = self.write(d, **{**self.good(), key: bad})
+                problems, _ = onboard_env.check(path, onboard_env.read(path))
+                self.assertTrue(any(p.startswith(key) for p in problems), problems)
+
+    def test_pasted_key_not_echoed(self):
+        key = "ck_live_9f8e7d6c5b4a39281706f5e4d3c2b1a0"
+        with tempfile.TemporaryDirectory() as d:
+            path = self.write(d, **{**self.good(), "CARDINAL_API_KEY_ENV": key})
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(onboard_env.main(["--check", path]), 3)
+            self.assertNotIn(key, buf.getvalue())
+
+    def test_saas_scripts_use_env_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = self.write(d, **{**self.good(), "CARDINAL_API_KEY_ENV": "CARDINAL_KEY"})
+            out = os.path.join(d, "onboard")
+            self.assertEqual(inv.main(["--env-file", path, "--out", out]), 0)
+            with open(os.path.join(out, "plan.json")) as f:
+                plan = json.load(f)
+            self.assertEqual((plan["target"], plan["ingest_endpoint"], plan["api_key_env"]),
+                             ("saas", INGEST, "CARDINAL_KEY"))
+            rout = os.path.join(out, "out")
+            os.makedirs(rout)
+            with open(os.path.join(rout, "iam-policy.json"), "w") as f:
+                f.write("{}")   # left over from an earlier s3 render
+            self.assertEqual(render.main(["--env-file", path, "--plan", os.path.join(out, "plan.json"), "--out", rout]), 0)
+            self.assertFalse(os.path.exists(os.path.join(rout, "iam-policy.json")))
+            with open(os.path.join(rout, "cardinal.alloy")) as f:
+                self.assertIn('"x-cardinalhq-api-key" = sys.env("CARDINAL_KEY")', f.read())
+            with open(os.path.join(rout, "render.json")) as f:
+                rj = json.load(f)
+            self.assertEqual((rj["target"], rj["alloy"]["stability_level"]), ("saas", "public-preview"))
+
+
+class SaasRenderTest(unittest.TestCase):
+    def test_existing_cardinal_exporter_not_tapped(self):
+        # A hand-written SaaS exporter (the pre-skill workaround) isn't Grafana-bound.
+        src = fixture("otlp_grafana_cloud").replace(
+            "otelcol.exporter.otlphttp.grafana_cloud.input]",
+            "otelcol.exporter.otlphttp.grafana_cloud.input, otelcol.exporter.otlphttp.cardinal_saas.input]")
+        src += ('\notelcol.exporter.otlphttp "cardinal_saas" {\n  client {\n'
+                '    endpoint = sys.env("CARDINAL_INGEST_ENDPOINT")\n'
+                '    headers  = { "x-cardinalhq-api-key" = sys.env("CARDINAL_API_KEY") }\n  }\n}\n')
+        i = inv.inventory(ac.graph(ac.parse(src)))
+        self.assertTrue(any("cardinal_saas" in w and "already sends to Cardinal" in w for w in i["warnings"]))
+        self.assertEqual({t["sink"] for t in i["taps"]}, {"otelcol.exporter.otlphttp.grafana_cloud"})
+        # Fed only by a list that goes nowhere else: not a tap.
+        alone = src.replace("otelcol.exporter.otlphttp.grafana_cloud.input, otelcol.exporter.otlphttp.cardinal_saas.input]",
+                            "otelcol.exporter.otlphttp.cardinal_saas.input]", 1)
+        self.assertNotEqual(alone, src)
+        taps = inv.inventory(ac.graph(ac.parse(alone)))["taps"]
+        self.assertFalse(any(t["sink"].endswith("cardinal_saas") for t in taps), taps)
+
+
+    def test_all_fixtures_render_and_lint_clean(self):
+        for name in ("otlp_grafana_cloud", "prom_loki", "otel_converters", "customer_cardinal_label"):
+            for values in ("env", "literal"):
+                with self.subTest(name=name, values=values):
+                    src = fixture(name)
+                    r = render.render(src, saas_plan_for(src, values=values))
+                    self.assertEqual(rules(r["findings"]), [], [str(f) for f in r["findings"]])
+                    g = ac.graph(ac.parse(r["config"]))
+                    self.assertIn("otelcol.exporter.otlphttp.cardinal_onboard", g.nodes)
+                    self.assertNotIn("otelcol.exporter.awss3.cardinal_onboard", g.nodes)
+                    self.assertIsNone(r["iam"])
+
+    def test_key_only_from_env(self):
+        src = fixture("otlp_grafana_cloud")
+        for values in ("env", "literal"):
+            r = render.render(src, saas_plan_for(src, values=values))
+            self.assertIn('"x-cardinalhq-api-key" = sys.env("CARDINAL_API_KEY")', r["block"])
+            self.assertTrue(r["env"]["CARDINAL_API_KEY"].startswith("<secret"))
+        env = render.render(src, saas_plan_for(src))
+        self.assertIn('endpoint = sys.env("CARDINAL_INGEST_ENDPOINT")', env["block"])
+        self.assertEqual(env["env"]["CARDINAL_INGEST_ENDPOINT"], INGEST)
+        self.assertNotIn("LAKERUNNER_ORGANIZATION_ID", env["env"])
+        lit = render.render(src, saas_plan_for(src, values="literal"))
+        self.assertIn(f'endpoint = "{INGEST}"', lit["block"])
+
+    def test_stability_level(self):
+        src = fixture("otlp_grafana_cloud")
+        self.assertEqual(render.render(src, saas_plan_for(src))["stability_level"], "public-preview")
+        p = saas_plan_for(src)
+        for t in p["taps"]:
+            t["enabled"] = t["signal"] != "metrics"
+        r = render.render(src, p)
+        self.assertIsNone(r["stability_level"])
+        self.assertIn("Uses only stable Alloy components", r["block"])
+        self.assertEqual(render.render(src, plan_for(src))["stability_level"], "experimental")
+
+    def test_bad_plans(self):
+        src = fixture("otlp_grafana_cloud")
+        for over in ({"target": "cloud"}, {"values": "literal", "ingest_endpoint": None},
+                     {"ingest_endpoint": INGEST + "/v1/traces"}, {"api_key_env": "ck_live_abc"},
+                     {"org_id": "not-a-uuid"}):
+            with self.subTest(over=over), self.assertRaises(render.PlanError):
+                render.render(src, saas_plan_for(src, **over))
+
+    def test_switch_target_updates_in_place(self):
+        src = fixture("prom_loki")
+        s3 = render.render(src, plan_for(src))["config"]
+        saas = render.render(s3, saas_plan_for(src))
+        self.assertTrue(saas["updated"])
+        self.assertNotIn("awss3", saas["block"])
+        self.assertEqual(rules(saas["findings"]), [])
+        self.assertEqual(saas["config"].count(">>> cardinal onboard-alloy"), 1)
 
 
 class LintTest(unittest.TestCase):
@@ -460,6 +609,53 @@ class LintTest(unittest.TestCase):
         o, c, p = self.rendered()
         c = 'import.file "mods" {\n  filename = "/etc/alloy/mods"\n}\n' + c
         self.assertIn("C011", rules(self.lint(o, c, p), "warn"))
+
+
+class SaasLintTest(unittest.TestCase):
+    def rendered(self, name="otlp_grafana_cloud", **over):
+        src = fixture(name)
+        p = saas_plan_for(src, **over)
+        return src, render.render(src, p)["config"], p
+
+    def lint(self, original, patched, plan):
+        return lint_config.lint(ac.graph(ac.parse(patched)), ac.graph(ac.parse(original)), plan)
+
+    def test_c003_c013_apply_to_otlphttp(self):
+        o, c, p = self.rendered()
+        bypass = c.replace("traces  = [otelcol.processor.batch.cardinal_onboard.input]",
+                           "traces  = [otelcol.exporter.otlphttp.cardinal_onboard.input]")
+        self.assertNotEqual(bypass, c)
+        self.assertIn("C003", rules(self.lint(o, bypass, p)))
+        self.assertIn("C013", rules(self.lint(o, c.replace("block_on_overflow = false", "block_on_overflow = true"), p)))
+
+    def test_c014_literal_key(self):
+        o, c, p = self.rendered()
+        leaked = c.replace('sys.env("CARDINAL_API_KEY")', '"ck_live_abcdef"')
+        self.assertNotEqual(leaked, c)
+        found = self.lint(o, leaked, p)
+        self.assertIn("C014", rules(found))
+        self.assertFalse(any("ck_live_abcdef" in str(f) for f in found))
+        no_header = c.replace('"x-cardinalhq-api-key"', '"authorization"')
+        self.assertIn("C014", rules(self.lint(o, no_header, p)))
+        other_var = c.replace('sys.env("CARDINAL_API_KEY")', 'sys.env("OTHER_KEY")')
+        self.assertIn("C014", rules(self.lint(o, other_var, p)))
+
+    def test_c014_endpoint(self):
+        o, c, p = self.rendered(values="literal")
+        self.assertIn("C014", rules(self.lint(o, c.replace(INGEST, "https://evil.example.com"), p)))
+
+    def test_c015_target_mismatch(self):
+        o, c, p = self.rendered()
+        self.assertIn("C015", rules(self.lint(o, c, {**p, "target": "s3"})))
+        src = fixture("otlp_grafana_cloud")
+        s3 = render.render(src, plan_for(src))["config"]
+        self.assertIn("C015", rules(self.lint(src, s3, p)))
+
+    def test_customer_otlphttp_left_alone(self):
+        # The fixture's own Grafana Cloud exporter is otlphttp without the Cardinal header.
+        o, c, p = self.rendered()
+        self.assertIn('otelcol.exporter.otlphttp "grafana_cloud"', c)
+        self.assertEqual(rules(self.lint(o, c, p)), [])
 
 
 if __name__ == "__main__":
