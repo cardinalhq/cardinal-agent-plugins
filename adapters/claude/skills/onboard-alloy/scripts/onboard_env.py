@@ -11,8 +11,10 @@ Usage:
 --from-connection reads the non-secret state the agent's Cardinal connect saved
 (cardinal.json: host, org, ingest endpoint; never the secrets file) from
 CARDINAL_AGENT_HOME, else the first of ~/.claude, ~/.codex, ~/.cursor, ~/.gemini that has
-one, or from the path given. Connected to Cardinal SaaS, it prefills TARGET=saas, the org
-and the ingest endpoint; connected to a self-hosted Cardinal, only the org.
+one, or from the path given. It prefills the org, and the ingest endpoint once
+--set TARGET=saas says the data goes to Cardinal SaaS. It never decides TARGET: a
+customer whose data lake runs in their own VPC connects to the same app.cardinalhq.io
+as a SaaS customer, so ask the user and pass the answer with --set TARGET=saas|s3.
 
 alloy_inventory.py and render.py take the same file with --env-file.
 
@@ -35,7 +37,6 @@ import stat
 import sys
 import time
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import alloy_config as ac  # noqa: E402
@@ -44,10 +45,11 @@ TEMPLATE = """\
 # /cardinal:onboard-alloy — fill in the values below, save, then tell Claude "done".
 # Nothing here is a password: never put an AWS key or a Cardinal API key in this file.
 
-# Where Cardinal receives the data:
-#   s3    — your own Cardinal Data Lake bucket (self-hosted Lakerunner); Alloy writes files to it
-#   saas  — Cardinal SaaS (app.cardinalhq.io); Alloy sends OTLP/HTTP with an API key
-TARGET=s3
+# Where Cardinal receives the data (required, no default):
+#   saas  — Cardinal SaaS: Cardinal stores the data; Alloy sends OTLP/HTTP with an API key
+#   s3    — your own Cardinal Data Lake in your VPC (Lakerunner on your bucket); Alloy
+#           writes files to the bucket. Your Cardinal login may still be app.cardinalhq.io.
+TARGET=
 
 # Path to the Alloy config to patch, taken from its source of truth (Helm values,
 # GitOps repo) — not the live ConfigMap. Relative paths are relative to this file.
@@ -101,8 +103,6 @@ TARGETS = ("s3", "saas")
 RUNTIMES = ("kubernetes", "host")
 # Config locations of host installs: Homebrew (Apple silicon, Intel) and the Linux packages.
 HOST_CONFIG_DIRS = ("/opt/homebrew/etc/alloy", "/usr/local/etc/alloy", "/etc/alloy")
-# Cardinal SaaS control planes; any other connect host is a self-hosted Cardinal.
-SAAS_HOSTS = ("app.cardinalhq.io",)
 AGENT_HOMES = ("~/.claude", "~/.codex", "~/.cursor", "~/.gemini")
 EXIT_DIFFERS = 4
 REQUIRED = {
@@ -175,20 +175,15 @@ def connection(path: Optional[str] = None) -> Dict[str, str]:
     return out
 
 
-def is_saas(host: str) -> bool:
-    return (urlparse(host).hostname or "") in SAAS_HOSTS
-
-
-def connection_values(conn: Dict[str, str]) -> Dict[str, str]:
-    """Values file entries the connection already answers."""
+def connection_values(conn: Dict[str, str], target: Optional[str]) -> Dict[str, str]:
+    """Values file entries the connection answers: the org, and for target saas the ingest
+    endpoint. Never TARGET itself: SaaS and in-VPC customers share the same control plane."""
     out: Dict[str, str] = {}
     if UUID_RE.match(conn.get("org_id", "")):
         out["CARDINAL_ORG_ID"] = conn["org_id"]
-    if is_saas(conn.get("host", "")):
-        out["TARGET"] = "saas"
-        ie = conn.get("ingest_endpoint", "").rstrip("/")
-        if re.match(r"^https://[^/\s]+$", ie):
-            out["CARDINAL_INGEST_ENDPOINT"] = ie
+    ie = conn.get("ingest_endpoint", "").rstrip("/")
+    if target == "saas" and re.match(r"^https://[^/\s]+$", ie):
+        out["CARDINAL_INGEST_ENDPOINT"] = ie
     return out
 
 
@@ -245,11 +240,14 @@ def check(env_path: str, values: Dict[str, str]) -> Tuple[List[str], List[str]]:
     """(problems, notes). Problems block the next step; notes are informational."""
     problems: List[str] = []
     notes: List[str] = []
-    target = values.get("TARGET", "s3") or "s3"
-    if target not in TARGETS:
+    # No TARGET line at all is an older template, from when s3 was the only target.
+    target = values.get("TARGET", "s3")
+    if not target:
+        problems.append('TARGET is empty: "saas" (Cardinal SaaS stores the data) or '
+                        '"s3" (your own Cardinal Data Lake in your VPC)')
+    elif target not in TARGETS:
         problems.append('TARGET must be "s3" or "saas"')
-        target = "s3"
-    for k in REQUIRED[target]:
+    for k in REQUIRED.get(target, ()):
         if not values.get(k):
             problems.append(f"{k} is empty")
     if target == "saas":
@@ -330,7 +328,7 @@ def connection_notes(values: Dict[str, str], conn: Dict[str, str]) -> List[str]:
         return ["not connected to Cardinal: nothing to compare the org and endpoint with"]
     who = f"{conn.get('org_slug') or conn.get('org_id', '?')} on {conn.get('host', '?')}"
     out = []
-    for k, v in connection_values(conn).items():
+    for k, v in connection_values(conn, values.get("TARGET")).items():
         if (values.get(k) or "").rstrip("/") != v:
             out.append(f"{k} is {values.get(k) or '(empty)'} but the Cardinal connection ({who}) says {v}")
     return out
@@ -373,8 +371,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     g.add_argument("--init", metavar="FILE")
     g.add_argument("--check", metavar="FILE")
     ap.add_argument("--from-connection", nargs="?", const="", metavar="CARDINAL_JSON",
-                    help="prefill (--init) or compare (--check) the org, target and ingest endpoint "
-                         "with the agent's Cardinal connection")
+                    help="prefill (--init) or compare (--check) the org, and for TARGET=saas the "
+                         "ingest endpoint, with the agent's Cardinal connection")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="--init: prefill a value already known (repeatable; never the API key)")
     ap.add_argument("--replace", action="store_true",
@@ -384,21 +382,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     conn = connection(args.from_connection or None) if use_conn else {}
 
     if args.init:
-        prefill: Dict[str, Tuple[str, str]] = {}   # key -> (value, where it came from)
-        for k, v in connection_values(conn).items():
-            prefill[k] = (v, f"Cardinal connection ({conn.get('org_slug') or conn.get('host')})")
         try:
-            for k, v in parse_sets(args.set).items():
-                prefill[k] = (v, "--set")
+            sets = parse_sets(args.set)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
+        if sets.get("TARGET", "saas") not in TARGETS:
+            print('error: --set TARGET takes "saas" or "s3"', file=sys.stderr)
+            return 2
+        prefill: Dict[str, Tuple[str, str]] = {}   # key -> (value, where it came from)
+        for k, v in connection_values(conn, sets.get("TARGET")).items():
+            prefill[k] = (v, f"Cardinal connection ({conn.get('org_slug') or conn.get('host')})")
+        for k, v in sets.items():
+            prefill[k] = (v, "--set")
         if "ALLOY_CONFIG" in prefill and "RUNTIME" not in prefill:
             rt = guess_runtime(prefill["ALLOY_CONFIG"][0])
             if rt:
                 prefill["RUNTIME"] = (rt, "the config's location (Homebrew / Linux package)")
         if use_conn and not conn:
-            print("not connected to Cardinal: TARGET, org and endpoint left for the user")
+            print("not connected to Cardinal: org and endpoint left for the user")
+        if "TARGET" not in prefill:
+            print("TARGET left empty: ask the user whether the data goes to Cardinal SaaS or to "
+                  "their own Cardinal Data Lake in their VPC (the connection can't tell them apart), "
+                  "then pass --set TARGET=saas|s3")
         wanted = {k: v for k, (v, _) in prefill.items()}
         if os.path.exists(args.init) and not args.replace:
             print(f"{args.init} already exists — not overwritten")

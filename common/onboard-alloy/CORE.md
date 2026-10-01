@@ -18,11 +18,13 @@ Cardinal. Two targets, set by `TARGET` in the values file:
 | `s3` | Self-hosted Cardinal Data Lake (Lakerunner on the customer's bucket) | `otelcol.exporter.awss3` writing to `s3://<bucket>/otel-raw/<org-uuid>/<cluster>/` |
 | `saas` | Cardinal SaaS (app.cardinalhq.io) | `otelcol.exporter.otlphttp` to Cardinal's OTLP/HTTP intake, with an `x-cardinalhq-api-key` header read from an env var |
 
-Don't ask what the connection already says: when the agent is connected to Cardinal
-SaaS, `onboard_env.py --from-connection` prefills `saas`, the org and the ingest
-endpoint (see the values file below); show them and let the user correct them. Ask only
-when not connected or connected to a self-hosted Cardinal. If unsure: a customer who
-signs in at app.cardinalhq.io and has no Lakerunner of their own is `saas`.
+**Ask this first, every time:** *"Should Alloy send to Cardinal SaaS, or to your own
+Cardinal Data Lake in your VPC?"* The connection can't answer it: a customer whose data
+lake runs in their own VPC (for example a site set up with `install-site`) signs in at
+the same app.cardinalhq.io as a SaaS customer. Everything else the connection does
+answer (the org, and for `saas` the ingest endpoint) is prefilled, not asked; see the
+values file below. If the user is unsure: no Lakerunner or data lake bucket of their
+own means `saas`.
 
 Not this skill: dashboards and alert rules (`migrate-from-grafana`, which needs this
 done first), historical data, and customers without Alloy (Cardinal's own collectors).
@@ -60,14 +62,14 @@ starts flowing then, and keeps flowing with nobody running anything.
 | Item | Target | Why | Notes |
 |---|---|---|---|
 | Cardinal connection | both | org, and checking data arrives (step 6) | See SKILL.md. Prefilled from the connection; **confirm the org it names**. Ask only when not connected |
-| `s3` or `saas` | both | which exporter is rendered | Prefilled `saas` when connected to Cardinal SaaS; otherwise see the table above |
+| `s3` or `saas` | both | which exporter is rendered | **Always ask** (above); never inferred from the connection. Passed with `--set TARGET=` |
 | The Alloy config, **from its source of truth** | both | what gets patched | See step 1 |
 | Where Alloy runs (`RUNTIME`) | both | Kubernetes metadata, where env vars and the key come from | `kubernetes`, or `host` for Homebrew / a Linux package. Guessed from the config's path; confirm |
 | Cluster name | both | `k8s.cluster.name` (and the S3 prefix) | Permanent — see step 0 |
 | Organization UUID | `s3` | S3 prefix, IAM scope | Prefilled from the connection; else from the Cardinal data lake install. Optional for `saas` |
 | Data lake bucket and region (and endpoint for MinIO/R2) | `s3` | where Alloy writes | Confirm with the user; don't guess |
 | KMS key ARN, if the bucket uses SSE-KMS | `s3` | IAM policy | Ask; a missing KMS grant shows up as AccessDenied |
-| Ingest endpoint | `saas` | where Alloy sends | Prefilled from the connection (the intake its own telemetry uses). Not connected: ask; Cardinal's OTLP/HTTP intake for their region, e.g. `https://otelhttp.intake.us-east-2.aws.cardinalhq.io` (base URL, no `/v1/...`); don't guess the region |
+| Ingest endpoint | `saas` | where Alloy sends | Prefilled from the connection once `TARGET=saas` (the intake the agent's own telemetry uses). Not connected: ask; Cardinal's OTLP/HTTP intake for their region, e.g. `https://otelhttp.intake.us-east-2.aws.cardinalhq.io` (base URL, no `/v1/...`); don't guess the region |
 | A Cardinal API key, **outside chat and outside the values file** | `saas` | authenticates Alloy | The customer creates it in Cardinal and stores it in a Kubernetes Secret (`kubernetes`) or the service's env file (`host`). The values file holds only the env var name (`CARDINAL_API_KEY_ENV`, default `CARDINAL_API_KEY`). The connect skill's own keys are for the agent; don't reuse them |
 
 All of these except the Cardinal connection go in **one values file**,
@@ -77,21 +79,23 @@ and don't ask what the connection or the files already answer:
 
 ```bash
 python3 $SCRIPTS/onboard_env.py --init .env.onboard-alloy --from-connection \
+    --set TARGET=<saas|s3, the user's answer> \
     --set ALLOY_CONFIG=<path from step 1> [--set CLUSTER_NAME=<name>]
 ```
 
-- `--from-connection` reads the agent's Cardinal connect state (never its secrets):
-  connected to SaaS it fills `TARGET=saas`, `CARDINAL_ORG_ID` and
-  `CARDINAL_INGEST_ENDPOINT`; connected to a self-hosted Cardinal, only the org. It
-  prints each prefilled value and where it came from.
+- `TARGET` has no default. Without `--set TARGET=`, the file leaves it empty, `--init`
+  says to ask, and `--check` stops until it's filled in.
+- `--from-connection` reads the agent's Cardinal connect state (never its secrets) and
+  fills `CARDINAL_ORG_ID`, plus `CARDINAL_INGEST_ENDPOINT` when `TARGET=saas`. It never
+  sets `TARGET`. It prints each prefilled value and where it came from.
 - `--set KEY=VALUE` fills a value you found yourself. Use it for `ALLOY_CONFIG` once
   step 1 settles it, and for `CLUSTER_NAME` when the config or the user already names
   the cluster (e.g. an `external_labels { cluster = "..." }`). A config under a Homebrew
   or Linux-package path (`/opt/homebrew/etc/alloy`, `/usr/local/etc/alloy`, `/etc/alloy`)
   prefills `RUNTIME=host`; `--set RUNTIME=...` overrides it.
 - **An existing file is never overwritten.** If it differs from what would be
-  prefilled (another org, or an older template without `TARGET`, which then silently
-  means `s3`), `--init` prints `DIFFERS` lines and exits 4. Show them and ask whether to
+  prefilled (another org or target, or an older template without `TARGET`, which then
+  silently means `s3`), `--init` prints `DIFFERS` lines and exits 4. Show them and ask whether to
   keep it or start fresh with `--replace` (the old file is kept as `.bak-<time>`).
 
 Then open it for the user in their editor (SKILL.md says how) and say, naming what was
@@ -125,8 +129,9 @@ value later (e.g. the bucket), edit the file and re-run render; the file wins ov
 ### 0. Scope and values file
 
 - Ask which clusters (or which machine's Alloy). Do them one at a time.
-- Read the connection first (`--from-connection`) for the target, org and endpoint.
-  Ask about them only if it's missing or self-hosted.
+- Ask SaaS or their own data lake in their VPC (`TARGET`, above). It's the one question
+  the connection can't answer. The org (and for `saas` the endpoint) then come from the
+  connection (`--from-connection`); ask about them only when not connected.
 - Settle where `ALLOY_CONFIG` comes from (step 1) before creating the file, so it can be
   prefilled.
 - Create and open `.env.onboard-alloy` (above). The one value that needs thought is the

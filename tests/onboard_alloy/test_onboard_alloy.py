@@ -333,7 +333,7 @@ class EnvFileTest(unittest.TestCase):
         return path
 
     def good(self):
-        return dict(ALLOY_CONFIG=os.path.join(FIXTURES, "prom_loki.alloy"), CARDINAL_ORG_ID=ORG,
+        return dict(TARGET="s3", ALLOY_CONFIG=os.path.join(FIXTURES, "prom_loki.alloy"), CARDINAL_ORG_ID=ORG,
                     CLUSTER_NAME=CLUSTER, S3_BUCKET="acme-cardinal-lake", AWS_REGION="us-east-1")
 
     def test_init_template(self):
@@ -344,8 +344,18 @@ class EnvFileTest(unittest.TestCase):
             self.assertEqual(set(vals), set(onboard_env.KEYS))
             self.assertEqual(vals["VALUES_MODE"], "env")
             problems, _ = onboard_env.check(path, vals)
-            self.assertEqual(vals["TARGET"], "s3")
-            self.assertEqual(len(problems), len(onboard_env.REQUIRED["s3"]))
+            # No default target: SaaS and in-VPC customers must say which.
+            self.assertEqual(vals["TARGET"], "")
+            self.assertEqual(len(problems), 1)
+            self.assertTrue(problems[0].startswith("TARGET is empty"), problems)
+            # A file from before TARGET existed still means s3.
+            with open(path) as f:
+                legacy = re.sub(r"(?m)^TARGET=.*\n", "", f.read())
+            legacy_path = os.path.join(d, "legacy")
+            with open(legacy_path, "w") as f:
+                f.write(legacy)
+            problems, _ = onboard_env.check(legacy_path, onboard_env.read(legacy_path))
+            self.assertEqual(len(problems), len(onboard_env.REQUIRED["s3"]), problems)
             with open(path, "a") as f:
                 f.write("# keep me\n")
             onboard_env.main(["--init", path])   # never overwrites
@@ -475,24 +485,48 @@ class ConnectionPrefillTest(unittest.TestCase):
             code = onboard_env.main(args)
         return code, out.getvalue(), err.getvalue()
 
-    def test_saas_connection_prefills_target_org_endpoint(self):
+    def test_connection_never_decides_target(self):
+        # SaaS and in-VPC customers both connect to app.cardinalhq.io: only the org is known.
+        for host in ("https://app.cardinalhq.io", "https://maestro.acme.internal"):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as d:
+                env = os.path.join(d, ".env.onboard-alloy")
+                code, out, _ = self.run_main(["--init", env, "--from-connection", self.conn(d, host=host)])
+                self.assertEqual(code, 0)
+                vals = onboard_env.read(env)
+                self.assertEqual((vals["TARGET"], vals["CARDINAL_ORG_ID"], vals["CARDINAL_INGEST_ENDPOINT"]),
+                                 ("", ORG, ""))
+                self.assertIn("TARGET left empty: ask the user", out)
+                self.assertTrue(onboard_env.check(env, vals)[0][0].startswith("TARGET is empty"))
+
+    def test_saas_answer_prefills_endpoint(self):
         with tempfile.TemporaryDirectory() as d:
             env = os.path.join(d, ".env.onboard-alloy")
-            code, out, _ = self.run_main(["--init", env, "--from-connection", self.conn(d)])
+            code, out, _ = self.run_main(["--init", env, "--from-connection", self.conn(d), "--set", "TARGET=saas"])
             self.assertEqual(code, 0)
             vals = onboard_env.read(env)
             self.assertEqual((vals["TARGET"], vals["CARDINAL_ORG_ID"], vals["CARDINAL_INGEST_ENDPOINT"]),
                              ("saas", ORG, INGEST))
-            self.assertIn("prefilled TARGET=saas", out)
+            self.assertIn("prefilled CARDINAL_INGEST_ENDPOINT", out)
+            self.assertNotIn("TARGET left empty", out)
             self.assertEqual(os.stat(env).st_mode & 0o777, 0o600)
 
-    def test_self_hosted_connection_prefills_only_org(self):
+    def test_vpc_customer_on_saas_control_plane(self):
+        # Connected to app.cardinalhq.io, data lake in their own VPC: no SaaS endpoint.
         with tempfile.TemporaryDirectory() as d:
             env = os.path.join(d, ".env.onboard-alloy")
-            self.run_main(["--init", env, "--from-connection", self.conn(d, host="https://maestro.acme.internal")])
+            self.run_main(["--init", env, "--from-connection", self.conn(d), "--set", "TARGET=s3"])
             vals = onboard_env.read(env)
             self.assertEqual((vals["TARGET"], vals["CARDINAL_ORG_ID"], vals["CARDINAL_INGEST_ENDPOINT"]),
                              ("s3", ORG, ""))
+            problems = onboard_env.check(env, vals)[0]
+            self.assertIn("S3_BUCKET is empty", problems)
+            self.assertNotIn("CARDINAL_INGEST_ENDPOINT is empty", problems)
+
+    def test_bad_target_answer(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = os.path.join(d, ".env.onboard-alloy")
+            self.assertEqual(self.run_main(["--init", env, "--set", "TARGET=vpc"])[0], 2)
+            self.assertFalse(os.path.exists(env))
 
     def test_not_connected_leaves_template(self):
         with tempfile.TemporaryDirectory() as d:
