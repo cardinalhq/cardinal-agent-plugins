@@ -94,7 +94,9 @@ Real Claude Code result shapes (key sets sampled from this machine's transcripts
  │      (normalizers only reshape; any exception ──► generic)                                  │
  │ 5 REDACT every field: structural scrub (gateway port) + plain-text key=value rules          │
  │      + PEM + token shapes + surrogates/NUL + sensitive-path lines + base64 blobs            │
- │      + local-path scrub (spill root → [local file], cwd → ".", $HOME → "~")                 │
+ │      + local-path scrub (claude-<uid>/-<encoded cwd> → claude-<uid>/[session tmp],          │
+ │        dash-encoded cwd/$HOME → [cwd]/[home], spill root → [local file], cwd → ".",         │
+ │        $HOME → "~"); summary: scrubbed first, then clipped to 120                           │
  │ 6 CAP: args ≤ 64 KiB, result ≤ 256 KiB → #1982 envelope {truncated, original_bytes, prefix} │
  │ 7 WRITE ev_<12hex>.json (v2, atomic, 0600/0700) · gc (TTL + size + per-session caps)        │
  └───────────────────────────────┬─────────────────────────────────────────────────────────────┘
@@ -142,7 +144,7 @@ same steps with zero code changes.
   "status": "ok" | "error",                 // NEW (v1: is_error bool, still written for v1 readers)
   "exit_code": 2,                           // NEW, optional (shell normalizer / "Exit code N")
   "normalizer": "shell" | "file-edit" | "mcp-content" | "generic",   // NEW: which shaper ran
-  "summary": "make check-maestro",          // NEW: ≤120 chars, scrubbed; for list/find
+  "summary": "make check-maestro",          // NEW: ≤120 chars, scrubbed before clipped; for list/find
   "args": {…}, "args_truncated": false,
   "result": {"structured": …, "text": […], "other_blocks": n} | {"truncated": true, "original_bytes": n, "prefix": "…"},
   "truncated": false, "spilled": false, "spilled_bytes": 0,
@@ -356,7 +358,7 @@ Initial normalizers (all optional; with none, everything still works through `ge
 | id | match (shape) | output |
 |---|---|---|
 | mcp-content | `source.kind=="mcp"` or keys ⊆ {content, structuredContent, isError, _meta} with `content` a str/list of blocks | today's `normalize()` (spill follow, JSON-text→structured, image placeholders → `[local file]`) |
-| shell | dict with `stdout`/`stderr` string(s) | `structured={stdout, stderr, exit_code?, interrupted?, background_task_id?, timed_out_ms?}`; follows `persistedOutputPath` under spill_root; on failure parses `^Exit code (\d+)` from `error`; `summary`=the command string from input (first ≤120 chars) |
+| shell | dict with `stdout`/`stderr` string(s) | `structured={stdout, stderr, exit_code?, interrupted?, background_task_id?, timed_out_ms?}`; follows `persistedOutputPath` under spill_root; on failure parses `^Exit code (\d+)` from `error`; `summary`=the command string from input (normalizers hand over up to 480 chars; the pipeline scrubs, then clips to ≤120) |
 | file-edit | dict with `structuredPatch` | the patch is the evidence: `structured={file_path, patch, type?, user_modified?, replace_all?}`; always drops `originalFile`; a Write's `content` is kept only when ≤ 32 KiB (else the patch alone) |
 | generic | always | dict/list → `structured` as-is; str → JSON container → `structured`, else `text=[s]`; `None` → `text=[""]`; error → `text=[error]`, `is_error` |
 
