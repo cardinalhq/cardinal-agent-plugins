@@ -1,5 +1,5 @@
 {
- "_comment": "Port-parity vectors for cardinal_core.evidence.scrub, a Python port of conductor's receipt credential scrub (cardinalhq/conductor packages/mcp-gateway/storyboard/receipts/receipts.go scrub/isCredentialKey and errors.go redactValueShapes/RedactErrorText). 'keys' is copied from conductor's receipts/testdata/credential_keys.json (gateway classification: 'credential' and 'headers' keys match, 'evidence_both' and 'evidence_gateway_only' keys do not, 'secret_pair_names' {name, value} pairs are redacted and 'plain_pair_names' kept). 'scrub' (scrub), 'text' (scrubText) and 'plain' (RedactErrorText on non-JSON text) outputs were produced by the Go implementation at conductor 9d8bd031. When conductor's scrub changes, regenerate from Go and update the port in the same change. The PEM private-key vectors were produced by the Go implementation on conductor branch fix/receipt-scrub-pem-private-keys (redactPEMPrivateKeys, e7d88135).",
+ "_comment": "Port-parity vectors for cardinal_core.evidence.scrub, a Python port of conductor's receipt credential scrub (cardinalhq/conductor packages/mcp-gateway/storyboard/receipts/receipts.go scrub/isCredentialKey and errors.go redactValueShapes/RedactErrorText). 'keys' is copied from conductor's receipts/testdata/credential_keys.json (gateway classification: 'credential' and 'headers' keys match, 'evidence_both' and 'evidence_gateway_only' keys do not, 'secret_pair_names' {name, value} pairs are redacted and 'plain_pair_names' kept). 'scrub' (scrub), 'text' (scrubText) and 'plain' (RedactErrorText on non-JSON text) outputs were produced by the Go implementation at conductor 9d8bd031. When conductor's scrub changes, regenerate from Go and update the port in the same change. The PEM private-key vectors were produced by the Go implementation on conductor branch fix/receipt-scrub-pem-private-keys (redactPEMPrivateKeys, e7d88135). The `go test -v` status-line vectors at the end of 'plain' ('--- PASS: TestX' kept, every near miss redacted) were produced by the Go implementation at conductor bc5d0d16 (cardinalhq/conductor#2014, isGoTestStatus), which also reproduces every earlier 'plain' vector unchanged.",
  "keys": {
   "credential": [
    "x-cardinalhq-api-key",
@@ -604,6 +604,114 @@
   {
    "in": "h1 -----BEGIN PRIVATE KEY-----! h2 -----BEGIN PRIVATE KEY-----! end",
    "out": "h1 [redacted]! h2 [redacted]! end"
+  },
+  {
+   "in": "--- PASS: TestX (0.01s)",
+   "out": "--- PASS: TestX (0.01s)"
+  },
+  {
+   "in": "    --- PASS: TestX/sub_case (0.00s)",
+   "out": "    --- PASS: TestX/sub_case (0.00s)"
+  },
+  {
+   "in": "x\\n    --- PASS: TestY (0.02s)",
+   "out": "x\\n    --- PASS: TestY (0.02s)"
+  },
+  {
+   "in": "x\n    --- PASS: TestY (0.02s)",
+   "out": "x\n    --- PASS: TestY (0.02s)"
+  },
+  {
+   "in": "\t--- PASS:\tTestTab (0.00s)",
+   "out": "\t--- PASS:\tTestTab (0.00s)"
+  },
+  {
+   "in": "{\"Action\":\"output\",\"Output\":\"--- PASS: TestX (0.00s)\\n\"}",
+   "out": "{\"Action\":\"output\",\"Output\":\"--- PASS: TestX (0.00s)\\n\"}"
+  },
+  {
+   "in": "=== RUN   TestX\n--- PASS: TestX (0.01s)\nPASS\nok  \texample.com/pkg\t0.012s",
+   "out": "=== RUN   TestX\n--- PASS: TestX (0.01s)\nPASS\nok  \texample.com/pkg\t0.012s"
+  },
+  {
+   "in": "PASS:hunter2",
+   "out": "PASS:[redacted]"
+  },
+  {
+   "in": "PASS : hunter2",
+   "out": "PASS : [redacted]"
+  },
+  {
+   "in": "environment:\n  PASS: s3cret",
+   "out": "environment:\n  PASS: [redacted]"
+  },
+  {
+   "in": "environment:\\n  PASS: s3cret",
+   "out": "environment:\\n  PASS: [redacted]"
+  },
+  {
+   "in": "Pass: s3cret",
+   "out": "Pass: [redacted]"
+  },
+  {
+   "in": "pass: hunter2",
+   "out": "pass: [redacted]"
+  },
+  {
+   "in": "PASS=hunter2",
+   "out": "PASS=[redacted]"
+  },
+  {
+   "in": "PASS => x",
+   "out": "PASS => [redacted]"
+  },
+  {
+   "in": "\"PASS\": \"x\"",
+   "out": "\"PASS\": \"[redacted]\""
+  },
+  {
+   "in": "\\\"PASS\\\":\\\"x\\\"",
+   "out": "\\\"PASS\\\":\\\"[redacted]\\\""
+  },
+  {
+   "in": "DB_PASS: x",
+   "out": "DB_PASS: [redacted]"
+  },
+  {
+   "in": "DB_PASS=x",
+   "out": "DB_PASS=[redacted]"
+  },
+  {
+   "in": "--- PASS=x",
+   "out": "--- PASS=[redacted]"
+  },
+  {
+   "in": "--- PASS:x",
+   "out": "--- PASS:[redacted]"
+  },
+  {
+   "in": "--- PASS: \"x\"",
+   "out": "--- PASS: \"[redacted]\""
+  },
+  {
+   "in": "--- PASS: \\\"x\\\"",
+   "out": "--- PASS: \\\"[redacted]\\\""
+  },
+  {
+   "in": "--- DB_PASS: x",
+   "out": "--- DB_PASS: [redacted]"
+  },
+  {
+   "in": "user=bob pass=Xy9",
+   "out": "user=bob pass=[redacted]"
+  },
+  {
+   "in": "Authorization: Bearer abcdefgh123",
+   "out": "Authorization: Bearer [redacted]"
+  },
+  {
+   "in": "--- PASS: TestX (0.01s) password=hunter2",
+   "out": "--- PASS: TestX (0.01s) password=[redacted]"
   }
  ]
 }
