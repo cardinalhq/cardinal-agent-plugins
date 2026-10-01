@@ -109,6 +109,61 @@ class SessionTmpAndEncodedPathTests(unittest.TestCase):
         self.assertEqual(cap.encode_path("/home/a.b_c"), "-home-a-b-c")
 
 
+class SpillRootBeforeEncodedTests(unittest.TestCase):
+    """The spill root (~/.claude/projects) holds the dash-encoded cwd. The
+    spill rule must run first: rewriting the encoded segment to [cwd] first
+    ended the spill match at its "]" and sent up "[local file]]/<session
+    uuid>/tool-results/<file>"."""
+
+    SPILL = f"{HOME}/.claude/projects"
+    PERSISTED = f"{HOME}/.claude/projects/-Users-mgraff-git-app/{UUID}/tool-results/b57.txt"
+
+    def test_local_rewrites_a_spill_path_whole(self):
+        local = cap._Local(self.SPILL, CWD, HOME)
+        self.assertEqual(local.apply(f"cat {self.PERSISTED}"), "cat [local file]")
+        self.assertEqual(local.apply(f"ls {self.SPILL}/-Users-mgraff-other/x.jsonl"), "ls [local file]")
+        # Outside the spill root the encoded rules still apply.
+        self.assertEqual(local.apply("see -Users-mgraff-git-app/abc"), "see [cwd]/abc")
+
+    def _spill_call(self, tool: str, tool_input: dict, response) -> dict:
+        call = norms.ToolCall(runtime="claude-code", tool_name=tool, source=cap.builtin_source("claude-code"),
+                              tool=tool, tool_input=tool_input, response=response, session_id="s1",
+                              tool_use_id="toolu_spill", cwd=CWD, spill_root=self.SPILL)
+        return cap.build_record(call, home=HOME)
+
+    def _assert_clean(self, e: dict, exact: bool = True) -> None:
+        dumped = json.dumps(e)
+        for leak in (UUID, "tool-results", "b57.txt", "mgraff") + (("]]",) if exact else ()):
+            self.assertNotIn(leak, dumped)
+
+    def test_bash_args_summary_and_stdout_name_the_spill_file_as_local_file(self):
+        e = self._spill_call("Bash", {"command": f"grep -c ERROR {self.PERSISTED}", "description": "run"},
+                             {"stdout": f"see {self.PERSISTED} for details\n", "stderr": ""})
+        self.assertEqual(e["args"]["command"], "grep -c ERROR [local file]")
+        self.assertEqual(e["summary"], "grep -c ERROR [local file]")
+        self.assertEqual(e["result"]["structured"]["stdout"], "see [local file] for details\n")
+        self._assert_clean(e)
+
+    def test_read_of_a_spill_file(self):
+        e = self._spill_call("Read", {"file_path": self.PERSISTED}, "1\tERROR x\n")
+        self.assertEqual(e["summary"], "[local file]")
+        # Pre-existing (same on 41df576): _path_lines reads the bare path as
+        # a grep context line and withholds it at the ~/.claude prefix
+        # ("…/projects/-Users-[withheld]") before the spill rule runs, so the
+        # stored arg is "[local file]]". Odd, but nothing under it leaks.
+        self.assertIn(e["args"]["file_path"], ("[local file]", "[local file]]"))
+        self._assert_clean(e, exact=False)
+
+    def test_capture_call_stdout_naming_the_spill_file(self):
+        call = norms.ToolCall(runtime="claude-code", tool_name="Bash", source=cap.builtin_source("claude-code"),
+                              tool="Bash", tool_input={"command": "make test", "description": "run"},
+                              response={"stdout": f"see {self.PERSISTED} for details", "stderr": ""},
+                              session_id="s1", tool_use_id="toolu_spill2", cwd=CWD, spill_root=self.SPILL)
+        e = record(call)
+        self.assertEqual(e["result"]["structured"]["stdout"], "see [local file] for details")
+        self._assert_clean(e)
+
+
 class ScrubBeforeClipTests(unittest.TestCase):
     def _summary(self, command: str) -> str:
         s = record(bash(command))["summary"]

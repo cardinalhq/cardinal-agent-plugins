@@ -95,7 +95,7 @@ Real Claude Code result shapes (key sets sampled from this machine's transcripts
  │ 5 REDACT every field: structural scrub (gateway port) + plain-text key=value rules          │
  │      + PEM + token shapes + surrogates/NUL + sensitive-path lines + base64 blobs            │
  │      + local-path scrub (claude-<uid>/-<encoded cwd> → claude-<uid>/[session tmp],          │
- │        dash-encoded cwd/$HOME → [cwd]/[home], spill root → [local file], cwd → ".",         │
+ │        spill root → [local file], dash-encoded cwd/$HOME → [cwd]/[home], cwd → ".",         │
  │        $HOME → "~"); summary: scrubbed first, then clipped to 120                           │
  │ 6 CAP: args ≤ 64 KiB, result ≤ 256 KiB → #1982 envelope {truncated, original_bytes, prefix} │
  │ 7 WRITE ev_<12hex>.json (v2, atomic, 0600/0700) · gc (TTL + size + per-session caps)        │

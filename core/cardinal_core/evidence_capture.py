@@ -18,8 +18,8 @@ leaves the machine only when the author promotes it
          (cardinal_core.evidence_normalizers; shape only, never a gate)
       5  redact every field: the gateway's scrub (evidence.scrub) plus
          plain-text key=value rules, sensitive-path lines, base64 blobs and
-         local paths (Claude's session temp dir -> [session tmp], the
-         dash-encoded cwd/$HOME -> [cwd]/[home], spill root -> [local file],
+         local paths (Claude's session temp dir -> [session tmp], spill
+         root -> [local file], the dash-encoded cwd/$HOME -> [cwd]/[home],
          cwd -> ".", $HOME -> "~"); a summary is scrubbed before it is clipped
       6  cap: args <= 64 KiB, result <= 256 KiB, else conductor's
          {truncated, original_bytes, prefix} envelope
@@ -174,12 +174,25 @@ def encode_path(p: str) -> str:
 
 class _Local:
     """Local path rewrites, in this order: Claude's session temp dir ->
-    claude-<uid>/[session tmp]; the dash-encoded cwd/home (-Users-alice-app)
-    -> [cwd]/[home], longest first; spill root -> [local file], cwd -> ".",
-    home -> "~"."""
+    claude-<uid>/[session tmp]; spill root -> [local file] (whole path, so
+    the encoded project dir, session id and file name under it all go);
+    the dash-encoded cwd/home (-Users-alice-app) -> [cwd]/[home], longest
+    first; cwd -> ".", home -> "~". The spill rule must precede the encoded
+    rules: a spill path holds the encoded cwd, and rewriting that first
+    would end the spill match at the "]" of "[cwd]"."""
 
     def __init__(self, spill_root: Optional[str], cwd: Optional[str], home: Optional[str]):
         self.rules = [("claude-", _SESSION_TMP, lambda m: m.group(1) + SESSION_TMP)]
+        roots = set()
+        if spill_root:
+            roots.add(str(spill_root))
+            try:
+                roots.add(str(Path(spill_root).resolve()))
+            except (OSError, RuntimeError):
+                pass
+        for r in sorted(roots, key=len, reverse=True):
+            if len(r) > 1:
+                self.rules.append((r, re.compile(re.escape(r) + r"(?:/[^\s\]\"'`)]*)?"), LOCAL_FILE))
         encoded = {}
         for p, repl in ((cwd, "[cwd]"), (home, "[home]")):
             if not isinstance(p, str) or not p.startswith("/"):
@@ -196,16 +209,6 @@ class _Local:
         for enc in sorted(encoded, key=len, reverse=True):
             rx = re.compile(_ENCODED_LEFT + re.escape(enc) + _ENCODED_RIGHT)
             self.rules.append((enc, rx, encoded[enc]))
-        roots = set()
-        if spill_root:
-            roots.add(str(spill_root))
-            try:
-                roots.add(str(Path(spill_root).resolve()))
-            except (OSError, RuntimeError):
-                pass
-        for r in sorted(roots, key=len, reverse=True):
-            if len(r) > 1:
-                self.rules.append((r, re.compile(re.escape(r) + r"(?:/[^\s\]\"'`)]*)?"), LOCAL_FILE))
         for p, repl in ((cwd, "."), (home, "~")):
             if isinstance(p, str) and len(p.rstrip("/")) > 1 and p.startswith("/"):
                 q = p.rstrip("/")
