@@ -1117,7 +1117,9 @@ class DisconnectTests(unittest.TestCase):
         secrets_path.write_text("{ this is not json")
 
         res = run_plugin(DISCONNECT, [], self.home)
-        self.assertEqual(res.returncode, 0, res.stderr)
+        # Incomplete teardown (the token is still on disk) → non-zero.
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("incomplete", res.stdout)
         self.assertNotIn("Removed control-plane token", res.stdout)
         self.assertIn("Could not remove", res.stdout)
         self.assertTrue(secrets_path.exists())
@@ -1142,6 +1144,149 @@ class DisconnectTests(unittest.TestCase):
         self.assertIn("cardinal MCP server is off", res.stdout)
         self.assertIn("Telemetry stays on", res.stdout)
         self.assertNotIn("local-only", res.stdout)
+
+    # --- teardown completeness (old identity must not outlive disconnect) ---
+
+    def _seed_identity_caches(self) -> dict:
+        claude = self.home / ".claude"
+        paths = {
+            "verdict": claude / "cardinal" / "limits" / "s1.verdict.json",
+            "discovery": claude / "cardinal" / "storyboard-discovery" / "s1.json",
+            "ledger": claude / "cardinal" / "decisions" / "sessions" / "s1.json",
+            "plan": claude / "cardinal" / "plan.json",
+            "token": self.home / ".cardinal" / "evidence" / "s1" / "token.json",
+            "promoted": self.home / ".cardinal" / "evidence" / "s1" / "promoted.json",
+            "capture": self.home / ".cardinal" / "evidence" / "s1" / "ev_0123456789ab.json",
+        }
+        for p in paths.values():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('{"old": "identity"}')
+        return paths
+
+    def test_disconnect_hands_the_ingest_key_to_an_org_owner(self):
+        # maestro keeps ingest keys in their own table: the maestro-keys
+        # revoke route answers 401 for them (verified against production), and
+        # their own route needs a signed-in org owner. So disconnect never
+        # sends the ingest key anywhere; it names it and where to revoke it.
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("ingest-key-uuid-1", dict(self.stub.revoke_calls))
+        self.assertIn("still active: the plugin can't revoke it", res.stdout)
+        self.assertIn("/integrations → Lakerunner → Ingest API keys", res.stdout)
+        self.assertIn("quit them", res.stdout)
+
+    def test_disconnect_clears_identity_caches_but_keeps_captured_evidence(self):
+        paths = self._seed_identity_caches()
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((self.home / ".claude" / "cardinal").exists())
+        self.assertFalse(paths["token"].exists())
+        self.assertFalse(paths["promoted"].exists())
+        self.assertTrue(paths["capture"].exists(), "this machine's own captures stay")
+
+    def test_disconnect_marks_the_machine_and_connect_clears_it(self):
+        marker = self.home / ".claude" / "cardinal-disconnected"
+        run_plugin(DISCONNECT, [], self.home)
+        self.assertTrue(marker.exists())
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_disconnect_leaves_no_secret_bearing_backup(self):
+        claude = self.home / ".claude"
+        old = claude / "settings.json.bak.20260925-163619"
+        old.write_text(json.dumps({"theme": "dark", "env": {
+            "CARDINAL_MCP_API_KEY": "MCPOLD", "MY_VAR": "keep",
+            "OTEL_EXPORTER_OTLP_HEADERS": "x-cardinalhq-api-key=INGESTOLD"}}))
+        other_vendor = claude / "settings.json.bak.20260925-170000"
+        other_vendor.write_text(json.dumps({"env": {"OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer v"}}))
+        before = {p.name for p in claude.iterdir()}
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_files = {p.name for p in claude.iterdir()} - before
+        self.assertFalse([n for n in new_files if ".bak" in n], new_files)
+        scrubbed = read_json(old)
+        self.assertEqual(scrubbed["env"], {"MY_VAR": "keep"})
+        self.assertEqual(scrubbed["theme"], "dark")
+        self.assertEqual(old.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(read_json(other_vendor)["env"]["OTEL_EXPORTER_OTLP_HEADERS"], "authorization=Bearer v")
+        for p in claude.rglob("*"):
+            if p.is_file():
+                text = p.read_text(errors="replace")
+                self.assertNotIn("MCPPLAINTEXT", text, p)
+                self.assertNotIn("MCPOLD", text, p)
+
+    def test_a_revoke_that_raises_does_not_abort_the_teardown(self):
+        state = read_json(self.state)
+        state["host"] = "app.cardinalhq.io"  # no scheme: urllib raises ValueError
+        self.state.write_text(json.dumps(state))
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+        self.assertFalse(self.state.exists())
+        self.assertNotIn("CARDINAL_MCP_API_KEY", settings_env(self.home))
+        self.assertIn("Could not revoke MCP key", res.stdout)
+        self.assertIn("Could not revoke control-plane token", res.stdout)
+
+    def test_malformed_settings_still_revokes_and_removes_the_rest(self):
+        paths = self._seed_identity_caches()
+        self.settings.write_text("{ not json")
+        res = run_plugin(DISCONNECT, [], self.home)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("Refusing to modify", res.stdout)
+        self.assertEqual(self.settings.read_text(), "{ not json", "left for the user to fix")
+        self.assertFalse(self.state.exists())
+        self.assertFalse(paths["verdict"].exists())
+        self.assertIn("mcp-key-uuid-1", dict(self.stub.revoke_calls))
+        self.assertIn("act-key-uuid-1", dict(self.stub.revoke_calls))
+
+    def test_force_without_state_reports_a_key_it_cannot_revoke(self):
+        self.state.unlink()
+        res = run_plugin(DISCONNECT, ["--force"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("key id is unknown", res.stdout)
+        self.assertNotIn("CARDINAL_MCP_API_KEY", settings_env(self.home))
+        self.assertEqual(self.stub.revoke_calls, [])
+
+    def test_keep_telemetry_refuses_an_mcp_only_connection(self):
+        state = read_json(self.state)
+        state.pop("ingest_key_id", None)
+        state["telemetry"] = {"enabled": False}
+        state["mode"] = "mcp-only"
+        self.state.write_text(json.dumps(state))
+        settings = read_json(self.settings)
+        for k in list(settings["env"]):
+            if k.startswith("OTEL_"):
+                del settings["env"][k]
+        self.settings.write_text(json.dumps(settings))
+        res = run_plugin(DISCONNECT, ["--keep-telemetry"], self.home)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("no telemetry to keep", res.stdout)
+        self.assertEqual(read_json(self.state)["mode"], "mcp-only", "nothing changed")
+
+    def test_keep_telemetry_drops_the_discovery_cache(self):
+        paths = self._seed_identity_caches()
+        res = run_plugin(DISCONNECT, ["--keep-telemetry"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(paths["discovery"].exists())
+        self.assertTrue(paths["verdict"].exists(), "telemetry side stays connected")
+
+    def test_rotate_as_another_identity_clears_the_old_caches(self):
+        paths = self._seed_identity_caches()
+        state = read_json(self.state)
+        state["user_email"] = "previous-user@example.com"
+        self.state.write_text(json.dumps(state))
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "--rotate"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Cleared the previous connection", res.stdout)
+        self.assertFalse(paths["discovery"].exists())
+        self.assertFalse(paths["token"].exists())
+
+    def test_rotate_as_the_same_identity_keeps_the_caches(self):
+        paths = self._seed_identity_caches()
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "--rotate"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(paths["verdict"].exists())
 
     def test_no_state_file_no_op(self):
         self.state.unlink()

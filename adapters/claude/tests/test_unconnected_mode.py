@@ -137,6 +137,17 @@ class ConnectionHelperTests(unittest.TestCase):
         self.assertTrue(self.conn.is_connected(
             self.home, {"OTEL_EXPORTER_OTLP_HEADERS": "a=b, x-cardinalhq-api-key=ing_2"}))
 
+    def test_after_disconnect_the_environment_no_longer_counts(self):
+        # A running Claude Code keeps the old key in its process env after
+        # /cardinal:disconnect; the marker makes the hooks ignore it.
+        env = {"CARDINAL_MCP_API_KEY": "ck_old",
+               "OTEL_EXPORTER_OTLP_HEADERS": "x-cardinalhq-api-key=ing_old"}
+        self.assertTrue(self.conn.is_connected(self.home, env))
+        (self.home / ".claude" / "cardinal-disconnected").write_text("{}")
+        self.assertFalse(self.conn.is_connected(self.home, env))
+        self.settings({"CARDINAL_MCP_API_KEY": "ck_new"})
+        self.assertTrue(self.conn.is_connected(self.home, env), "settings.json still counts")
+
     def test_connect_state_file(self):
         (self.home / ".claude" / "cardinal.json").write_text("{}")
         self.assertTrue(self.conn.is_connected(self.home, {}))
