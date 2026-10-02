@@ -12,6 +12,8 @@ on:
       - "common/onboard-alloy/**"
       - "adapters/*/skills/onboard-alloy/**"
       - "tests/onboard_alloy/**"
+      - "tests/migrate_grafana/**"
+      - "tests/test_migrate_connect_scopes.py"
       - "build/sync_skills.py"
       - ".github/workflows/skills-sync.yml"
   push:
@@ -22,6 +24,8 @@ on:
       - "common/onboard-alloy/**"
       - "adapters/*/skills/onboard-alloy/**"
       - "tests/onboard_alloy/**"
+      - "tests/migrate_grafana/**"
+      - "tests/test_migrate_connect_scopes.py"
       - "build/sync_skills.py"
       - ".github/workflows/skills-sync.yml"
   workflow_dispatch:
@@ -46,3 +50,15 @@ jobs:
           python-version: "3.9"
       - name: onboard-alloy scripts (parser, inventory, render, lint)
         run: python3 -m unittest discover -s tests/onboard_alloy -v
+
+  migrate-grafana-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: migrate-from-grafana scripts (histogram translation, label drops, probes, Grafana comparison)
+        run: python3 -m unittest discover -s tests/migrate_grafana -v
+      - name: migrate-from-grafana connect scopes
+        run: python3 -m unittest discover tests -p test_migrate_connect_scopes.py -v
