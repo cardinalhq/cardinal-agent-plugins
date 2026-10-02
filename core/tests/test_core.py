@@ -12,6 +12,7 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from cardinal_core import bashclass, deviceflow, initiative, limits, otlp, pricing, session
 from cardinal_core.paths import AgentPaths, atomic_write_json_compact
@@ -664,6 +665,63 @@ class Core020ApiTests(unittest.TestCase):
             self.assertLess(time.monotonic() - t0, 2.0, "empty ladder must not sleep")
         finally:
             stub.stop()
+
+
+class ActScopesTest(unittest.TestCase):
+    """The control-plane token's extra scopes, shared by every adapter's connect."""
+
+    def test_parse_splits_commas_and_dedupes(self):
+        self.assertEqual(
+            deviceflow.parse_act_scopes(["alerts:write,dashboards:write", "alerts:write"]),
+            ["alerts:write", "dashboards:write"],
+        )
+
+    def test_parse_rejects_unknown_scope(self):
+        with self.assertRaisesRegex(ValueError, "unknown scope 'admin:all'"):
+            deviceflow.parse_act_scopes(["admin:all"])
+
+    def test_defaults_add_every_extra_unless_minimal(self):
+        self.assertEqual(deviceflow.default_act_scopes([], False), list(deviceflow.ACT_EXTRA_SCOPES))
+        self.assertEqual(deviceflow.default_act_scopes(["telemetry:query"], False),
+                         ["telemetry:query", "dashboards:write", "alerts:write"])
+        self.assertEqual(deviceflow.default_act_scopes(["telemetry:query"], True), ["telemetry:query"])
+        self.assertEqual(deviceflow.default_act_scopes([], True), [])
+
+    def _start(self, rejected):
+        calls = []
+
+        def start(host, scopes, client_id):
+            calls.append(list(scopes))
+            if any(s in rejected for s in scopes):
+                raise deviceflow.DeviceFlowError("device-code init failed: invalid_scope")
+            return {"device_code": "dc"}
+        return calls, start
+
+    def test_fallback_drops_optional_scopes_once(self):
+        calls, start = self._start({"dashboards:write"})
+        logged = []
+        with mock.patch.object(deviceflow, "start_device_code", side_effect=start):
+            grant, requested = deviceflow.start_device_code_with_fallback(
+                "h", ["ingest:write"], ["maestro:act", "dashboards:write"], "c", log=logged.append)
+        self.assertEqual(grant, {"device_code": "dc"})
+        self.assertEqual(requested, ["ingest:write"])
+        self.assertEqual(calls, [["ingest:write", "maestro:act", "dashboards:write"], ["ingest:write"]])
+        self.assertIn("Retrying with scopes: ingest:write", logged)
+
+    def test_no_fallback_when_nothing_optional(self):
+        calls, start = self._start({"dashboards:write"})
+        with mock.patch.object(deviceflow, "start_device_code", side_effect=start), \
+                self.assertRaises(deviceflow.DeviceFlowError):
+            deviceflow.start_device_code_with_fallback(
+                "h", ["ingest:write", "dashboards:write"], ["dashboards:write"], "c", log=lambda _: None)
+        self.assertEqual(len(calls), 1)
+
+    def test_act_credential_needs_plaintext(self):
+        self.assertIsNone(deviceflow.act_credential({"act": {"key_id": "k"}}))
+        self.assertIsNone(deviceflow.act_credential(None))
+        act = {"api_key": "p", "key_id": "k"}
+        self.assertIs(deviceflow.act_credential({"act": act}), act)
+        self.assertEqual(deviceflow.act_granted_scopes(act), ["maestro:act"])
 
 
 if __name__ == "__main__":

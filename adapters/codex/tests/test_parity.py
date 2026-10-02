@@ -49,6 +49,10 @@ def golden(name: str):
     return json.loads((GOLDENS / f"{name}.json").read_text())
 
 
+ALL_SCOPES = ["ingest:write", "mcp:invoke", "maestro:act",
+              "dashboards:write", "alerts:write", "telemetry:query"]
+
+
 class StubCardinal:
     """HTTP stub for the full connect/status/disconnect + ingest surface.
     Ported verbatim from the source repo's test_cardinal_plugin.py."""
@@ -60,6 +64,10 @@ class StubCardinal:
         self.token_pending_count = 1
         self.token_calls = 0
         self.last_scopes: list[str] = []
+        self.device_code_calls: list[list[str]] = []
+        # Scopes /device/code rejects with 400 "unknown scope" — a maestro
+        # that predates dashboards:write / alerts:write / telemetry:query.
+        self.unknown_scopes: set[str] = set()
         self.mcp_status = 405
         self.ingest_status = 400
         self.revoke_status = 204
@@ -113,6 +121,12 @@ class StubCardinal:
                     except json.JSONDecodeError:
                         body = {}
                     outer.last_scopes = list(body.get("scopes") or [])
+                    outer.device_code_calls.append(outer.last_scopes)
+                    bad = [s for s in outer.last_scopes if s in outer.unknown_scopes]
+                    if bad:
+                        self._send_json(400, {"error": "invalid_scope",
+                                              "error_description": f"unknown scope: {bad[0]}"})
+                        return
                     self._send_json(201, {
                         "device_code": "dc-xyz",
                         "user_code": "ABCD-EFGH",
@@ -156,6 +170,17 @@ class StubCardinal:
                     }
                     if "mcp:invoke" not in outer.last_scopes:
                         bundle["mcp"] = None
+                    if "maestro:act" in outer.last_scopes:
+                        bundle["act"] = {
+                            "endpoint": outer.url(),
+                            "api_key": "ACTPLAINTEXT" + "z" * 52,
+                            "key_id": "act-key-uuid-1",
+                            "key_prefix": "ACTPLAIN",
+                            "created_at": "2026-10-02T00:00:00Z",
+                            "scopes": [s for s in outer.last_scopes
+                                       if s in ("maestro:act", "dashboards:write",
+                                                "alerts:write", "telemetry:query")],
+                        }
                     if outer.ingest_unavailable_reason:
                         bundle["ingest"] = None
                         bundle["limits"] = None
@@ -348,7 +373,7 @@ class ConnectTests(unittest.TestCase):
     def test_happy_path_writes_managed_config_and_state(self):
         result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(self.stub.last_scopes, ["ingest:write", "mcp:invoke"])
+        self.assertEqual(self.stub.last_scopes, ALL_SCOPES)
 
         config = read_toml(self.config)
         entry = config["mcp_servers"]["cardinal"]
@@ -365,6 +390,7 @@ class ConnectTests(unittest.TestCase):
         self.assertEqual(state["mcp_key_id"], "mcp-key-uuid-1")
         self.assertNotIn("MCPPLAINTEXT", self.state.read_text())
         self.assertNotIn("INGESTPLAINTEXT", self.state.read_text())
+        self.assertNotIn("ACTPLAINTEXT", self.state.read_text())
 
         secrets = read_json(self.secrets)
         self.assertTrue(secrets["ingest_api_key"].startswith("INGESTPLAINTEXT"))
@@ -395,6 +421,67 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("cardinal-codex-plugin", handler["command"])
         self.assertNotIn("statusMessage", handler)
         self.assertLessEqual(handler["timeout"], 5)
+
+    def test_connect_mints_act_token_for_migrate_from_grafana(self):
+        # migrate-from-grafana reads act_api_key / act_endpoint from the secrets
+        # file and act_scopes from the state file (cardinal_catalog.connect_info).
+        result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        secrets = read_json(self.secrets)
+        self.assertTrue(secrets["act_api_key"].startswith("ACTPLAINTEXT"))
+        self.assertEqual(secrets["act_endpoint"], self.stub.url())
+        self.assertEqual(self.secrets.stat().st_mode & 0o777, 0o600)
+        state = read_json(self.state)
+        self.assertEqual(state["act_key_id"], "act-key-uuid-1")
+        self.assertEqual(state["act_scopes"], ALL_SCOPES[2:])
+        self.assertIn("Actions: enabled (maestro:act, dashboards:write", result.stdout)
+        self.assertIn("read logs, metrics and", result.stdout)
+        self.assertNotIn("Not granted", result.stdout)
+
+    def test_named_scopes_are_accepted(self):
+        # The command migrate-from-grafana's reconnect hint prints.
+        result = run_script(
+            CONNECT,
+            ["--host", self.stub.url(), "dashboards:write", "alerts:write", "telemetry:query"],
+            self.home,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.stub.last_scopes, ALL_SCOPES)
+
+    def test_unknown_scope_is_rejected_before_any_request(self):
+        result = run_script(CONNECT, ["--host", self.stub.url(), "admin:all"], self.home)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown scope", result.stderr)
+        self.assertEqual(self.stub.device_code_calls, [])
+
+    def test_minimal_scopes_skips_act_token(self):
+        result = run_script(CONNECT, ["--host", self.stub.url(), "--minimal-scopes"], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.stub.last_scopes, ["ingest:write", "mcp:invoke"])
+        self.assertNotIn("act_api_key", read_json(self.secrets))
+        self.assertNotIn("act_key_id", read_json(self.state))
+        self.assertNotIn("Actions:", result.stdout)
+
+    def test_older_server_without_act_scopes_still_connects(self):
+        self.stub.unknown_scopes = {"maestro:act", "dashboards:write"}
+        result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(len(self.stub.device_code_calls), 2)
+        self.assertEqual(self.stub.last_scopes, ["ingest:write", "mcp:invoke"])
+        self.assertIn("unknown scope", result.stdout)
+        self.assertNotIn("act_key_id", read_json(self.state))
+
+    def test_rotate_without_act_token_revokes_the_prior_one(self):
+        first = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        self.stub.token_calls = 0
+        second = run_script(
+            CONNECT, ["--host", self.stub.url(), "--rotate", "--minimal-scopes"], self.home,
+        )
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+        self.assertIn(("act-key-uuid-1", "ACTPLAINTEXT" + "z" * 52), self.stub.revoke_calls)
+        self.assertNotIn("act_api_key", read_json(self.secrets))
+        self.assertNotIn("act_key_id", read_json(self.state))
 
     def test_repair_hooks_strips_legacy_semantic_dag_paths_without_auth(self):
         """Installs connected before the Semantic DAG removal still carry
@@ -617,6 +704,7 @@ class StatusAndDisconnectTests(unittest.TestCase):
         self.assertIn("OK ingest reachable", result.stdout)
         self.assertIn("MCP endpoint:", result.stdout)
         self.assertIn("OK MCP reachable", result.stdout)
+        self.assertIn("Actions:     enabled (maestro:act, dashboards:write", result.stdout)
 
     def test_disconnect_revokes_key_and_removes_managed_block(self):
         result = run_script(DISCONNECT, [], self.home)
@@ -624,6 +712,7 @@ class StatusAndDisconnectTests(unittest.TestCase):
         self.assertEqual(self.stub.revoke_calls, [
             ("ingest-key-uuid-1", "INGESTPLAINTEXT" + "y" * 48),
             ("mcp-key-uuid-1", "MCPPLAINTEXT" + "x" * 52),
+            ("act-key-uuid-1", "ACTPLAINTEXT" + "z" * 52),
         ])
         self.assertFalse(self.state.exists())
         self.assertFalse(self.secrets.exists())

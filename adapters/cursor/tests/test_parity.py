@@ -721,5 +721,122 @@ class SubagentTests(unittest.TestCase):
         self.assertEqual(len(self.hook.subagent_description_from_payload({"description": long})), 160)
 
 
+class ActTokenTests(unittest.TestCase):
+    """The control-plane token (maestro:act + dashboards:write / alerts:write /
+    telemetry:query) that migrate-from-grafana reads from the secrets and state
+    files. Device flow and probes are stubbed at cardinal_core.deviceflow."""
+
+    ALL = ["ingest:write", "mcp:invoke", "maestro:act",
+           "dashboards:write", "alerts:write", "telemetry:query"]
+    ACT = {
+        "endpoint": "https://cardinal.example",
+        "api_key": "ACTPLAINTEXT" + "z" * 52,
+        "key_id": "act-key-1",
+        "key_prefix": "ACTPLAIN",
+        "created_at": "2026-10-02T00:00:00Z",
+        "scopes": ["maestro:act", "dashboards:write", "alerts:write", "telemetry:query"],
+    }
+    MCP = {
+        "url": "https://cardinal.example/api/orgs/org-1/mcp",
+        "api_key": "MCPPLAINTEXT" + "x" * 52,
+        "key_id": "mcp-key-1",
+        "key_prefix": "MCPPLAIN",
+    }
+
+    def setUp(self) -> None:
+        self.home = _CursorHome()
+        self.connect = _load_module("cardinal_connect_act", SCRIPTS_DIR / "cardinal-connect")
+
+    def tearDown(self) -> None:
+        self.home.close()
+
+    def _bundle(self, act: dict | None) -> dict:
+        return {
+            "org": {"id": "org-1", "slug": "acme"},
+            "user": {"email": "dev@example.com"},
+            "mcp": dict(self.MCP), "ingest": None,
+            "ingest_unavailable_reason": "no_lakerunner_integration", "limits": None,
+            "act": act,
+        }
+
+    def _run(self, bundle: dict, extra_scopes=("dashboards:write", "alerts:write", "telemetry:query")):
+        args = argparse.Namespace(
+            host="https://cardinal.example", telemetry_only=False, deployment_env=None,
+            dry_run=False, project=False,
+            extra_scopes=list(extra_scopes), act_requested=True,
+        )
+        df = self.connect.deviceflow
+        out = io.StringIO()
+        with mock.patch.object(df, "poll_device_token", return_value=bundle), \
+                mock.patch.object(df, "verify_mcp_reachable", return_value=(True, "HTTP 405")), \
+                mock.patch.object(df, "revoke_maestro_key", return_value=(True, "HTTP 204")) as revoke, \
+                contextlib.redirect_stdout(out):
+            rc = self.connect.continue_after_grant(args, {"device_code": "dc", "interval": 1})
+        return rc, out.getvalue(), revoke
+
+    def _requested_scopes(self, argv: list[str]) -> list[list[str]]:
+        calls = []
+        df = self.connect.deviceflow
+
+        def start(host, scopes, client_id):
+            calls.append(list(scopes))
+            raise df.DeviceFlowError("stop here")
+
+        with mock.patch.object(sys, "argv", ["cardinal-connect", *argv]), \
+                mock.patch.object(df, "start_device_code", side_effect=start), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            self.connect.main()
+        return calls
+
+    def test_requests_act_token_and_extra_scopes_by_default(self) -> None:
+        calls = self._requested_scopes([])
+        # Rejected (as an older server would): retried once without the defaults.
+        self.assertEqual(calls, [self.ALL, ["ingest:write", "mcp:invoke"]])
+
+    def test_minimal_scopes_requests_no_act_token(self) -> None:
+        self.assertEqual(self._requested_scopes(["--minimal-scopes"]),
+                         [["ingest:write", "mcp:invoke"]])
+
+    def test_named_scope_is_required(self) -> None:
+        calls = self._requested_scopes(["--minimal-scopes", "telemetry:query"])
+        self.assertEqual(calls, [["ingest:write", "mcp:invoke", "maestro:act", "telemetry:query"]])
+
+    def test_writes_act_secret_and_state(self) -> None:
+        rc, out, revoke = self._run(self._bundle(dict(self.ACT)))
+        self.assertEqual(rc, 0, out)
+        secrets = json.loads((self.home.cursor / "cardinal-secrets.json").read_text())
+        self.assertEqual(secrets["act_api_key"], self.ACT["api_key"])
+        self.assertEqual(secrets["act_endpoint"], self.ACT["endpoint"])
+        state_text = (self.home.cursor / "cardinal.json").read_text()
+        self.assertNotIn("ACTPLAINTEXT", state_text)
+        state = json.loads(state_text)
+        self.assertEqual(state["act_key_id"], "act-key-1")
+        self.assertEqual(state["act_scopes"], self.ACT["scopes"])
+        self.assertIn("Actions: enabled (maestro:act, dashboards:write", out)
+        self.assertNotIn("Not granted", out)
+        revoke.assert_not_called()
+
+    def test_scopes_not_echoed_warns_not_granted(self) -> None:
+        act = dict(self.ACT)
+        del act["scopes"]
+        rc, out, _ = self._run(self._bundle(act))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Not granted: dashboards:write, alerts:write, telemetry:query", out)
+        state = json.loads((self.home.cursor / "cardinal.json").read_text())
+        self.assertEqual(state["act_scopes"], ["maestro:act"])
+
+    def test_reconnect_without_act_token_revokes_prior_one(self) -> None:
+        (self.home.cursor / "cardinal.json").write_text(json.dumps(
+            {"act_key_id": "old-act", "act_key_prefix": "OLDACT"}))
+        (self.home.cursor / "cardinal-secrets.json").write_text(json.dumps(
+            {"act_api_key": "OLDPLAINTEXT"}))
+        rc, out, revoke = self._run(self._bundle(None))
+        self.assertEqual(rc, 0, out)
+        revoke.assert_called_once_with("https://cardinal.example", "old-act", "OLDPLAINTEXT")
+        self.assertIn("Revoked prior control-plane token OLDACT", out)
+        self.assertIn("Cardinal returned no control-plane token", out)
+        self.assertNotIn("act_api_key", json.loads((self.home.cursor / "cardinal-secrets.json").read_text()))
+
+
 if __name__ == "__main__":
     unittest.main()
