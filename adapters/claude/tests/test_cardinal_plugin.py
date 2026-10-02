@@ -57,6 +57,10 @@ class StubMaestro:
         self.token_pending_count = 1
         self.token_calls = 0
         self.last_scopes: list[str] = []
+        self.device_code_calls: list[list[str]] = []
+        # Scopes /device/code rejects with 400 "unknown scope" — simulates a
+        # maestro that predates dashboards:write / alerts:write / telemetry:query.
+        self.unknown_scopes: set[str] = set()
         self.ingest_reachable_status = 400
         self.mcp_reachable_status = 405
         # When True, the /token response's ingest block carries
@@ -113,6 +117,12 @@ class StubMaestro:
                 except json.JSONDecodeError:
                     body = {}
                 outer.last_scopes = list(body.get("scopes") or [])
+                outer.device_code_calls.append(outer.last_scopes)
+                bad = [s for s in outer.last_scopes if s in outer.unknown_scopes]
+                if bad:
+                    self._send(400, {"error": "invalid_scope",
+                                     "error_description": f"unknown scope: {bad[0]}"})
+                    return
                 self._send(201, {
                     "device_code": "dc-xyz",
                     "user_code": "ABCD-EFGH",
@@ -421,37 +431,93 @@ class ConnectTests(unittest.TestCase):
         state = read_json(self.state)
         self.assertIn("act_key_id", state)
 
-    def test_connect_accepts_dashboards_and_alerts_write(self):
+    def test_connect_requests_extra_scopes_by_default(self):
+        # A plain connect must cover every skill that writes as the user, so
+        # nobody has to know to append the scopes by hand.
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(
+            self.stub.last_scopes,
+            ["ingest:write", "mcp:invoke", "maestro:act",
+             "dashboards:write", "alerts:write", "telemetry:query"],
+        )
+        self.assertEqual(
+            read_json(self.state)["act_scopes"],
+            ["maestro:act", "dashboards:write", "alerts:write", "telemetry:query"],
+        )
+        self.assertIn("read logs, metrics and", res.stdout)
+        self.assertNotIn("Not granted", res.stdout)
+
+    def test_connect_named_scopes_are_redundant_but_accepted(self):
         res = run_plugin(
             CONNECT,
-            ["--host", self.stub.url(), "dashboards:write", "alerts:write"],
+            ["--host", self.stub.url(), "dashboards:write", "alerts:write", "telemetry:query"],
             self.home,
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(
             self.stub.last_scopes,
-            ["ingest:write", "mcp:invoke", "maestro:act", "dashboards:write", "alerts:write"],
+            ["ingest:write", "mcp:invoke", "maestro:act",
+             "dashboards:write", "alerts:write", "telemetry:query"],
         )
-        state = read_json(self.state)
-        self.assertEqual(state["act_scopes"], ["maestro:act", "dashboards:write", "alerts:write"])
+
+    def test_minimal_scopes_requests_only_named(self):
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "--minimal-scopes"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.stub.last_scopes, ["ingest:write", "mcp:invoke", "maestro:act"])
+        self.assertEqual(read_json(self.state)["act_scopes"], ["maestro:act"])
         self.assertNotIn("Not granted", res.stdout)
 
-    def test_connect_accepts_telemetry_query(self):
-        res = run_plugin(CONNECT, ["--host", self.stub.url(), "telemetry:query"], self.home)
+    def test_minimal_scopes_with_named_scope(self):
+        res = run_plugin(
+            CONNECT, ["--host", self.stub.url(), "--minimal-scopes", "telemetry:query"], self.home,
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(self.stub.last_scopes[-1], "telemetry:query")
         self.assertIn("read logs, metrics and", res.stdout)
+        self.assertNotIn("dashboards:write", self.stub.last_scopes)
         self.assertEqual(read_json(self.state)["act_scopes"], ["maestro:act", "telemetry:query"])
 
     def test_connect_scopes_comma_separated_and_deduped(self):
         res = run_plugin(
             CONNECT,
-            ["--host", self.stub.url(), "alerts:write,dashboards:write", "alerts:write"],
+            ["--host", self.stub.url(), "--minimal-scopes",
+             "alerts:write,dashboards:write", "alerts:write"],
             self.home,
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(self.stub.last_scopes[-2:], ["alerts:write", "dashboards:write"])
         self.assertEqual(self.stub.last_scopes.count("alerts:write"), 1)
+
+    def test_older_server_without_extra_scopes_still_connects(self):
+        # Self-hosted maestro that predates the extra scopes 400s the whole
+        # device-code request; the default extras are dropped, not fatal.
+        self.stub.unknown_scopes = {"dashboards:write", "alerts:write", "telemetry:query"}
+        res = run_plugin(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(self.stub.device_code_calls), 2)
+        self.assertEqual(self.stub.last_scopes, ["ingest:write", "mcp:invoke", "maestro:act"])
+        self.assertIn("unknown scope", res.stdout)
+        self.assertEqual(read_json(self.state)["act_scopes"], ["maestro:act"])
+
+    def test_older_server_keeps_explicitly_named_scope(self):
+        # Fallback drops only the defaults; a scope the user named still goes.
+        self.stub.unknown_scopes = {"dashboards:write"}
+        res = run_plugin(CONNECT, ["--host", self.stub.url(), "telemetry:query"], self.home)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.stub.last_scopes,
+                         ["ingest:write", "mcp:invoke", "maestro:act", "telemetry:query"])
+
+    def test_explicitly_named_scope_rejected_fails(self):
+        # The user asked for it: don't silently connect without it.
+        self.stub.unknown_scopes = {"dashboards:write"}
+        res = run_plugin(
+            CONNECT, ["--host", self.stub.url(), "--minimal-scopes", "dashboards:write"], self.home,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("unknown scope", res.stderr)
+        self.assertEqual(len(self.stub.device_code_calls), 1)
+        self.assertFalse(self.state.exists())
 
     def test_connect_rejects_unknown_scope_before_any_request(self):
         res = run_plugin(CONNECT, ["--host", self.stub.url(), "admin:all"], self.home)
