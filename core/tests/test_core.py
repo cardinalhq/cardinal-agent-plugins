@@ -377,6 +377,14 @@ class SessionTests(unittest.TestCase):
 
 
 class DeviceFlowTests(unittest.TestCase):
+    def test_revoke_never_raises(self):
+        # A teardown must not abort halfway on one bad revoke.
+        for host in ("app.cardinalhq.io", "http://127.0.0.1:9", "http://[::1"):
+            with self.subTest(host=host):
+                ok, msg = deviceflow.revoke_maestro_key(host, "key-1", "plaintext")
+                self.assertFalse(ok)
+                self.assertNotIn("plaintext", msg)
+
     def test_derive_deployment_env(self) -> None:
         self.assertEqual(deviceflow.derive_deployment_env("https://app.cardinalhq.io"), "prod")
         self.assertEqual(deviceflow.derive_deployment_env("https://dogfood.cardinalhq.io"), "dogfood")

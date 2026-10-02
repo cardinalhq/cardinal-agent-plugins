@@ -447,6 +447,23 @@ class CacheOnlyPrResolverTests(unittest.TestCase):
 
 
 class SessionCacheTests(unittest.TestCase):
+    def test_a_state_recorded_under_another_connection_reads_as_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            block = sd.render_block([match()], has_get=True, scenes={SB1: [scene(1)]})
+            a = sd.connection_id({"origin": "https://x", "org": "o1", "key": "k1"})
+            b = sd.connection_id({"origin": "https://x", "org": "o1", "key": "k2"})
+            self.assertNotEqual(a, b)
+            self.assertIsNone(sd.connection_id({"origin": "https://x", "org": "o1", "key": None}))
+            sd.record_run(d, "s1", "feat", "a" * 40, block=block, conn_id=a)
+            self.assertEqual(sd.stored_block(d, "s1", a), block)
+            self.assertIsNone(sd.stored_block(d, "s1", b))
+            self.assertFalse(sd.should_run(d, "s1", "feat", "a" * 40, "UserPromptSubmit", conn_id=a))
+            self.assertTrue(sd.should_run(d, "s1", "feat", "a" * 40, "UserPromptSubmit", conn_id=b))
+            # A state from before connections were recorded is absent too.
+            sd.record_run(d, "s1", "feat", "a" * 40, block=block)
+            self.assertIsNone(sd.stored_block(d, "s1", a))
+
     def test_should_run_and_record_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / "state"
@@ -587,6 +604,31 @@ class FetchAndDiscoverTests(_RepoCase):
         self.fake.routes["find"] = (200, {"matches": [match()]})
         self.fake.routes["get"] = get_route({})
         self.assertTrue(self.discover().endswith(sd.FOOTER))
+
+    def test_a_block_found_with_another_connection_is_never_reused(self):
+        # Reconnecting as another user or org in a running (or resumed)
+        # session must not show the old connection's storyboards: not to a
+        # subagent, not as a pending block, not kept over a failed look.
+        self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
+        self.fake.routes["get"] = get_route({SB1: [scene(1)]})
+        self.assertIn(SB1, self.discover())
+        other = dict(self.fake.conn(), org="org-2", key="ck_other_user")
+        self.assertIsNone(self.discover(event="SubagentStart", conn=other))
+        self.assertEqual(self.discover(event="SubagentStart"), sd.stored_block(self.state, "sess-1"))
+        # A failed look under the new connection does not keep the old block.
+        self.fake.routes["find"] = (500, {"error": "boom"})
+        self.assertIsNone(self.discover(event="UserPromptSubmit", conn=other))
+        self.assertIsNone(self.discover(event="SubagentStart", conn=other))
+        self.assertNotIn(SB1, (self.state / "sess-1.json").read_text())
+        self.assertNotIn("ck_other_user", (self.state / "sess-1.json").read_text(), "the key is never stored")
+
+    def test_a_pending_block_is_not_delivered_under_another_connection(self):
+        self.fake.routes["find"] = (200, {"matches": [match(tier="branch")]})
+        self.fake.routes["get"] = get_route({SB1: [scene(1)]})
+        self.assertIsNone(self.discover(deliver_by=time.monotonic() - 1))
+        other = dict(self.fake.conn(), org="org-2", key="ck_other_user")
+        self.fake.routes["find"] = (200, {"matches": []})
+        self.assertIsNone(self.discover(event="UserPromptSubmit", conn=other))
 
     def test_no_key_or_no_org_sends_nothing(self):
         for conn in ({"origin": self.fake.origin, "org": "org-1", "key": None},
