@@ -138,6 +138,7 @@ FAKE_CHROMIUM = textwrap.dedent('''\
                     "targetId": "CV", "type": "iframe", "url": "about:srcdoc", "parentFrameId": "MAIN"}}}})
                 ev("Page.frameDetached", {{"frameId": "CV", "reason": "swap"}})
                 ev("Page.domContentEventFired", {{}})
+                ev("Page.loadEventFired", {{}})
             elif m == "Runtime.evaluate":
                 expr = p.get("expression", "")
                 if "abort(" in expr:

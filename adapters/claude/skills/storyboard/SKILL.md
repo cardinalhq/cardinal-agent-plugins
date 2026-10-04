@@ -118,3 +118,20 @@ investigation (note rcpt_ / ev_ ids)
 Publishing is final: published acts are immutable; storyboard__add_act adds the next act to
 the same storyboard and link. Hand over the `view_url`; if it is app-relative (a
 self-hosted install without `MAESTRO_BASE_URL`), prefix the Cardinal host.
+
+## The card
+
+The card is an act's link preview: what a posted link shows. When `storyboard__publish`
+lists `card` (an older Cardinal rejects it), pass it once the scenes are clean:
+- `headline`: the conclusion, one sentence, at most 140 characters. Every number in it
+  must be bound in this act, or publish refuses.
+- `headline_figure`: one bound number. `cover_scene`: the scene that shows the conclusion;
+  avoid scenes that bind raw rows.
+- Preview with `card`, Read the cover and the link-preview mock the hook reports, then
+  publish with the same `card`. After publish a hook uploads your render of the cover (or
+  hero) scene and says which image link previews use.
+
+Member link previews are on by default. Tell the person what a posted link shows
+(question, headline, counts, verdict, image). If they don't want it, pass
+`link_preview: false` when `storyboard__publish` lists `link_preview`, or use
+`storyboard__share` when its action lists `link_preview`.

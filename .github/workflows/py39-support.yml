@@ -72,6 +72,7 @@ jobs:
           import cardinal_core.evidence_promote
           import cardinal_core.storyboard_context
           import cardinal_core.storyboard_discovery
+          import cardinal_core.storyboard_hero
           print('ok: all core modules import under 3.9')
           "
 

@@ -59,6 +59,16 @@
         ]
       },
       {
+        "matcher": "mcp__(plugin_cardinal_)?cardinal__storyboard__publish",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-hero.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "mcp__(plugin_cardinal_)?cardinal__storyboard__(create|preview|add_act)",
         "hooks": [
           {
