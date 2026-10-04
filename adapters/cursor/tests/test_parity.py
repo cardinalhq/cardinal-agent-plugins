@@ -452,7 +452,7 @@ class JsonManagedBlockTests(unittest.TestCase):
         events = set(data["hooks"].keys())
         self.assertEqual(events, {
             "sessionStart", "beforeSubmitPrompt", "postToolUse", "postToolUseFailure",
-            "preCompact", "stop", "subagentStop",
+            "afterFileEdit", "preCompact", "stop", "subagentStop",
             "afterAgentResponse", "afterAgentThought",
         })
 

@@ -403,8 +403,12 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("SubagentStop", hooks["hooks"])
         self.assertIn("cardinal-codex-plugin", json.dumps(hooks))
         # Semantic DAG is gone: its PreToolUse tool hook is no longer
-        # registered.
-        self.assertNotIn("PreToolUse", hooks["hooks"])
+        # registered. The one PreToolUse group is storyboard context
+        # stamping, matched to Cardinal's storyboard tools only.
+        (stamp_group,) = hooks["hooks"]["PreToolUse"]
+        self.assertEqual(stamp_group["matcher"], "^mcp__cardinal__storyboard__(create|add_act|publish|find)$")
+        (handler,) = stamp_group["hooks"]
+        self.assertIn("--event StoryboardContext", handler["command"])
         self.assertNotIn("semantic-dag", json.dumps(hooks))
         # PostToolUse: hook-side decision emission (exact "Bash" matcher)
         # and generic evidence capture (".*", every tool). No status message
@@ -517,8 +521,10 @@ class ConnectTests(unittest.TestCase):
         self.assertNotIn(str(legacy_root), hook_text)
         self.assertNotIn("semantic-dag", hook_text)
         hooks = read_json(self.hooks)["hooks"]
-        # The stale groups held nothing else, so the events go away.
-        self.assertNotIn("PreToolUse", hooks)
+        # The stale groups held nothing else, so they go away; PreToolUse
+        # keeps only the storyboard context group.
+        self.assertEqual([g["matcher"] for g in hooks["PreToolUse"]],
+                         ["^mcp__cardinal__storyboard__(create|add_act|publish|find)$"])
         self.assertIn("SessionStart", hooks)
         self.assertTrue((self.home / ".codex" / "cardinal" / "cardinal-codex-telemetry.py").is_file())
         manifest = read_json(ROOT / ".codex-plugin" / "plugin.json")

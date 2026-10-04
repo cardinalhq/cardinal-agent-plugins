@@ -214,6 +214,9 @@ def run_hook(hook: Path, event: str, home: Path, stdin: dict,
               "CARDINAL_CODEX_DEBUG_PAYLOADS", "CARDINAL_DECISIONS",
               "CARDINAL_FIXTURE_GH", "CARDINAL_FIXTURE_GH_LOG"):
         env.pop(k, None)
+    # The goldens predate storyboard associations: their session-start text
+    # is pinned without it (tests/test_codex_storyboard.py covers it).
+    env["CARDINAL_STORYBOARD_SESSION_START"] = "0"
     if env_extra:
         env.update(env_extra)
     return subprocess.run(

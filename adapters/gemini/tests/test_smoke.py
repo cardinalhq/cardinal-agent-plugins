@@ -40,6 +40,9 @@ def run_hook(event: str, payload: dict, home: Path) -> subprocess.CompletedProce
     env = os.environ.copy()
     env["HOME"] = str(home)
     env.pop("GEMINI_SESSION_ID", None)
+    # "Not connected" means no MCP connection in the environment either.
+    env.pop("CARDINAL_MCP_URL", None)
+    env.pop("CARDINAL_MCP_API_KEY", None)
     return subprocess.run(
         [sys.executable, str(HOOK), "--event", event],
         input=json.dumps(payload).encode(),
