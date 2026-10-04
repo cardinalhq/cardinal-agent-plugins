@@ -17,7 +17,9 @@ their `scripts/cardinal-storyboard` launcher share:
     rewrite MCP input (Codex PreToolUse, Gemini BeforeTool; Cursor's
     beforeMCPExecution cannot). Never alters a context the model set and
     never writes `about`.
-  - cli_main: `cardinal-storyboard context | discover`.
+  - registered_hook_group / hooks_file_registers: whether the adapter's
+    stamping hook is actually registered (session start wording).
+  - cli_main: `cardinal-storyboard context [--bare] | discover`.
 
 State lives under the adapter's runtime dir (~/.<agent>/cardinal/):
 storyboard-discovery/ (per-session discovery cache), storyboard-files/,
@@ -189,24 +191,59 @@ def _connected(conn: Any) -> bool:
 
 def session_line(session_id: Optional[str], cli: Optional[str], auto_context: bool = False) -> Optional[str]:
     """The line naming this session's id and the context CLI, or None
-    without a valid id. auto_context: the adapter's pre-tool hook fills an
-    absent session_id / context itself (the CLI stays the fallback)."""
+    without a valid id. auto_context: the adapter's pre-tool hook is
+    registered and will fill an absent session_id / context itself (the CLI
+    stays the fallback); the adapter decides (registered_hook_group).
+
+    The command named is `context --bare`: it prints the context object
+    itself, so the model passes exactly what it reads, never the
+    {"context": ...} wrapper (A1's strict context rejects the unknown key
+    `context`). session_id is its own argument, never a context key."""
     if not valid_session(session_id):
         return None
     line = (f"Cardinal session id for this session: {session_id}. When you call Cardinal's "
             f"storyboard__create, storyboard__add_act or storyboard__find, pass it as session_id")
     if cli:
-        cmd = f'python3 "{cli}" context --session-id {session_id}'
+        cmd = f'python3 "{cli}" context --bare --session-id {session_id}'
         if auto_context:
             line += (f"; the plugin fills session_id and context when you leave them out, and "
-                     f"`{cmd}` prints the same context (where this storyboard is written from) "
-                     f"to pass yourself when it does not.")
+                     f"`{cmd}` prints that context object (where this storyboard is written from), "
+                     f"to pass yourself as `context`, exactly as printed, when it does not.")
         else:
-            line += (f", and pass as context the object `{cmd}` prints (where this storyboard is "
-                     f"written from: repo, branch, PR, HEAD, the files this session edited).")
+            line += (f", and pass as `context` the JSON object `{cmd}` prints, exactly as printed "
+                     f"(where this storyboard is written from: repo, branch, PR, HEAD, the files "
+                     f"this session edited). session_id is never a key inside context.")
     else:
         line += "."
     return line
+
+
+def registered_hook_group(hooks_root: Any, event: str, needle: str) -> bool:
+    """Whether hooks_root (a hooks.json / settings.json `hooks` map) has a
+    group under event with a handler whose command contains needle (the
+    adapter's `--event X # <marker>` tail). A plugin upgrade runs the new
+    hook code before the user re-registers hooks, so session start checks
+    this before telling the model the plugin fills context. Never raises."""
+    try:
+        groups = hooks_root.get(event) if isinstance(hooks_root, dict) else None
+        for group in groups if isinstance(groups, list) else []:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            for h in handlers if isinstance(handlers, list) else []:
+                if isinstance(h, dict) and needle in str(h.get("command") or ""):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def hooks_file_registers(path: Path, event: str, needle: str) -> bool:
+    """registered_hook_group over the `hooks` map of the JSON file at path;
+    False when it is missing or unreadable."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except Exception:
+        return False
+    return registered_hook_group(data.get("hooks") if isinstance(data, dict) else None, event, needle)
 
 
 def session_start_text(wiring: Wiring, cwd: str, session_id: Optional[str], *,
@@ -421,10 +458,11 @@ def stamped_input(wiring: Wiring, tool: str, tool_input: Any, session_id: Option
 CLI_DOC = """cardinal-storyboard — local facts for Cardinal Investigation Storyboards ({agent}).
 
 Commands:
-  context [--cwd DIR] [--session-id ID]
-      Print {{"context": {{...}}}} on one line: where this storyboard is being
-      written, for storyboard__find, storyboard__create and
-      storyboard__add_act to take as `context`. Fields (each only when
+  context [--cwd DIR] [--session-id ID] [--bare]
+      Print {{"context": {{...}}}} on one line (with --bare, only the inner
+      {{...}}): where this storyboard is being written. The INNER object is
+      what storyboard__find, storyboard__create and storyboard__add_act take
+      as `context`; never pass the wrapper. Fields (each only when
       known): repo, repo_path, branch (not main, master, develop or trunk),
       pr_number and pr_url (the branch's PR, from `gh`, cached), head_sha,
       workdir_hash, client ("{runtime}/<plugin version>"), actor_email (the
@@ -456,6 +494,8 @@ def cli_main(argv: Optional[list], wiring: Wiring, *, agent: str,
     context = sub.add_parser("context", help="print the context for storyboard__find / create / add_act")
     context.add_argument("--cwd", help="directory to describe (default: the current directory)")
     context.add_argument("--session-id", help="this session's id: adds the files it edited as paths")
+    context.add_argument("--bare", action="store_true",
+                         help="print only the context object (what the tools take as `context`)")
     discover = sub.add_parser("discover", help="print the storyboards this PR, branch or commit already has")
     discover.add_argument("--cwd", help="directory to look from (default: the current directory)")
     discover.add_argument("--json", action="store_true", help='print {"block": <text or null>}')
@@ -471,7 +511,8 @@ def cli_main(argv: Optional[list], wiring: Wiring, *, agent: str,
             ctx = wiring.collect(args.cwd or os.getcwd(), sid, gh=True)
         except Exception:
             ctx = {}
-        out.write(json.dumps({"context": ctx}, sort_keys=True, separators=(",", ":")) + "\n")
+        body = ctx if args.bare else {"context": ctx}
+        out.write(json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n")
         return 0
     if args.command == "discover":
         block = None

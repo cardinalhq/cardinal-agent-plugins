@@ -468,7 +468,12 @@ def handle_tool_evidence(payload: dict[str, Any]) -> None:
 
 STORYBOARD_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-storyboard"
 STORYBOARD_CONTEXT_EVENT = "StoryboardContext"
-STORYBOARD_TOOL_RE = re.compile(r"^mcp__cardinal__storyboard__(create|add_act|publish|find|link)$")
+# The four tools stamped_input fills (link's about refs are the model's);
+# the same set as cardinal-connect's PreToolUse matcher.
+STORYBOARD_TOOL_RE = re.compile(r"^mcp__cardinal__storyboard__(create|add_act|publish|find)$")
+# hooks.json's handler for the stamping hook (cardinal-connect
+# managed_hook_command("StoryboardContext")).
+STORYBOARD_CONTEXT_HOOK_NEEDLE = f"--event {STORYBOARD_CONTEXT_EVENT} # cardinal-codex-plugin"
 # Codex applies a PreToolUse updatedInput only together with
 # permissionDecision "allow" ("PreToolUse hook returned updatedInput without
 # permissionDecision:allow"), and whether that "allow" also skips an approval
@@ -491,6 +496,26 @@ def stamping_allowed(payload: dict[str, Any]) -> bool:
     if isinstance(value, str) and value.strip().lower() in STAMP_ALWAYS_VALUES:
         return True
     return payload.get("permission_mode") in STAMP_PERMISSION_MODES
+
+
+def stamping_registered() -> bool:
+    """Whether ~/.codex/hooks.json has the PreToolUse StoryboardContext
+    handler. The stable launcher runs the newest cached plugin's hook, so
+    after an upgrade this code runs before `cardinal-connect --repair-hooks`
+    has added the handler."""
+    from cardinal_core import storyboard_agent
+
+    return storyboard_agent.hooks_file_registers(Path.home() / ".codex" / "hooks.json", "PreToolUse",
+                                                 STORYBOARD_CONTEXT_HOOK_NEEDLE)
+
+
+def auto_context(payload: dict[str, Any], wiring) -> bool:
+    """Whether the PreToolUse hook will fill an absent session_id / context
+    in this session: allowed in this permission mode, not turned off with
+    CARDINAL_STORYBOARD_CONTEXT=0, and actually registered. Chosen from the
+    SessionStart permission_mode; a mid-session /approvals change is not
+    seen (the CLI fallback is named in both wordings)."""
+    return stamping_allowed(payload) and not wiring.context_disabled() and stamping_registered()
 
 
 def record_patch_edits(payload: dict[str, Any]) -> None:
@@ -521,6 +546,7 @@ def handle_storyboard_context(payload: dict[str, Any]) -> None:
     session_id / context (storyboard_agent.stamped_input). Prints nothing
     (the call runs unchanged) when nothing was added, when stamping is not
     allowed in this permission mode, or on any failure."""
+    dump_debug_payload("PreToolUse", payload)
     m = STORYBOARD_TOOL_RE.match(str(payload.get("tool_name") or ""))
     if not m or not stamping_allowed(payload):
         return
@@ -1090,9 +1116,10 @@ def handle_session_start(payload: dict[str, Any]) -> None:
         # well inside hooks.json's 5 s.
         from cardinal_core import storyboard_agent
 
+        wiring = storyboard_wiring()
         storyboard = storyboard_agent.session_start_text(
-            storyboard_wiring(), cwd, session_id_from_payload(payload),
-            auto_context=stamping_allowed(payload), deadline=min(started + 3.5, time.monotonic() + 2.0))
+            wiring, cwd, session_id_from_payload(payload),
+            auto_context=auto_context(payload, wiring), deadline=min(started + 3.5, time.monotonic() + 2.0))
         if storyboard:
             parts.append(storyboard)
     except Exception:

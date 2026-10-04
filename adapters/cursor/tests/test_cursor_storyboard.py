@@ -145,7 +145,8 @@ class CursorStoryboardTests(unittest.TestCase):
         self.connect()
         ctx = json.loads(self.run_hook(SESSION_START).stdout)["additional_context"]
         self.assertIn(f"Cardinal session id for this session: {CONV}.", ctx)
-        self.assertIn(f'pass as context the object `python3 "{CLI}" context --session-id {CONV}`', ctx)
+        self.assertIn(f'pass as `context` the JSON object `python3 "{CLI}" context --bare --session-id {CONV}` '
+                      f'prints, exactly as printed', ctx)
         self.assertNotIn("the plugin fills", ctx)
         self.assertIn(f"{SB1} · written from branch fix/checkout (subject not confirmed)", ctx)
         self.assertEqual(self.fake.requests[0]["headers"]["x-cardinal-client"], f"cursor/{VERSION}")

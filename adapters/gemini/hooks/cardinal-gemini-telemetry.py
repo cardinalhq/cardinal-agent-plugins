@@ -782,8 +782,13 @@ def capture_evidence(payload: dict[str, Any]) -> str | None:
 
 STORYBOARD_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-storyboard"
 STORYBOARD_SERVER = "cardinal"
-STORYBOARD_TOOL_RE = re.compile(r"^storyboard__(create|add_act|publish|find|link)$")
-STORYBOARD_FLAT_RE = re.compile(r"^mcp_cardinal_storyboard__(create|add_act|publish|find|link)$")
+# The four tools stamped_input fills (link's about refs are the model's);
+# the same set as the BeforeTool matcher.
+STORYBOARD_TOOL_RE = re.compile(r"^storyboard__(create|add_act|publish|find)$")
+STORYBOARD_FLAT_RE = re.compile(r"^mcp_cardinal_storyboard__(create|add_act|publish|find)$")
+# The BeforeTool handler cardinal-connect registers (extension hooks.json,
+# or settings.json without the extension).
+BEFORE_TOOL_HOOK_NEEDLE = f"--event BeforeTool # {SCOPE_NAME}"
 EDIT_TOOLS = ("write_file", "replace", "edit")
 
 
@@ -794,8 +799,8 @@ def storyboard_wiring():
 
 
 def storyboard_tool(payload: dict[str, Any]) -> str | None:
-    """The storyboard tool's short name (create, add_act, publish, find,
-    link) of a call to Cardinal's MCP server, else None. mcp_context
+    """The storyboard tool's short name (create, add_act, publish, find)
+    of a call to Cardinal's MCP server, else None. mcp_context
     {server_name, tool_name} first (the flattened mcp_<server>_<tool> name
     is ambiguous); the flattened name only without it."""
     mcp_context = payload.get("mcp_context")
@@ -840,11 +845,32 @@ def record_edit(payload: dict[str, Any]) -> None:
         pass
 
 
+def stamping_registered() -> bool:
+    """Whether a Cardinal BeforeTool handler is registered: in the installed
+    extension's hooks/hooks.json, or ~/.gemini/settings.json `hooks` (a
+    no-extension install). An upgraded plugin runs this code before
+    cardinal-connect has re-registered hooks (the old extension copy has
+    no BeforeTool)."""
+    from cardinal_core import storyboard_agent
+
+    gemini = Path.home() / ".gemini"
+    return any(storyboard_agent.hooks_file_registers(path, "BeforeTool", BEFORE_TOOL_HOOK_NEEDLE)
+               for path in (gemini / "extensions" / "cardinal" / "hooks" / "hooks.json",
+                            gemini / "settings.json"))
+
+
+def auto_context(wiring) -> bool:
+    """Whether BeforeTool will fill an absent session_id / context: not
+    turned off with CARDINAL_STORYBOARD_CONTEXT=0, and registered."""
+    return not wiring.context_disabled() and stamping_registered()
+
+
 def handle_before_tool(payload: dict[str, Any]) -> None:
     """BeforeTool on Cardinal's storyboard tools: fill an absent session_id /
     context (storyboard_agent.stamped_input) by returning the stamped
     tool_input. Prints nothing (the call runs unchanged) when nothing was
     added or on any failure; CARDINAL_STORYBOARD_CONTEXT=0 opts out."""
+    dump_debug_payload("BeforeTool", payload)
     tool = storyboard_tool(payload)
     if tool is None:
         return
@@ -1085,8 +1111,9 @@ def handle_session_start(payload: dict[str, Any]) -> None:
         # relate to this checkout (2 s network deadline; the hook has 10 s).
         from cardinal_core import storyboard_agent
 
+        wiring = storyboard_wiring()
         storyboard = storyboard_agent.session_start_text(
-            storyboard_wiring(), cwd, session_id_from_payload(payload), auto_context=True)
+            wiring, cwd, session_id_from_payload(payload), auto_context=auto_context(wiring))
         if storyboard:
             parts.append(storyboard)
     except Exception:

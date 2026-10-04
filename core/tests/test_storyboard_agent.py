@@ -112,12 +112,50 @@ class SessionLineTests(unittest.TestCase):
         line = sa.session_line(SESSION, "/p/scripts/cardinal-storyboard")
         self.assertTrue(line.startswith(f"Cardinal session id for this session: {SESSION}."))
         self.assertIn("pass it as session_id", line)
-        self.assertIn(f'`python3 "/p/scripts/cardinal-storyboard" context --session-id {SESSION}`', line)
-        self.assertIn("pass as context the object", line)
+        self.assertIn(f'`python3 "/p/scripts/cardinal-storyboard" context --bare --session-id {SESSION}`', line)
+        # --bare prints the object itself: what the model reads is what it passes
+        # (the {"context": ...} wrapper would be an unknown context key -> 400).
+        self.assertIn("pass as `context` the JSON object", line)
+        self.assertIn("exactly as printed", line)
+        self.assertIn("session_id is never a key inside context", line)
 
     def test_auto_context_wording(self):
         line = sa.session_line(SESSION, "/p/cs", auto_context=True)
         self.assertIn("the plugin fills session_id and context when you leave them out", line)
+        self.assertIn(f'`python3 "/p/cs" context --bare --session-id {SESSION}`', line)
+        self.assertIn("to pass yourself as `context`, exactly as printed", line)
+
+    def test_never_suggests_session_id_inside_context(self):
+        for auto in (False, True):
+            line = sa.session_line(SESSION, "/p/cs", auto_context=auto)
+            self.assertIn("pass it as session_id", line)
+            self.assertNotIn("session_id inside context,", line)
+            self.assertNotIn('"session_id"', line)
+            self.assertNotIn("wrapper", line)
+
+
+class RegisteredHookTests(unittest.TestCase):
+    CODEX = {"PreToolUse": [{"matcher": "^mcp__cardinal__storyboard__(create)$", "hooks": [
+        {"type": "command", "command": "python3 /h/.codex/cardinal/l.py --event StoryboardContext # cardinal-codex-plugin"}]}]}
+
+    def test_finds_the_managed_handler(self):
+        needle = "--event StoryboardContext # cardinal-codex-plugin"
+        self.assertTrue(sa.registered_hook_group(self.CODEX, "PreToolUse", needle))
+        self.assertFalse(sa.registered_hook_group(self.CODEX, "PostToolUse", needle))
+        self.assertFalse(sa.registered_hook_group(self.CODEX, "PreToolUse", "--event Other"))
+
+    def test_junk_is_false(self):
+        for junk in (None, [], {"PreToolUse": "x"}, {"PreToolUse": [None, {"hooks": "x"}, {"hooks": [1]}]}):
+            self.assertFalse(sa.registered_hook_group(junk, "PreToolUse", "--event"))
+
+    def test_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "hooks.json"
+            self.assertFalse(sa.hooks_file_registers(path, "PreToolUse", "StoryboardContext"))
+            path.write_text("{not json")
+            self.assertFalse(sa.hooks_file_registers(path, "PreToolUse", "StoryboardContext"))
+            path.write_text(json.dumps({"hooks": self.CODEX}))
+            self.assertTrue(sa.hooks_file_registers(path, "PreToolUse", "StoryboardContext"))
 
     def test_invalid_id_is_no_line(self):
         self.assertIsNone(sa.session_line(None, "/p/cs"))
@@ -239,6 +277,16 @@ class CliTests(_Case):
         self.assertEqual((ctx["repo"], ctx["branch"], ctx["paths"]), (REPO, "fix/eng-12-cache", ["pkg/a.py"]))
         self.assertIn("head_sha", ctx)
         self.assertNotIn("actor_email", ctx)  # not connected: no user_email stored
+
+    def test_context_bare_prints_the_object_itself(self):
+        sa.record_edits(self.wiring, SESSION, ["pkg/a.py"], str(self.repo))
+        _, wrapped = self.run_cli("context", "--cwd", str(self.repo), "--session-id", SESSION)
+        code, out = self.run_cli("context", "--bare", "--cwd", str(self.repo), "--session-id", SESSION)
+        self.assertEqual(code, 0)
+        bare = json.loads(out)
+        self.assertNotIn("context", bare)
+        self.assertEqual(bare, json.loads(wrapped)["context"])
+        self.assertEqual(bare["repo"], REPO)
 
     def test_context_session_from_env(self):
         sa.record_edits(self.wiring, SESSION, ["pkg/a.py"], str(self.repo))

@@ -67,7 +67,12 @@ that may relate to the checkout are shown at session start. Shared logic:
 - **SessionStart** (the existing hook): when Cardinal MCP is connected,
   `additionalContext` names this session's id (for `storyboard__create`,
   `storyboard__add_act` and `storyboard__find` `session_id`) and
-  `scripts/cardinal-storyboard context --session-id <id>`, plus the
+  `scripts/cardinal-storyboard context --bare --session-id <id>` (the
+  `context` object itself; without `--bare` it is wrapped in
+  `{"context": {…}}`). It says the plugin fills context only when the
+  `BeforeTool` handler is registered (the installed extension's
+  `hooks/hooks.json`, or `settings.json`) and not turned off; otherwise it
+  names the CLI as the way to pass it. Plus the
   storyboards that may relate to this branch, PR or commit (at most 3, 2 KB,
   framed as data; gh cache only, a 2 s network deadline,
   `X-Cardinal-Client: gemini/<plugin version>`). Off:

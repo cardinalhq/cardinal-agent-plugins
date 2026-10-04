@@ -158,6 +158,24 @@ class GeminiStoryboardTests(unittest.TestCase):
                                                           "user_email": "dev@example.com"}))
         (gemini / "cardinal-secrets.json").write_text(json.dumps({"mcp_api_key": "ck_gemini_test"}))
 
+    def register_stamping(self, where: str = "extension"):
+        """The BeforeTool group as cardinal-connect writes it: into the
+        installed extension's hooks/hooks.json, or settings.json `hooks`."""
+        group = {"matcher": "storyboard__(create|add_act|publish|find)$", "cardinalManaged": True,
+                 "hooks": [{"type": "command", "timeout": 10000,
+                            "command": f"python3 {HOOK} --event BeforeTool # cardinal-gemini-plugin"}]}
+        gemini = self.home / ".gemini"
+        if where == "extension":
+            path = gemini / "extensions" / "cardinal" / "hooks" / "hooks.json"
+            path.parent.mkdir(parents=True)
+        else:
+            path = gemini / "settings.json"
+        path.write_text(json.dumps({"hooks": {"BeforeTool": [group]}}))
+
+    def session_context(self, **env: str) -> str:
+        out = self.run_hook("SessionStart", SESSION_START, **env).stdout
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
     def env(self, **extra: str) -> dict:
         env = {"HOME": str(self.home), "PATH": self.path, "CARDINAL_GEMINI_INLINE_BACKGROUND": "1"}
         env.update(extra)
@@ -178,16 +196,40 @@ class GeminiStoryboardTests(unittest.TestCase):
 
     def test_session_start_names_the_session_and_discovers(self):
         self.connect()
+        self.register_stamping()
         out = json.loads(self.run_hook("SessionStart", SESSION_START).stdout)["hookSpecificOutput"]
         self.assertEqual(out["hookEventName"], "SessionStart")
         ctx = out["additionalContext"]
         self.assertIn("one branch = one initiative", ctx)
         self.assertIn(f"Cardinal session id for this session: {SESSION}.", ctx)
-        self.assertIn(f'`python3 "{CLI}" context --session-id {SESSION}`', ctx)
+        self.assertIn(f'`python3 "{CLI}" context --bare --session-id {SESSION}`', ctx)
+        self.assertIn("the plugin fills session_id and context when you leave them out", ctx)
         self.assertIn(f"{SB1} · written from branch fix/checkout (subject not confirmed)", ctx)
         find = self.fake.requests[0]
         self.assertEqual(find["headers"]["x-cardinal-client"], f"gemini/{VERSION}")
         self.assertEqual(find["headers"]["x-cardinalhq-api-key"], "ck_gemini_test")
+
+    CLI_WORDING = "pass as `context` the JSON object `python3 \"{cli}\" context --bare --session-id {sid}` prints, exactly as printed"
+
+    def assert_cli_wording(self, ctx: str):
+        self.assertIn(self.CLI_WORDING.format(cli=CLI, sid=SESSION), ctx)
+        self.assertNotIn("the plugin fills", ctx)
+
+    def test_session_start_settings_registration_is_automatic(self):
+        self.connect()
+        self.register_stamping("settings")
+        self.assertIn("the plugin fills session_id and context", self.session_context())
+
+    def test_session_start_without_before_tool_points_at_the_cli(self):
+        # Upgraded plugin, old extension hooks.json (no BeforeTool) until
+        # cardinal-connect re-registers.
+        self.connect()
+        self.assert_cli_wording(self.session_context())
+
+    def test_session_start_context_opt_out_points_at_the_cli(self):
+        self.connect()
+        self.register_stamping()
+        self.assert_cli_wording(self.session_context(CARDINAL_STORYBOARD_CONTEXT="0"))
 
     def test_session_start_outside_a_repo_is_the_session_line_only(self):
         self.connect()
@@ -206,6 +248,14 @@ class GeminiStoryboardTests(unittest.TestCase):
         head = _git(self.repo, "rev-parse", "HEAD")
         self.assertEqual((ctx["repo"], ctx["branch"], ctx["head_sha"]), ("acme/widgets", "fix/checkout", head))
         self.assertEqual(ctx["paths"], ["hello.txt"])
+
+    def test_cli_bare_prints_the_object_itself(self):
+        res = subprocess.run([sys.executable, str(CLI), "context", "--bare", "--cwd", str(self.repo)],
+                             capture_output=True, text=True, env=self.env(), timeout=30)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        bare = json.loads(res.stdout)
+        self.assertNotIn("context", bare)
+        self.assertEqual((bare["repo"], bare["branch"]), ("acme/widgets", "fix/checkout"))
 
     def test_failed_edit_is_not_recorded(self):
         failed = {**AFTER_WRITE, "tool_response": {"llmContent": "Error: permission denied",

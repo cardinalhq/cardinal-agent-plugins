@@ -149,6 +149,18 @@ class CodexStoryboardTests(unittest.TestCase):
                                                          "user_email": "dev@example.com"}))
         (codex / "cardinal-secrets.json").write_text(json.dumps({"mcp_api_key": "ck_codex_test"}))
 
+    def register_stamping(self):
+        """~/.codex/hooks.json as cardinal-connect writes the PreToolUse group."""
+        (self.home / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{
+            "matcher": "^mcp__cardinal__storyboard__(create|add_act|publish|find)$",
+            "hooks": [{"type": "command", "timeout": 5, "command":
+                       f"python3 {self.home}/.codex/cardinal/cardinal-codex-telemetry.py "
+                       "--event StoryboardContext # cardinal-codex-plugin"}]}]}}))
+
+    def session_context(self, payload: dict = None, **env: str) -> str:
+        out = self.run_hook("SessionStart", payload or SESSION_START, **env).stdout
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
     def env(self, **extra: str) -> dict:
         env = {"HOME": str(self.home), "PATH": self.path}
         env.update(extra)
@@ -171,12 +183,13 @@ class CodexStoryboardTests(unittest.TestCase):
 
     def test_session_start_names_the_session_and_discovers(self):
         self.connect()
+        self.register_stamping()
         out = json.loads(self.run_hook("SessionStart", SESSION_START).stdout)["hookSpecificOutput"]
         self.assertEqual(out["hookEventName"], "SessionStart")
         ctx = out["additionalContext"]
         self.assertIn("one branch = one initiative", ctx)  # the convention prompt is kept
         self.assertIn(f"Cardinal session id for this session: {SESSION}.", ctx)
-        self.assertIn(f'`python3 "{CLI}" context --session-id {SESSION}`', ctx)
+        self.assertIn(f'`python3 "{CLI}" context --bare --session-id {SESSION}`', ctx)
         self.assertIn("the plugin fills session_id and context when you leave them out", ctx)
         self.assertIn(f"{SB1} · written from branch fix/checkout (subject not confirmed)", ctx)
         find = self.fake.requests[0]
@@ -184,12 +197,27 @@ class CodexStoryboardTests(unittest.TestCase):
         self.assertEqual(find["headers"]["x-cardinal-client"], f"codex/{VERSION}")
         self.assertEqual(find["headers"]["x-cardinalhq-api-key"], "ck_codex_test")
 
+    CLI_WORDING = "pass as `context` the JSON object `python3 \"{cli}\" context --bare --session-id {sid}` prints, exactly as printed"
+
+    def assert_cli_wording(self, ctx: str):
+        self.assertIn(self.CLI_WORDING.format(cli=CLI, sid=SESSION), ctx)
+        self.assertNotIn("the plugin fills", ctx)
+
     def test_session_start_default_mode_points_at_the_cli(self):
         self.connect()
-        payload = {**SESSION_START, "permission_mode": "default"}
-        ctx = json.loads(self.run_hook("SessionStart", payload).stdout)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("pass as context the object", ctx)
-        self.assertNotIn("the plugin fills", ctx)
+        self.register_stamping()
+        self.assert_cli_wording(self.session_context({**SESSION_START, "permission_mode": "default"}))
+
+    def test_session_start_without_registered_stamping_points_at_the_cli(self):
+        # Upgraded plugin, hooks.json not yet repaired: no PreToolUse group.
+        self.connect()
+        self.assert_cli_wording(self.session_context())
+        self.assert_cli_wording(self.session_context(CARDINAL_STORYBOARD_CONTEXT="always"))
+
+    def test_session_start_context_opt_out_points_at_the_cli(self):
+        self.connect()
+        self.register_stamping()
+        self.assert_cli_wording(self.session_context(CARDINAL_STORYBOARD_CONTEXT="0"))
 
     def test_session_start_not_connected_is_unchanged(self):
         ctx = json.loads(self.run_hook("SessionStart", SESSION_START).stdout)["hookSpecificOutput"]["additionalContext"]

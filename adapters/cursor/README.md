@@ -99,8 +99,9 @@ Shared logic: `cardinal_core.storyboard_agent`.
 - **sessionStart** (the existing hook): when Cardinal MCP is connected,
   `additional_context` names this conversation's id (for
   `storyboard__create`, `storyboard__add_act` and `storyboard__find`
-  `session_id`) and `scripts/cardinal-storyboard context --session-id <id>`,
-  whose output is the `context` to pass, plus the storyboards that may
+  `session_id`) and `scripts/cardinal-storyboard context --bare --session-id
+  <id>`, which prints the `context` object itself to pass (without `--bare`
+  it is wrapped in `{"context": {…}}`), plus the storyboards that may
   relate to this branch, PR or commit (at most 3, 2 KB, framed as data; gh
   cache only, a 2 s network deadline, `X-Cardinal-Client: cursor/<plugin
   version>`). Off: `CARDINAL_STORYBOARD_DISCOVERY=0` (the storyboards) or

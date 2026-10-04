@@ -231,8 +231,9 @@ that may relate to the checkout are shown at session start. Shared logic:
 - **SessionStart** (the existing hook): when Cardinal MCP is connected, the
   additional context names this session's id (for `storyboard__create`,
   `storyboard__add_act` and `storyboard__find` `session_id`) and
-  `scripts/cardinal-storyboard context --session-id <id>`, whose output is
-  the `context` to pass, plus the storyboards that may relate to this
+  `scripts/cardinal-storyboard context --bare --session-id <id>`, which
+  prints the `context` object itself to pass (without `--bare` it prints
+  `{"context": {…}}`; only the inner object is `context`), plus the storyboards that may relate to this
   branch, PR or commit (at most 3, 2 KB, framed as data; gh cache only, a
   2 s network deadline, `X-Cardinal-Client: codex/<plugin version>`). Off:
   `CARDINAL_STORYBOARD_DISCOVERY=0` (the storyboards) or
@@ -251,8 +252,20 @@ that may relate to the checkout are shown at session start. Shared logic:
   `permissionDecision: "allow"`, and whether that also skips an approval
   prompt is not verified, so the hook stamps only in `bypassPermissions`
   mode, or in every mode with `CARDINAL_STORYBOARD_CONTEXT=always`.
-  Elsewhere the agent passes `cardinal-storyboard context` (the SessionStart
-  text says which). `CARDINAL_STORYBOARD_CONTEXT=0` turns it off.
+  **`always` may skip Codex's approval prompt for storyboard writes,
+  including `storyboard__publish`**: the hook's `"allow"` is sent on every
+  stamped `create`, `add_act`, `publish` and `find` call, so set it only if
+  you accept that. Elsewhere the agent passes `cardinal-storyboard context
+  --bare` itself. The SessionStart text says the plugin fills context only
+  when stamping applies in the session's permission mode, is not turned
+  off, and `~/.codex/hooks.json` has the `StoryboardContext` handler (an
+  upgraded plugin runs before `--repair-hooks` adds it); otherwise it names
+  the CLI. The wording follows the permission mode at session start; a
+  later `/approvals` change is not reflected (the CLI is named either way).
+  `CARDINAL_STORYBOARD_CONTEXT=0` turns it off.
+- Without `--session-id` the storyboard CLI tries `CODEX_SESSION_ID` /
+  `OPENAI_CODEX_SESSION_ID`; no capture shows Codex setting either, so the
+  SessionStart text always passes `--session-id`.
 
 Evidence (codex-cli 0.142.5, captured 2026-10-03 with a scratch
 `CODEX_HOME`): `apply_patch` arrives as `tool_input.command` (the patch) with
