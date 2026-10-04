@@ -175,5 +175,42 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(re.match(r"^[0-9a-f]{32}$", sc.workdir_hash("/x", "h")))
 
 
+
+class AssociationsContextTests(_TmpCase):
+    def test_protected_branch_is_omitted_and_no_pr_lookup(self):
+        for branch in ("main", "master", "develop", "trunk"):
+            root = self.dir / branch
+            root.mkdir()
+            _make_repo(root, branch)
+            seen = []
+            ctx = sc.collect(str(root), client=CLIENT, pr_resolver=lambda *a: seen.append(a) or (1, None))
+            self.assertNotIn("branch", ctx, branch)
+            self.assertNotIn("pr_number", ctx, branch)
+            self.assertEqual(seen, [], branch)
+            self.assertIn("head_sha", ctx)
+
+    def test_paths_only_with_edited_paths_and_a_repo(self):
+        _make_repo(self.dir)
+        self.assertNotIn("paths", sc.collect(str(self.dir), client=CLIENT))
+        asked = []
+
+        def edited(repo):
+            asked.append(repo)
+            return ["pkg/a/f.txt", "/etc/passwd", "../x", "pkg/a/f.txt", "b.ts"]
+
+        ctx = sc.collect(str(self.dir), client=CLIENT, edited_paths=edited)
+        self.assertEqual(asked, ["cardinalhq/conductor"])
+        self.assertEqual(ctx["paths"], ["pkg/a/f.txt", "b.ts"])
+        self.assertEqual(sc.collect(str(self.dir), client=CLIENT, edited_paths=lambda r: [])
+                         .get("paths"), None)
+        self.assertNotIn("paths", sc.collect(str(self.dir), client=CLIENT, edited_paths=lambda r: 1 / 0))
+        many = sc.collect(str(self.dir), client=CLIENT, edited_paths=lambda r: [f"f{i}.ts" for i in range(80)])
+        self.assertEqual(len(many["paths"]), sc.MAX_PATHS)
+
+    def test_no_paths_outside_git(self):
+        ctx = sc.collect(str(self.dir), client=CLIENT, edited_paths=lambda r: ["a.ts"])
+        self.assertNotIn("paths", ctx)
+
+
 if __name__ == "__main__":
     unittest.main()

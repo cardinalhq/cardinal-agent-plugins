@@ -516,5 +516,67 @@ class EvidenceCaptureHookTests(unittest.TestCase):
         self.assertTrue(os.access(HOOK, os.X_OK))
 
 
+
+class EditedFilesRecordTests(unittest.TestCase):
+    """A successful Edit / Write / MultiEdit / NotebookEdit records the file's
+    repo-relative path for the session (storyboard context.paths), inside
+    this same hook run."""
+
+    def setUp(self):
+        if not VENDORED.exists():
+            self.skipTest("cardinal_core not vendored — run: python3 build/vendor.py claude")
+        self.tmp = TemporaryDirectory()
+        self.home = Path(os.path.realpath(self.tmp.name))
+        self.repo = self.home / "work"
+        (self.repo / "pkg").mkdir(parents=True)
+        for args in (["init", "-q"], ["remote", "add", "origin", "https://github.com/Acme/Widgets.git"]):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+        self.files = self.home / ".claude" / "cardinal" / "storyboard-files" / f"{SESSION}.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, payload: dict, **env) -> None:
+        res = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True,
+                             timeout=30, env={"HOME": str(self.home), "PATH": os.environ.get("PATH", ""), **env},
+                             cwd=str(self.repo))
+        self.assertEqual((res.returncode, res.stderr), (0, ""))
+
+    def _payload(self, tool: str, tool_input: dict, event: str = "PostToolUse") -> dict:
+        body = {"session_id": SESSION, "cwd": str(self.repo), "hook_event_name": event, "tool_name": tool,
+                "tool_input": tool_input, "tool_use_id": "toolu_01"}
+        if event == "PostToolUse":
+            body["tool_response"] = {"filePath": tool_input.get("file_path"), "success": True}
+        else:
+            body["error"] = "String to replace not found"
+        return body
+
+    def recorded(self) -> list:
+        if not self.files.is_file():
+            return []
+        return [f["path"] for f in json.loads(self.files.read_text())["files"]]
+
+    def test_edit_tools_record_the_repo_relative_path(self):
+        self._run(self._payload("Edit", {"file_path": str(self.repo / "pkg" / "a.ts"), "old_string": "a",
+                                         "new_string": "b"}))
+        self._run(self._payload("Write", {"file_path": "pkg/b.ts", "content": "x"}))
+        self._run(self._payload("NotebookEdit", {"notebook_path": str(self.repo / "nb.ipynb"), "new_source": "x"}))
+        self._run(self._payload("MultiEdit", {"file_path": str(self.repo / "pkg" / "a.ts"), "edits": []}))
+        self.assertEqual(self.recorded(), ["pkg/a.ts", "nb.ipynb", "pkg/b.ts"])
+        self.assertEqual(stat.S_IMODE(self.files.stat().st_mode), 0o600)
+        self.assertNotIn(str(self.home), json.dumps(json.loads(self.files.read_text())["files"]))
+
+    def test_failed_edits_and_other_tools_are_not_recorded(self):
+        self._run(self._payload("Edit", {"file_path": str(self.repo / "pkg" / "a.ts")}, event="PostToolUseFailure"))
+        self._run(self._payload("Read", {"file_path": str(self.repo / "pkg" / "a.ts")}))
+        self.assertEqual(self.recorded(), [])
+
+    def test_recorded_even_with_capture_off(self):
+        self._run(self._payload("Edit", {"file_path": str(self.repo / "pkg" / "a.ts")}),
+                  CARDINAL_EVIDENCE_CAPTURE="0")
+        self.assertEqual(self.recorded(), ["pkg/a.ts"])
+        self.assertFalse((self.home / ".cardinal" / "evidence" / SESSION).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

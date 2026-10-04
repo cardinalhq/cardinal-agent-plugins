@@ -120,6 +120,8 @@ class StoryboardSkillTextTests(unittest.TestCase):
             # SessionStart hook (hooks/storyboard-session.py)
             '"Cardinal session id for this session: …"',
             "Pass it to `storyboard__create`, `storyboard__find` and `storyboard__add_act`",
+            # PreToolUse context hook (hooks/storyboard-context.py)
+            "the context hook adds it if you forget",
             # PostToolUse preview hook (hooks/storyboard-preview.py)
             "a plugin hook renders each scene with your local Chromium and reports the PNG paths",
             "Read every PNG",
@@ -175,6 +177,17 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "on every storyboard request, before `storyboard__create`",
             "storyboard__find {session_id, context}",
             "follow its `rule`",
+            # Associations (plugin 0.40): context is stamped by the hook, the
+            # CLI is the fallback; continue only on may_continue; `about` is
+            # declared only when the server lists it, checkout only for this
+            # branch's / PR's change, never for an incident; link after the PR.
+            "A plugin hook adds `session_id` and `context` (where you write from)",
+            "pass `cardinal-storyboard context`'s `{\"context\": {…}}`",
+            "continue without asking only on `may_continue` true",
+            "If storyboard__create lists `about`",
+            "`{checkout: true}` only when it explains this branch's or PR's change",
+            "ask if unsure; never for an incident",
+            "`storyboard__link {storyboard_id, add: {prs: [N]}}` (or `{commits: [<merge sha>]}`)",
             "same_session",
             "`yours` both true",
             "storyboard__add_act",
@@ -216,17 +229,15 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "description `<why> · <act_count> acts · updated <relative time>`",
             # <why>, exactly one of:
             "`same session`",
-            "same PR",
-            "`same PR <repo>#<pr_number>`",
-            "same branch",
-            "`same branch <branch>`",
-            "same directory",
-            "`same directory <repo_path>`",
+            "`<why>` names the role",
+            "`about <kind> <value>`",
+            "`written from branch <branch>`",
+            "`written from the checkout of PR <repo>#<pr_number>`",
+            "Never call a written_from match the same PR",
             "`same repo <repo>`",
-            "`same working directory`",
             "`your storyboard`",
             # which matches: strong <= 3, else one weak one from the last 7 days
-            "strong matches (`match` session, pr, branch, repo_path), at most 3",
+            "strong matches (`match` session, or `match_role` about), then written_from ones, at most 3",
             "at most 1 weak match (repo, workdir, actor)",
             "7 days",
             "create without asking",
@@ -322,12 +333,16 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # card" (headline / figure / cover, preview-then-publish with the same
         # card, the hero upload, member link previews on by default) plus the
         # canvas skill's cover-and-mock paragraph (rich unfurls H3/H1) took it
-        # to 2652 words / 278 lines. No headroom left: trim before adding.
+        # to 2652 words / 278 lines. Storyboard associations (plugin 0.40:
+        # automatic context, `about`, storyboard__link, may_continue,
+        # role-named ask labels) replaced the context paste step and the
+        # "same PR" labels and still added 9 lines / 110 words: 2762 / 287.
+        # No headroom left: trim before adding.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)
-        self.assertLessEqual(total, 280)
+        self.assertLessEqual(total, 290)
         words = sum(len(p.read_text().split()) for p in paths)
-        self.assertLessEqual(words, 2660)
+        self.assertLessEqual(words, 2770)
 
 
 if __name__ == "__main__":

@@ -64,16 +64,23 @@ Captured evidence stays on this machine meanwhile and can be cited after connect
 ## Update, don't duplicate
 
 If `storyboard__find` is listed, on every storyboard request, before `storyboard__create`:
-1. Run `cardinal-storyboard context`; it prints `{"context": {…}}`.
-2. Call `storyboard__find {session_id, context}` and follow its `rule`: continue silently
-   only an `open_act` with `same_session` and `yours` both true.
+1. A plugin hook adds `session_id` and `context` (where you write from) when you leave them
+   out. A result without context: pass `cardinal-storyboard context`'s `{"context": {…}}`.
+2. Call `storyboard__find {session_id, context}` (plus `refs`, if listed, for PRs, commits,
+   files or issues named) and follow its `rule`: continue without asking only on
+   `may_continue` true (older Cardinal: continue silently only an `open_act` with
+   `same_session` and `yours` both true).
 3. Otherwise ask (below). All acts published: `storyboard__add_act {storyboard_id, title,
    session_id, context}`; an open act you can write: continue it. New, or no
    `storyboard__add_act` listed: `storyboard__create` with `context`.
-4. Publish answers `public_links_decision_required`: ask the person if public links should
+4. If storyboard__create lists `about`: `{checkout: true}` only when it explains this
+   branch's or PR's change (ask if unsure; never for an incident); else the PRs, commits,
+   issues, paths and links it explains. After opening or merging that PR:
+   `storyboard__link {storyboard_id, add: {prs: [N]}}` (or `{commits: [<merge sha>]}`).
+5. Publish answers `public_links_decision_required`: ask the person if public links should
    show this act, unless they already said to update what they shared (that covers only
    this choice); publish again with `public_links: "extend"` or `"keep"`.
-5. `raw_evidence_confirmation_required`: always ask the person, listing the bindings it names;
+6. `raw_evidence_confirmation_required`: always ask the person, listing the bindings it names;
    never set `confirm_raw_evidence` yourself, even if they said to update what they shared.
    Only their yes sends `confirm_raw_evidence: true`.
 
@@ -82,14 +89,16 @@ No `storyboard__find` (an older Cardinal): create without `context`.
 ### Ask before adding to an existing storyboard
 
 Skip it if the person named a target (an `sb_` id, a link, "the storyboard for PR …").
-Offer strong matches (`match` session, pr, branch, repo_path), at most 3, in find's order;
-with none, at most 1 weak match (repo, workdir, actor) updated in the last 7 days. None:
-create without asking. Ask with AskUserQuestion (else a numbered question; wait):
+Offer strong matches (`match` session, or `match_role` about), then written_from ones, at
+most 3, in find's order; with none, at most 1 weak match (repo, workdir, actor) updated in
+the last 7 days. None: create without asking. Ask with AskUserQuestion (else a numbered
+question; wait):
 - label `Add to "<question, first 40 chars>"`, or for someone else's open act
   `Continue open act <n> of "<question>"`
-- description `<why> · <act_count> acts · updated <relative time>`; `<why>`:
-  `same session`, `same PR <repo>#<pr_number>`, `same branch <branch>`,
-  `same directory <repo_path>`, `same repo <repo>`, `same working directory`, `your storyboard`
+- description `<why> · <act_count> acts · updated <relative time>`; `<why>` names the role:
+  `same session`, `about <kind> <value>`, `written from branch <branch>`, `written from
+  the checkout of PR <repo>#<pr_number>`, `same repo <repo>`, `your storyboard`. Never
+  call a written_from match the same PR.
 
 Always add `Start a new storyboard`. Can't ask (`claude -p`): create; name the best match
 in your final message ("say: add this to <storyboard>").
@@ -98,7 +107,7 @@ in your final message ("say: add this to <storyboard>").
 
 - **session_id:** a SessionStart hook puts this session's id in your context ("Cardinal
   session id for this session: …"). Pass it to `storyboard__create`, `storyboard__find` and
-  `storyboard__add_act`.
+  `storyboard__add_act` (the context hook adds it if you forget).
 - **The preview loop is local.** After every `storyboard__preview`, a plugin hook renders
   each scene with your local Chromium and reports the PNG paths. Read every PNG (every
   reveal step, the first and last included) and critique it against the authoring guide
@@ -108,7 +117,7 @@ in your final message ("say: add this to <storyboard>").
 
 ```
 investigation (note rcpt_ / ev_ ids)
-  → describe_grammar {authoring, evidence} → context → find → ask before adding
+  → describe_grammar {authoring, evidence} → find (context stamped) → ask before adding
   → storyboard__create or add_act → promote
   → define_surface / upsert_scene → storyboard__preview
     ↳ plugin hook: local Chromium → PNG per scene per reveal step

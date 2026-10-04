@@ -42,10 +42,12 @@ SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
 
 GATED_HOOKS = (
     "initiative-convention.py", "plan-state.py", "git-state.py", "limits-gate.py", "decision-prompt.py",
-    "turn-usage.py", "plan-usage.py", "subagent-usage.py", "storyboard-discovery.py",
+    "turn-usage.py", "plan-usage.py", "subagent-usage.py", "storyboard-discovery.py", "storyboard-edit-lookup.py",
 )
-# Run in both modes: storyboards work before connect.
-STORYBOARD_HOOKS = ("storyboard-session.py", "storyboard-preview.py", "storyboard-token.py", "evidence-capture.py")
+# Run in both modes: storyboards work before connect. storyboard-context.py
+# only rewrites a storyboard tool call's input locally (no network).
+STORYBOARD_HOOKS = ("storyboard-session.py", "storyboard-preview.py", "storyboard-token.py", "evidence-capture.py",
+                    "storyboard-context.py", "storyboard-hero.py")
 # Not gated: never touches the network or Cardinal (a local Invariant
 # checkout's check-pr.ts, or nothing).
 LOCAL_ONLY_HOOKS = ("invariant-check.py",)
