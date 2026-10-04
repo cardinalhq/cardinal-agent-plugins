@@ -951,6 +951,22 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(sd.branch_issues("fix/eng-12-cache"), ["ENG-12"])
         self.assertEqual(sd.branch_issues("ABC-1/def-22"), ["ABC-1", "DEF-22"])
         self.assertEqual(sd.branch_issues("feat/storyboard-associations"), [])
+        for branch in ("feat/utf-8", "fix/sha-256", "release/v1-2", "release-2026", "chore/v1-99-7"):
+            self.assertEqual(sd.branch_issues(branch), [], branch)
+        self.assertEqual(sd.branch_issues("fix/utf-8-eng-12"), ["ENG-12"])
+
+    def test_render_edit_block_never_cuts_the_storyboard_id(self):
+        def about(sid, value, question):
+            return {"storyboard_id": sid, "question": question, "status": "published", "match": "path",
+                    "match_role": "about", "matched": {"kind": "path", "value": value, "repo": "a/b"}}
+        sid, other = "sb_0123456789abcdef01234567", "sb_1111111111111111111111aa"
+        # The first match yields no label: entries[0] is the second one, with its own question.
+        nolabel = dict(about(other, "x", "other question"), match_role="written_from")
+        block = sd.render_edit_block([nolabel, about(sid, "y/" + "\u20ac" * 300, "\u00f6" * 400)], "x/" + "\u00e4" * 300)
+        self.assertLessEqual(len(block.encode("utf-8")), sd.EDIT_MAX_BLOCK_BYTES)
+        self.assertIn(f"{sid} · about y/", block)
+        self.assertIn("Q: \u00f6", block)
+        self.assertNotIn("other question", block)
 
 
 class CapsTests(unittest.TestCase):

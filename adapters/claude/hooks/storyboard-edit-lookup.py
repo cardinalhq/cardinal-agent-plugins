@@ -17,7 +17,11 @@ Contract:
     looked up, or EDIT_MAX_LOOKUPS (6) lookups already made, exits before
     any other import (~/.claude/cardinal/storyboard-edit-lookup/<session>.json).
   - No network unless connected with an MCP key and the cached server
-    capability (server-caps.json, written by storyboard discovery) is >= 1.
+    capability (server-caps.json, written by storyboard discovery and by
+    this hook's own find answers) is >= 1. Unconnected or capability < 1 /
+    unknown leaves a per-session marker (<session>.skip) so later edits
+    exit on the fast path too, until it is SKIP_TTL_S old or settings.json,
+    cardinal.json or server-caps.json changes after it.
   - One find {refs: {repo, paths: [file], prs: PRs that last changed it}},
     within 1.5 s of process start; only about path / about pr matches not
     already shown to this session (discovery's block or an earlier edit).
@@ -48,6 +52,7 @@ OFF_VALUES = ("0", "false", "off", "no")
 # path cannot import it).
 MAX_LOOKUPS = 6
 BUDGET_S = 1.5
+SKIP_TTL_S = 600
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -69,6 +74,39 @@ def disabled() -> bool:
         except Exception:
             value = None
     return isinstance(value, str) and value.strip().lower() in OFF_VALUES
+
+
+def skip_marker(session_id: str) -> str:
+    return os.path.join(state_dir(), _SAFE_RE.sub("_", session_id)[:128] + ".skip")
+
+
+def _mtime(path: str) -> int:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def ineligible(session_id: str) -> bool:
+    """A recent 'not connected / capability < 1' marker that nothing it
+    depends on has changed since."""
+    marked = _mtime(skip_marker(session_id))
+    if not marked or time.time_ns() - marked > SKIP_TTL_S * 1_000_000_000:
+        return False
+    claude = os.path.join(home_dir(), ".claude")
+    deps = (os.path.join(claude, "settings.json"), os.path.join(claude, "cardinal.json"),
+            os.path.join(claude, "cardinal", "server-caps.json"))
+    return all(_mtime(p) < marked for p in deps)
+
+
+def mark_ineligible(session_id: str) -> None:
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        with open(skip_marker(session_id), "w", encoding="utf-8"):
+            pass
+        os.utime(skip_marker(session_id), None)
+    except Exception:
+        pass
 
 
 def already_done(session_id: str, directory: str) -> bool:
@@ -119,10 +157,14 @@ def main() -> None:
     if already_done(sid, directory):
         debug(result="dedupe")
         return
+    if ineligible(sid):
+        debug(result="ineligible")
+        return
 
     sys.path.insert(0, HOOKS_DIR)
     import _connection
     if not _connection.is_connected():
+        mark_ineligible(sid)
         return
     import _storyboard_discovery
     from pathlib import Path
@@ -130,6 +172,11 @@ def main() -> None:
 
     conn = _storyboard_discovery.connection()
     if not conn.get("key") or not conn.get("org"):
+        mark_ineligible(sid)
+        return
+    caps = _storyboard_discovery.server_caps(conn)
+    if caps is None or caps < 1:
+        mark_ineligible(sid)
         return
     block = storyboard_discovery.lookup_for_path(
         file_path,
@@ -137,9 +184,10 @@ def main() -> None:
         conn=conn,
         session_id=sid,
         state_dir=Path(state_dir()),
-        caps=_storyboard_discovery.server_caps(conn),
+        caps=caps,
         client=_storyboard_discovery.client_header(),
         discovery_state_dir=_storyboard_discovery.state_dir(),
+        caps_path=_storyboard_discovery.caps_path(),
         deadline=STARTED + BUDGET_S,
     )
     debug(result="block" if block else "none")

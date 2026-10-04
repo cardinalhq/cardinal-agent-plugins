@@ -80,6 +80,8 @@ def client() -> str:
 
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+# The edited-file record must finish before this (the hook's timeout is 2 s).
+RECORD_BY_S = 1.8
 
 
 def record_edited_file(payload, home: Path) -> None:
@@ -154,7 +156,18 @@ def main() -> None:
         return
     if not isinstance(payload, dict):
         return
-    record_edited_file(payload, home)
+    try:
+        capture(payload, spill_root, home)
+    finally:
+        # After the capture, so its git probes never eat the capture's
+        # budget, and bounded by what is left of the hook's timeout.
+        with cap.time_guard(max(0.05, RECORD_BY_S - (time.monotonic() - START))):
+            record_edited_file(payload, home)
+
+
+def capture(payload: dict, spill_root: str, home: Path) -> None:
+    from cardinal_core import evidence_capture as cap
+
     event = payload.get("hook_event_name") or "PostToolUse"
     error = None
     response = None

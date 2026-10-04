@@ -133,6 +133,57 @@ class EditLookupTests(unittest.TestCase):
             self.run_hook(str(d / "f.ts"))
         self.assertEqual(len(self.finds()), 6)
 
+    def test_edits_outside_a_repo_do_not_use_up_the_cap(self):
+        self.caps(1)
+        for i in range(8):
+            d = self.home / f"scratch{i}"
+            d.mkdir()
+            self.run_hook(str(d / "notes.md"), tool="Write")
+        self.run_hook(str(self.home / "not-yet" / "deep" / "new.md"), tool="Write")
+        self.assertEqual(self.finds(), [])
+        self.run_hook(str(self.repo / "svc" / "cache" / "keys.ts"))
+        self.assertEqual(len(self.finds()), 1, "the repo edit still sends a find")
+        n = len(self.fake.requests)
+        self.run_hook(str(self.home / "scratch0" / "other.md"), tool="Write")
+        self.assertEqual(len(self.fake.requests), n, "a non-repo directory is probed once")
+
+    def test_a_find_answer_refreshes_the_caps_cache(self):
+        self.caps(1)
+        path = self.home / ".claude" / "cardinal" / "server-caps.json"
+        stale = json.loads(path.read_text())
+        stale[self.fake.origin]["at"] = time.time() - 23 * 3600
+        path.write_text(json.dumps(stale))
+        self.run_hook(str(self.repo / "svc" / "cache" / "keys.ts"))
+        entry = json.loads(path.read_text())[self.fake.origin]
+        self.assertEqual(entry["associations_api"], 1)
+        self.assertGreater(entry["at"], time.time() - 60)
+
+    def test_ineligible_marker_takes_the_fast_path_until_caps_change(self):
+        out, _ = self.run_hook(str(self.repo / "svc" / "cache" / "keys.ts"))
+        self.assertEqual(out, "")
+        out, _ = self.run_hook(str(self.repo / "web" / "a.ts"), env={"CARDINAL_HOOK_DEBUG": "1"})
+        log = (self.home / ".claude" / "cardinal" / "hook-debug.log").read_text().splitlines()
+        self.assertEqual(json.loads(log[-1])["result"], "ineligible")
+        self.caps(1)
+        self.run_hook(str(self.repo / "web" / "a.ts"))
+        self.assertEqual(len(self.finds()), 1, "new caps invalidate the marker")
+
+    def test_a_long_label_is_shortened_but_never_the_storyboard_id(self):
+        self.caps(1)
+        deep = "/".join(["ä" * 40] * 6)
+        d = self.repo / deep
+        d.mkdir(parents=True)
+        rel = f"{deep}/f.ts"
+        self.fake.routes["find"] = (200, {"associations_api": 1, "matches": [
+            about(SB1, "path", rel, question="ö" * 400), about(SB2, "path", rel, question="ü" * 400)]})
+        out, _ = self.run_hook(str(d / "f.ts"))
+        block = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(SB1, block)
+        self.assertLessEqual(len(block.encode()), 1024)
+        state = json.loads(next((self.home / ".claude" / "cardinal" / "storyboard-edit-lookup").glob("*.json"))
+                           .read_text())
+        self.assertIn(SB1, state["injected"])
+
     def test_no_network_without_caps_1(self):
         out, _ = self.run_hook(str(self.repo / "svc" / "cache" / "keys.ts"))
         self.assertEqual(out, "")

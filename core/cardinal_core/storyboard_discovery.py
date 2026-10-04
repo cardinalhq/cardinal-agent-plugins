@@ -214,6 +214,11 @@ _CHECKOUT_RE = re.compile(r"^checkout: moving from (\S+) to (\S+)$")
 # A tracker key in a branch name (fix/eng-12-cache -> ENG-12): conductor
 # associations.ts TRACKER_KEY_RE, uppercased. Lookups only.
 _BRANCH_ISSUE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]{1,15})-(\d{1,10})(?![0-9])")
+# Word-digits runs that are almost never tracker keys (feat/utf-8,
+# fix/sha-256, release/v1-2, release-2026): not looked up.
+_NOT_TRACKER_KEYS = frozenset({"UTF", "SHA", "MD", "ISO", "RFC", "HTTP", "TLS", "SSL", "IPV", "PY", "NODE",
+                               "GO", "JAVA", "RELEASE", "RELEASES", "HOTFIX", "VERSION", "YEAR"})
+_VERSION_KEY_RE = re.compile(r"^V\d+$")
 
 
 class Hints(NamedTuple):
@@ -276,7 +281,10 @@ def branch_issues(branch: Optional[str], limit: int = MAX_BRANCH_ISSUES) -> list
     """Tracker keys named in a branch (fix/eng-12-cache -> ["ENG-12"])."""
     out: list = []
     for m in _BRANCH_ISSUE_RE.finditer(branch or ""):
-        key = f"{m.group(1).upper()}-{m.group(2)}"
+        prefix = m.group(1).upper()
+        if prefix in _NOT_TRACKER_KEYS or _VERSION_KEY_RE.match(prefix):
+            continue
+        key = f"{prefix}-{m.group(2)}"
         if key not in out:
             out.append(key)
         if len(out) == limit:
@@ -1108,33 +1116,41 @@ def _edit_label(m: dict, rel: str) -> Optional[str]:
 
 def render_edit_block(matches: list, rel: str) -> Optional[str]:
     """At most EDIT_MAX_BLOCK_BYTES; storyboards that do not fit are dropped
-    from the end, the first's question shortened until it fits."""
+    from the end, then the first's label and question shortened until it
+    fits, then cut to its bare id. The storyboard id is never cut."""
     entries = []
     for m in matches:
         lab = _edit_label(m, rel)
         if lab is None:
             continue
-        head = f"{m['storyboard_id']} · {lab}"
         status = m.get("status")
-        if isinstance(status, str) and STATUS_RE.match(status):
-            head += f" · {status}"
-        entries.append([head, clean(m.get("question"), MAX_QUESTION)])
+        tail = f" · {status}" if isinstance(status, str) and STATUS_RE.match(status) else ""
+        entries.append({"id": m["storyboard_id"], "label": lab, "tail": tail,
+                        "question": m.get("question"), "q": clean(m.get("question"), MAX_QUESTION)})
     if not entries:
         return None
 
     def assemble(es: list) -> str:
-        body = [line for head, q in es for line in (head, f"Q: {q}")]
+        body = []
+        for e in es:
+            body.append(f"{e['id']} · {e['label']}{e['tail']}" if e["label"] else e["id"])
+            body.append(f"Q: {e['q']}")
         return "\n".join([EDIT_HEADER, OPEN_MARKER, *body, CLOSE_MARKER, EDIT_FOOTER])
 
-    while len(entries) > 1 and len(assemble(entries).encode("utf-8")) > EDIT_MAX_BLOCK_BYTES:
+    def fits(es: list) -> bool:
+        return len(assemble(es).encode("utf-8")) <= EDIT_MAX_BLOCK_BYTES
+
+    while len(entries) > 1 and not fits(entries):
         entries.pop()
-    limit = MAX_QUESTION
-    while len(assemble(entries).encode("utf-8")) > EDIT_MAX_BLOCK_BYTES and limit > 8:
+    first, limit = entries[0], MAX_QUESTION
+    label = first["label"]
+    while not fits(entries) and limit > 8:
         limit //= 2
-        entries[0][1] = clean(matches[0].get("question"), limit) if matches else ""
-        entries[0][0] = entries[0][0][:limit * 2]
-    block = assemble(entries)
-    return block if len(block.encode("utf-8")) <= EDIT_MAX_BLOCK_BYTES else None
+        first["q"] = clean(first["question"], limit)
+        first["label"] = clean(label, limit * 2)
+    if not fits(entries):
+        first["label"], first["tail"], first["q"] = "", "", ""
+    return assemble(entries) if fits(entries) else None
 
 
 def _prs_last_changing(path: str, cwd: str) -> list:
@@ -1158,6 +1174,7 @@ def lookup_for_path(
     caps: Optional[int],
     client: Optional[str] = None,
     discovery_state_dir: Optional[Path] = None,
+    caps_path: Optional[Path] = None,
     deadline: Optional[float] = None,
     opener=None,
 ) -> Optional[str]:
@@ -1166,8 +1183,10 @@ def lookup_for_path(
     parent directory already looked up this session, EDIT_MAX_LOOKUPS
     reached, no usable connection, server capability < 1 or unknown, the
     file outside a git work tree with an origin. The directory is recorded
-    BEFORE the request, so a slow or failed lookup is not repeated for the
-    next file in it. Never raises."""
+    first, so neither a git probe nor a slow or failed lookup is repeated for
+    the next file in it; `count` grows only when a find is actually sent, so
+    edits outside a repo (scratch, memory files) never use up the cap. A
+    find answer refreshes caps_path for conn's origin. Never raises."""
     try:
         if not _usable(conn) or not session_id or state_dir is None:
             return None
@@ -1183,7 +1202,6 @@ def lookup_for_path(
         if caps is None or caps < 1:
             return None
         state["dirs"] = (state["dirs"] + [key])[-100:]
-        state["count"] += 1
         Path(state_dir).mkdir(parents=True, exist_ok=True)
         _write_edit_state(state_dir, session_id, state)
 
@@ -1193,6 +1211,8 @@ def lookup_for_path(
         if found is None:
             return None
         repo, rel = found
+        state["count"] += 1
+        _write_edit_state(state_dir, session_id, state)
         if deadline is None:
             deadline = time.monotonic() + EDIT_BUDGET_S
         refs: dict = {"repo": repo, "paths": [rel]}
@@ -1215,6 +1235,7 @@ def lookup_for_path(
         answer = box.get("found")
         if worker.is_alive() or not isinstance(answer, dict):
             return None
+        write_caps(caps_path, conn.get("origin"), caps_from_answer(answer))
         shown = set(state["injected"])
         prior = stored_block(discovery_state_dir, session_id, connection_id(conn)) or ""
         kept, seen = [], set()
