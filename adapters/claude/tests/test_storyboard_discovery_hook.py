@@ -160,27 +160,32 @@ class DiscoveryHookTests(_HookCase):
     def test_session_start_injects_the_block(self):
         self.connect()
         block = self.context_of(self.run_hook("SessionStart"), "SessionStart")
-        self.assertTrue(block.startswith("Cardinal has storyboards for this work, written by members of your "
-                                         "Cardinal org."))
-        self.assertIn(f"{SB1} · same branch fix/checkout · published, 1 act", block)
+        self.assertTrue(block.startswith("Cardinal storyboards that may relate to this work, written by members of "
+                                         "your Cardinal org;"))
+        self.assertIn(f"{SB1} · written from branch fix/checkout (subject not confirmed) · published, 1 act", block)
         self.assertIn("- [supported] Hit rate fell: Only on v2 pods.", block)
         self.assertIn("read the full storyboard with storyboard__get {storyboard_id}", block)
         find = self.fake.requests[0]
         self.assertEqual(find["path"], "/api/orgs/org-1/storyboards/mcp-tools/find")
         self.assertEqual(find["headers"]["x-cardinalhq-api-key"], "ck_hook_test")
-        self.assertEqual(find["body"]["context"], {"repo": "acme/widgets", "branch": "fix/checkout"})
+        version = json.loads((PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text())["version"]
+        self.assertEqual(find["headers"]["x-cardinal-client"], f"claude-plugin/{version}")
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(find["body"]["context"], {"repo": "acme/widgets", "branch": "fix/checkout", "head_sha": head})
+        self.assertEqual(find["body"]["refs"], {"repo": "acme/widgets", "commits": [head]})
         self.assertFalse(self.gh_log.exists(), "discovery never runs gh")
         self.assertTrue((self.home / ".claude" / "cardinal" / "storyboard-discovery" / f"{SESSION}.json").is_file())
 
-    def test_pr_comes_from_the_gh_cache_and_a_subdirectory_sends_repo_path(self):
+    def test_pr_comes_from_the_gh_cache_and_a_subdirectory_sends_no_repo_path(self):
         self.connect()
         cache = self.home / ".claude" / "cardinal" / "decisions" / "cache"
         cache.mkdir(parents=True)
         (cache / "prs.json").write_text(json.dumps({"acme/widgets#fix/checkout": {
             "at": time.time(), "number": 42, "url": "https://github.com/acme/widgets/pull/42"}}))
         self.context_of(self.run_hook("SessionStart", cwd=self.repo / "svc"), "SessionStart")
-        self.assertEqual(self.fake.requests[0]["body"]["context"],
-                         {"repo": "acme/widgets", "repo_path": "svc", "branch": "fix/checkout", "pr_number": 42})
+        ctx = self.fake.requests[0]["body"]["context"]
+        self.assertEqual({k: ctx[k] for k in ctx if k != "head_sha"},
+                         {"repo": "acme/widgets", "branch": "fix/checkout", "pr_number": 42})
         self.assertFalse(self.gh_log.exists())
 
     def test_user_prompt_same_head_is_silent_then_runs_after_a_commit(self):

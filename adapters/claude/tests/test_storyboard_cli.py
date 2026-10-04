@@ -76,6 +76,21 @@ class ContextCliTests(unittest.TestCase):
         self.assertRegex(ctx["workdir_hash"], r"^[0-9a-f]{32}$")
         self.assertRegex(ctx["head_sha"], r"^[0-9a-f]{40}$")
 
+    def test_paths_are_the_files_this_session_edited(self):
+        files = self.home / ".claude" / "cardinal" / "storyboard-files"
+        files.mkdir(parents=True)
+        (files / "sess-1.json").write_text(json.dumps({"files": [
+            {"repo": "acme/widgets", "path": "svc/x.txt"}, {"repo": "other/repo", "path": "y.ts"}]}))
+        self.assertNotIn("paths", self.context())
+        self.assertEqual(self.context("--session-id", "sess-1")["paths"], ["svc/x.txt"])
+        self.assertNotIn("paths", self.context("--session-id", "sess-2"))
+
+    def test_protected_branch_is_not_sent(self):
+        _git(self.repo, "checkout", "-q", "-b", "main")
+        ctx = self.context()
+        self.assertNotIn("branch", ctx)
+        self.assertNotIn("pr_number", ctx)
+
     def test_output_never_contains_an_absolute_path(self):
         res = self.run_cli("context", "--cwd", str(self.repo / "svc"), cwd=self.home)
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -142,7 +157,7 @@ class ContextCliTests(unittest.TestCase):
         res = self.run_cli("discover", "--json")
         self.assertEqual(res.returncode, 0, res.stderr)
         block = json.loads(res.stdout)["block"]
-        self.assertIn(f"{sid} · same branch fix/checkout · published, 1 act", block)
+        self.assertIn(f"{sid} · written from branch fix/checkout (subject not confirmed) · published, 1 act", block)
         self.assertIn("- [open] T: S", block)
         res = self.run_cli("discover")
         self.assertEqual(res.stdout, block + "\n")
