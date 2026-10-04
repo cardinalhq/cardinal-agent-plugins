@@ -404,6 +404,8 @@ def run_scenario(hook_script: Path, scenario: dict[str, Any], workdir: Path) -> 
         # the AfterTool capture output (the after-tool scenario's
         # non-Cardinal lakerunner MCP call would otherwise print its id).
         env["CARDINAL_EVIDENCE_CAPTURE"] = "0"
+        # Nor storyboard session-start text (test_gemini_storyboard.py).
+        env["CARDINAL_STORYBOARD_SESSION_START"] = "0"
         # Stub `gh` first on PATH: no network, deterministic PR linkage.
         env["PATH"] = f"{write_gh_stub(workdir)}{os.pathsep}{env.get('PATH', '')}"
         env["HOME"] = str(home)

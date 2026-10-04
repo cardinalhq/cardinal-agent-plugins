@@ -214,12 +214,54 @@ sandbox). Run `cardinal-connect --repair-hooks` and restart Codex to pick up
 the new group.
 
 Verified: `PostToolUse` fires for `Bash` with `tool_response` = the output
-string (see Host-surface evidence). Not verified: whether Codex fires
-`PostToolUse` for MCP tools and `apply_patch`, and that `.*` matches every
-tool name (`matches_matcher` treats a non-alphanumeric matcher as a regex;
+string (see Host-surface evidence); a 2026-10-03 capture (codex-cli
+0.142.5, see Storyboard associations) also saw it fire for `apply_patch` and
+MCP tools. Not verified: that `.*` matches every tool name (`matches_matcher` treats a non-alphanumeric matcher as a regex;
 the pre-removal Semantic DAG hooks used `.*`). Tool calls that do not reach
 `PostToolUse` are not captured; cite them with `storyboard__record_evidence`
 (the reported tier). `CARDINAL_CODEX_DEBUG_PAYLOADS=1` dumps real payloads.
+
+## Storyboard associations
+
+Where a storyboard is written from (repo, branch, PR, HEAD, the files this
+session edited) is recorded on each act as its `context`, and storyboards
+that may relate to the checkout are shown at session start. Shared logic:
+`cardinal_core.storyboard_agent`.
+
+- **SessionStart** (the existing hook): when Cardinal MCP is connected, the
+  additional context names this session's id (for `storyboard__create`,
+  `storyboard__add_act` and `storyboard__find` `session_id`) and
+  `scripts/cardinal-storyboard context --session-id <id>`, whose output is
+  the `context` to pass, plus the storyboards that may relate to this
+  branch, PR or commit (at most 3, 2 KB, framed as data; gh cache only, a
+  2 s network deadline, `X-Cardinal-Client: codex/<plugin version>`). Off:
+  `CARDINAL_STORYBOARD_DISCOVERY=0` (the storyboards) or
+  `CARDINAL_STORYBOARD_SESSION_START=0` (all of it).
+- **Edited files**: the `ToolEvidence` `PostToolUse` run records the files a
+  successful `apply_patch` names (`*** Add File:`, `Update File:`,
+  `Delete File:`, `Move to:`; relative to the call's cwd) for
+  `context.paths`. Codex has no other edit tool; files changed by shell
+  commands are not recorded.
+- **Automatic context** (`PreToolUse`, matcher
+  `^mcp__cardinal__storyboard__(create|add_act|publish|find)$`,
+  `--event StoryboardContext`): fills an absent `session_id` and an absent
+  or `{}` `context`; never changes what the model set, never writes
+  `about`; `publish` only once the server has advertised associations.
+  Codex applies `updatedInput` only together with
+  `permissionDecision: "allow"`, and whether that also skips an approval
+  prompt is not verified, so the hook stamps only in `bypassPermissions`
+  mode, or in every mode with `CARDINAL_STORYBOARD_CONTEXT=always`.
+  Elsewhere the agent passes `cardinal-storyboard context` (the SessionStart
+  text says which). `CARDINAL_STORYBOARD_CONTEXT=0` turns it off.
+
+Evidence (codex-cli 0.142.5, captured 2026-10-03 with a scratch
+`CODEX_HOME`): `apply_patch` arrives as `tool_input.command` (the patch) with
+a `tool_response` string `Exit code: 0 … Success. Updated the following
+files: A hello.txt`; MCP tools are `mcp__<server>__<tool>`; a `PreToolUse`
+`updatedInput` with `permissionDecision: "allow"` reached the MCP server
+rewritten. Fixtures: `tests/test_codex_storyboard.py`. Run
+`cardinal-connect --repair-hooks` and restart Codex to register the
+`PreToolUse` group.
 
 ## Tests
 
