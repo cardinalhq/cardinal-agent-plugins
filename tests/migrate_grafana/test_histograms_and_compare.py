@@ -142,14 +142,20 @@ class PerSignalDropTest(unittest.TestCase):
         self.assertFalse(any("removed" in n for n in notes))
 
     def test_log_drop(self):
-        l, notes = tr(drop_log_labels=["deployment_environment"]).logql(f"{{{ENV}}}")
-        self.assertEqual(l, '{service_name=~".+"}')
+        l, notes = tr(drop_log_labels=["deployment_environment"]).logql(f'{{{ENV}, service_name="cart"}}')
+        self.assertEqual(l, '{service_name="cart"}')
         self.assertTrue(any("Cardinal's logs" in n for n in notes))
+
+    def test_log_drop_that_empties_the_selector_skips(self):
+        # {service_name=~".+"} would read every service's logs in the org.
+        l, notes = tr(drop_log_labels=["deployment_environment"]).logql(f"{{{ENV}}}")
+        self.assertIsNone(l)
+        self.assertIn(convert.EMPTIED, notes)
 
     def test_older_mapping_drops_both(self):
         m = mapping()
         del m["drop_log_labels"]
-        l, _ = convert.Translator(m).logql(f"{{{ENV}}}")
+        l, _ = convert.Translator(m).logql(f'{{{ENV}, service_name="cart"}}')
         self.assertNotIn("deployment_environment", l)
 
 
@@ -257,7 +263,7 @@ class LabelDropDecisionTest(unittest.TestCase):
     def test_value_missing_on_one_signal(self):
         m = {"logs": {("env", "staging")}}
         drops, review = self.decide(m, log_labels={"env"}, values={("logs", "env"): {"prod"}})
-        self.assertEqual(drops["logs"], {"env"})
+        self.assertEqual(drops["logs"], {"env=staging"})  # that one filter, not every env filter
         self.assertIn("values_in_cardinal", review[0])
 
     def test_renamed_label_is_not_dropped(self):
@@ -265,7 +271,7 @@ class LabelDropDecisionTest(unittest.TestCase):
                                renames={"service": "service_name"})
         self.assertEqual(drops["metrics"], set())
 
-    def test_unknown_grouping_label_dropped_for_its_signal(self):
+    def test_unknown_filter_label_proposed_for_its_signal(self):
         drops, _ = self.decide({}, used={"metrics": {"pod"}, "logs": {"pod"}}, log_labels={"pod"})
         self.assertEqual(drops, {"metrics": {"pod"}, "logs": set()})
 
