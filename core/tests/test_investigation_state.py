@@ -728,6 +728,170 @@ class Refresh(unittest.TestCase):
         self.assertEqual(ist.check(json.loads(json.dumps(st)), got, SESSIONS)["errors"], [])
 
 
+INV = {"investigation_id": "inv_" + "a" * 24, "question": "Why did query latency regress?",
+       "window": {"start": "2026-10-01T00:00:00.000Z", "end": "2026-10-01T01:00:00.000Z"}}
+
+
+def pre_storyboard(state: dict) -> dict:
+    """What an agent authors before any storyboard exists: no findings or
+    receipts to point at, only the investigation's own items."""
+    s = copy.deepcopy(state)
+    s["actors"] = [{"id": "owner", "role": "owner"}, {"id": "agent", "role": "agent"}]
+    s["hypotheses"] = [{"id": "h-gc", "statement": "GC pauses add latency.", "status": "untested"}]
+    s["open_questions"] = [{"id": "q-host", "text": "Does it reproduce on a second host?",
+                            "awaiting": {"actor": "owner", "ask": "Pick a second host."}}]
+    s["constraints"] = [{"id": "c-exact", "statement": "Admitted query shapes must stay exact.",
+                         "authored_by": "owner", "authority": "owner_stated",
+                         "source": [owner(T_RULE, "Admitted query shapes must stay exact.")]}]
+    s["decisions"] = [{"id": "d-cache", "statement": "Cache preparation by immutable segment identity.",
+                       "outcome": "adopted", "proposed_by": "agent", "decided_by": "owner", "approval": "explicit",
+                       "source": [owner(T_GO, "Go with the cache.")], "because": ["h-gc"]}]
+    return s
+
+
+class VirtualStoryboard(unittest.TestCase):
+    """Before any storyboard: the state of an Investigation, checked against a
+    virtual empty storyboard. The derived half is empty; every authored rule
+    holds exactly as for a storyboard's state. Parity: maestro's port takes
+    the same virtual storyboard ({storyboard_id: null, acts: [], scenes: [],
+    receipt_tiers: {}})."""
+
+    def setUp(self):
+        self.got = ist.virtual_storyboard(INV)
+        self.state = pre_storyboard(ist.project(self.got))
+
+    def errors(self, state, sessions=SESSIONS) -> list:
+        return ist.check(state, self.got, sessions)["errors"]
+
+    def test_the_virtual_storyboard_is_an_empty_storyboard_get(self):
+        self.assertEqual(self.got, {"storyboard_id": None, "question": INV["question"], "window": INV["window"],
+                                    "acts": [], "scenes": [], "receipt_tiers": {}})
+
+    def test_projects_an_empty_derived_half_that_stays_open(self):
+        st = ist.project(self.got)
+        self.assertEqual(st["schema"], ist.SCHEMA)
+        self.assertEqual(st["source"], {"storyboard_id": None, "acts": []})
+        self.assertEqual((st["question"], st["window"]), (INV["question"], INV["window"]))
+        for k in ("context", "findings", "hypotheses", "open_questions", "actors", "constraints", "decisions", "terms"):
+            self.assertEqual(st[k], [], k)
+        self.assertEqual(st["evidence"], {})
+        self.assertEqual(st["status"], "open")  # nothing established yet: never concluded by default
+        self.assertNotIn("investigation_id", json.dumps(st))  # the id lives beside the document, not in it
+        self.assertEqual(ist.check(st, self.got)["errors"], [])
+
+    def test_an_authored_pre_storyboard_state_checks_clean_and_verifies_its_quotes(self):
+        res = ist.check(self.state, self.got, SESSIONS)
+        self.assertEqual(res["errors"], [])
+        self.assertEqual(res["stats"]["owner_quotes_verified"], 2)
+
+    def test_every_authored_rule_is_as_strict_as_for_a_storyboard(self):
+        def mutated(fn):
+            s = copy.deepcopy(self.state)
+            fn(s)
+            return s
+        cases = {
+            "not a receipt this storyboard cites": lambda s: s["decisions"][0]["source"].append({"kind": "receipt", "id": R1}),
+            "hypothesis h-gc.evidence": lambda s: s["hypotheses"][0].update(evidence=[R1]),
+            "quote not verified": lambda s: s["constraints"][0]["source"][0].update(quote="Keep everything exact forever."),
+            "unknown fields": lambda s: s["constraints"][0].update(summary="We looked at it."),
+            "say why": lambda s: s["decisions"][0].pop("because"),
+            "is not a scene of the published storyboard": lambda s: s["findings"].append(
+                {"id": "f1", "act": 1, "state": "supported", "title": "T", "statement": "S.", "claims": [], "evidence": []}),
+            "evidence must list exactly": lambda s: s["evidence"].update({R1: {"tier": "witnessed"}}),
+            "question differs": lambda s: s.update(question="Something else?"),
+            "window differs": lambda s: s.update(window=None),
+            "status must be one of": lambda s: s.update(status="done"),
+            "source.storyboard_id does not match": lambda s: s.update(source={"acts": []}),
+            "source.acts must be": lambda s: s.update(source={"storyboard_id": None, "acts": [1]}),
+            "names no item of this state": lambda s: s["decisions"][0].update(because=["h-nope"]),
+            "is not an actor": lambda s: s["constraints"][0].update(authored_by="someone"),
+            "basis tested names the receipt": lambda s: s["hypotheses"].append(
+                {"id": "h-s3", "statement": "S3 is slow.", "status": "ruled_out",
+                 "basis": {"method": "tested", "by": "agent", "criterion": "under 1%"}, "because": ["h-gc"]}),
+            "a date in evidence is not a deadline": lambda s: s["open_questions"][0].update(
+                due={"date": "2026-11-01", "set_by": "agent", "source": [{"kind": "receipt", "id": R1}]}),
+            "`finding` marks a storyboard open question": lambda s: s["open_questions"][0].update(finding="f1"),
+        }
+        for needle, fn in cases.items():
+            errs = self.errors(mutated(fn))
+            self.assertTrue(any(needle in e for e in errs), f"{needle}: {errs}")
+        # No transcript: nothing rests on the owner's words.
+        errs = self.errors(self.state, sessions=None)
+        self.assertTrue(any("no session transcript is available here" in e for e in errs), errs)
+
+    def test_a_storyboard_id_in_source_is_refused(self):
+        s = copy.deepcopy(self.state)
+        s["source"] = {"storyboard_id": SB, "acts": []}
+        self.assertIn("source.storyboard_id does not match the storyboard", self.errors(s))
+
+    def test_downgrade_and_removal_rules_hold(self):
+        s = copy.deepcopy(self.state)
+        s["constraints"][0]["source"] = [{"kind": "doc", "path": "d10.md"}]
+        new, changes = ist.downgrade(s, SESSIONS)
+        self.assertEqual(new["constraints"][0]["authority"], "unknown")
+        self.assertEqual(changes, ["constraint c-exact: owner_stated -> unknown (no verified owner words)"])
+        self.assertEqual(self.errors(new), [])
+        gone = copy.deepcopy(self.state)
+        gone["hypotheses"] = []
+        gone["decisions"][0]["because"] = ["c-exact"]
+        errs = ist.check(gone, self.got, SESSIONS, previous=self.state)["errors"]
+        self.assertTrue(any("h-gc was removed" in e for e in errs), errs)
+
+    def test_after_attach_the_old_state_is_told_to_refresh(self):
+        errs = ist.check(self.state, storyboard(), SESSIONS)["errors"]
+        self.assertTrue(any("a storyboard is attached to the investigation now" in e for e in errs), errs)
+
+    def test_refresh_after_attach_projects_the_storyboard_and_keeps_everything_authored(self):
+        self.state["status"] = "blocked"
+        got = storyboard()
+        new = ist.refresh(self.state, got)
+        self.assertEqual(new["source"], {"storyboard_id": SB, "acts": [1]})
+        self.assertEqual([f["id"] for f in new["findings"]], ["cause"])
+        self.assertEqual(new["status"], "blocked")
+        for k in ("actors", "constraints", "decisions"):
+            self.assertEqual(new[k], self.state[k], k)
+        self.assertEqual([h["id"] for h in new["hypotheses"]], ["cause.h1", "h-gc"])
+        self.assertEqual([q["id"] for q in new["open_questions"]], ["q-host", "cause/compaction", "cause/one-host"])
+        res = ist.check(new, got, SESSIONS, previous=self.state)
+        self.assertEqual(res["errors"], [])
+        self.assertEqual(res["stats"]["owner_quotes_verified"], 2)
+
+
+class TopLevelKeys(unittest.TestCase):
+    """An unknown top-level or source field is refused, as maestro's port
+    refuses it (keys(state, STATE_KEYS, "state")): a local ok never meets a
+    server 422 for it."""
+
+    def test_unknown_top_level_and_source_fields_are_refused(self):
+        got = storyboard()
+        s = authored(ist.project(got))
+        s["summary"] = "x"
+        self.assertEqual(ist.check(s, got, SESSIONS)["errors"], [
+            "state: unknown fields ['summary'] (allowed: schema, source, question, status, window, context, actors, "
+            "evidence, findings, hypotheses, open_questions, constraints, decisions, terms)"])
+        s = authored(ist.project(got))
+        s["source"]["investigation_id"] = "inv_" + "a" * 24
+        self.assertEqual(ist.check(s, got, SESSIONS)["errors"],
+                         ["source: unknown fields ['investigation_id'] (allowed: storyboard_id, acts)"])
+        st = ist.project(ist.virtual_storyboard(INV))
+        st["reasoning"] = "x"
+        self.assertTrue(any("state: unknown fields ['reasoning']" in e for e in ist.check(st, ist.virtual_storyboard(INV))["errors"]))
+
+    def test_projected_states_use_exactly_the_allowed_keys(self):
+        self.assertEqual(tuple(ist.project(storyboard())), ist.STATE_KEYS)
+        self.assertEqual(tuple(ist.project(storyboard())["source"]), ist.SOURCE_KEYS)
+
+
+class Oracle(unittest.TestCase):
+    def test_a_quote_from_a_session_not_loaded_says_how_to_load_it(self):
+        ref = dict(owner(T_GO, "Go with the cache."), session="other-session-1")
+        self.assertIn("pass --session <file>", ist.verify_quote(ref, "owner", SESSIONS))
+        self.assertIn("pass --session <file>", ist.verify_quote(owner(T_GO, "Never said."), "owner", SESSIONS))
+        got = storyboard()
+        errs = ist.check(authored(ist.project(got)), got, None)["errors"]
+        self.assertTrue(any("pass --session <file>" in e and "agent_interpretation / unknown" in e for e in errs), errs)
+
+
 class LoadGet(unittest.TestCase):
     def test_rejects_non_storyboard(self):
         with self.assertRaises(ist.FetchError):

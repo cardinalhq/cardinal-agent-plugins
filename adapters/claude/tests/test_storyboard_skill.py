@@ -340,6 +340,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # "Investigation state" (InvestigationState step 1: state init /
         # check after publish; its authoring guide is printed by `state
         # init`, not pasted here) added 9 lines / 77 words: 2839 / 296.
+        # Investigations (state before any storyboard) fit in by rewording it.
         # No headroom left: trim before adding.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)
