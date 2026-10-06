@@ -432,6 +432,27 @@ class StateServerCliTests(unittest.TestCase):
         self.assertIn("not published", res.stdout)
         self.assertFalse([t for t, _ in self.seen if t == "put-state"])
 
+    def test_an_unknown_field_is_refused_by_check_and_never_sent_by_publish(self):
+        ok = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        for where, field in (((), "summary"), (("source",), "investigation_id")):
+            state = json.loads(self.path.read_text())
+            x = state
+            for k in where:
+                x = x[k]
+            x[field] = "x"
+            self.path.write_text(json.dumps(state))
+            bad = self.run_cli("state", "check", str(self.path))
+            self.assertEqual(bad.returncode, 1, bad.stdout)
+            self.assertIn(f"unknown fields ['{field}']", bad.stdout)
+            res = self.run_cli("state", "publish", str(self.path))
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("not published", res.stdout)
+            self.assertIn(f"unknown fields ['{field}']", res.stdout)
+            self.assertFalse([t for t, _ in self.seen if t == "put-state"])
+            del x[field]
+            self.path.write_text(json.dumps(state))
+
     def test_a_server_without_the_state_routes_says_so_and_leaves_the_file_alone(self):
         self.mode["old_server"] = True
         before = self.path.read_text()

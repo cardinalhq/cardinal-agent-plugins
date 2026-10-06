@@ -138,6 +138,10 @@ DECISION_KEYS = ("id", "statement", "outcome", "proposed_by", "decided_by", "app
                  "because", "rationale", "superseded_by", "refs")
 ACTOR_KEYS = ("id", "role", "identity")
 TERM_KEYS = ("term", "means")
+# Top-level keys of a v1.1 document (project()'s output), and of its source.
+STATE_KEYS = ("schema", "source", "question", "status", "window", "context", "actors", "evidence", "findings",
+              "hypotheses", "open_questions", "constraints", "decisions", "terms")
+SOURCE_KEYS = ("storyboard_id", "acts")
 
 # First-person process narration: what the state must never carry. A hint
 # for the author, not a proof of absence (a warning, never an error).
@@ -620,9 +624,12 @@ def _check(state: Any, got: dict, sessions: Optional[dict] = None, previous: Opt
 
     if not isinstance(state, dict):
         return {"errors": ["the state must be a JSON object"], "warnings": [], "stats": {}}
+    keys(state, STATE_KEYS, "state")
     if state.get("schema") != SCHEMA:
         err(f'schema must be "{SCHEMA}"')
     src = state.get("source") or {}
+    if isinstance(state.get("source"), dict):
+        keys(src, SOURCE_KEYS, "source")
     if src.get("storyboard_id") != got.get("storyboard_id"):
         err("source.storyboard_id does not match the storyboard")
     if src.get("acts") != _published_acts(got):
