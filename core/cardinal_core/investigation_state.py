@@ -76,7 +76,7 @@ from typing import Any, Callable, Optional
 SCHEMA = "investigation-state/v1.1"
 
 STORYBOARD_ID_RE = re.compile(r"^sb_[0-9a-f]{24}$")
-INVESTIGATION_ID_RE = re.compile(r"^inv_[0-9a-f]{24}$")
+INVESTIGATION_ID_RE = re.compile(r"^inv_[0-9a-f]{24}\Z")
 RECEIPT_ID_RE = re.compile(r"^rcpt_[0-9a-f]{24}$")
 ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_./-]{1,96}$")
 

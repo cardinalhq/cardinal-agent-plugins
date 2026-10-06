@@ -106,15 +106,17 @@ git-state, usage
   investigation bind|create`; `~/.cardinal/investigations/sessions/<id>.json`)
   receives the investigation's advisory events (cue, question, challenge from
   other principals) at its next tool boundary: `hooks/investigation-events.sh`
-  (PostToolUse on every tool, and Stop as a backstop, at most 3 consecutive
-  blocks) is a POSIX sh check for that binding file, so an unbound session
+  (PostToolUse and PostToolUseFailure on every main-thread tool call — a
+  subagent's call leaves the event for the main thread — and Stop as a
+  backstop, at most 3 consecutive blocks) is a POSIX sh check for that binding file, so an unbound session
   never starts Python or touches the network; a bound one reads the events
   after its cursor and adds them as context, each marked authority ADVISORY
   with its producer, its text as one JSON string and the
   `cardinal-storyboard investigation ack` command. Nothing new: no output.
   `CARDINAL_CONNECTION=env` makes the hooks and `cardinal-storyboard` use
   `CARDINAL_MCP_URL` / `CARDINAL_MCP_API_KEY` from the environment only (a
-  development session against another Maestro).
+  development session against another Maestro); after `/cardinal:disconnect`
+  nothing is sent in that mode either.
 - **Connected.** `/cardinal:connect` picks the org, writes its MCP URL and API
   key and the OTel ingest settings into `~/.claude/settings.json` `env`, and
   turns on telemetry (Outcomes Dashboard), spend limits, initiative, plan,

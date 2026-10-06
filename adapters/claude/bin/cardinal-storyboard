@@ -848,7 +848,7 @@ def _event_line(e: dict) -> str:
     pr = p.get("principal") if isinstance(p.get("principal"), dict) else {}
     who = f"{ie._tok(pr.get('kind'))}:{ie._tok(pr.get('id'))}"
     if p.get("session_id"):
-        who += f" session {ie._tok(p['session_id'])}"
+        who += f" claimed session {ie._claimed(p['session_id'])}"
     if p.get("is_investigation_author") is True:
         who += " (author)"
     to = f" to session {ie._tok(e['to_session_id'])}" if e.get("to_session_id") else ""
@@ -874,7 +874,7 @@ def cmd_investigation_events(args: argparse.Namespace) -> int:
     conn, client = _connection()
     try:
         events, cursor, head = ie.read_all(conn, args.investigation_id, after=args.after, client=client,
-                                           max_pages=1000, timeout=30.0)
+                                           max_pages=1000, timeout=30.0, limit=ie.CLI_PAGE_LIMIT)
     except sync.ServerError as e:
         sys.stderr.write(f"cannot read the events of {args.investigation_id}: {ie.plain(e)}\n")
         return 1

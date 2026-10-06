@@ -13,7 +13,8 @@ needs from this adapter:
     CARDINAL_CONNECTION=env in the environment skips settings.json: the
     connection is CARDINAL_MCP_URL + CARDINAL_MCP_API_KEY from the
     environment only (a development or test session against another
-    Maestro, without touching ~/.claude/settings.json).
+    Maestro, without touching ~/.claude/settings.json); the disconnected
+    marker (/cardinal:disconnect) still means nothing is sent.
   - the PR: the decisions gh cache only (cache_only_pr_resolver), never `gh`.
   - the session cache: ~/.claude/cardinal/storyboard-discovery/<session>.json
     (the last look's branch/HEAD and the block it rendered, which
@@ -77,6 +78,10 @@ def connection(home: Optional[Path] = None, environ: Optional[dict] = None) -> d
     home = home or home_dir()
     environ = os.environ if environ is None else environ
     if environ.get(CONNECTION_ENV) == "env":
+        import _local_state
+
+        if _local_state.is_marked_disconnected(home):
+            return {}  # /cardinal:disconnect wins over env mode too
         return connection_for(environ.get(MCP_URL_ENV), environ.get(MCP_KEY_ENV))
     env = _settings_env(home)
     url, key = env.get(MCP_URL_ENV), env.get(MCP_KEY_ENV)

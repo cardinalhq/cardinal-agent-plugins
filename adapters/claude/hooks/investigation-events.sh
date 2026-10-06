@@ -1,5 +1,6 @@
 #!/bin/sh
-# cardinal investigation events — PostToolUse (every tool) and Stop hook.
+# cardinal investigation events — PostToolUse / PostToolUseFailure (every
+# tool) and Stop hook.
 #
 # The fast path. Every tool call of every session runs this, so an UNBOUND
 # session (no ~/.cardinal/investigations/sessions/<session_id>.json) must

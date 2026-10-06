@@ -127,6 +127,11 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/evidence-capture.py",
             "timeout": 2
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/investigation-events.sh",
+            "timeout": 3
           }
         ]
       }

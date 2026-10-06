@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """cardinal investigation events — delivery for a session bound to an
-Investigation. Started only by investigation-events.sh (the PostToolUse and
-Stop hook), and only when this session has a binding file.
+Investigation. Started only by investigation-events.sh (the PostToolUse,
+PostToolUseFailure and Stop hook), and only when this session has a binding
+file.
 
-At a tool boundary (PostToolUse): reads the investigation's events after
+At a tool boundary (PostToolUse, or PostToolUseFailure so a run of failing
+tools still delivers): reads the investigation's events after
 this session's cursor (read-investigation-events, to_session_id = this
 session; one request normally, 1.5 s timeout), keeps the deliverable ones
 (cue / question / challenge addressed to this session or to everyone, not
@@ -13,6 +15,11 @@ cardinal_core.investigation_events (producer, provenance, authority
 ADVISORY, the text as one JSON string, the ack command). Then the cursor
 advances past everything fetched. Nothing deliverable: no output at all.
 Throttled to one check per second (parallel tool calls).
+
+A subagent's tool call (the payload carries a non-empty agent_id; its
+session_id is the parent's) does nothing: no output and the cursor is not
+touched, so the event waits for the main thread's next tool boundary or
+Stop instead of landing in the subagent's context.
 
 At Stop (the backstop for events that land during the final turn): the
 same check; deliverable events block the stop ({"decision": "block",
@@ -45,8 +52,10 @@ def main() -> None:
         return
     sid = payload.get("session_id")
     event = payload.get("hook_event_name")
-    if event not in ("PostToolUse", "Stop"):
+    if event not in ("PostToolUse", "PostToolUseFailure", "Stop"):
         return
+    if payload.get("agent_id"):
+        return  # a subagent's tool call: leave the event for the main thread
     from cardinal_core import investigation_events as ie
     home = Path(os.environ.get("HOME") or str(Path.home()))
     if not ie.valid_session(sid) or ie.read_binding(home, sid) is None:
@@ -61,7 +70,7 @@ def main() -> None:
         if event == "Stop":
             out = {"decision": "block", "reason": text}
         else:
-            out = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
+            out = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
         sys.stdout.write(json.dumps(out))
         sys.stdout.flush()
 
