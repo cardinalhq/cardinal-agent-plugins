@@ -135,7 +135,7 @@ After each publish run `cardinal-storyboard state init <sb_id>` (`--refresh` aft
 later act): it writes the InvestigationState, the JSON an agent continues from without
 this transcript, and prints how to author it. Fill only the authored parts: what was
 established, decided and left open, never the process; `state check <path>` until
-`ok`, then `state publish <path>`: Cardinal's copy is canonical (`state pull` first).
+`ok`, then `state publish <path>`: Cardinal's copy is canonical (edit pulled copies).
 
 ## The card
 

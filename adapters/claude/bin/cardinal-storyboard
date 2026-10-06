@@ -337,7 +337,9 @@ def cmd_state_publish(args: argparse.Namespace) -> int:
                              allow_removed=args.allow_remove, client=_storyboard_discovery.client_header())
     except sync.ServerError as e:
         body = e.body
-        if body.get("error") == "version_conflict":
+        if sync.unsupported(e):
+            sys.stdout.write(f"not published: {sync.UNSUPPORTED} ({args.path}).\n")
+        elif body.get("error") == "version_conflict":
             sys.stdout.write(f"not published: the server copy is at version {body.get('current_version')} and this file is "
                              f"based on version {base}. The server copy is canonical: `cardinal-storyboard state pull {sid}` "
                              "(to another --out if you have edits), re-apply the edits to it, and publish again.\n")
@@ -351,8 +353,8 @@ def cmd_state_publish(args: argparse.Namespace) -> int:
     except ist.FetchError as e:
         sys.stderr.write(f"{e}\n")
         return 1
-    if out.get("storyboard_id") != sid or not isinstance(out.get("version"), int):
-        sys.stderr.write("put-state answered for another storyboard\n")
+    if out.get("storyboard_id") != sid or not sync.server_copy_ok(out):
+        sys.stderr.write("put-state answered for another storyboard or without a version and etag\n")
         return 1
     _write_server_copy(Path(args.path), conn, out, state)
     trust = out.get("trust") or {}
@@ -374,10 +376,13 @@ def cmd_state_pull(args: argparse.Namespace) -> int:
     try:
         got = sync.get_state(conn, args.storyboard_id, client=_storyboard_discovery.client_header())
     except sync.ServerError as e:
-        sys.stderr.write(f"{e}\n")
+        sys.stderr.write((sync.UNSUPPORTED if sync.unsupported(e) else str(e)) + "\n")
         return 1
     except ist.FetchError as e:
         sys.stderr.write(f"{e}\n")
+        return 1
+    if not sync.server_copy_ok(got):
+        sys.stderr.write("get-state answered without a version and etag\n")
         return 1
     state = got["state"]
     if out.exists() and not args.force:

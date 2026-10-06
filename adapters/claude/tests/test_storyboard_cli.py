@@ -298,7 +298,6 @@ class StateCliTests(unittest.TestCase):
         self.assertEqual(allowed.returncode, 0, allowed.stdout)
 
 
-
 class StateServerCliTests(unittest.TestCase):
     """state publish / pull against a fake maestro: the server copy is
     canonical after a publish (version-based), quotes go up attested."""
@@ -330,6 +329,7 @@ class StateServerCliTests(unittest.TestCase):
         }
         server_copy = self.server_copy = {}
         seen = self.seen = []
+        mode = self.mode = {"old_server": False}
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):  # noqa: N802
@@ -339,6 +339,9 @@ class StateServerCliTests(unittest.TestCase):
                 status, out = 200, None
                 if tool == "get":
                     out = get
+                elif mode["old_server"]:
+                    # A Maestro before the state routes: the plugin key's allowlist refuses them.
+                    status, out = 403, {"error": "insufficient_scope"}
                 elif tool == "get-state":
                     out = (dict(server_copy, storyboard_id=body["storyboard_id"], current=True,
                                 trust={"client_attested_authority": []}) if server_copy
@@ -428,3 +431,17 @@ class StateServerCliTests(unittest.TestCase):
         self.assertEqual(res.returncode, 1)
         self.assertIn("not published", res.stdout)
         self.assertFalse([t for t, _ in self.seen if t == "put-state"])
+
+    def test_a_server_without_the_state_routes_says_so_and_leaves_the_file_alone(self):
+        self.mode["old_server"] = True
+        before = self.path.read_text()
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("does not store InvestigationState yet", res.stdout)
+        self.assertNotIn("insufficient_scope", res.stdout)
+        self.assertEqual(self.path.read_text(), before)
+        self.assertFalse(Path(str(self.path) + ".server").exists())
+        pulled = self.run_cli("state", "pull", self.SB, "--out", str(self.base / "p.json"))
+        self.assertEqual(pulled.returncode, 1)
+        self.assertIn("does not store InvestigationState yet", pulled.stderr)
+        self.assertFalse((self.base / "p.json").exists())

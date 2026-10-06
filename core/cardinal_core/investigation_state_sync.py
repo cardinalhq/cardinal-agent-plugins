@@ -162,6 +162,28 @@ def _post(conn: dict, tool: str, payload: dict, *, client: str, opener=None, tim
     return body
 
 
+UNSUPPORTED = ("this Cardinal server does not store InvestigationState yet (it needs a newer Maestro); "
+               "the local state file is unchanged and still valid, so nothing needs fixing: skip publishing")
+
+# Errors the state routes themselves answer; any other 404 means the route is missing.
+_ROUTE_404S = ("state_not_found", "storyboard_not_found")
+
+
+def unsupported(err: "ServerError") -> bool:
+    """True when the server predates the state routes: the plugin key's allowlist
+    refuses them (403 insufficient_scope) or the route does not exist."""
+    code = err.body.get("error")
+    if err.status == 403 and code == "insufficient_scope":
+        return True
+    return err.status in (404, 405) and code not in _ROUTE_404S
+
+
+def server_copy_ok(got: dict) -> bool:
+    """A put-state / get-state answer carries the version and etag the .server
+    sidecar records."""
+    return isinstance(got.get("version"), int) and isinstance(got.get("etag"), str) and bool(got.get("etag"))
+
+
 def put_state(conn: dict, state: dict, *, base_version: int, attestation: dict, allow_removed=(),
               client: str, opener=None) -> dict:
     sid = (state.get("source") or {}).get("storyboard_id")
