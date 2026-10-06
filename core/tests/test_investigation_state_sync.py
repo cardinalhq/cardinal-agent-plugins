@@ -204,11 +204,25 @@ class InvestigationClient(unittest.TestCase):
         # put-state / get-state body refuses investigation_id.
         for status, body in ((403, b'{"error":"insufficient_scope"}'), (404, b"<html>Cannot POST</html>"),
                              (404, b'{"error":"not_found"}'),
-                             (400, b'{"error":"invalid_body","issues":[{"path":"","message":"Unrecognized key: investigation_id"}]}')):
+                             # zod v4 (maestro), as formatZodIssues flattens it; and zod v3's wording.
+                             (400, b'{"error":"invalid_body","issues":[{"path":"storyboard_id","message":"Invalid input: '
+                                   b'expected string, received undefined"},{"path":"","message":"Unrecognized key: '
+                                   b'\\"investigation_id\\""}]}'),
+                             (400, b'{"error":"invalid_body","issues":[{"path":"","message":"Unrecognized keys: \\"x\\", '
+                                   b'\\"investigation_id\\""}]}'),
+                             (400, b'{"error":"invalid_body","issues":[{"message":"Unrecognized key(s) in object: '
+                                   b'\'investigation_id\'"}]}')):
             self.assertTrue(sync.investigations_unsupported(self.refusal(status, body)), (status, body))
         for status, body in ((404, b'{"error":"investigation_not_found"}'), (403, b'{"error":"not_investigation_author"}'),
                              (409, b'{"error":"version_conflict","current_version":2}'),
-                             (400, b'{"error":"invalid_body","issues":[{"path":"question"}]}')):
+                             (400, b'{"error":"invalid_body","issues":[{"path":"question"}]}'),
+                             # A real refusal that merely mentions investigation_id is not an old server.
+                             (400, b'{"error":"invalid_body","issues":[{"path":"investigation_id","message":"expected '
+                                   b'inv_ followed by 24 hex characters"}]}'),
+                             (400, b'{"error":"invalid_body","issues":[{"path":"state","message":"Unrecognized key: '
+                                   b'\\"investigation_id\\""}]}'),
+                             (400, b'{"error":"invalid_attestation","issues":[{"path":"","message":"Unrecognized key: '
+                                   b'\\"investigation_id\\""}]}')):
             self.assertFalse(sync.investigations_unsupported(self.refusal(status, body)), (status, body))
 
     def test_refusals_in_words(self):
@@ -218,6 +232,19 @@ class InvestigationClient(unittest.TestCase):
         self.assertIn("another investigation", sync.plain(self.refusal(409, b'{"error":"storyboard_attached_elsewhere"}')))
         self.assertEqual(sync.plain(self.refusal(500, b'{"message":"try later"}')), "Cardinal refused (try later)")
         self.assertEqual(sync.plain(self.refusal(500, b"{}")), "Cardinal refused (no reason given)")
+        # A refused body says what was refused (invalid_body carries issues, no message).
+        e = self.refusal(400, b'{"error":"invalid_body","issues":[{"path":"window.start","message":"Invalid input"},'
+                              b'{"path":"","message":"Unrecognized key: \\"x\\""}]}')
+        self.assertEqual(sync.plain(e), 'Cardinal refused (invalid_body: window.start: Invalid input; Unrecognized key: "x")')
+
+    def test_create_sends_the_session_it_is_created_in(self):
+        op = FakeOpener({"investigation_id": INV})
+        sync.create_investigation(CONN, "Why?", client="c", session_id="11111111-2222-3333-4444-555555555555", opener=op)
+        self.assertEqual(json.loads(op.requests[0].data)["session_id"], "11111111-2222-3333-4444-555555555555")
+        sync.create_investigation(CONN, "Why?", client="c", opener=op)
+        self.assertNotIn("session_id", json.loads(op.requests[1].data))
+        with self.assertRaises(ist.FetchError):
+            sync.create_investigation(CONN, "Why?", client="c", session_id="../x", opener=op)
 
 
 if __name__ == "__main__":

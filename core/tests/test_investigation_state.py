@@ -857,6 +857,41 @@ class VirtualStoryboard(unittest.TestCase):
         self.assertEqual(res["stats"]["owner_quotes_verified"], 2)
 
 
+class TopLevelKeys(unittest.TestCase):
+    """An unknown top-level or source field is refused, as maestro's port
+    refuses it (keys(state, STATE_KEYS, "state")): a local ok never meets a
+    server 422 for it."""
+
+    def test_unknown_top_level_and_source_fields_are_refused(self):
+        got = storyboard()
+        s = authored(ist.project(got))
+        s["summary"] = "x"
+        self.assertEqual(ist.check(s, got, SESSIONS)["errors"], [
+            "state: unknown fields ['summary'] (allowed: schema, source, question, status, window, context, actors, "
+            "evidence, findings, hypotheses, open_questions, constraints, decisions, terms)"])
+        s = authored(ist.project(got))
+        s["source"]["investigation_id"] = "inv_" + "a" * 24
+        self.assertEqual(ist.check(s, got, SESSIONS)["errors"],
+                         ["source: unknown fields ['investigation_id'] (allowed: storyboard_id, acts)"])
+        st = ist.project(ist.virtual_storyboard(INV))
+        st["reasoning"] = "x"
+        self.assertTrue(any("state: unknown fields ['reasoning']" in e for e in ist.check(st, ist.virtual_storyboard(INV))["errors"]))
+
+    def test_projected_states_use_exactly_the_allowed_keys(self):
+        self.assertEqual(tuple(ist.project(storyboard())), ist.STATE_KEYS)
+        self.assertEqual(tuple(ist.project(storyboard())["source"]), ist.SOURCE_KEYS)
+
+
+class Oracle(unittest.TestCase):
+    def test_a_quote_from_a_session_not_loaded_says_how_to_load_it(self):
+        ref = dict(owner(T_GO, "Go with the cache."), session="other-session-1")
+        self.assertIn("pass --session <file>", ist.verify_quote(ref, "owner", SESSIONS))
+        self.assertIn("pass --session <file>", ist.verify_quote(owner(T_GO, "Never said."), "owner", SESSIONS))
+        got = storyboard()
+        errs = ist.check(authored(ist.project(got)), got, None)["errors"]
+        self.assertTrue(any("pass --session <file>" in e and "agent_interpretation / unknown" in e for e in errs), errs)
+
+
 class LoadGet(unittest.TestCase):
     def test_rejects_non_storyboard(self):
         with self.assertRaises(ist.FetchError):

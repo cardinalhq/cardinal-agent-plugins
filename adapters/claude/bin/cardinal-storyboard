@@ -30,7 +30,9 @@ Commands:
   investigation create --question TEXT [--window JSON]
       Create an Investigation on Cardinal (authored by this key's user) and
       print its id (inv_...). Its InvestigationState can be published before
-      any storyboard exists: state init --investigation.
+      any storyboard exists: state init --investigation. Records this
+      session ($CLAUDE_CODE_SESSION_ID): its transcript verifies the state's
+      quotes.
 
   investigation attach <investigation_id> <storyboard_id>
       Attach a storyboard (one you authored an act of) to your
@@ -97,7 +99,11 @@ Commands:
   init and check take --from-get FILE (a saved storyboard__get result) instead of
   fetching. Owner and agent quotes are verified against the session
   transcript of every published act found under ~/.claude/projects (the
-  transcript is read as an oracle, never copied); --session FILE adds one.
+  transcript is read as an oracle, never copied) and, for an
+  investigation-bound state, of the session the investigation was created
+  in (never the session that happens to run this command); --session FILE
+  adds one. An investigation created outside a session has no oracle:
+  nothing in its state rests on a quote unless --session names one.
 
 The storyboard skill runs `context` and passes the object to
 storyboard__find, then follows the rule find returns: continue an open act
@@ -215,26 +221,53 @@ def storyboard_for_state(storyboard_id: str, from_get):
                                 client=_storyboard_discovery.client_header())
 
 
-def sessions_for_state(got: dict, extra: list):
-    """The transcripts this machine holds for the storyboard's acts, as
-    {session_id: utterances}; None when there are none. Before any
-    storyboard (no acts to name a session) this session's own transcript."""
-    from cardinal_core import investigation_state as ist
-    home = Path(os.environ.get("HOME") or str(Path.home()))
+def _oracle_sessions(got: dict, investigation) -> list:
+    """The sessions whose transcripts verify a state's quotes: the
+    storyboard's acts, plus, for an investigation-bound state, the session
+    the investigation was created in (never the session running this CLI)."""
     sids = [act.get("session_id") for act in got.get("acts") or [] if isinstance(act, dict)]
-    if got.get("storyboard_id") is None:
-        sids.append(os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID"))
+    if isinstance(investigation, dict):
+        sids.append(investigation.get("session_id"))
+    return [s for i, s in enumerate(sids) if isinstance(s, str) and re.match(r"^[0-9A-Za-z-]{8,64}$", s) and s not in sids[:i]]
+
+
+def _transcript(sid: str):
+    home = Path(os.environ.get("HOME") or str(Path.home()))
+    found = sorted((home / ".claude" / "projects").glob(f"*/{sid}.jsonl"))
+    return str(found[0]) if found else None
+
+
+def sessions_for_state(got: dict, extra: list, investigation=None):
+    """The transcripts this machine holds for the oracle sessions
+    (_oracle_sessions) and every --session, as {session_id: utterances};
+    None when there are none."""
+    from cardinal_core import investigation_state as ist
     paths = {}
-    for sid in sids:
-        if isinstance(sid, str) and re.match(r"^[0-9A-Za-z-]{8,64}$", sid):
-            found = sorted((home / ".claude" / "projects").glob(f"*/{sid}.jsonl"))
-            if found:
-                paths[sid] = str(found[0])
+    for sid in _oracle_sessions(got, investigation):
+        found = _transcript(sid)
+        if found:
+            paths[sid] = found
     for f in extra or []:
         paths[Path(f).stem] = f
     if not paths:
         return None
     return ist.load_sessions(paths, lambda p: open(p, encoding="utf-8", errors="replace"))
+
+
+def _oracle_note(inv_id, investigation, got: dict, extra: list) -> None:
+    """Say on stderr when an investigation-bound state has no oracle for its
+    quotes, or one whose transcript is not on this machine."""
+    if not inv_id or not isinstance(investigation, dict) or extra:
+        return
+    sid = investigation.get("session_id")
+    if not sid:
+        if not any(isinstance(a, dict) and a.get("session_id") for a in got.get("acts") or []):
+            sys.stderr.write(f"note: investigation {inv_id} records no session, so no transcript can verify a quote: "
+                             "record what rests on the owner's words as agent_interpretation / unknown, or pass "
+                             "--session <file> (the transcript JSONL where it was said)\n")
+    elif not _transcript(sid):
+        sys.stderr.write(f"note: the transcript of session {sid}, where investigation {inv_id} was created, is not on "
+                         "this machine: pass --session <file> to verify quotes from it\n")
 
 
 def _connection():
@@ -268,9 +301,9 @@ class _Unbound(Exception):
 
 
 def got_for_state(path: str, state, from_get):
-    """(got, investigation_id or None) for a state file: the investigation its
-    PATH.server names, else the storyboard in its source (plugin 0.40.0).
-    Raises FetchError, ServerError or _Unbound."""
+    """(got, investigation_id or None, investigation or None) for a state
+    file: the investigation its PATH.server names, else the storyboard in its
+    source (plugin 0.40.0). Raises FetchError, ServerError or _Unbound."""
     from cardinal_core import investigation_state as ist
     meta = _server_meta(path)
     inv_id = meta.get("investigation_id")
@@ -279,13 +312,20 @@ def got_for_state(path: str, state, from_get):
         if not sid and not from_get:
             raise _Unbound(f"{path} belongs to no storyboard and no investigation: `state init --investigation ID` "
                            "or `state pull --investigation ID` writes one that does")
-        return storyboard_for_state(sid, from_get), None
+        return storyboard_for_state(sid, from_get), None, None
     from cardinal_core import investigation_state_sync as sync
     conn, client = _connection()
     if conn.get("origin") and (meta.get("origin"), meta.get("org")) != (conn.get("origin"), conn.get("org")):
         raise _Unbound(f"{path} belongs to investigation {inv_id} on another Cardinal connection ({meta.get('origin')}): "
                        "connect to it, or pull the state from this one")
-    return _investigation_got(sync.get_investigation(conn, inv_id, client=client), from_get), inv_id
+    inv = sync.get_investigation(conn, inv_id, client=client)
+    got = _investigation_got(inv, from_get)
+    src = state.get("source") if isinstance(state, dict) and isinstance(state.get("source"), dict) else {}
+    if src.get("storyboard_id") and got.get("storyboard_id") is None:
+        sys.stderr.write(f"note: {path} reflects storyboard {src['storyboard_id']}, which is no longer attached to "
+                         f"investigation {inv_id} (deleted?): `cardinal-storyboard state init --investigation {inv_id} "
+                         f"--refresh --out {path}` re-projects it from the investigation, keeping what is authored\n")
+    return got, inv_id, inv
 
 
 def _load_state(path: str):
@@ -297,7 +337,7 @@ def _load_state(path: str):
 
 
 def _resolve(args, state):
-    """got_for_state with every failure printed; (got, investigation_id) or None."""
+    """got_for_state with every failure printed; (got, investigation_id, investigation) or None."""
     from cardinal_core import investigation_state as ist
     from cardinal_core import investigation_state_sync as sync
     try:
@@ -365,15 +405,28 @@ def _init_investigation(args: argparse.Namespace) -> int:
         sys.stderr.write(f"{e}\n")
         return 1
     sb = got.get("storyboard_id")
+    meta = _server_meta(str(out))
+    detached = None
     if args.refresh and out.exists():
         try:
             old = json.loads(out.read_text())
             old_sb = (old.get("source") or {}).get("storyboard_id")
-            if old_sb is not None and old_sb != sb:
+            # The storyboard this investigation-bound file reflects is gone
+            # from the investigation (deleted: there is no detach): re-project
+            # from the investigation itself, keeping what is authored.
+            gone = (sb is None and old_sb is not None and meta.get("investigation_id") == inv_id
+                    and meta.get("storyboard_id") == old_sb)
+            if old_sb is not None and old_sb != sb and not gone:
                 sys.stderr.write(f"{out} reflects storyboard {old_sb}, and investigation {inv_id} has "
                                  f"{sb or 'no storyboard'}: --force starts over\n")
                 return 1
+            if gone:
+                # Its open questions stay open, now the investigation's own.
+                for q in old.get("open_questions") or []:
+                    if isinstance(q, dict):
+                        q.pop("finding", None)
             state = ist.refresh(old, got)
+            detached = old_sb if gone else None
         except (OSError,) + ist.MALFORMED as e:
             sys.stderr.write(f"{out}: {e}\n")
             return 1
@@ -386,16 +439,20 @@ def _init_investigation(args: argparse.Namespace) -> int:
     # file was already based on is kept (a refresh after attach publishes on
     # top of it); otherwise 0, and a publish over an existing server copy is
     # refused until it is pulled.
-    meta = _server_meta(str(out))
     same = (meta.get("origin"), meta.get("org")) == (conn.get("origin"), conn.get("org")) and (
         meta.get("investigation_id") == inv_id or (not meta.get("investigation_id") and sb and meta.get("storyboard_id") == sb))
     version = meta.get("version") if same and isinstance(meta.get("version"), int) else 0
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     _write_meta(out, conn, investigation_id=inv_id, storyboard_id=sb, version=version,
-                etag=meta.get("etag") if version else None)
-    result = ist.check(state, got, sessions_for_state(got, args.session))
+                etag=meta.get("etag") if version else None, session_id=inv.get("session_id"))
+    _oracle_note(inv_id, inv, got, args.session)
+    result = ist.check(state, got, sessions_for_state(got, args.session, inv))
     note = ""
+    if detached:
+        note += (f"note: storyboard {detached} is no longer attached to {inv_id} (deleted?): re-projected from the "
+                 "investigation. Its findings, receipts and what was authored on them (limits, discrepancies, "
+                 "receipt descriptions) are gone; state check names every item that still cites them.\n")
     server = inv.get("state") if isinstance(inv.get("state"), dict) else None
     if server and server.get("version") != version:
         note = (f"note: investigation {inv_id} already has a published state (version {server.get('version')}); "
@@ -412,8 +469,9 @@ def cmd_state_check(args: argparse.Namespace) -> int:
     resolved = _resolve(args, state)
     if resolved is None:
         return 1
-    got, _ = resolved
-    sessions = sessions_for_state(got, args.session)
+    got, inv_id, inv = resolved
+    _oracle_note(inv_id, inv, got, args.session)
+    sessions = sessions_for_state(got, args.session, inv)
     if args.downgrade:
         state, changes = ist.downgrade(state, sessions)
         Path(args.path).write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n")
@@ -447,22 +505,26 @@ def _server_meta(path: str) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
-def _write_meta(path: Path, conn: dict, *, storyboard_id, version: int, etag, investigation_id=None) -> None:
+def _write_meta(path: Path, conn: dict, *, storyboard_id, version: int, etag, investigation_id=None,
+                session_id=None) -> None:
     """PATH.server: where the canonical copy lives and which version this file
     is based on. A storyboard-bound state's sidecar is exactly plugin 0.40.0's
     {origin, org, storyboard_id, version, etag}; an investigation-bound one
-    adds investigation_id (storyboard_id null before a storyboard)."""
+    adds investigation_id and session_id (the session it was created in,
+    whose transcript verifies its quotes; null when it records none), and
+    storyboard_id is null before a storyboard."""
     meta = {"origin": conn.get("origin"), "org": conn.get("org")}
     if investigation_id:
-        meta["investigation_id"] = investigation_id
+        meta.update(investigation_id=investigation_id, session_id=session_id)
     meta.update(storyboard_id=storyboard_id, version=version, etag=etag)
     Path(str(path) + ".server").write_text(json.dumps(meta) + "\n")
 
 
-def _write_server_copy(path: Path, conn: dict, got: dict, state: dict, investigation_id=None) -> None:
+def _write_server_copy(path: Path, conn: dict, got: dict, state: dict, investigation_id=None,
+                       session_id=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _write_meta(path, conn, investigation_id=investigation_id, storyboard_id=got.get("storyboard_id"),
-                version=got["version"], etag=got["etag"])
+                version=got["version"], etag=got["etag"], session_id=session_id)
     Path(str(path) + ".last-ok").write_text(json.dumps(state, ensure_ascii=False) + "\n")
 
 
@@ -478,8 +540,9 @@ def cmd_state_publish(args: argparse.Namespace) -> int:
     resolved = _resolve(args, state)
     if resolved is None:
         return 1
-    got, inv_id = resolved
-    sessions = sessions_for_state(got, args.session)
+    got, inv_id, inv = resolved
+    _oracle_note(inv_id, inv, got, args.session)
+    sessions = sessions_for_state(got, args.session, inv)
     meta = _server_meta(args.path)
     if inv_id:
         # got_for_state refused a sidecar of another connection.
@@ -537,7 +600,8 @@ def cmd_state_publish(args: argparse.Namespace) -> int:
         return 1
     if inv_id:
         out = dict(out, storyboard_id=got.get("storyboard_id"))
-    _write_server_copy(Path(args.path), conn, out, state, investigation_id=inv_id)
+    _write_server_copy(Path(args.path), conn, out, state, investigation_id=inv_id,
+                       session_id=(inv or {}).get("session_id"))
     trust = out.get("trust") or {}
     attested = trust.get("client_attested_authority") or []
     sys.stdout.write(f"published: version {out['version']} (etag {out['etag'][:12]}…){' unchanged' if out.get('unchanged') else ''}; "
@@ -597,7 +661,8 @@ def cmd_state_pull(args: argparse.Namespace) -> int:
         # The storyboard the state reflects (null before one), not the one attached since.
         src = state.get("source") if isinstance(state.get("source"), dict) else {}
         got = dict(got, storyboard_id=src.get("storyboard_id"))
-    _write_server_copy(out, conn, got, state, investigation_id=inv_id)
+    _write_server_copy(out, conn, got, state, investigation_id=inv_id,
+                       session_id=inv.get("session_id") if inv_id else None)
     trust = got.get("trust") or {}
     sys.stdout.write(f"{out}\nversion {got['version']}; "
                      f"{'current' if got.get('current') else 'STALE: ' + str(got.get('stale_note'))}; "
@@ -615,9 +680,12 @@ def cmd_investigation_create(args: argparse.Namespace) -> int:
         except ValueError as e:
             sys.stderr.write(f"--window is not JSON: {e}\n")
             return EXIT_USAGE
+    # The session it is created in: before any storyboard, the only
+    # transcript that may verify the state's quotes.
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID") or None
     conn, client = _connection()
     try:
-        out = sync.create_investigation(conn, args.question, window, client=client)
+        out = sync.create_investigation(conn, args.question, window, client=client, session_id=session_id)
     except sync.ServerError as e:
         sys.stderr.write(_refused(e, "investigation not created") + "\n")
         return 1

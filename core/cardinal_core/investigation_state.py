@@ -340,7 +340,7 @@ def verify_plan_approval(appr: Any, role_of: Callable[[Any], Optional[str]], ses
         if not isinstance(ref, dict) or ref.get("kind") != "message" or role_of(ref.get("from")) != role:
             return f"{name} is a message quote from the {role}"
     if sessions is None:
-        return "no session transcript is available here to verify the plan and its approval"
+        return "no session transcript is available here to verify the plan and its approval: pass --session <file> (that session's transcript JSONL)"
     plan = _locate(appr["plan_source"], "agent", sessions)
     ok = _locate(appr["approval_source"], "owner", sessions)
     if plan is None:
@@ -370,7 +370,7 @@ def verify_quote(ref: dict, role: str, sessions: dict) -> Optional[str]:
         return "at is not an ISO timestamp"
     pool = [sessions[ref["session"]]] if ref.get("session") in sessions else list(sessions.values())
     if ref.get("session") and ref["session"] not in sessions:
-        return f"session {ref['session']} is not available here"
+        return f"session {ref['session']} is not loaded here: pass --session <file> (that session's transcript JSONL)"
     said = [(ts, r, t) for u in pool for ts, r, t in u if q and q in _norm(t)]
     if any(r == role and abs(ts - at) <= QUOTE_SLACK_SECONDS for ts, r, t in said):
         return None
@@ -378,7 +378,8 @@ def verify_quote(ref: dict, role: str, sessions: dict) -> Optional[str]:
         return "those words were said, but not at that time"
     if said:
         return "those are not the " + ("owner's words (the agent said them)" if role == "owner" else "agent's words")
-    return "no message in the session transcripts contains those words"
+    return ("no message in the session transcripts contains those words (if they were said in a session "
+            "not loaded here, pass --session <file> (that session's transcript JSONL))")
 
 
 # ---------------------------------------------------------------------------
@@ -770,7 +771,9 @@ def _check(state: Any, got: dict, sessions: Optional[dict] = None, previous: Opt
             return
         quoted = [r for r in refs if r.get("kind") == "message" and actors.get(r.get("from")) == "owner"]
         if quoted and sessions is None:
-            err(f"{where}: {claim} rests on the owner's words, and no session transcript is available here to verify them")
+            err(f"{where}: {claim} rests on the owner's words, and no session transcript is available here to verify them: "
+                "pass --session <file> (that session's transcript JSONL), or record it at the authority you can show (agent_interpretation / unknown; "
+                "state check --downgrade)")
         elif not quoted:
             err(f"{where}: {claim} needs the owner's own words in source: a verified message quote from the owner "
                 "(a doc, commit, PR or receipt does not make it the owner's)")

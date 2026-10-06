@@ -476,7 +476,9 @@ class InvestigationCliTests(unittest.TestCase):
     SB = "sb_0123456789abcdef01234567"
     INV = "inv_" + "a" * 24
     R1 = "rcpt_" + "1" * 24
-    SID = "11111111-2222-3333-4444-555555555555"
+    SID = "11111111-2222-3333-4444-555555555555"  # the session the investigation is created in
+    ACT_SID = "66666666-7777-8888-9999-000000000000"  # the session that later publishes the storyboard's act
+    OTHER_SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"  # some later session running the CLI
     QUOTE = {"kind": "message", "from": "owner", "at": "2026-10-01T01:00:00.000Z", "quote": "Keep every query exact."}
     WINDOW = {"start": "2026-10-01T00:00:00.000Z", "end": "2026-10-01T01:00:00.000Z"}
 
@@ -490,13 +492,18 @@ class InvestigationCliTests(unittest.TestCase):
         home = self.base / "home"
         proj = home / ".claude" / "projects" / "-repo"
         proj.mkdir(parents=True)
-        # This session's transcript: before any storyboard, the oracle for owner quotes.
+        # The investigation's session: before any storyboard, the only oracle for its quotes.
         (proj / f"{self.SID}.jsonl").write_text(json.dumps({
             "type": "user", "timestamp": self.QUOTE["at"],
             "message": {"role": "user", "content": "Keep every query exact."}}) + "\n")
+        for sid, said in ((self.ACT_SID, "Ship the cache."), (self.OTHER_SID, "Delete the volumes.")):
+            (proj / f"{sid}.jsonl").write_text(json.dumps({
+                "type": "user", "timestamp": "2026-10-02T01:00:00.000Z",
+                "message": {"role": "user", "content": said}}) + "\n")
+        self.env = {"CLAUDE_CODE_SESSION_ID": self.SID}
         get = {
             "storyboard_id": self.SB, "question": "Why?", "window": self.WINDOW,
-            "acts": [{"number": 1, "status": "published", "context": {"repo": "o/r"}, "session_id": self.SID}],
+            "acts": [{"number": 1, "status": "published", "context": {"repo": "o/r"}, "session_id": self.ACT_SID}],
             "receipt_tiers": {self.R1: "captured"},
             "scenes": [{"act": 1, "act_status": "published", "id": "s1", "state": "supported", "title": "T",
                         "statement": "S.", "receipt_ids": [self.R1], "claims": [],
@@ -522,6 +529,8 @@ class InvestigationCliTests(unittest.TestCase):
 
             def answer(self, tool, body):
                 if tool == "get":
+                    if mode.get("deleted"):
+                        return 404, {"error": "storyboard_not_found"}
                     return 200, get
                 if mode["server"] == "pre-state":
                     # A Maestro before the state routes: the plugin key's allowlist refuses them.
@@ -529,18 +538,24 @@ class InvestigationCliTests(unittest.TestCase):
                 if tool in ("create-investigation", "get-investigation", "attach-storyboard") and mode["server"] == "state-only":
                     return 404, None  # maestro v1.99.11: no such route
                 if "investigation_id" in body and mode["server"] == "state-only":
-                    return 400, {"error": "invalid_body", "issues": [{"message": "Unrecognized key(s) in object: 'investigation_id'"}]}
+                    return 400, {"error": "invalid_body", "issues": [{"path": "", "message": 'Unrecognized key: "investigation_id"'}]}
                 if tool == "create-investigation":
-                    invs[inv_id] = {"question": body["question"], "window": body.get("window"), "storyboard_id": None, "state": None}
+                    invs[inv_id] = {"question": body["question"], "window": body.get("window"), "storyboard_id": None,
+                                    "session_id": body.get("session_id"), "state": None}
                     return 200, {"investigation_id": inv_id, "author": {"kind": "user", "id": "u1"}, "created_at": "t"}
                 if "investigation_id" in body and body["investigation_id"] not in invs:
                     return 404, {"error": "investigation_not_found"}
                 inv = invs.get(body.get("investigation_id"))
                 if tool == "get-investigation":
                     st = inv["state"]
-                    return 200, dict({k: inv[k] for k in ("question", "window", "storyboard_id")}, investigation_id=inv_id,
+                    if mode.get("deleted"):
+                        inv["storyboard_id"] = None
+                    return 200, dict({k: inv[k] for k in ("question", "window", "storyboard_id", "session_id")}, investigation_id=inv_id,
                                      state=st and {"version": st["version"], "etag": st["etag"], "current": True})
                 if tool == "attach-storyboard":
+                    if mode["server"] == "bad-body":
+                        return 400, {"error": "invalid_body", "issues": [
+                            {"path": "storyboard_id", "message": "expected sb_ followed by 24 hex characters"}]}
                     if mode["server"] == "not-author":
                         return 403, {"error": "not_investigation_author"}
                     inv["storyboard_id"] = body["storyboard_id"]
@@ -582,8 +597,7 @@ class InvestigationCliTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_cli(self, *args):
-        env = {"HOME": str(self.base / "home"), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-               "CLAUDE_CODE_SESSION_ID": self.SID}
+        env = dict(self.env, HOME=str(self.base / "home"), PATH=os.environ.get("PATH", "/usr/bin:/bin"))
         return subprocess.run([sys.executable, str(CLI), *args], capture_output=True, text=True, timeout=60, env=env)
 
     def meta(self, path=None) -> dict:
@@ -608,16 +622,20 @@ class InvestigationCliTests(unittest.TestCase):
 
     def test_create_init_check_publish_before_any_storyboard(self):
         self.create_and_init()
-        self.assertEqual(self.seen[0], ("create-investigation", {"question": "Why?", "window": self.WINDOW}))
+        self.assertEqual(self.seen[0], ("create-investigation", {"question": "Why?", "window": self.WINDOW,
+                                                                 "session_id": self.SID}))
         state = json.loads(self.path.read_text())
         self.assertEqual(state["source"], {"storyboard_id": None, "acts": []})
         self.assertEqual((state["question"], state["window"], state["status"]), ("Why?", self.WINDOW, "open"))
         self.assertNotIn("investigation_id", state)
         meta = self.meta()
-        self.assertEqual((meta["investigation_id"], meta["storyboard_id"], meta["version"]), (self.INV, None, 0))
+        self.assertEqual((meta["investigation_id"], meta["session_id"], meta["storyboard_id"], meta["version"]),
+                         (self.INV, self.SID, None, 0))
+        # Checked from a later session: the oracle is still the investigation's session.
+        self.env = {"CLAUDE_CODE_SESSION_ID": self.OTHER_SID}
         ok = self.run_cli("state", "check", str(self.path))
         self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
-        self.assertIn("1 owner / 0 agent quotes verified", ok.stdout)  # against this session's transcript
+        self.assertIn("1 owner / 0 agent quotes verified", ok.stdout)
         res = self.run_cli("state", "publish", str(self.path))
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("published: version 1", res.stdout)
@@ -659,7 +677,7 @@ class InvestigationCliTests(unittest.TestCase):
         self.assertIn("version 1; current", ok.stdout)
         self.assertEqual(json.loads(pulled.read_text()), json.loads(self.path.read_text()))
         self.assertEqual(self.meta(pulled), {"origin": self.meta()["origin"], "org": "o1", "investigation_id": self.INV,
-                                             "storyboard_id": None, "version": 1, "etag": "e" * 64})
+                                             "session_id": self.SID, "storyboard_id": None, "version": 1, "etag": "e" * 64})
         # The pulled copy is investigation-bound: it publishes on top of version 1.
         self.assertEqual(self.run_cli("state", "publish", str(pulled)).returncode, 0)
         self.assertEqual((self.puts()[-1]["investigation_id"], self.puts()[-1]["base_version"]), (self.INV, 1))
@@ -692,11 +710,22 @@ class InvestigationCliTests(unittest.TestCase):
         self.assertEqual([q["id"] for q in state["open_questions"]], ["s1/q"])
         self.assertEqual((self.meta()["investigation_id"], self.meta()["storyboard_id"], self.meta()["version"]),
                          (self.INV, self.SB, 1))
+        # The act was published from another session: the oracle is the act's
+        # session plus the investigation's, so the quote verified before the
+        # storyboard still verifies, and so does one from the act's session.
+        state = json.loads(self.path.read_text())
+        state["constraints"].append({"id": "c2", "statement": "Ship the cache.", "authored_by": "owner",
+                                     "authority": "owner_stated", "source": [
+                                         {"kind": "message", "from": "owner", "at": "2026-10-02T01:00:00.000Z",
+                                          "quote": "Ship the cache."}]})
+        self.path.write_text(json.dumps(state))
         ok = self.run_cli("state", "check", str(self.path))
         self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIn("2 owner / 0 agent quotes verified", ok.stdout)
         res = self.run_cli("state", "publish", str(self.path))
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual((self.puts()[-1]["investigation_id"], self.puts()[-1]["base_version"]), (self.INV, 1))
+        self.assertEqual({q["session"] for q in self.puts()[-1]["attestation"]["quotes"]}, {self.SID, self.ACT_SID})
         self.assertEqual(self.invs[self.INV]["state"]["state"]["source"]["storyboard_id"], self.SB)
 
     def test_refresh_never_moves_a_state_off_its_storyboard(self):
@@ -756,3 +785,80 @@ class InvestigationCliTests(unittest.TestCase):
         self.assertFalse((self.base / "n.json").exists())
         self.assertFalse((self.base / "p.json").exists())
         self.assertEqual(self.puts(), [])
+
+    def test_the_oracle_is_the_investigations_session_never_the_current_one(self):
+        self.create_and_init()
+        state = json.loads(self.path.read_text())
+        # Said only in a later session that merely runs the CLI: not verified.
+        state["constraints"][0]["source"] = [{"kind": "message", "from": "owner", "at": "2026-10-02T01:00:00.000Z",
+                                              "quote": "Delete the volumes."}]
+        self.path.write_text(json.dumps(state))
+        self.env = {"CLAUDE_CODE_SESSION_ID": self.OTHER_SID}
+        bad = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("quote not verified", bad.stdout)
+        self.assertIn("pass --session <file>", bad.stdout)
+        # Asked for explicitly, that session's transcript is an oracle.
+        other = self.base / "home" / ".claude" / "projects" / "-repo" / f"{self.OTHER_SID}.jsonl"
+        ok = self.run_cli("state", "check", str(self.path), "--session", str(other))
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+
+    def test_an_investigation_without_a_session_has_no_oracle(self):
+        self.env = {}
+        self.create_and_init()
+        self.assertNotIn("session_id", self.seen[0][1])
+        self.assertIsNone(self.meta()["session_id"])
+        res = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("no session transcript is available here", res.stdout)
+        self.assertIn(f"investigation {self.INV} records no session", res.stderr)
+        self.assertIn("agent_interpretation / unknown", res.stderr)
+        self.assertEqual(self.run_cli("state", "publish", str(self.path)).returncode, 1)
+        self.assertEqual(self.puts(), [])
+        transcript = self.base / "home" / ".claude" / "projects" / "-repo" / f"{self.SID}.jsonl"
+        ok = self.run_cli("state", "check", str(self.path), "--session", str(transcript))
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+
+    def test_a_missing_transcript_of_the_investigations_session_says_pass_session(self):
+        self.create_and_init()
+        transcript = self.base / "home" / ".claude" / "projects" / "-repo" / f"{self.SID}.jsonl"
+        moved = transcript.rename(self.base / "kept.jsonl")
+        res = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn(f"the transcript of session {self.SID}", res.stderr)
+        self.assertIn("pass --session <file>", res.stderr)
+        self.assertEqual(self.run_cli("state", "check", str(self.path), "--session", str(moved)).returncode, 0)
+
+    def test_refresh_after_the_attached_storyboard_is_deleted_keeps_what_is_authored(self):
+        authored = self.create_and_init()
+        self.run_cli("investigation", "attach", self.INV, self.SB)
+        self.assertEqual(self.run_cli("state", "init", "--investigation", self.INV, "--out", str(self.path),
+                                      "--refresh").returncode, 0)
+        self.assertEqual(self.run_cli("state", "publish", str(self.path)).returncode, 0)
+        self.mode["deleted"] = True
+        stale = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(stale.returncode, 1)
+        self.assertIn("no longer attached", stale.stderr)
+        res = self.run_cli("state", "init", "--investigation", self.INV, "--out", str(self.path), "--refresh")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"storyboard {self.SB} is no longer attached", res.stdout)
+        state = json.loads(self.path.read_text())
+        self.assertEqual((state["source"], state["findings"], state["evidence"]), ({"storyboard_id": None, "acts": []}, [], {}))
+        for k in ("actors", "constraints"):
+            self.assertEqual(state[k], authored[k])
+        self.assertEqual([h["id"] for h in state["hypotheses"]], ["h-gc"])
+        # The storyboard's open question stays open, now the investigation's own.
+        self.assertEqual(state["open_questions"], [{"id": "s1/q", "text": "Open?"}])
+        self.assertEqual((self.meta()["storyboard_id"], self.meta()["version"]), (None, 1))
+        ok = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertEqual(self.run_cli("state", "publish", str(self.path)).returncode, 0)
+        self.assertEqual(self.puts()[-1]["base_version"], 1)
+
+    def test_refused_bodies_name_the_issue(self):
+        self.create_and_init()
+        self.mode["server"] = "bad-body"
+        res = self.run_cli("investigation", "attach", self.INV, self.SB)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("invalid_body: storyboard_id: expected sb_ followed by 24 hex characters", res.stderr)
+        self.assertNotIn("does not support investigations", res.stderr)
