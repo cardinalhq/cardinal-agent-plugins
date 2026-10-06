@@ -51,6 +51,9 @@ STORYBOARD_HOOKS = ("storyboard-session.py", "storyboard-preview.py", "storyboar
 # Not gated: never touches the network or Cardinal (a local Invariant
 # checkout's check-pr.ts, or nothing).
 LOCAL_ONLY_HOOKS = ("invariant-check.py",)
+# A POSIX sh fast path (no Python, no network) in front of a gated Python
+# hook: the sh only checks for a local binding file.
+FAST_PATH_HOOKS = {"investigation-events.sh": "investigation-events.py"}
 
 GUARD = textwrap.dedent('''\
     import os, runpy, socket, subprocess, sys
@@ -271,9 +274,13 @@ class HookRegistrationTests(unittest.TestCase):
     def test_every_hook_is_classified_and_every_gated_hook_checks_the_connection(self):
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
         commands = {h["command"].rsplit("/", 1)[-1] for groups in hooks.values() for g in groups for h in g["hooks"]}
-        self.assertEqual(commands, set(GATED_HOOKS) | set(STORYBOARD_HOOKS) | set(LOCAL_ONLY_HOOKS),
+        self.assertEqual(commands, set(GATED_HOOKS) | set(STORYBOARD_HOOKS) | set(LOCAL_ONLY_HOOKS) | set(FAST_PATH_HOOKS),
                          "a new hook must be gated on _connection or listed as working unconnected")
-        for name in GATED_HOOKS:
+        for sh in FAST_PATH_HOOKS:
+            text = (HOOKS / sh).read_text()
+            for tool in ("python", "curl", "wget", "nc "):
+                self.assertNotIn(tool, text.split("\n", 1)[1].replace("investigation-events.py", ""), sh)
+        for name in list(GATED_HOOKS) + list(FAST_PATH_HOOKS.values()):
             text = (HOOKS / name).read_text()
             self.assertIn("import _connection", text, name)
             self.assertIn("if not _connection.is_connected():", text, name)
