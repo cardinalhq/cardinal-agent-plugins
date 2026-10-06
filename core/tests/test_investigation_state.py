@@ -287,6 +287,10 @@ class CheckV1(unittest.TestCase):
                                         "rationale": "Spreads load."})
         self.assertTrue(any("d-prop: a proposal is approval pending with no decided_by" in e for e in self.errors()))
 
+    def test_explicit_approval_with_a_null_decider_is_refused(self):
+        self.state["decisions"][0]["decided_by"] = None
+        self.assertTrue(any("d-cache: approval explicit names who decided" in e for e in self.errors()))
+
     def test_decided_with_pending_approval_is_refused(self):
         self.state["decisions"][1]["approval"] = "pending"
         self.assertTrue(any("pending is only for outcome proposed" in e for e in self.errors()))
@@ -599,6 +603,32 @@ class Downgrade(unittest.TestCase):
         self.assertEqual(len(changes), 5, changes)
         self.assertEqual(ist.check(new, self.got, PLAN_SESSIONS)["errors"], [])
 
+    def test_a_failed_constraint_plan_approval_does_not_stay_owner_ratified(self):
+        # "sounds good" after several plans is no approval; the owner's verified
+        # reply, moved into source as provenance, must not keep owner_ratified.
+        self.state["constraints"].append(
+            {"id": "c-arch", "statement": "Archive everything first.", "authored_by": "agent",
+             "authority": "owner_ratified", "approval": {"kind": "plan_approval", "by": "owner",
+                                                         "plan_source": agent_says(5, "archive everything first"),
+                                                         "approval_source": owner_says(6, "sounds good")}})
+        new, changes = ist.downgrade(self.state, PLAN_SESSIONS)
+        c = next(x for x in new["constraints"] if x["id"] == "c-arch")
+        self.assertNotIn("approval", c)
+        self.assertEqual(c["authority"], "agent_interpretation")
+        self.assertEqual([r["quote"] for r in c["source"]], ["archive everything first", "sounds good"])
+        self.assertIn("constraint c-arch: owner_ratified -> agent_interpretation (no verified owner words)", changes)
+        self.assertEqual(ist.check(new, self.got, PLAN_SESSIONS)["errors"], [])
+
+    def test_a_failed_plan_approval_keeps_owner_ratified_on_the_owners_own_cited_words(self):
+        self.state["constraints"].append(
+            {"id": "c-arch", "statement": "Archive everything first.", "authored_by": "agent",
+             "authority": "owner_ratified", "source": [owner(T_GO, "Go with the cache.")],
+             "approval": {"kind": "plan_approval", "by": "owner",
+                          "plan_source": agent_says(5, "archive everything first"),
+                          "approval_source": owner_says(6, "sounds good")}})
+        new, _ = ist.downgrade(self.state, PLAN_SESSIONS)
+        self.assertEqual(next(x for x in new["constraints"] if x["id"] == "c-arch")["authority"], "owner_ratified")
+
     def test_a_supported_claim_is_left_alone(self):
         new, changes = ist.downgrade(self.state, SESSIONS)
         self.assertEqual((new, changes), (self.state, []))
@@ -609,6 +639,29 @@ class Downgrade(unittest.TestCase):
         self.assertTrue(any("c-exact was removed" in e for e in ist.check(self.state, self.got, SESSIONS, prev)["errors"]))
         res = ist.check(self.state, self.got, SESSIONS, prev, allow_removed=("c-exact",))
         self.assertEqual(res["errors"], [])
+
+
+class Malformed(unittest.TestCase):
+    """A document too malformed to walk is an error (fail closed), never a crash."""
+
+    def test_type_confused_fields_are_errors_not_crashes(self):
+        got = storyboard()
+        for path, value in ((("source",), 1), (("actors",), 1), (("findings", 0, "id"), []),
+                            (("findings", 0, "limits"), 1), (("constraints", 0, "authored_by"), []),
+                            (("constraints", 0, "exceptions"), 1), (("decisions", 0, "decided_by"), [])):
+            s = authored(ist.project(got))
+            x = s
+            for k in path[:-1]:
+                x = x[k]
+            x[path[-1]] = value
+            new, changes = ist.downgrade(s, SESSIONS)
+            errors = ist.check(new, got, SESSIONS, previous=copy.deepcopy(s))["errors"]
+            self.assertTrue(errors, path)
+
+    def test_a_malformed_document_is_reported(self):
+        res = ist.check({"schema": ist.SCHEMA, "source": 1}, storyboard(), SESSIONS)
+        self.assertTrue(any("the state is malformed" in e for e in res["errors"]))
+        self.assertEqual(ist.downgrade([1], SESSIONS), ([1], []))
 
 
 class Refresh(unittest.TestCase):

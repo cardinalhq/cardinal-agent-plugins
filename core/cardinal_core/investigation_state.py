@@ -569,8 +569,23 @@ def summary(result: dict) -> str:
             f"{s.get('bytes', 0)} bytes (~{s.get('approx_tokens', 0)} tokens)")
 
 
+MALFORMED = (TypeError, AttributeError, KeyError, ValueError, IndexError)
+
+
 def check(state: Any, got: dict, sessions: Optional[dict] = None, previous: Optional[dict] = None,
           allow_removed: tuple = ()) -> dict:
+    """_check(), except that a document too malformed to walk (a list
+    where an object belongs, an id that is not a string) is an error, never a
+    crash: the check fails closed."""
+    try:
+        return _check(state, got, sessions, previous, allow_removed)
+    except MALFORMED as e:
+        return {"errors": [f"the state is malformed ({type(e).__name__}: {e}): fix its shape against the schema"],
+                "warnings": [], "stats": {}}
+
+
+def _check(state: Any, got: dict, sessions: Optional[dict] = None, previous: Optional[dict] = None,
+           allow_removed: tuple = ()) -> dict:
     """{errors, warnings, stats}. errors: the document is not a faithful
     InvestigationState of this storyboard. warnings: worth a look.
     sessions: {session_id: session_utterances(...)} of the transcripts this
@@ -972,7 +987,7 @@ def check(state: Any, got: dict, sessions: Optional[dict] = None, previous: Opti
         elif outcome in DECISION_OUTCOMES:
             if approval == "pending":
                 err(f"{w}: {outcome} is decided; pending is only for outcome proposed")
-            if approval in ("explicit", "by_action", PLAN_APPROVAL) and "decided_by" not in x:
+            if approval in ("explicit", "by_action", PLAN_APPROVAL) and x.get("decided_by") is None:
                 err(f"{w}: approval {approval} names who decided (decided_by)")
         if decider == "owner" and approval == "unknown":
             err(f"{w}: decided_by an owner with approval unknown is an inferred approval; say unknown for decided_by too")
@@ -1119,6 +1134,16 @@ def _authored_ids(state: dict) -> set:
 
 
 def downgrade(state: dict, sessions: Optional[dict]) -> tuple:
+    """_downgrade(), except that a document too malformed to walk is
+    returned unchanged (no changes) for check() to report."""
+    import copy
+    try:
+        return _downgrade(state, sessions)
+    except MALFORMED:
+        return copy.deepcopy(state), []
+
+
+def _downgrade(state: dict, sessions: Optional[dict]) -> tuple:
     """(state, changes): every authority claim its sources do not establish,
     lowered to the strongest level they do; nothing is removed. An owner
     instruction filed as an exception to a rule the owner never set becomes
@@ -1147,14 +1172,17 @@ def downgrade(state: dict, sessions: Optional[dict]) -> tuple:
         if not isinstance(c, dict):
             continue
         author = roles.get(c.get("authored_by"))
+        # Only the source the author cited: a failed plan approval's quotes,
+        # kept in source as provenance below, never establish the rule.
+        cited = list(c.get("source") or [])
         if "approval" in c and not plan_ok(c["approval"]):
             unplan(c)
             changes.append(f"constraint {c.get('id')}: plan approval not established; its quotes kept in source")
         auth = c.get("authority")
-        if auth == "owner_stated" and author not in ("owner", None) and said(c.get("source")):
+        if auth == "owner_stated" and author not in ("owner", None) and said(cited):
             c["authority"] = "owner_ratified"
             changes.append(f"constraint {c.get('id')}: owner_stated -> owner_ratified (the words are the {author}'s)")
-        elif auth in OWNER_AUTHORITIES and not ("approval" in c or said(c.get("source"))):
+        elif auth in OWNER_AUTHORITIES and not ("approval" in c or said(cited)):
             c["authority"] = "agent_interpretation" if author == "agent" else "unknown"
             changes.append(f"constraint {c.get('id')}: {auth} -> {c['authority']} (no verified owner words)")
         owner_rule = c.get("authority") in OWNER_AUTHORITIES

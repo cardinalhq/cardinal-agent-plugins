@@ -209,7 +209,7 @@ def cmd_state_init(args: argparse.Namespace) -> int:
     if args.refresh and out.exists():
         try:
             state = ist.refresh(json.loads(out.read_text()), got)
-        except (OSError, ValueError) as e:
+        except (OSError,) + ist.MALFORMED as e:
             sys.stderr.write(f"{out}: {e}\n")
             return 1
     else:
