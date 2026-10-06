@@ -664,6 +664,34 @@ class Malformed(unittest.TestCase):
         self.assertEqual(ist.downgrade([1], SESSIONS), ([1], []))
 
 
+
+class UnknownFields(unittest.TestCase):
+    """An unknown top-level or source field is refused with maestro's allowed
+    lists and message: a local ok never meets a server 422 for it."""
+
+    def setUp(self):
+        self.got = storyboard()
+        self.state = authored(ist.project(self.got))
+
+    def test_a_clean_state_is_still_ok(self):
+        self.assertEqual(ist.check(self.state, self.got, SESSIONS)["errors"], [])
+
+    def test_an_unknown_top_level_field_is_refused(self):
+        self.state["summary"] = "x"
+        self.assertEqual(ist.check(self.state, self.got, SESSIONS)["errors"], [
+            "state: unknown fields ['summary'] (allowed: schema, source, question, status, window, context, actors, "
+            "evidence, findings, hypotheses, open_questions, constraints, decisions, terms)"])
+
+    def test_an_unknown_source_field_is_refused(self):
+        self.state["source"]["investigation_id"] = "inv_" + "a" * 24
+        self.assertEqual(ist.check(self.state, self.got, SESSIONS)["errors"],
+                         ["source: unknown fields ['investigation_id'] (allowed: storyboard_id, acts)"])
+
+    def test_projected_states_use_exactly_the_allowed_keys(self):
+        self.assertEqual(tuple(ist.project(self.got)), ist.STATE_KEYS)
+        self.assertEqual(tuple(ist.project(self.got)["source"]), ist.SOURCE_KEYS)
+
+
 class Refresh(unittest.TestCase):
     def test_keeps_authored_sections_across_a_new_act(self):
         got = storyboard()
