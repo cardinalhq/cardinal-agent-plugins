@@ -625,6 +625,10 @@ class InvestigationCliTests(unittest.TestCase):
         self.create_and_init()
         self.assertEqual(self.seen[0], ("create-investigation", {"question": "Why?", "window": self.WINDOW,
                                                                  "session_id": self.SID}))
+        # The session it was created in is bound to it (advisory events reach it).
+        binding = json.loads((self.base / "home" / ".cardinal" / "investigations" / "sessions" /
+                              f"{self.SID}.json").read_text())
+        self.assertEqual((binding["investigation_id"], binding["cursor"], binding["source"]), (self.INV, 0, "create"))
         state = json.loads(self.path.read_text())
         self.assertEqual(state["source"], {"storyboard_id": None, "acts": []})
         self.assertEqual((state["question"], state["window"], state["status"]), ("Why?", self.WINDOW, "open"))

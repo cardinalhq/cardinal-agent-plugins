@@ -32,7 +32,7 @@ Commands:
       print its id (inv_...). Its InvestigationState can be published before
       any storyboard exists: state init --investigation. Records this
       session ($CLAUDE_CODE_SESSION_ID): its transcript verifies the state's
-      quotes.
+      quotes; the session is also bound to it (see investigation bind).
 
   investigation attach <investigation_id> <storyboard_id>
       Attach a storyboard (one you authored an act of) to your
@@ -43,6 +43,27 @@ Commands:
   investigation show <investigation_id>
       Print the investigation: question, window, author, storyboard, and
       its state's version.
+
+  investigation bind <investigation_id> [--session SID]
+      Bind an agent session (default $CLAUDE_CODE_SESSION_ID) to the
+      investigation: from its next tool boundary the plugin's hook delivers
+      the investigation's advisory events (cue / question / challenge from
+      other principals) into it. `investigation create` binds the session
+      it runs in; so does CARDINAL_INVESTIGATION_ID=inv_... at launch.
+      Binding file: ~/.cardinal/investigations/sessions/<SID>.json.
+
+  investigation ack <investigation_id> <seq> --disposition accepted|declined|noted [--note TEXT] [--session SID]
+      Acknowledge advisory event #seq as this session (idempotent per
+      session and event). Only the investigation's author can.
+
+  investigation events <investigation_id> [--after N] [--json]
+      Print the investigation's event stream after seq N (default 0).
+
+  investigation post <investigation_id> --type cue|question|challenge --text TEXT
+                     [--to-session SID] [--idempotency-key KEY]
+      Append an advisory event (a producer's convenience; any org principal
+      with storyboard write access). Advisory only: it never carries owner
+      authority.
 
   state init (<storyboard_id> | --investigation ID) [--out PATH] [--refresh | --force]
       Write the InvestigationState of a published storyboard: the
@@ -695,6 +716,13 @@ def cmd_investigation_create(args: argparse.Namespace) -> int:
         return 1
     inv_id = out["investigation_id"]
     sys.stdout.write(f"{inv_id}\n")
+    if session_id:
+        try:
+            from cardinal_core import investigation_events as ie
+            ie.bind(_home(), session_id, inv_id, "create")
+            sys.stderr.write(f"bound session {session_id} to it: advisory events reach it at its next tool boundary\n")
+        except (OSError, ValueError) as e:
+            sys.stderr.write(f"note: session {session_id} not bound to it ({e})\n")
     sys.stderr.write(f"next: cardinal-storyboard state init --investigation {inv_id}\n")
     return 0
 
@@ -732,6 +760,161 @@ def cmd_investigation_show(args: argparse.Namespace) -> int:
         sys.stderr.write(f"{e}\n")
         return 1
     sys.stdout.write(json.dumps(inv, indent=2, ensure_ascii=False) + "\n")
+    return 0
+
+
+def _home() -> Path:
+    return Path(os.environ.get("HOME") or str(Path.home()))
+
+
+def _session_arg(args: argparse.Namespace):
+    """--session, else this Claude Code session; None (with a message) when neither is a session id."""
+    from cardinal_core import investigation_events as ie
+    sid = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
+    if not ie.valid_session(sid):
+        sys.stderr.write("needs --session SID (an agent session id: letters, digits, _ and -; at most 128)\n"
+                         if not sid else f"not a session id: {sid!r}\n")
+        return None
+    return sid
+
+
+def _investigation_arg(inv_id: str) -> bool:
+    from cardinal_core import investigation_events as ie
+    if ie.valid_investigation(inv_id):
+        return True
+    sys.stderr.write(f"not an investigation id: {inv_id!r} (inv_ followed by 24 hex characters)\n")
+    return False
+
+
+def cmd_investigation_bind(args: argparse.Namespace) -> int:
+    from cardinal_core import investigation_events as ie
+    from cardinal_core import investigation_state as ist
+    from cardinal_core import investigation_state_sync as sync
+    sid = _session_arg(args)
+    if not sid or not _investigation_arg(args.investigation_id):
+        return EXIT_USAGE
+    conn, client = _connection()
+    try:  # the events route answers for this investigation (and exists on this server)
+        ie.read_events(conn, args.investigation_id, after=0, limit=1, to_session_id=sid, client=client)
+    except sync.ServerError as e:
+        sys.stderr.write(f"not bound: {ie.plain(e)}\n")
+        return 1
+    except ist.FetchError as e:
+        sys.stderr.write(f"note: could not reach Cardinal to check the investigation ({e}); binding anyway\n")
+    try:
+        binding, created = ie.bind(_home(), sid, args.investigation_id, "cli")
+    except (OSError, ValueError) as e:
+        sys.stderr.write(f"not bound: {e}\n")
+        return 1
+    sys.stdout.write(f"{'bound' if created else 'already bound'}: session {sid} -> {args.investigation_id} "
+                     f"(cursor {binding['cursor']}). Advisory events reach it at its next tool boundary.\n")
+    return 0
+
+
+def cmd_investigation_ack(args: argparse.Namespace) -> int:
+    from cardinal_core import investigation_events as ie
+    from cardinal_core import investigation_state as ist
+    from cardinal_core import investigation_state_sync as sync
+    sid = _session_arg(args)
+    if not sid or not _investigation_arg(args.investigation_id):
+        return EXIT_USAGE
+    conn, client = _connection()
+    try:
+        payload = ie.ack_payload(args.seq, args.disposition, args.note)
+        out = ie.append_event(conn, args.investigation_id, ie.ACKNOWLEDGED, payload,
+                              idempotency_key=ie.ack_key(sid, args.seq), session_id=sid, client=client,
+                              producer_client=plugin_client())
+    except sync.ServerError as e:
+        if e.body.get("error") == "idempotency_conflict":
+            sys.stderr.write(f"event #{args.seq} was already acknowledged from session {sid} with another "
+                             "disposition or note; an acknowledgment is final\n")
+        else:
+            sys.stderr.write(f"not acknowledged: {ie.plain(e)}\n")
+        return 1
+    except ist.FetchError as e:
+        sys.stderr.write(f"not acknowledged: {e}\n")
+        return 1
+    ev = out["event"]
+    if out.get("duplicate"):
+        sys.stdout.write(f"event #{args.seq} was already acknowledged ({args.disposition}) as event #{ev['seq']}\n")
+    else:
+        sys.stdout.write(f"acknowledged event #{args.seq} ({args.disposition}) as event #{ev['seq']}\n")
+    return 0
+
+
+def _event_line(e: dict) -> str:
+    from cardinal_core import investigation_events as ie
+    p = e.get("producer") if isinstance(e.get("producer"), dict) else {}
+    pr = p.get("principal") if isinstance(p.get("principal"), dict) else {}
+    who = f"{ie._tok(pr.get('kind'))}:{ie._tok(pr.get('id'))}"
+    if p.get("session_id"):
+        who += f" claimed session {ie._claimed(p['session_id'])}"
+    if p.get("is_investigation_author") is True:
+        who += " (author)"
+    to = f" to session {ie._tok(e['to_session_id'])}" if e.get("to_session_id") else ""
+    payload = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+    if e.get("type") == ie.ACKNOWLEDGED:
+        body = f"ack of #{payload.get('ack_of')}: {ie._tok(payload.get('disposition'))}"
+        if isinstance(payload.get("note"), str):
+            body += f" {ie.json_text(payload['note'])}"
+    else:
+        body = ie.json_text(str(payload.get("text", "")))
+    return f"#{e.get('seq')} {ie._tok(e.get('created_at'))} {ie._tok(e.get('type'))} from {who}{to}: {body}"
+
+
+def cmd_investigation_events(args: argparse.Namespace) -> int:
+    from cardinal_core import investigation_events as ie
+    from cardinal_core import investigation_state as ist
+    from cardinal_core import investigation_state_sync as sync
+    if not _investigation_arg(args.investigation_id):
+        return EXIT_USAGE
+    if args.after < 0:
+        sys.stderr.write("--after is a seq, 0 or more\n")
+        return EXIT_USAGE
+    conn, client = _connection()
+    try:
+        events, cursor, head = ie.read_all(conn, args.investigation_id, after=args.after, client=client,
+                                           max_pages=1000, timeout=30.0, limit=ie.CLI_PAGE_LIMIT)
+    except sync.ServerError as e:
+        sys.stderr.write(f"cannot read the events of {args.investigation_id}: {ie.plain(e)}\n")
+        return 1
+    except ist.FetchError as e:
+        sys.stderr.write(f"{e}\n")
+        return 1
+    if args.json:
+        sys.stdout.write(json.dumps({"investigation_id": args.investigation_id, "events": events,
+                                     "next_after": cursor, "head_seq": head}, indent=2, ensure_ascii=False) + "\n")
+        return 0
+    for e in events:
+        sys.stdout.write(_event_line(e) + "\n")
+    sys.stderr.write(f"{len(events)} event{'s' if len(events) != 1 else ''} after #{args.after}; head #{head}\n")
+    return 0
+
+
+def cmd_investigation_post(args: argparse.Namespace) -> int:
+    import secrets
+    from cardinal_core import investigation_events as ie
+    from cardinal_core import investigation_state as ist
+    from cardinal_core import investigation_state_sync as sync
+    if not _investigation_arg(args.investigation_id):
+        return EXIT_USAGE
+    key = args.idempotency_key or f"post:{secrets.token_hex(16)}"
+    own = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
+    conn, client = _connection()
+    try:
+        payload = ie.text_payload(args.text, args.ref or None)
+        out = ie.append_event(conn, args.investigation_id, ie.POST_TYPES[args.type], payload, idempotency_key=key,
+                              to_session_id=args.to_session, session_id=own if ie.valid_session(own) else None,
+                              client=client, producer_client=plugin_client())
+    except sync.ServerError as e:
+        sys.stderr.write(f"not posted: {ie.plain(e)}\n")
+        return 1
+    except ist.FetchError as e:
+        sys.stderr.write(f"not posted: {e}\n")
+        return 1
+    ev = out["event"]
+    sys.stdout.write(f"{'already posted' if out.get('duplicate') else 'posted'}: event #{ev['seq']} "
+                     f"({ev.get('type')}, idempotency key {key})\n")
     return 0
 
 
@@ -783,7 +966,7 @@ def build_parser() -> argparse.ArgumentParser:
     pull.add_argument("--force", action="store_true", help="replace a local file that differs from the server copy")
     pull.set_defaults(func=cmd_state_pull)
     inv = sub.add_parser("investigation", help="an Investigation on Cardinal: its state can exist before any storyboard")
-    inv_sub = inv.add_subparsers(dest="investigation_command", metavar="{create,attach,show}")
+    inv_sub = inv.add_subparsers(dest="investigation_command", metavar="{create,attach,show,bind,ack,events,post}")
     create = inv_sub.add_parser("create", help="create an investigation and print its id")
     create.add_argument("--question", required=True, help="what the investigation asks (at most 2000 characters)")
     create.add_argument("--window", help='its time window as JSON, e.g. {"start": "...", "end": "..."}')
@@ -795,6 +978,30 @@ def build_parser() -> argparse.ArgumentParser:
     show = inv_sub.add_parser("show", help="print an investigation")
     show.add_argument("investigation_id")
     show.set_defaults(func=cmd_investigation_show)
+    bind = inv_sub.add_parser("bind", help="deliver the investigation's advisory events into an agent session")
+    bind.add_argument("investigation_id")
+    bind.add_argument("--session", help="the session id (default $CLAUDE_CODE_SESSION_ID)")
+    bind.set_defaults(func=cmd_investigation_bind)
+    ack = inv_sub.add_parser("ack", help="acknowledge an advisory event as this session")
+    ack.add_argument("investigation_id")
+    ack.add_argument("seq", type=int, help="the event's number (#seq)")
+    ack.add_argument("--disposition", required=True, choices=("accepted", "declined", "noted"))
+    ack.add_argument("--note", help="what you will do (at most 2000 characters)")
+    ack.add_argument("--session", help="the session id (default $CLAUDE_CODE_SESSION_ID)")
+    ack.set_defaults(func=cmd_investigation_ack)
+    events = inv_sub.add_parser("events", help="print the investigation's event stream")
+    events.add_argument("investigation_id")
+    events.add_argument("--after", type=int, default=0, help="only events after this seq (default 0)")
+    events.add_argument("--json", action="store_true", help="the events as JSON")
+    events.set_defaults(func=cmd_investigation_events)
+    post = inv_sub.add_parser("post", help="append an advisory event (cue, question or challenge)")
+    post.add_argument("investigation_id")
+    post.add_argument("--type", required=True, choices=("cue", "question", "challenge"))
+    post.add_argument("--text", required=True, help="the event's text (at most 4000 characters)")
+    post.add_argument("--ref", action="append", default=[], help="a reference (repeatable, at most 10)")
+    post.add_argument("--to-session", help="address one session (default: every session of the investigation)")
+    post.add_argument("--idempotency-key", help="re-sending the same key and text is a no-op (default: random)")
+    post.set_defaults(func=cmd_investigation_post)
     return parser
 
 

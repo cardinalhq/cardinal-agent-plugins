@@ -291,7 +291,7 @@ MAX_QUESTION = 2000
 
 
 # The same shape every storyboard tool accepts for a session id (maestro).
-SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}\Z")
 
 
 def create_investigation(conn: dict, question: str, window: Optional[dict] = None, *, client: str,
