@@ -75,6 +75,7 @@ jobs:
           import cardinal_core.storyboard_hero
           import cardinal_core.storyboard_files
           import cardinal_core.storyboard_agent
+          import cardinal_core.investigation_state
           print('ok: all core modules import under 3.9')
           "
 
