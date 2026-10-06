@@ -173,3 +173,127 @@ class ContextCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StateCliTests(unittest.TestCase):
+    """state init / check, offline (--from-get): the InvestigationState file."""
+
+    SB = "sb_0123456789abcdef01234567"
+    R1 = "rcpt_" + "1" * 24
+
+    def setUp(self):
+        if not VENDORED.exists():
+            self.skipTest("cardinal_core not vendored — run: python3 build/vendor.py claude")
+        self.tmp = TemporaryDirectory()
+        self.base = Path(os.path.realpath(self.tmp.name))
+        (self.base / "home").mkdir()
+        self.get = self.base / "get.json"
+        self.get.write_text(json.dumps({
+            "storyboard_id": self.SB, "question": "Why?", "window": {"start": "a", "end": "b"},
+            "acts": [{"number": 1, "status": "published", "context": {"repo": "o/r"}}],
+            "receipt_tiers": {self.R1: "captured"},
+            "scenes": [{"act": 1, "act_status": "published", "id": "s1", "state": "supported", "title": "T",
+                        "statement": "S.", "receipt_ids": [self.R1], "claims": [],
+                        "open_questions": [{"id": "q", "text": "Open?"}]}],
+        }))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args):
+        env = {"HOME": str(self.base / "home"), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        return subprocess.run([sys.executable, str(CLI), *args], capture_output=True, text=True, timeout=60, env=env)
+
+    def test_init_writes_the_default_path_and_prints_the_guide(self):
+        res = self.run_cli("state", "init", self.SB, "--from-get", str(self.get))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        path = self.base / "home" / ".claude" / "cardinal" / "investigation-state" / f"{self.SB}.json"
+        self.assertEqual(res.stdout.splitlines()[0], str(path))
+        self.assertIn("Re-type, under the same id", res.stdout)
+        state = json.loads(path.read_text())
+        self.assertEqual(state["schema"], "investigation-state/v1.1")
+        self.assertEqual(state["open_questions"][0]["id"], "s1/q")
+
+    def test_init_refuses_to_overwrite_and_refresh_keeps_authored(self):
+        out = self.base / "st.json"
+        self.assertEqual(self.run_cli("state", "init", self.SB, "--out", str(out), "--from-get", str(self.get)).returncode, 0)
+        state = json.loads(out.read_text())
+        state["constraints"] = [{"id": "c1", "statement": "Keep it exact.", "authored_by": "unknown", "authority": "unknown"}]
+        out.write_text(json.dumps(state))
+        again = self.run_cli("state", "init", self.SB, "--out", str(out), "--from-get", str(self.get))
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("--refresh", again.stderr)
+        res = self.run_cli("state", "init", self.SB, "--out", str(out), "--refresh", "--from-get", str(self.get))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(out.read_text())["constraints"][0]["id"], "c1")
+
+    def test_check_reports_errors_and_exits_one(self):
+        out = self.base / "st.json"
+        self.run_cli("state", "init", self.SB, "--out", str(out), "--from-get", str(self.get))
+        ok = self.run_cli("state", "check", str(out), "--from-get", str(self.get))
+        self.assertEqual(ok.returncode, 0, ok.stdout)
+        self.assertTrue(ok.stdout.splitlines()[-1].startswith("ok: 1 findings"))
+        self.assertIn("warning: 1 receipt(s) have no `what`", ok.stdout)
+        state = json.loads(out.read_text())
+        state["open_questions"] = []
+        out.write_text(json.dumps(state))
+        bad = self.run_cli("state", "check", str(out), "--from-get", str(self.get))
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("error: open question s1/q was dropped", bad.stdout)
+
+    def test_init_without_a_connection_fails_cleanly(self):
+        res = self.run_cli("state", "init", self.SB)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("not connected", res.stderr)
+
+    def test_check_verifies_owner_quotes_against_the_acts_transcript(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        got = json.loads(self.get.read_text())
+        got["acts"][0]["session_id"] = sid
+        self.get.write_text(json.dumps(got))
+        proj = self.base / "home" / ".claude" / "projects" / "-repo"
+        proj.mkdir(parents=True)
+        (proj / f"{sid}.jsonl").write_text(json.dumps({
+            "type": "user", "timestamp": "2026-10-01T01:00:00.000Z",
+            "message": {"role": "user", "content": "Keep every query exact."}}) + "\n")
+        out = self.base / "st.json"
+        self.run_cli("state", "init", self.SB, "--out", str(out), "--from-get", str(self.get))
+        state = json.loads(out.read_text())
+        state["actors"] = [{"id": "owner", "role": "owner"}]
+        quote = {"kind": "message", "from": "owner", "at": "2026-10-01T01:00:00.000Z", "quote": "Keep every query exact."}
+        state["constraints"] = [{"id": "c1", "statement": "Queries stay exact.", "authored_by": "owner",
+                                 "authority": "owner_stated", "source": [quote]}]
+        out.write_text(json.dumps(state))
+        ok = self.run_cli("state", "check", str(out), "--from-get", str(self.get))
+        self.assertEqual(ok.returncode, 0, ok.stdout)
+        self.assertIn("1 owner / 0 agent quotes verified", ok.stdout)
+        quote["quote"] = "Keep every query exact, forever."
+        out.write_text(json.dumps(state))
+        bad = self.run_cli("state", "check", str(out), "--from-get", str(self.get))
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("quote not verified", bad.stdout)
+
+    def test_downgrade_keeps_content_and_removal_is_refused(self):
+        out = self.base / "st.json"
+        self.run_cli("state", "init", self.SB, "--out", str(out), "--from-get", str(self.get))
+        state = json.loads(out.read_text())
+        state["actors"] = [{"id": "owner", "role": "owner"}, {"id": "agent", "role": "agent"}]
+        state["constraints"] = [{"id": "c1", "statement": "Only the owner merges.", "authored_by": "agent",
+                                 "authority": "owner_ratified", "source": [{"kind": "doc", "path": "d10.md"}]}]
+        out.write_text(json.dumps(state))
+        bad = self.run_cli("state", "check", str(out), "--from-get", str(self.get))
+        self.assertEqual(bad.returncode, 1)
+        res = self.run_cli("state", "check", str(out), "--from-get", str(self.get), "--downgrade")
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertIn("downgraded: constraint c1: owner_ratified -> agent_interpretation", res.stdout)
+        kept = json.loads(out.read_text())["constraints"][0]
+        self.assertEqual((kept["statement"], kept["authority"]), ("Only the owner merges.", "agent_interpretation"))
+        state = json.loads(out.read_text())
+        state["constraints"] = []
+        out.write_text(json.dumps(state))
+        gone = self.run_cli("state", "check", str(out), "--from-get", str(self.get))
+        self.assertEqual(gone.returncode, 1)
+        self.assertIn("c1 was removed", gone.stdout)
+        allowed = self.run_cli("state", "check", str(out), "--from-get", str(self.get), "--allow-remove", "c1")
+        self.assertEqual(allowed.returncode, 0, allowed.stdout)
+
