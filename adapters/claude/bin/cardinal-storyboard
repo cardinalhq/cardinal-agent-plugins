@@ -228,7 +228,8 @@ def _oracle_sessions(got: dict, investigation) -> list:
     sids = [act.get("session_id") for act in got.get("acts") or [] if isinstance(act, dict)]
     if isinstance(investigation, dict):
         sids.append(investigation.get("session_id"))
-    return [s for i, s in enumerate(sids) if isinstance(s, str) and re.match(r"^[0-9A-Za-z-]{8,64}$", s) and s not in sids[:i]]
+    from cardinal_core.investigation_state_sync import SESSION_ID_RE
+    return [s for i, s in enumerate(sids) if isinstance(s, str) and SESSION_ID_RE.match(s) and s not in sids[:i]]
 
 
 def _transcript(sid: str):
@@ -703,7 +704,7 @@ def cmd_investigation_attach(args: argparse.Namespace) -> int:
     from cardinal_core import investigation_state_sync as sync
     conn, client = _connection()
     try:
-        sync.attach_storyboard(conn, args.investigation_id, args.storyboard_id, client=client)
+        out = sync.attach_storyboard(conn, args.investigation_id, args.storyboard_id, client=client)
     except sync.ServerError as e:
         sys.stderr.write(_refused(e, "not attached") + "\n")
         return 1
@@ -713,6 +714,8 @@ def cmd_investigation_attach(args: argparse.Namespace) -> int:
     sys.stdout.write(f"attached {args.storyboard_id} to {args.investigation_id}. The state's next publish must reflect "
                      f"it: cardinal-storyboard state init --investigation {args.investigation_id} --refresh "
                      "[--out PATH] keeps everything authored.\n")
+    if isinstance(out.get("note"), str) and out["note"]:
+        sys.stdout.write(f"Cardinal: {out['note']}\n")
     return 0
 
 

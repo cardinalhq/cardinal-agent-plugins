@@ -559,7 +559,8 @@ class InvestigationCliTests(unittest.TestCase):
                     if mode["server"] == "not-author":
                         return 403, {"error": "not_investigation_author"}
                     inv["storyboard_id"] = body["storyboard_id"]
-                    return 200, {"investigation_id": inv_id, "storyboard_id": body["storyboard_id"]}
+                    return 200, dict({"investigation_id": inv_id, "storyboard_id": body["storyboard_id"], "unchanged": False},
+                                     **({"note": "the state predates this storyboard"} if inv["state"] else {}))
                 if tool == "put-state":
                     if mode["server"] == "not-author":
                         return 403, {"error": "not_investigation_author"}
@@ -695,6 +696,7 @@ class InvestigationCliTests(unittest.TestCase):
         res = self.run_cli("investigation", "attach", self.INV, self.SB)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn(f"state init --investigation {self.INV} --refresh", res.stdout)
+        self.assertIn("Cardinal: the state predates this storyboard", res.stdout)
         self.assertEqual(self.seen[-1], ("attach-storyboard", {"investigation_id": self.INV, "storyboard_id": self.SB}))
         stale = self.run_cli("state", "check", str(self.path))
         self.assertEqual(stale.returncode, 1)

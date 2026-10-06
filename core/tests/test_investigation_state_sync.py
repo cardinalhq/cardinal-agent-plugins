@@ -230,6 +230,8 @@ class InvestigationClient(unittest.TestCase):
         self.assertEqual(sync.plain(e), "Cardinal refused (only the investigation's author can do that "
                                         "(it was created by another user or key))")
         self.assertIn("another investigation", sync.plain(self.refusal(409, b'{"error":"storyboard_attached_elsewhere"}')))
+        self.assertIn("daily limit", sync.plain(self.refusal(429, b'{"error":"quota_exceeded"}')))
+        self.assertIn("/cardinal:connect", sync.plain(self.refusal(403, b'{"error":"no_principal"}')))
         self.assertEqual(sync.plain(self.refusal(500, b'{"message":"try later"}')), "Cardinal refused (try later)")
         self.assertEqual(sync.plain(self.refusal(500, b"{}")), "Cardinal refused (no reason given)")
         # A refused body says what was refused (invalid_body carries issues, no message).
@@ -243,8 +245,10 @@ class InvestigationClient(unittest.TestCase):
         self.assertEqual(json.loads(op.requests[0].data)["session_id"], "11111111-2222-3333-4444-555555555555")
         sync.create_investigation(CONN, "Why?", client="c", opener=op)
         self.assertNotIn("session_id", json.loads(op.requests[1].data))
-        with self.assertRaises(ist.FetchError):
-            sync.create_investigation(CONN, "Why?", client="c", session_id="../x", opener=op)
+        sync.create_investigation(CONN, "Why?", client="c", session_id="agent_session-7", opener=op)  # maestro's shape
+        for bad in ("../x", "", "a" * 129):
+            with self.assertRaises(ist.FetchError):
+                sync.create_investigation(CONN, "Why?", client="c", session_id=bad, opener=op)
 
 
 if __name__ == "__main__":

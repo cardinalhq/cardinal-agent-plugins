@@ -190,6 +190,8 @@ _PLAIN = {
     "storyboard_attached_elsewhere": "that storyboard already belongs to another investigation",
     "investigation_has_storyboard": "the investigation already has a storyboard (one per investigation)",
     "not_an_act_author": "you are not an author of any act of that storyboard",
+    "no_principal": "this connection's key acts for no user or key Cardinal can name; reconnect with /cardinal:connect",
+    "quota_exceeded": "this workspace reached its daily limit of new investigations; try again later",
 }
 
 
@@ -288,7 +290,8 @@ def _check_investigation_id(investigation_id: Any) -> None:
 MAX_QUESTION = 2000
 
 
-SESSION_ID_RE = re.compile(r"^[0-9A-Za-z-]{8,64}$")
+# The same shape every storyboard tool accepts for a session id (maestro).
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def create_investigation(conn: dict, question: str, window: Optional[dict] = None, *, client: str,
