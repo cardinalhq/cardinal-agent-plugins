@@ -297,3 +297,151 @@ class StateCliTests(unittest.TestCase):
         allowed = self.run_cli("state", "check", str(out), "--from-get", str(self.get), "--allow-remove", "c1")
         self.assertEqual(allowed.returncode, 0, allowed.stdout)
 
+
+class StateServerCliTests(unittest.TestCase):
+    """state publish / pull against a fake maestro: the server copy is
+    canonical after a publish (version-based), quotes go up attested."""
+
+    SB = "sb_0123456789abcdef01234567"
+    R1 = "rcpt_" + "1" * 24
+    SID = "11111111-2222-3333-4444-555555555555"
+    QUOTE = {"kind": "message", "from": "owner", "at": "2026-10-01T01:00:00.000Z", "quote": "Keep every query exact."}
+
+    def setUp(self):
+        if not VENDORED.exists():
+            self.skipTest("cardinal_core not vendored — run: python3 build/vendor.py claude")
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.tmp = TemporaryDirectory()
+        self.base = Path(os.path.realpath(self.tmp.name))
+        home = self.base / "home"
+        proj = home / ".claude" / "projects" / "-repo"
+        proj.mkdir(parents=True)
+        (proj / f"{self.SID}.jsonl").write_text(json.dumps({
+            "type": "user", "timestamp": self.QUOTE["at"],
+            "message": {"role": "user", "content": "Keep every query exact."}}) + "\n")
+        get = {
+            "storyboard_id": self.SB, "question": "Why?", "window": {"start": "a", "end": "b"},
+            "acts": [{"number": 1, "status": "published", "context": {"repo": "o/r"}, "session_id": self.SID}],
+            "receipt_tiers": {self.R1: "captured"},
+            "scenes": [{"act": 1, "act_status": "published", "id": "s1", "state": "supported", "title": "T",
+                        "statement": "S.", "receipt_ids": [self.R1], "claims": [], "open_questions": []}],
+        }
+        server_copy = self.server_copy = {}
+        seen = self.seen = []
+        mode = self.mode = {"old_server": False}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+                tool = self.path.rsplit("/", 1)[-1]
+                seen.append((tool, body))
+                status, out = 200, None
+                if tool == "get":
+                    out = get
+                elif mode["old_server"]:
+                    # A Maestro before the state routes: the plugin key's allowlist refuses them.
+                    status, out = 403, {"error": "insufficient_scope"}
+                elif tool == "get-state":
+                    out = (dict(server_copy, storyboard_id=body["storyboard_id"], current=True,
+                                trust={"client_attested_authority": []}) if server_copy
+                           else None)
+                    if out is None:
+                        status, out = 404, {"error": "state_not_found"}
+                elif tool == "put-state":
+                    if body["base_version"] != server_copy.get("version", 0):
+                        status, out = 409, {"error": "version_conflict", "current_version": server_copy.get("version", 0)}
+                    else:
+                        server_copy.update(version=server_copy.get("version", 0) + 1, etag="e" * 64, state=body["state"])
+                        out = {"storyboard_id": body["storyboard_id"], "version": server_copy["version"], "etag": "e" * 64,
+                               "warnings": [], "trust": {"client_attested_authority": [{"where": "constraint c1", "claim": "x"}]}}
+                data = json.dumps(out).encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        (home / ".claude" / "settings.json").write_text(json.dumps({"env": {
+            "CARDINAL_MCP_URL": f"http://127.0.0.1:{server.server_port}/api/orgs/o1/mcp", "CARDINAL_MCP_API_KEY": "ck"}}))
+        self.path = self.base / "st.json"
+        self.assertEqual(self.run_cli("state", "init", self.SB, "--out", str(self.path)).returncode, 0)
+        state = json.loads(self.path.read_text())
+        state["actors"] = [{"id": "owner", "role": "owner"}]
+        state["constraints"] = [{"id": "c1", "statement": "Queries stay exact.", "authored_by": "owner",
+                                 "authority": "owner_stated", "source": [self.QUOTE]}]
+        self.path.write_text(json.dumps(state))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args):
+        env = {"HOME": str(self.base / "home"), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        return subprocess.run([sys.executable, str(CLI), *args], capture_output=True, text=True, timeout=60, env=env)
+
+    def test_publish_attests_quotes_and_records_the_server_version(self):
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("published: version 1", res.stdout)
+        self.assertIn("server copy is now canonical", res.stdout)
+        put = [b for t, b in self.seen if t == "put-state"][-1]
+        self.assertEqual(put["base_version"], 0)
+        self.assertEqual(put["attestation"]["quotes"][0]["role"], "owner")
+        self.assertEqual(put["attestation"]["quotes"][0]["session"], self.SID)
+        meta = json.loads(Path(str(self.path) + ".server").read_text())
+        self.assertEqual((meta["storyboard_id"], meta["version"]), (self.SB, 1))
+        # The next publish is based on the server version.
+        state = json.loads(self.path.read_text())
+        state["status"] = "blocked"
+        self.path.write_text(json.dumps(state))
+        self.assertEqual(self.run_cli("state", "publish", str(self.path)).returncode, 0)
+        self.assertEqual([b for t, b in self.seen if t == "put-state"][-1]["base_version"], 1)
+
+    def test_a_publish_based_on_a_stale_copy_is_refused_and_pull_restores_the_server_copy(self):
+        self.assertEqual(self.run_cli("state", "publish", str(self.path)).returncode, 0)
+        other = self.base / "other.json"
+        other.write_text(self.path.read_text())  # a copy that never saw version 1
+        res = self.run_cli("state", "publish", str(other))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("the server copy is at version 1 and this file is based on version 0", res.stdout)
+        # Local edits are not silently replaced by a pull…
+        state = json.loads(other.read_text())
+        state["status"] = "blocked"
+        other.write_text(json.dumps(state))
+        refused = self.run_cli("state", "pull", self.SB, "--out", str(other))
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("differs from the server copy", refused.stderr)
+        # …but --force (or a fresh path) takes the canonical copy.
+        ok = self.run_cli("state", "pull", self.SB, "--out", str(other), "--force")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(json.loads(other.read_text())["status"], json.loads(self.path.read_text())["status"])
+        self.assertEqual(json.loads(Path(str(other) + ".server").read_text())["version"], 1)
+
+    def test_nothing_that_fails_locally_is_sent(self):
+        state = json.loads(self.path.read_text())
+        state["constraints"][0]["source"][0]["quote"] = "Keep every query exact, forever."
+        self.path.write_text(json.dumps(state))
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("not published", res.stdout)
+        self.assertFalse([t for t, _ in self.seen if t == "put-state"])
+
+    def test_a_server_without_the_state_routes_says_so_and_leaves_the_file_alone(self):
+        self.mode["old_server"] = True
+        before = self.path.read_text()
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("does not store InvestigationState yet", res.stdout)
+        self.assertNotIn("insufficient_scope", res.stdout)
+        self.assertEqual(self.path.read_text(), before)
+        self.assertFalse(Path(str(self.path) + ".server").exists())
+        pulled = self.run_cli("state", "pull", self.SB, "--out", str(self.base / "p.json"))
+        self.assertEqual(pulled.returncode, 1)
+        self.assertIn("does not store InvestigationState yet", pulled.stderr)
+        self.assertFalse((self.base / "p.json").exists())
