@@ -466,3 +466,293 @@ class StateServerCliTests(unittest.TestCase):
         self.assertEqual(pulled.returncode, 1)
         self.assertIn("does not store InvestigationState yet", pulled.stderr)
         self.assertFalse((self.base / "p.json").exists())
+
+
+class InvestigationCliTests(unittest.TestCase):
+    """investigation create / attach / show and an investigation-bound state
+    (state init / check / publish / pull --investigation) against a fake
+    maestro; a storyboard-bound state stays exactly plugin 0.40.0's."""
+
+    SB = "sb_0123456789abcdef01234567"
+    INV = "inv_" + "a" * 24
+    R1 = "rcpt_" + "1" * 24
+    SID = "11111111-2222-3333-4444-555555555555"
+    QUOTE = {"kind": "message", "from": "owner", "at": "2026-10-01T01:00:00.000Z", "quote": "Keep every query exact."}
+    WINDOW = {"start": "2026-10-01T00:00:00.000Z", "end": "2026-10-01T01:00:00.000Z"}
+
+    def setUp(self):
+        if not VENDORED.exists():
+            self.skipTest("cardinal_core not vendored — run: python3 build/vendor.py claude")
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.tmp = TemporaryDirectory()
+        self.base = Path(os.path.realpath(self.tmp.name))
+        home = self.base / "home"
+        proj = home / ".claude" / "projects" / "-repo"
+        proj.mkdir(parents=True)
+        # This session's transcript: before any storyboard, the oracle for owner quotes.
+        (proj / f"{self.SID}.jsonl").write_text(json.dumps({
+            "type": "user", "timestamp": self.QUOTE["at"],
+            "message": {"role": "user", "content": "Keep every query exact."}}) + "\n")
+        get = {
+            "storyboard_id": self.SB, "question": "Why?", "window": self.WINDOW,
+            "acts": [{"number": 1, "status": "published", "context": {"repo": "o/r"}, "session_id": self.SID}],
+            "receipt_tiers": {self.R1: "captured"},
+            "scenes": [{"act": 1, "act_status": "published", "id": "s1", "state": "supported", "title": "T",
+                        "statement": "S.", "receipt_ids": [self.R1], "claims": [],
+                        "open_questions": [{"id": "q", "text": "Open?"}]}],
+        }
+        invs = self.invs = {}
+        sb_states = self.sb_states = {}
+        seen = self.seen = []
+        mode = self.mode = {"server": "new"}
+        inv_id = self.INV
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+                tool = self.path.rsplit("/", 1)[-1]
+                seen.append((tool, body))
+                status, out = self.answer(tool, body)
+                data = json.dumps(out).encode() if out is not None else b"<html>Cannot POST</html>"
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def answer(self, tool, body):
+                if tool == "get":
+                    return 200, get
+                if mode["server"] == "pre-state":
+                    # A Maestro before the state routes: the plugin key's allowlist refuses them.
+                    return 403, {"error": "insufficient_scope"}
+                if tool in ("create-investigation", "get-investigation", "attach-storyboard") and mode["server"] == "state-only":
+                    return 404, None  # maestro v1.99.11: no such route
+                if "investigation_id" in body and mode["server"] == "state-only":
+                    return 400, {"error": "invalid_body", "issues": [{"message": "Unrecognized key(s) in object: 'investigation_id'"}]}
+                if tool == "create-investigation":
+                    invs[inv_id] = {"question": body["question"], "window": body.get("window"), "storyboard_id": None, "state": None}
+                    return 200, {"investigation_id": inv_id, "author": {"kind": "user", "id": "u1"}, "created_at": "t"}
+                if "investigation_id" in body and body["investigation_id"] not in invs:
+                    return 404, {"error": "investigation_not_found"}
+                inv = invs.get(body.get("investigation_id"))
+                if tool == "get-investigation":
+                    st = inv["state"]
+                    return 200, dict({k: inv[k] for k in ("question", "window", "storyboard_id")}, investigation_id=inv_id,
+                                     state=st and {"version": st["version"], "etag": st["etag"], "current": True})
+                if tool == "attach-storyboard":
+                    if mode["server"] == "not-author":
+                        return 403, {"error": "not_investigation_author"}
+                    inv["storyboard_id"] = body["storyboard_id"]
+                    return 200, {"investigation_id": inv_id, "storyboard_id": body["storyboard_id"]}
+                if tool == "put-state":
+                    if mode["server"] == "not-author":
+                        return 403, {"error": "not_investigation_author"}
+                    copy = inv["state"] if inv else sb_states.get(body["storyboard_id"])
+                    if body["base_version"] != (copy or {}).get("version", 0):
+                        return 409, {"error": "version_conflict", "current_version": (copy or {}).get("version", 0)}
+                    new = {"version": (copy or {}).get("version", 0) + 1, "etag": "e" * 64, "state": body["state"]}
+                    if inv:
+                        inv["state"] = new
+                        return 200, {"investigation_id": inv_id, "storyboard_id": inv["storyboard_id"], "version": new["version"],
+                                     "etag": new["etag"], "warnings": [], "trust": {"client_attested_authority": []}}
+                    sb_states[body["storyboard_id"]] = new
+                    return 200, {"storyboard_id": body["storyboard_id"], "version": new["version"], "etag": new["etag"],
+                                 "warnings": [], "trust": {"client_attested_authority": []}}
+                if tool == "get-state":
+                    copy = inv["state"] if inv else sb_states.get(body["storyboard_id"])
+                    if not copy:
+                        return 404, {"error": "state_not_found"}
+                    ids = {"investigation_id": inv_id, "storyboard_id": inv["storyboard_id"]} if inv else {"storyboard_id": body["storyboard_id"]}
+                    return 200, dict(copy, **ids, current=True, trust={"client_attested_authority": []})
+                return 404, None
+
+            def log_message(self, *a):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        (home / ".claude" / "settings.json").write_text(json.dumps({"env": {
+            "CARDINAL_MCP_URL": f"http://127.0.0.1:{server.server_port}/api/orgs/o1/mcp", "CARDINAL_MCP_API_KEY": "ck"}}))
+        self.path = self.base / "st.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args):
+        env = {"HOME": str(self.base / "home"), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+               "CLAUDE_CODE_SESSION_ID": self.SID}
+        return subprocess.run([sys.executable, str(CLI), *args], capture_output=True, text=True, timeout=60, env=env)
+
+    def meta(self, path=None) -> dict:
+        return json.loads(Path(str(path or self.path) + ".server").read_text())
+
+    def puts(self) -> list:
+        return [b for t, b in self.seen if t == "put-state"]
+
+    def create_and_init(self):
+        res = self.run_cli("investigation", "create", "--question", "Why?", "--window", json.dumps(self.WINDOW))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout, f"{self.INV}\n")
+        res = self.run_cli("state", "init", "--investigation", self.INV, "--out", str(self.path))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        state = json.loads(self.path.read_text())
+        state["actors"] = [{"id": "owner", "role": "owner"}]
+        state["hypotheses"] = [{"id": "h-gc", "statement": "GC pauses add latency.", "status": "untested"}]
+        state["constraints"] = [{"id": "c1", "statement": "Queries stay exact.", "authored_by": "owner",
+                                 "authority": "owner_stated", "source": [self.QUOTE]}]
+        self.path.write_text(json.dumps(state))
+        return state
+
+    def test_create_init_check_publish_before_any_storyboard(self):
+        self.create_and_init()
+        self.assertEqual(self.seen[0], ("create-investigation", {"question": "Why?", "window": self.WINDOW}))
+        state = json.loads(self.path.read_text())
+        self.assertEqual(state["source"], {"storyboard_id": None, "acts": []})
+        self.assertEqual((state["question"], state["window"], state["status"]), ("Why?", self.WINDOW, "open"))
+        self.assertNotIn("investigation_id", state)
+        meta = self.meta()
+        self.assertEqual((meta["investigation_id"], meta["storyboard_id"], meta["version"]), (self.INV, None, 0))
+        ok = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIn("1 owner / 0 agent quotes verified", ok.stdout)  # against this session's transcript
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("published: version 1", res.stdout)
+        put = self.puts()[-1]
+        self.assertEqual((put["investigation_id"], put["base_version"]), (self.INV, 0))
+        self.assertNotIn("storyboard_id", put)
+        self.assertEqual(put["attestation"]["quotes"][0]["session"], self.SID)
+        self.assertEqual((self.meta()["investigation_id"], self.meta()["version"]), (self.INV, 1))
+        state = json.loads(self.path.read_text())
+        state["status"] = "blocked"
+        self.path.write_text(json.dumps(state))
+        self.assertEqual(self.run_cli("state", "publish", str(self.path)).returncode, 0)
+        self.assertEqual(self.puts()[-1]["base_version"], 1)
+        shown = self.run_cli("investigation", "show", self.INV)
+        self.assertEqual(json.loads(shown.stdout)["state"]["version"], 2)
+
+    def test_nothing_that_fails_locally_is_sent(self):
+        self.create_and_init()
+        state = json.loads(self.path.read_text())
+        state["constraints"][0]["source"] = [{"kind": "receipt", "id": self.R1}]
+        self.path.write_text(json.dumps(state))
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("is not a receipt this storyboard cites", res.stdout)
+        self.assertEqual(self.puts(), [])
+
+    def test_pull_by_investigation_and_a_stale_copy_is_refused(self):
+        self.create_and_init()
+        other = self.base / "other.json"
+        other.write_text(self.path.read_text())
+        Path(str(other) + ".server").write_text(Path(str(self.path) + ".server").read_text())
+        self.assertEqual(self.run_cli("state", "publish", str(self.path)).returncode, 0)
+        res = self.run_cli("state", "publish", str(other))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn(f"`cardinal-storyboard state pull --investigation {self.INV}`", res.stdout)
+        pulled = self.base / "pulled.json"
+        ok = self.run_cli("state", "pull", "--investigation", self.INV, "--out", str(pulled))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("version 1; current", ok.stdout)
+        self.assertEqual(json.loads(pulled.read_text()), json.loads(self.path.read_text()))
+        self.assertEqual(self.meta(pulled), {"origin": self.meta()["origin"], "org": "o1", "investigation_id": self.INV,
+                                             "storyboard_id": None, "version": 1, "etag": "e" * 64})
+        # The pulled copy is investigation-bound: it publishes on top of version 1.
+        self.assertEqual(self.run_cli("state", "publish", str(pulled)).returncode, 0)
+        self.assertEqual((self.puts()[-1]["investigation_id"], self.puts()[-1]["base_version"]), (self.INV, 1))
+
+    def test_pull_without_a_published_state_says_so(self):
+        self.run_cli("investigation", "create", "--question", "Why?")
+        res = self.run_cli("state", "pull", "--investigation", self.INV, "--out", str(self.path))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("has no published InvestigationState yet", res.stderr)
+        self.assertFalse(self.path.exists())
+
+    def test_attach_then_refresh_reprojects_from_the_storyboard_and_keeps_the_authored_sections(self):
+        authored = self.create_and_init()
+        self.assertEqual(self.run_cli("state", "publish", str(self.path)).returncode, 0)
+        res = self.run_cli("investigation", "attach", self.INV, self.SB)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"state init --investigation {self.INV} --refresh", res.stdout)
+        self.assertEqual(self.seen[-1], ("attach-storyboard", {"investigation_id": self.INV, "storyboard_id": self.SB}))
+        stale = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(stale.returncode, 1)
+        self.assertIn("a storyboard is attached to the investigation now", stale.stdout)
+        res = self.run_cli("state", "init", "--investigation", self.INV, "--out", str(self.path), "--refresh")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        state = json.loads(self.path.read_text())
+        self.assertEqual(state["source"], {"storyboard_id": self.SB, "acts": [1]})
+        self.assertEqual([f["id"] for f in state["findings"]], ["s1"])
+        for k in ("actors", "constraints"):
+            self.assertEqual(state[k], authored[k])
+        self.assertEqual([h["id"] for h in state["hypotheses"]], ["h-gc"])
+        self.assertEqual([q["id"] for q in state["open_questions"]], ["s1/q"])
+        self.assertEqual((self.meta()["investigation_id"], self.meta()["storyboard_id"], self.meta()["version"]),
+                         (self.INV, self.SB, 1))
+        ok = self.run_cli("state", "check", str(self.path))
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual((self.puts()[-1]["investigation_id"], self.puts()[-1]["base_version"]), (self.INV, 1))
+        self.assertEqual(self.invs[self.INV]["state"]["state"]["source"]["storyboard_id"], self.SB)
+
+    def test_refresh_never_moves_a_state_off_its_storyboard(self):
+        self.run_cli("investigation", "create", "--question", "Why?")
+        self.assertEqual(self.run_cli("state", "init", self.SB, "--out", str(self.path)).returncode, 0)
+        res = self.run_cli("state", "init", "--investigation", self.INV, "--out", str(self.path), "--refresh")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn(f"reflects storyboard {self.SB}", res.stderr)
+
+    def test_a_storyboard_bound_state_is_published_exactly_as_in_0_40(self):
+        self.assertEqual(self.run_cli("state", "init", self.SB, "--out", str(self.path)).returncode, 0)
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(sorted(self.puts()[-1]), ["attestation", "base_version", "state", "storyboard_id"])
+        self.assertEqual(self.puts()[-1]["storyboard_id"], self.SB)
+        self.assertEqual(sorted(self.meta()), ["etag", "org", "origin", "storyboard_id", "version"])
+        self.assertFalse([t for t, b in self.seen if "investigation" in t or "investigation_id" in b])
+        pulled = self.base / "p.json"
+        self.assertEqual(self.run_cli("state", "pull", self.SB, "--out", str(pulled)).returncode, 0)
+        self.assertEqual([b for t, b in self.seen if t == "get-state"][-1], {"storyboard_id": self.SB})
+        self.assertNotIn("investigation_id", self.meta(pulled))
+
+    def test_a_state_bound_to_nothing_says_how_to_bind_it(self):
+        self.create_and_init()
+        Path(str(self.path) + ".server").unlink()
+        res = self.run_cli("state", "publish", str(self.path))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("belongs to no storyboard and no investigation", res.stderr)
+
+    def test_not_the_author_is_said_plainly(self):
+        self.create_and_init()
+        self.mode["server"] = "not-author"
+        for args, stream in ((("state", "publish", str(self.path)), "stdout"),
+                             (("investigation", "attach", self.INV, self.SB), "stderr")):
+            res = self.run_cli(*args)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("only the investigation's author can do that", getattr(res, stream))
+            self.assertNotIn("403", res.stdout + res.stderr)
+
+    def test_an_older_server_says_so_plainly(self):
+        self.create_and_init()
+        before = self.path.read_text()
+        for server in ("pre-state", "state-only"):
+            self.mode["server"] = server
+            for args in (("investigation", "create", "--question", "Why?"), ("investigation", "show", self.INV),
+                         ("investigation", "attach", self.INV, self.SB),
+                         ("state", "init", "--investigation", self.INV, "--out", str(self.base / "n.json")),
+                         ("state", "check", str(self.path)), ("state", "publish", str(self.path)),
+                         ("state", "pull", "--investigation", self.INV, "--out", str(self.base / "p.json"))):
+                res = self.run_cli(*args)
+                out = res.stdout + res.stderr
+                self.assertEqual(res.returncode, 1, (server, args, out))
+                self.assertIn("does not support investigations yet", out, (server, args))
+                for raw in ("403", "404", "insufficient_scope", "invalid_body", "Cannot POST"):
+                    self.assertNotIn(raw, out, (server, args))
+        self.assertEqual(self.path.read_text(), before)
+        self.assertFalse((self.base / "n.json").exists())
+        self.assertFalse((self.base / "p.json").exists())
+        self.assertEqual(self.puts(), [])

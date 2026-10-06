@@ -50,6 +50,14 @@ only in the derived half: what the state calls established is exactly what
 passed the storyboard's publish checks. Evidence is referenced by receipt id,
 never copied, and its tier is never authored.
 
+Before any storyboard exists, the state belongs to an Investigation (a
+server object with a question and a window): it is checked against a
+virtual empty storyboard (virtual_storyboard()), so the derived half is
+empty, source is {storyboard_id: null, acts: []}, and the authored sections
+are held to every rule above. Once a storyboard is attached, refresh()
+re-projects from it and carries the authored sections over. The
+investigation's id is never part of the document.
+
 The schema and its authority model are frozen at investigation-state/v1.1:
 a change to either is a new schema id, not an edit.
 
@@ -68,6 +76,7 @@ from typing import Any, Callable, Optional
 SCHEMA = "investigation-state/v1.1"
 
 STORYBOARD_ID_RE = re.compile(r"^sb_[0-9a-f]{24}$")
+INVESTIGATION_ID_RE = re.compile(r"^inv_[0-9a-f]{24}$")
 RECEIPT_ID_RE = re.compile(r"^rcpt_[0-9a-f]{24}$")
 ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_./-]{1,96}$")
 
@@ -488,12 +497,21 @@ def derive(got: dict) -> dict:
     }
 
 
+def virtual_storyboard(investigation: dict) -> dict:
+    """What check() and project() take for an investigation no storyboard is
+    attached to yet: a storyboard__get with nothing published. The question
+    and window are the investigation's own; the derived half is empty."""
+    return {"storyboard_id": None, "question": investigation.get("question"),
+            "window": investigation.get("window"), "acts": [], "scenes": [], "receipt_tiers": {}}
+
+
 def project(got: dict) -> dict:
     """A new state for a storyboard: the derived half, empty authored
     sections, and a status the author must confirm (open while any scene or
-    question is open)."""
+    question is open, or while nothing is published yet)."""
     d = derive(got)
-    still_open = bool(d["open_questions"]) or any(f["state"] == "open" for f in d["findings"])
+    still_open = (bool(d["open_questions"]) or any(f["state"] == "open" for f in d["findings"])
+                  or not _published_acts(got))
     return {
         "schema": SCHEMA,
         "source": {"storyboard_id": got.get("storyboard_id"), "acts": _published_acts(got)},
@@ -630,7 +648,10 @@ def _check(state: Any, got: dict, sessions: Optional[dict] = None, previous: Opt
     src = state.get("source") or {}
     if isinstance(state.get("source"), dict):
         keys(src, SOURCE_KEYS, "source")
-    if src.get("storyboard_id") != got.get("storyboard_id"):
+    if "storyboard_id" in src and src["storyboard_id"] is None and got.get("storyboard_id") is not None:
+        err("source.storyboard_id is null but a storyboard is attached to the investigation now: "
+            "re-run state init --investigation with --refresh to carry the authored sections over")
+    elif src.get("storyboard_id", "") != got.get("storyboard_id"):
         err("source.storyboard_id does not match the storyboard")
     if src.get("acts") != _published_acts(got):
         err(f"source.acts must be the published acts {_published_acts(got)}: a new act was published, re-run init and carry the authored sections over")

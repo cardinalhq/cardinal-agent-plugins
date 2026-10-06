@@ -130,5 +130,95 @@ class Client(unittest.TestCase):
             sync.get_state({}, SB, client="c")
 
 
+INV = "inv_" + "a" * 24
+
+
+def http_error(status: int, body: bytes):
+    import io
+    import urllib.error
+    return urllib.error.HTTPError("u", status, "x", {}, io.BytesIO(body))
+
+
+class InvestigationClient(unittest.TestCase):
+    """The investigation routes, and put-state / get-state addressed by
+    investigation_id (exactly one of investigation_id | storyboard_id)."""
+
+    def test_put_state_by_investigation_sends_its_id_and_no_storyboard_id(self):
+        state = ist.project(ist.virtual_storyboard({"question": "Why?"}))
+        op = FakeOpener({"investigation_id": INV, "storyboard_id": None, "version": 1, "etag": "e"})
+        sync.put_state(CONN, state, base_version=0, attestation={"quotes": []}, client="c", opener=op, investigation_id=INV)
+        body = json.loads(op.requests[0].data)
+        self.assertEqual((body["investigation_id"], body["base_version"], body["state"]), (INV, 0, state))
+        self.assertNotIn("storyboard_id", body)
+        self.assertNotIn("investigation_id", body["state"])  # the document schema is frozen
+
+    def test_put_state_by_storyboard_is_unchanged(self):
+        state = ist.project(storyboard())
+        op = FakeOpener({"storyboard_id": SB, "version": 1, "etag": "e"})
+        sync.put_state(CONN, state, base_version=0, attestation={}, client="c", opener=op)
+        self.assertEqual(sorted(json.loads(op.requests[0].data)), ["attestation", "base_version", "state", "storyboard_id"])
+
+    def test_get_state_takes_exactly_one_id_and_refuses_another_investigation(self):
+        for kw in ({}, {"storyboard_id": SB, "investigation_id": INV}):
+            with self.assertRaises(ist.FetchError):
+                sync.get_state(CONN, client="c", opener=FakeOpener({}), **kw)
+        with self.assertRaises(ist.FetchError):
+            sync.get_state(CONN, investigation_id="inv_nope", client="c", opener=FakeOpener({}))
+        with self.assertRaises(ist.FetchError):
+            sync.get_state(CONN, investigation_id=INV, client="c",
+                           opener=FakeOpener({"investigation_id": "inv_" + "b" * 24, "state": {}}))
+        op = FakeOpener({"investigation_id": INV, "storyboard_id": None, "state": {"schema": ist.SCHEMA}})
+        self.assertEqual(sync.get_state(CONN, investigation_id=INV, client="c", opener=op)["state"]["schema"], ist.SCHEMA)
+        self.assertEqual(json.loads(op.requests[0].data), {"investigation_id": INV})
+
+    def test_create_get_attach(self):
+        op = FakeOpener({"investigation_id": INV, "author": {"kind": "user", "id": "u1"}})
+        sync.create_investigation(CONN, "Why?", {"start": "a", "end": "b"}, client="c", opener=op)
+        self.assertTrue(op.requests[0].full_url.endswith("/storyboards/mcp-tools/create-investigation"))
+        self.assertEqual(json.loads(op.requests[0].data), {"question": "Why?", "window": {"start": "a", "end": "b"}})
+        for bad in ("", " ", "x" * 2001):
+            with self.assertRaises(ist.FetchError):
+                sync.create_investigation(CONN, bad, client="c", opener=op)
+        with self.assertRaises(ist.FetchError):
+            sync.create_investigation(CONN, "Why?", ["a"], client="c", opener=op)
+        with self.assertRaises(ist.FetchError):
+            sync.create_investigation(CONN, "Why?", client="c", opener=FakeOpener({"investigation_id": "x"}))
+        with self.assertRaises(ist.FetchError):
+            sync.get_investigation(CONN, INV, client="c", opener=FakeOpener({"investigation_id": "inv_" + "b" * 24}))
+        with self.assertRaises(ist.FetchError):
+            sync.get_investigation(CONN, INV, client="c", opener=FakeOpener({"investigation_id": INV, "storyboard_id": "x"}))
+        op = FakeOpener({"investigation_id": INV, "storyboard_id": SB})
+        sync.attach_storyboard(CONN, INV, SB, client="c", opener=op)
+        self.assertEqual(json.loads(op.requests[0].data), {"investigation_id": INV, "storyboard_id": SB})
+        with self.assertRaises(ist.FetchError):
+            sync.attach_storyboard(CONN, INV, "sb_x", client="c", opener=op)
+
+    def refusal(self, status: int, body: bytes) -> sync.ServerError:
+        with self.assertRaises(sync.ServerError) as cm:
+            sync.get_investigation(CONN, INV, client="c", opener=FakeOpener(http_error(status, body)))
+        return cm.exception
+
+    def test_an_older_server_is_recognized_never_a_raw_status(self):
+        # The plugin key's allowlist refuses an unknown route; or the route is
+        # missing; or (maestro with state but no investigations) the strict
+        # put-state / get-state body refuses investigation_id.
+        for status, body in ((403, b'{"error":"insufficient_scope"}'), (404, b"<html>Cannot POST</html>"),
+                             (404, b'{"error":"not_found"}'),
+                             (400, b'{"error":"invalid_body","issues":[{"path":"","message":"Unrecognized key: investigation_id"}]}')):
+            self.assertTrue(sync.investigations_unsupported(self.refusal(status, body)), (status, body))
+        for status, body in ((404, b'{"error":"investigation_not_found"}'), (403, b'{"error":"not_investigation_author"}'),
+                             (409, b'{"error":"version_conflict","current_version":2}'),
+                             (400, b'{"error":"invalid_body","issues":[{"path":"question"}]}')):
+            self.assertFalse(sync.investigations_unsupported(self.refusal(status, body)), (status, body))
+
+    def test_refusals_in_words(self):
+        e = self.refusal(403, b'{"error":"not_investigation_author"}')
+        self.assertEqual(sync.plain(e), "Cardinal refused (only the investigation's author can do that "
+                                        "(it was created by another user or key))")
+        self.assertIn("another investigation", sync.plain(self.refusal(409, b'{"error":"storyboard_attached_elsewhere"}')))
+        self.assertEqual(sync.plain(self.refusal(500, b'{"message":"try later"}')), "Cardinal refused (try later)")
+        self.assertEqual(sync.plain(self.refusal(500, b"{}")), "Cardinal refused (no reason given)")
+
+
 if __name__ == "__main__":
     unittest.main()
