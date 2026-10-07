@@ -338,6 +338,26 @@ class StoryboardSkillTextTests(unittest.TestCase):
         self.assertIn("the answer is no: work normally", readme)
         self.assertIn("`cardinal-storyboard investigation link`", readme)
 
+    def test_the_skill_is_not_the_way_a_storyboard_gets_written(self):
+        # Automatic projection (plugin 0.44.0): a Cardinal that supports it
+        # keeps the live storyboard up to date from the checkpoints. The skill
+        # stays for what is the user's call (publish, share, hand edits, other
+        # storyboards) and must not read as the required write-up step.
+        description = re.search(r"^description: (.*)$", STORYBOARD_SKILL.read_text(), re.M).group(1)
+        for needle in ("Publish, share or hand-edit", "keeps it current from the session's checkpoints",
+                       "explaining the investigation needs no skill either", "Where supported"):
+            self.assertIn(needle, description)
+        for ritual in ("explain, present, hand off or post-mortem", "wants the storyboard to explain"):
+            self.assertNotIn(ritual, description)
+        readme = _flat(STORYBOARD_SKILL.parent / "README.md")
+        self.assertNotIn("Storyboard this for the team", readme)
+        self.assertIn("You don't ask for the storyboard to be written", readme)
+        self.assertIn("an older one leaves it to you to ask for scenes", readme)
+        hook = _flat(PLUGIN_ROOT / "hooks" / "storyboard-session.py")
+        self.assertNotIn("The storyboard skill improves this storyboard", hook)
+        self.assertNotIn("The storyboard skill authors this session's live storyboard",
+                         _flat(PLUGIN_ROOT / "bin" / "cardinal-storyboard"))
+
     def test_storyboard_readme_explains_acts(self):
         readme = _flat(STORYBOARD_SKILL.parent / "README.md")
         self.assertNotIn("To change one, ask for a new storyboard", readme)
@@ -422,6 +442,9 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # start; the skill improves it; "Which storyboard", "Publish and
         # share", the do-I-start-it answer) replaced the finished-investigation
         # framing and was paid for by trimming: still 2840 / 296.
+        # Automatic projection (plugin 0.44.0: the skill is no longer the way
+        # a storyboard gets written) reworded the description and intro and
+        # dropped the flow's "work normally" ritual: 2838 / 296.
         # No headroom left: trim before adding.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)

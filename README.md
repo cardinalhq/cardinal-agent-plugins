@@ -51,11 +51,13 @@ per-session background poller, so a tool call never waits on the network.
 When its understanding materially changes, the session checkpoints it to the
 same ordered stream (`cardinal-storyboard investigation checkpoint`: sparse,
 batched hypothesis / experiment / finding / decision / question events, each
-the agent's claim, never a fact or owner authority).
+the agent's claim, never a fact or owner authority). A Cardinal with
+automatic projection keeps the live storyboard up to date from those
+checkpoints, so nobody has to ask for it to be written.
 Claude also ships two model-invocable skills for Cardinal's Investigation
 Storyboards: [`/cardinal:storyboard`](adapters/claude/skills/storyboard/README.md)
-improves, frames and publishes that live storyboard (evidence-bound, scene by
-scene) through the `storyboard__*` MCP tools, and
+publishes and shares a storyboard, or edits its scenes by hand when asked
+(evidence-bound, scene by scene), through the `storyboard__*` MCP tools, and
 [`/cardinal:canvas`](adapters/claude/skills/canvas/README.md) draws each
 scene's visual and previews it. `storyboard__preview` returns one
 self-contained page per scene. A synchronous `PostToolUse` hook on

@@ -14,7 +14,9 @@ leaves the machine only when the author promotes it
                    minted a witnessed receipt)                      -> nothing
          control plane: any input string runs `cardinal-storyboard
                    investigation …` (the investigation's control log is
-                   never evidence)                                  -> nothing
+                   never evidence)                                  -> nothing,
+                   unless it is one statement of a larger shell command
+                   that can be kept without it (salvage_control_plane)
       3  sensitivity gate over every key and string of tool_input
          (cardinal_core.evidence_gate; tool-neutral)          -> withheld stub
       4  normalize: the first matching pluggable normalizer, else generic
@@ -645,7 +647,8 @@ _CONTROL_PLANE_RE = re.compile(r"(?:^|[\s/;&|(`'\"])cardinal-storyboard[\s'\"]+i
 def control_plane(tool_input: Any, _depth: int = 0) -> bool:
     """Whether any string in a tool call's input runs `cardinal-storyboard
     investigation …`: the investigation's control log (events, acks, the
-    question, links) is never evidence, so such a call is never captured.
+    question, links) is never evidence, so such a call is never captured
+    as is (salvage_control_plane may keep the rest of a shell command).
     Tool-neutral, like the sensitivity gate."""
     if _depth > 20:
         return False
@@ -655,6 +658,442 @@ def control_plane(tool_input: Any, _depth: int = 0) -> bool:
         return any(control_plane(v, _depth + 1) for v in tool_input.values())
     if isinstance(tool_input, list):
         return any(control_plane(v, _depth + 1) for v in tool_input)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# A control-log command inside a larger shell command
+# ---------------------------------------------------------------------------
+#
+# `cardinal-storyboard investigation question "…"; cat src/*.py` runs the
+# control-log CLI AND reads code. Dropping the whole call (as control_plane
+# alone does) loses the code read, which may be the evidence for the
+# mechanism. Such a call is captured WITHOUT its control-log part, and only
+# when every step below is certain; any doubt skips the whole call, as before:
+#   1. the CLI is named only in one shell `command` string of a dict input;
+#   2. that command splits into top-level statements (quotes, $( ), ( ),
+#      backticks, comments, heredocs; anything else -> skip);
+#   3. each statement that names the CLI runs it as the last element of its
+#      pipeline (its output is printed as is, not transformed), with a
+#      subcommand that writes or links (never `events` / `show`, whose
+#      output IS the log), and another statement remains;
+#   4. those statements (with their stdin: a checkpoint's heredoc of claims)
+#      become CONTROL_OMITTED in the recorded command;
+#   5. the CLI recorded what it printed (record_control_output, by the CLI
+#      itself, for every `investigation` subcommand): those lines are removed
+#      from the output; no record -> skip;
+#   6. nothing left looks like control-log traffic (the patterns of
+#      conductor's isControlLogItem, which refuses such an upload) -> else skip.
+# So the control log (claims, other principals' events, acks) never becomes
+# evidence, and what the rest of the command showed does.
+
+CONTROL_OMITTED = "[Cardinal control-log command omitted]"
+CONTROL_OMITTED_NOTE = "(Kept without its cardinal-storyboard investigation part, which is never evidence.)"
+CONTROL_OUTPUT_DIR = Path(".cardinal") / "investigations" / "control-output"
+CONTROL_OUTPUT_TTL_S = 30 * 60
+CONTROL_OUTPUT_MAX_FILES = 256
+CONTROL_OUTPUT_MAX_BYTES = 256 << 10
+# Subcommands whose output is a short status line, never the event stream.
+_CONTROL_SALVAGE_SUBS = frozenset(("link", "question", "checkpoint", "ack", "post", "create", "attach", "bind",
+                                   "-h", "--help"))
+_CLI_NAMES = frozenset(("cardinal-storyboard", "cardinal-storyboard.py"))
+_WRAPPERS = frozenset(("env", "command", "exec", "nohup", "time"))
+# A statement that prints nothing worth citing on its own.
+_INERT = frozenset(("cd", "pushd", "popd", "export", "unset", "set", "true", ":", "wait", "sleep", "umask",
+                    "shopt", "alias", "source", "."))
+_PYTHON_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
+_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# conductor maestro storyboard/evidence-upload.ts CONTROL_LOG_TEXT_RE.
+_CONTROL_LOG_TEXT_RE = re.compile(
+    r"cardinal-storyboard(\.py)?[\"']?\s+investigation\b"
+    r"|/mcp-tools/((append|read)-investigation-events?|checkpoint-investigation)\b"
+    r"|\"is_investigation_author\"\s*:|\"authority\"\s*:\s*\"producer_claim\""
+    r"|^(is_investigation_author|ack_of|producer_claim)$", re.IGNORECASE)
+_MAX_GROUP_DEPTH = 20
+
+
+def control_output_dir(home: Path) -> Path:
+    return Path(home) / CONTROL_OUTPUT_DIR
+
+
+def record_control_output(home: Path, text: str, now: Optional[float] = None,
+                          env: Optional[dict] = None, overflow: bool = False) -> None:
+    """For the control-log CLI: record the lines it printed (stdout and
+    stderr), so a capture of the shell command it ran in can leave them out
+    (step 5 above). 0600 in a 0700 directory, kept CONTROL_OUTPUT_TTL_S.
+    More than CONTROL_OUTPUT_MAX_BYTES records only an overflow mark (such a
+    call is then never captured). Nothing when capture is off. Never raises."""
+    import json
+    import time
+    try:
+        home = Path(home)
+        if evidence.capture_disabled(evidence.default_root(home), env):
+            return
+        now = time.time() if now is None else now
+        d = control_output_dir(home)
+        os.makedirs(str(d.parent), mode=0o700, exist_ok=True)
+        evidence._ensure_private_dir(d)
+        overflow = overflow or not isinstance(text, str) or len(text) > CONTROL_OUTPUT_MAX_BYTES
+        lines = [] if overflow else sorted({ln.strip() for ln in text.splitlines() if ln.strip()})
+        body = json.dumps({"at": now, "overflow": overflow, "lines": lines}, ensure_ascii=False)
+        name = f"out_{int(now * 1e9)}_{os.getpid()}.json"
+        fd = os.open(str(d / name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        _gc_control_output(d, now)
+    except BaseException:
+        pass
+
+
+def _gc_control_output(d: Path, now: float) -> list:
+    """Remove expired records; -> the live ones, newest first, at most
+    CONTROL_OUTPUT_MAX_FILES (older ones beyond that are removed)."""
+    live = []
+    with os.scandir(str(d)) as it:
+        for e in it:
+            if not (e.name.startswith("out_") and e.name.endswith(".json")) or not e.is_file(follow_symlinks=False):
+                continue
+            try:
+                mt = e.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                continue
+            if now - mt > CONTROL_OUTPUT_TTL_S:
+                try:
+                    os.unlink(e.path)
+                except OSError:
+                    pass
+            else:
+                live.append((mt, e.path))
+    live.sort(reverse=True)
+    for _, p in live[CONTROL_OUTPUT_MAX_FILES:]:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+    return [p for _, p in live[:CONTROL_OUTPUT_MAX_FILES]]
+
+
+def _control_lines(home: Path, now: Optional[float] = None) -> Optional[set]:
+    """The lines the control-log CLI printed recently, or None (fail
+    closed): no record, an overflow, or an unreadable one."""
+    import json
+    import time
+    now = time.time() if now is None else now
+    d = control_output_dir(home)
+    try:
+        if os.path.islink(str(d)) or not d.is_dir():
+            return None
+        paths = _gc_control_output(d, now)
+    except OSError:
+        return None
+    if not paths:
+        return None
+    out: set = set()
+    for p in paths:
+        try:
+            fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "r", encoding="utf-8") as f:
+                rec = json.loads(f.read(CONTROL_OUTPUT_MAX_BYTES * 2))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(rec, dict) or rec.get("overflow") is not False or not isinstance(rec.get("lines"), list):
+            return None
+        out.update(ln for ln in rec["lines"] if isinstance(ln, str))
+    return out
+
+
+def _skip_bq(cmd: str, i: int) -> int:
+    """Index after the backtick closing a `…` that starts at i (after the
+    opening one), or -1."""
+    n = len(cmd)
+    while i < n:
+        if cmd[i] == "\\":
+            i += 2
+        elif cmd[i] == "`":
+            return i + 1
+        else:
+            i += 1
+    return -1
+
+
+def _skip_dq(cmd: str, i: int, depth: int = 0) -> int:
+    """Index after the quote closing a "…" that starts at i, or -1."""
+    n = len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\":
+            i += 2
+        elif c == '"':
+            return i + 1
+        elif c == "`":
+            i = _skip_bq(cmd, i + 1)
+            if i < 0:
+                return -1
+        elif cmd.startswith("$(", i):
+            i = _skip_group(cmd, i + 2, depth + 1)
+            if i < 0:
+                return -1
+        else:
+            i += 1
+    return -1
+
+
+def _skip_group(cmd: str, i: int, depth: int = 0) -> int:
+    """Index after the ")" closing a ( / $( group whose body starts at i, or
+    -1 (unbalanced, too deep, or a heredoc inside it)."""
+    if depth > _MAX_GROUP_DEPTH:
+        return -1
+    n = len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            j = cmd.find("'", i + 1)
+            if j < 0:
+                return -1
+            i = j + 1
+        elif c == '"':
+            i = _skip_dq(cmd, i + 1, depth)
+            if i < 0:
+                return -1
+        elif c == "`":
+            i = _skip_bq(cmd, i + 1)
+            if i < 0:
+                return -1
+        elif c == "(":
+            i = _skip_group(cmd, i + 1, depth + 1)
+            if i < 0:
+                return -1
+        elif c == ")":
+            return i + 1
+        elif cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+            return -1
+        else:
+            i += 1
+    return -1
+
+
+def _heredoc_word(cmd: str, j: int) -> tuple:
+    """A heredoc delimiter at j, quotes removed: (word, index after it)."""
+    n = len(cmd)
+    word = []
+    while j < n and cmd[j] not in " \t\n;&|<>()":
+        c = cmd[j]
+        if c in "'\"":
+            k = cmd.find(c, j + 1)
+            if k < 0:
+                return "", n
+            word.append(cmd[j + 1:k])
+            j = k + 1
+        elif c == "\\" and j + 1 < n:
+            word.append(cmd[j + 1])
+            j += 2
+        else:
+            word.append(c)
+            j += 1
+    return "".join(word), j
+
+
+def shell_statements(cmd: str) -> Optional[list]:
+    """The top-level statements of a shell command, as (start, end,
+    element_starts): cmd[start:end] is the statement (with its heredoc
+    bodies), element_starts the start of each pipeline element after the
+    first. Statements are separated by ; && || & and newlines. None when the
+    command cannot be split with certainty (an unterminated quote, group or
+    heredoc; a heredoc whose statement does not end at its line; `case`)."""
+    if not isinstance(cmd, str):
+        return None
+    n = len(cmd)
+    out: list = []
+    start, pipes, pending = 0, [], []
+    i = 0
+    while i < n:
+        c = cmd[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            j = cmd.find("'", i + 1)
+            if j < 0:
+                return None
+            i = j + 1
+        elif c == '"':
+            i = _skip_dq(cmd, i + 1)
+            if i < 0:
+                return None
+        elif c == "`":
+            i = _skip_bq(cmd, i + 1)
+            if i < 0:
+                return None
+        elif c == "(" or cmd.startswith("$(", i):
+            i = _skip_group(cmd, i + (2 if c == "$" else 1))
+            if i < 0:
+                return None
+        elif c == ")":
+            return None
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|"):
+            j = cmd.find("\n", i)
+            i = n if j < 0 else j
+        elif cmd.startswith("<<<", i):
+            i += 3
+        elif cmd.startswith("<<", i):
+            j = i + 2
+            strip = j < n and cmd[j] == "-"
+            j += 1 if strip else 0
+            while j < n and cmd[j] in " \t":
+                j += 1
+            word, j = _heredoc_word(cmd, j)
+            if not word:
+                return None
+            pending.append((word, strip))
+            i = j
+        elif c == "\n":
+            end = i
+            i += 1
+            for word, strip in pending:
+                while True:
+                    if i >= n:
+                        return None
+                    j = cmd.find("\n", i)
+                    line_end = n if j < 0 else j
+                    line = cmd[i:line_end]
+                    i = n if j < 0 else j + 1
+                    if (line.lstrip("\t") if strip else line) == word:
+                        end = line_end
+                        break
+            pending = []
+            out.append((start, end, pipes))
+            start, pipes = i, []
+        elif c in ";&|":
+            two = cmd[i:i + 2]
+            if c == ";" and two == ";;":
+                return None
+            if c == "&" and (two == "&>" or (i > 0 and cmd[i - 1] in "<>")):
+                i += 2 if two == "&>" else 1
+                continue
+            if c == "|" and two != "||":
+                if i > 0 and cmd[i - 1] == ">":  # >| (clobber)
+                    i += 1
+                    continue
+                i += 2 if two == "|&" else 1
+                pipes.append(i)
+                continue
+            if pending:
+                return None
+            width = 2 if two in ("&&", "||") else 1
+            out.append((start, i, pipes))
+            i += width
+            start, pipes = i, []
+        else:
+            i += 1
+    if pending:
+        return None
+    out.append((start, n, pipes))
+    return out
+
+
+def _salvageable_control(cmd: str, start: int, end: int, pipes: list) -> bool:
+    """Whether a statement naming the CLI runs it as its pipeline's last
+    element, with a subcommand whose output is a status line (step 3)."""
+    last = pipes[-1] if pipes else start
+    if any(_CONTROL_PLANE_RE.search(cmd[a:b]) for a, b in zip([start] + pipes, [p - 1 for p in pipes])):
+        return False
+    first_line = cmd[last:end].split("\n", 1)[0]
+    import shlex
+    try:
+        words = shlex.split(first_line, comments=True)
+    except ValueError:
+        return False
+    while words and _ASSIGN_RE.match(words[0]):
+        words.pop(0)
+    while words and (words[0] in _WRAPPERS or _PYTHON_RE.match(os.path.basename(words[0]))):
+        words.pop(0)
+        while words and words[0].startswith("-"):
+            words.pop(0)
+    return (len(words) >= 3 and os.path.basename(words[0]) in _CLI_NAMES and words[1] == "investigation"
+            and words[2] in _CONTROL_SALVAGE_SUBS)
+
+
+def _shows_something(text: str, pipes: list) -> bool:
+    """Whether a statement kept beside a control-log command can show
+    anything: not empty, a comment, or a lone `cd` / `export` / … (`cd repo
+    && cardinal-storyboard investigation checkpoint …` is not evidence)."""
+    t = text.strip()
+    if not t or t.startswith("#"):
+        return False
+    if pipes:
+        return True
+    import shlex
+    try:
+        words = shlex.split(t.split("\n", 1)[0], comments=True)
+    except ValueError:
+        return True
+    while words and _ASSIGN_RE.match(words[0]):
+        words.pop(0)
+    return bool(words) and words[0] not in _INERT
+
+
+def _subtract_lines(text: Any, lines: set) -> Any:
+    if not isinstance(text, str) or not text or not lines:
+        return text
+    return "\n".join(ln for ln in text.split("\n") if ln.strip() not in lines)
+
+
+def salvage_control_plane(call: ToolCall, home: Path, now: Optional[float] = None) -> Optional[ToolCall]:
+    """A call whose input runs the control-log CLI, as the same call without
+    its control-log part (steps 1-5 above), or None: skip the whole call."""
+    import dataclasses
+    ti = call.tool_input
+    if not isinstance(ti, dict) or not home:
+        return None
+    hits = [k for k, v in ti.items() if control_plane(v)]
+    if len(hits) != 1 or hits[0] not in ("command", "cmd") or not isinstance(ti[hits[0]], str):
+        return None
+    key = hits[0]
+    cmd = ti[key]
+    stmts = shell_statements(cmd)
+    if stmts is None:
+        return None
+    pieces, last, kept = [], 0, 0
+    for start, end, pipes in stmts:
+        text = cmd[start:end]
+        if "cardinal-storyboard" in text and _CONTROL_PLANE_RE.search(text):
+            if not _salvageable_control(cmd, start, end, pipes):
+                return None
+            lead = len(text) - len(text.lstrip())
+            trail = len(text) - len(text.rstrip())
+            pieces += [cmd[last:start + lead], CONTROL_OMITTED]
+            last = end - trail
+        elif _shows_something(text, pipes):
+            kept += 1
+    if not kept:
+        return None
+    pieces.append(cmd[last:])
+    new_cmd = "".join(pieces)
+    if control_plane(new_cmd):
+        return None
+    lines = _control_lines(Path(home), now)
+    if lines is None:
+        return None
+    response = call.response
+    if isinstance(response, dict):
+        response = dict(response)
+        for k in ("stdout", "stderr"):
+            response[k] = _subtract_lines(response.get(k), lines)
+    return dataclasses.replace(call, tool_input=dict(ti, **{key: new_cmd}), response=response,
+                               error=_subtract_lines(call.error, lines))
+
+
+def _names_control_log(v: Any, depth: int = 0) -> bool:
+    """Whether any key or string of v looks like control-log traffic (step 6)."""
+    if depth > 50:
+        return True
+    if isinstance(v, str):
+        return bool(_CONTROL_LOG_TEXT_RE.search(v))
+    if isinstance(v, dict):
+        return any(_names_control_log(k, depth + 1) or _names_control_log(x, depth + 1) for k, x in v.items())
+    if isinstance(v, list):
+        return any(_names_control_log(x, depth + 1) for x in v)
     return False
 
 
@@ -673,13 +1112,21 @@ def capture_call(call: ToolCall, home: Path, *, env: Optional[dict] = None, rule
         return None
     if isinstance(call.source, dict) and call.source.get("kind") == SOURCE_CARDINAL:
         return None
+    salvaged = False
     if control_plane(call.tool_input):
-        return None
+        call = salvage_control_plane(call, home)
+        if call is None:
+            return None
+        salvaged = True
     home_s = str(home) if home else None
     if rules is None:
         rules = gate.load_rules(Path(home) if home else None, call.cwd)
     verdict = gate.check(call.tool_name, call.tool_input, cwd=call.cwd, home=home_s, rules=rules)
     entry = build_record(call, home=home_s, withheld=verdict)
+    if salvaged:
+        if _names_control_log([entry.get("args"), entry.get("result"), entry.get("summary")]):
+            return None
+        entry["control_log_omitted"] = True
     if not write:
         return Captured(entry, None, verdict is not None)
     evidence.write_entry(root, entry)
@@ -693,6 +1140,8 @@ def capture_call(call: ToolCall, home: Path, *, env: Optional[dict] = None, rule
     try:
         if context_enabled(env):
             line = context_line(entry, _first_in_session(root, entry.get("session_id")), promote_cmd)
+            if salvaged:
+                line += " " + CONTROL_OMITTED_NOTE
     except BaseException:
         line = f"[evidence:{entry['evidence_id']}]"
     return Captured(entry, line, verdict is not None)

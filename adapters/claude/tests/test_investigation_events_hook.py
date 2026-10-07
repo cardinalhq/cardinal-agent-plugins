@@ -621,10 +621,14 @@ class SessionStartBootstrap(Base):
                        "When they ask for the storyboard, its link or the investigation, give these URLs",
                        "`cardinal-storyboard investigation link`",
                        f"never storyboard__create another for this session",
+                       f"No storyboard step is needed: where this Cardinal supports it, it keeps this storyboard "
+                       f"({SB}) up to date from the investigation record (your checkpoints)",
+                       "Edit, publish or share it only when the user asks (the storyboard skill)",
                        "`cardinal-storyboard investigation question",
                        "authority: ADVISORY"):
             self.assertIn(needle, ctx)
         self.assertNotIn("Pass it as session_id to storyboard__create", ctx)
+        self.assertNotIn("improves this storyboard", ctx)
 
     def test_restart_and_resume_reuse_the_binding_with_no_request(self):
         self.start()
