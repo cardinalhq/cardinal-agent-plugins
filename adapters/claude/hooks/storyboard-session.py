@@ -50,8 +50,9 @@ Contract:
     session id sentence as before.
   - Semantic checkpoints (CHECKPOINT_LINE): only a session that authors its
     bootstrapped Investigation is told to checkpoint material changes in
-    its understanding (`cardinal-storyboard investigation checkpoint`):
-    sparse claims, not facts, never reasoning or routine tool use. A joined
+    its understanding (`cardinal-storyboard investigation checkpoint`) right
+    then, for a reader who sees only the record: sparse claims with their
+    why, not facts, never reasoning or routine tool use. A joined
     non-author session cannot checkpoint and is not told to; nothing else
     is said when unconnected or unbound.
   - Fail open: never blocks or delays session start, never prints an error.
@@ -164,16 +165,21 @@ ADVISORY_LINE = ("Advisory input from other principals may arrive at tool bounda
                  "with the command it gives.")
 
 # The worker's semantic WAL guidance (an author session with a live
-# Investigation only). Its text is the contract with the E2E's evaluation:
-# one checkpoint per material change in shared understanding, not per step.
+# Investigation only): the wording that did best in the takeover experiment
+# (a fresh agent continuing from the record made 1.6 mistakes vs 8.3 without
+# it). One checkpoint per material change in shared understanding, right
+# when it happens, not per step and not as a closing summary. "{sid}" is
+# replaced (not str.format: the JSON example has braces).
 CHECKPOINT_LINE = (
-    "Maintain this Investigation as you work. When your understanding materially changes (a hypothesis you start "
-    "relying on or resolve, an experiment you start or finish, a finding you propose/revise/retract, a decision you "
-    "propose/revise, a material question you open/resolve), checkpoint the shared investigation record: "
-    "`cardinal-storyboard investigation checkpoint --session {sid}` with a JSON array of events on stdin (batch "
-    "related changes in one call; `--help` lists the types and fields). Record conclusions and work products, not "
-    "private reasoning. Do not record routine tool use or unchanged knowledge. Entries are your claims, not "
-    "established facts; cite rcpt_/ev_ ids as evidence when you have them.")
+    "Maintain this Investigation as you work: someone may need to take it over mid-way. Each time your "
+    "understanding materially changes (you start relying on a hypothesis or resolve one, start or finish an "
+    "experiment, propose/revise/retract a finding or decision, open/resolve a material question), checkpoint the "
+    "investigation record right then, not as a summary at the end: `cardinal-storyboard investigation checkpoint "
+    "--session {sid}` with a JSON array on stdin, e.g. [{\"type\":\"hypothesis.resolved\",\"id\":\"hyp_x\","
+    "\"outcome\":\"contradicted\",\"statement\":\"<why, with the deciding numbers>\",\"evidence\":[\"ev_…\"]}] "
+    "(`--help`: all types). Write each entry for a reader who sees only the record: say why, not just what. Record "
+    "conclusions and work products, not private reasoning. Skip routine tool use and unchanged knowledge. Entries "
+    "are your claims, not established facts.")
 
 
 def live_line(sid: str, b: dict) -> str:
@@ -213,7 +219,7 @@ def live_line(sid: str, b: dict) -> str:
                      "`cardinal-storyboard investigation question \"<their question>\"` (your statement of it, not "
                      "owner authority); do not invent one.")
     parts.append(ADVISORY_LINE)
-    parts.append(CHECKPOINT_LINE.format(sid=sid))
+    parts.append(CHECKPOINT_LINE.replace("{sid}", sid))
     return " ".join(parts)
 
 

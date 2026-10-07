@@ -89,9 +89,12 @@ Commands:
       the session's claim, never a fact or owner authority, and never
       InvestigationState; conclusions only, never reasoning or routine
       tool use. Only the investigation's author session can. Cited ev_ ids
-      are promoted into the session's storyboard first (only those);
-      rcpt_ ids pass as they are. The default key is derived from the
-      content, so a retry is deduplicated. `--help` lists the types.
+      are uploaded first as receipts of the Investigation (only those;
+      upload-investigation-evidence, never through a storyboard, so a
+      published storyboard does not matter); rcpt_ ids pass as they are.
+      Ids get their family's prefix (fnd_x -> finding_x, a bare id -> its
+      family's). The default key is derived from the events as cited, so
+      a retry is deduplicated. `--help` lists the types.
 
   investigation post <investigation_id> --type cue|question|challenge --text TEXT
                      [--to-session SID] [--idempotency-key KEY]
@@ -1073,41 +1076,26 @@ Each {"type", "id", ...fields} is your claim (not a fact), never reasoning. requ
   decision.revised      decision_*  statement; based_on, evidence, refs
   question.opened       question_*  statement; refs
   question.resolved     question_*  answer; evidence, refs
-evidence: rcpt_ / ev_ ids (a cited ev_ is promoted to the session's storyboard first).
+evidence: rcpt_ / ev_ ids (a cited ev_ is uploaded as an Investigation receipt first).
 refs: earlier ids or "#<seq>". An id stays the same in its later events. Text <= 2000 chars."""
-
-
-def _evidence_adapter():
-    """cardinal-evidence's PromoteAdapter: a checkpoint's cited ev_ ids are
-    promoted exactly as `cardinal-evidence promote` would (same connection,
-    client and credentials)."""
-    import importlib.machinery
-    import importlib.util
-    path = str(PLUGIN_ROOT / "bin" / "cardinal-evidence")
-    loader = importlib.machinery.SourceFileLoader("cardinal_evidence_cli", path)
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod.adapter()
 
 
 def cmd_investigation_checkpoint(args: argparse.Namespace) -> int:
     import time
     t0 = time.monotonic()
-    timing = {"promote": 0.0}
+    timing = {"upload": 0.0}
     try:
         return _checkpoint(args, timing)
     finally:
         if os.environ.get(CHECKPOINT_TIMING_ENV) == "1":
-            ms = {k: round(v * 1000) for k, v in (("total", time.monotonic() - t0), ("promote", timing["promote"]),
+            ms = {k: round(v * 1000) for k, v in (("total", time.monotonic() - t0), ("upload", timing["upload"]),
                                                   ("request", timing.get("request", 0.0)))}
-            sys.stderr.write(f"checkpoint timing: total {ms['total']} ms, promote {ms['promote']} ms, request "
+            sys.stderr.write(f"checkpoint timing: total {ms['total']} ms, upload {ms['upload']} ms, request "
                              f"{ms['request']} ms, events {timing.get('events', 0)}\n")
 
 
 def _checkpoint(args: argparse.Namespace, timing: dict) -> int:
     import time
-    from cardinal_core import evidence_promote as promote
     from cardinal_core import investigation_events as ie
     from cardinal_core import investigation_state as ist
     from cardinal_core import investigation_state_sync as sync
@@ -1134,26 +1122,20 @@ def _checkpoint(args: argparse.Namespace, timing: dict) -> int:
     except ValueError as e:
         sys.stderr.write(f"not checkpointed: stdin is not JSON ({e})\n")
         return EXIT_USAGE
-    sb = b.get("storyboard_id")
-
-    def promote_cited(ids: list) -> dict:
-        t = time.monotonic()
-        try:
-            return promote.promote_cited(ids, sb, _evidence_adapter())
-        finally:
-            timing["promote"] = time.monotonic() - t
-
     conn, client = _connection()
     t = time.monotonic()
     try:
         out = ie.checkpoint(conn, b["investigation_id"], sid, data, idempotency_key=args.key, client=client,
-                            producer_client=plugin_client(), promote=promote_cited)
+                            producer_client=plugin_client(), timing=timing)
     except ie.CheckpointInputError as e:
         sys.stderr.write(f"not checkpointed: {e}\n")
         return EXIT_USAGE
-    except promote.PromoteError as e:
+    except ie.EvidenceRefused as e:
+        if e.code == "evidence_unsupported":
+            sys.stderr.write(f"{e}\n")
+            return EXIT_USAGE
         sys.stderr.write(f"not checkpointed (cited evidence): {e}\n")
-        return EXIT_USAGE if e.code in ("evidence_not_citable", "no_storyboard") else 1
+        return EXIT_USAGE if e.code == "evidence_not_citable" else 1
     except sync.ServerError as e:
         if ie.checkpoint_unsupported(e):
             sys.stderr.write(ie.CHECKPOINT_UNSUPPORTED + "\n")
@@ -1164,7 +1146,7 @@ def _checkpoint(args: argparse.Namespace, timing: dict) -> int:
         sys.stderr.write(f"not checkpointed: {e}\n")
         return 1
     finally:
-        timing["request"] = time.monotonic() - t - timing["promote"]
+        timing["request"] = time.monotonic() - t - timing["upload"]
     timing["events"] = len(out["events"])
     if args.json:
         sys.stdout.write(json.dumps(out, indent=2, ensure_ascii=False) + "\n")

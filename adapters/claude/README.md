@@ -148,10 +148,15 @@ git-state, usage
   agent's claim (authority `producer_claim`), never a fact, owner authority
   or InvestigationState, and never chain of thought; tool calls are not
   checkpointed. They are never delivered back as advisory events. A cited
-  `ev_` id is promoted into the session's storyboard first, as
-  `cardinal-evidence promote` would (only the cited ones; a withheld or
-  unknown one refuses the whole checkpoint, nothing sent); `rcpt_` ids pass
-  as they are. A joined non-author session is not asked to and cannot.
+  `ev_` id is uploaded first as a receipt of the Investigation
+  (`upload-investigation-evidence`, the item `cardinal-evidence promote`
+  sends; never through a storyboard, so a published storyboard does not
+  block it). Only the cited ones; a withheld or unknown one refuses the
+  whole checkpoint, nothing sent; `rcpt_` ids pass as they are. The
+  default key comes from the events as cited, so a retry is deduplicated
+  even after local records are lost. Ids get their family's prefix
+  (`fnd_x` -> `finding_x`; a bare id -> its family's). A joined non-author
+  session is not asked to and cannot.
   `CARDINAL_CONNECTION=env` makes the hooks and `cardinal-storyboard` use
   `CARDINAL_MCP_URL` / `CARDINAL_MCP_API_KEY` from the environment only (a
   development session against another Maestro); after `/cardinal:disconnect`

@@ -1,6 +1,7 @@
 """Semantic Investigation WAL in Claude Code: `cardinal-storyboard
 investigation checkpoint` (the worker's batched claims, author only, cited
-ev_ evidence promoted first and nothing else), the SessionStart guidance
+ev_ evidence uploaded first as investigation receipts and nothing else,
+never through a storyboard), the SessionStart guidance
 that asks for sparse checkpoints, and `investigation events` rendering
 semantic events inertly next to control events. Against a fake maestro
 with checkpoint-investigation and the storyboard evidence route.
@@ -30,26 +31,41 @@ EVENTS = [
     {"type": "decision.proposed", "id": "decision_cache", "statement": "Cache preparation by segment identity.",
      "based_on": ["finding_prep"]},
 ]
-CHECKPOINT_SENTENCE = "Maintain this Investigation as you work."
+CHECKPOINT_SENTENCE = "Maintain this Investigation as you work: someone may need to take it over mid-way."
 
 
 class CheckpointMaestro(FakeMaestro):
     """The hook tests' fake plus checkpoint-investigation (CONTRACT A3) and
-    POST /storyboards/<id>/evidence (what cardinal-evidence promote uses)."""
+    upload-investigation-evidence (FIXES S1/S2: the same item is the same
+    receipt every time). A storyboard's evidence route answers 409, as for
+    a published storyboard: a checkpoint must never need it."""
 
     def __init__(self):
         super().__init__()
         self.batches: dict = {}
         self.uploads: list = []
+        self.receipts: dict = {}
+        self.storyboard_uploads: list = []
         self.ckpt_status = None
         self.ckpt_mode = "ok"   # "old": no checkpoint route (the plugin key's allowlist refuses it)
+        self.upload_mode = "ok"  # "old": no upload-investigation-evidence route
 
     def answer(self, tool, body):
         if tool == "evidence":
+            self.storyboard_uploads.append(body)
+            return 409, {"error": "storyboard_published"}
+        if tool == "upload-investigation-evidence":
+            if self.upload_mode == "old":
+                return 403, {"error": "insufficient_scope"}
+            if not self.caller["author"]:
+                return 403, {"error": "checkpoint_requires_investigation_author"}
             self.uploads.append(body)
-            n = len(self.uploads)
-            return 200, {"storyboard_id": SB, "results": [{"index": i, "receipt_id": f"rcpt_{n:08x}{i:016x}"}
-                                                          for i in range(len(body["items"]))]}
+            results = []
+            for i, item in enumerate(body["items"]):
+                canon = json.dumps({k: v for k, v in item.items() if k != "client"}, sort_keys=True)
+                results.append({"index": i, "receipt_id": self.receipts.setdefault(
+                    canon, f"rcpt_{len(self.receipts) + 1:024x}")})
+            return 200, {"investigation_id": INV, "results": results}
         if tool != "checkpoint-investigation":
             return super().answer(tool, body)
         if self.ckpt_mode == "old":
@@ -194,11 +210,13 @@ class CheckpointCli(CheckpointBase):
 
     def test_server_refusals_name_the_code_index_and_id(self):
         self.start()
-        self.fake.ckpt_status = (409, {"error": "semantic_object_not_found", "index": 1, "semantic_id": "finding_prep"})
+        self.fake.ckpt_status = (409, {"error": "semantic_object_not_found", "index": 1, "type": "finding.revised",
+                                       "id": "finding_prep"})
         res = self.ckpt(EVENTS, "--session", SID)
         self.assertEqual((res.returncode, res.stdout), (1, ""))
         self.assertEqual(res.stderr, "not checkpointed: semantic_object_not_found at event 1 (finding_prep): nothing "
-                                     "earlier in this investigation proposes, starts or opens that id\n")
+                                     "earlier in this investigation proposes, starts or opens that id: "
+                                     "propose/start/open it first (the same batch is fine)\n")
 
     def test_an_older_server_says_so_and_nothing_else(self):
         self.start()
@@ -218,7 +236,7 @@ class CheckpointCli(CheckpointBase):
         self.start()
         res = self.ckpt(EVENTS[:1], "--session", SID, CARDINAL_CHECKPOINT_TIMING="1")
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertRegex(res.stderr, r"^checkpoint timing: total \d+ ms, promote \d+ ms, request \d+ ms, events 1\n$")
+        self.assertRegex(res.stderr, r"^checkpoint timing: total \d+ ms, upload \d+ ms, request \d+ ms, events 1\n$")
         res = self.ckpt(EVENTS[:1], "--session", SID)
         self.assertEqual(res.stderr, "")
 
@@ -241,30 +259,62 @@ class CheckpointCli(CheckpointBase):
 
 
 class CitedEvidence(CheckpointBase):
-    """A cited ev_ is the worker's explicit citation: promoted into the
-    session's storyboard (the cardinal-evidence path), and nothing else."""
+    """A cited ev_ is the worker's explicit citation: uploaded as a receipt
+    of the Investigation (upload-investigation-evidence), never through a
+    storyboard, and nothing else is."""
 
-    def test_only_cited_ev_ids_are_promoted_into_the_sessions_storyboard(self):
-        self.start()
+    def test_only_cited_ev_ids_are_uploaded_even_with_a_published_storyboard(self):
+        self.start()  # the fake's storyboard evidence route refuses: as if published
         cited = self.capture("make bench", "prep 15.6s of 25.5s", "toolu_1")
         uncited = self.capture("make other", "UNCITED OUTPUT", "toolu_2")
         self.assertTrue(cited and uncited)
-        events = [{"type": "finding.proposed", "id": "finding_prep", "statement": "Prep dominates.",
+        events = [{"type": "finding.proposed", "id": "fnd_prep", "statement": "Prep dominates.",
                    "evidence": [cited, RCPT]}]
         res = self.ckpt(events, "--session", SID)
         self.assertEqual((res.returncode, res.stderr), (0, ""))
+        self.assertEqual(res.stdout, "checkpointed #1 (finding.proposed finding_prep)\n", "the stored id")
         (upload,) = self.fake.uploads
-        self.assertEqual(len(upload["items"]), 1)
+        self.assertEqual((upload["investigation_id"], upload["session_id"], len(upload["items"])), (INV, SID, 1))
+        self.assertTrue(upload["items"][0]["client"].startswith("claude-code"))
         self.assertNotIn("UNCITED OUTPUT", json.dumps(upload))
         self.assertIn("prep 15.6s", json.dumps(upload))
-        self.assertEqual([p for p in self.fake.paths if p.endswith("/evidence")],
-                         [f"/api/orgs/o1/storyboards/{SB}/evidence"])
+        self.assertEqual(self.fake.storyboard_uploads, [])
+        self.assertFalse([p for p in self.fake.paths if "/storyboards/sb_" in p])
         (body,) = self.posts()
-        self.assertEqual(body["events"][0]["payload"]["evidence"], ["rcpt_00000001" + "0" * 16, RCPT])
-        # A retry promotes nothing again (the receipt is reused) and is deduplicated.
+        self.assertEqual(body["events"][0]["payload"]["evidence"], ["rcpt_" + f"{1:024x}", RCPT])
+
+    def test_a_retry_after_local_records_are_lost_is_deduplicated(self):
+        self.start()
+        cited = self.capture("make bench", "prep 15.6s of 25.5s", "toolu_1")
+        events = [{"type": "finding.proposed", "id": "finding_prep", "statement": "s", "evidence": [cited]}]
+        self.assertEqual(self.ckpt(events, "--session", SID).returncode, 0)
+        promoted = self.home / ".cardinal" / "evidence" / SID / "promoted.json"
+        if promoted.exists():
+            promoted.unlink()
         res = self.ckpt(events, "--session", SID)
-        self.assertEqual(res.stdout, "already checkpointed #1 (retry deduplicated)\n")
-        self.assertEqual(len(self.fake.uploads), 1)
+        self.assertEqual((res.returncode, res.stdout, res.stderr),
+                         (0, "already checkpointed #1 (retry deduplicated)\n", ""))
+        self.assertEqual(len(self.fake.receipts), 1, "one receipt for the one call")
+        self.assertEqual(len(self.fake.events), 1)
+        self.assertEqual(len({b["idempotency_key"] for b in self.posts()}), 1)
+
+    def test_a_binding_without_a_storyboard_still_cites_captured_evidence(self):
+        self.bind()  # no storyboard_id at all
+        cited = self.capture("make bench", "fine", "toolu_1")
+        res = self.ckpt([{"type": "hypothesis.proposed", "id": "s3", "statement": "s", "evidence": [cited]}],
+                        "--session", SID)
+        self.assertEqual((res.returncode, res.stdout), (0, "checkpointed #1 (hypothesis.proposed hyp_s3)\n"))
+
+    def test_an_older_server_without_the_evidence_route_says_so_and_posts_nothing(self):
+        self.start()
+        self.fake.upload_mode = "old"
+        cited = self.capture("make bench", "fine", "toolu_1")
+        res = self.ckpt([{"type": "finding.proposed", "id": "finding_a", "statement": "s", "evidence": [cited]}],
+                        "--session", SID)
+        self.assertEqual((res.returncode, res.stdout), (2, ""))
+        self.assertEqual(res.stderr, "this Cardinal server cannot store investigation evidence yet; cite rcpt_ "
+                                     "receipts (nothing was checkpointed)\n")
+        self.assertEqual(self.posts(), [])
 
     def test_a_withheld_or_unknown_citation_uploads_and_posts_nothing(self):
         self.start()
@@ -302,10 +352,15 @@ class Guidance(CheckpointBase):
         start = ctx.index(CHECKPOINT_SENTENCE)
         line = ctx[start:]
         self.assertLess(len(line), 900)
+        self.assertEqual(len(SID), 36)
         for needle in (f"`cardinal-storyboard investigation checkpoint --session {SID}`",
-                       "materially changes", "batch related changes in one call", "`--help` lists the types",
-                       "not private reasoning", "Do not record routine tool use or unchanged knowledge",
-                       "your claims, not established facts", "rcpt_/ev_"):
+                       "someone may need to take it over mid-way", "materially changes",
+                       "right then, not as a summary at the end",
+                       '[{"type":"hypothesis.resolved","id":"hyp_x","outcome":"contradicted",'
+                       '"statement":"<why, with the deciding numbers>","evidence":["ev_…"]}]',
+                       "Write each entry for a reader who sees only the record: say why, not just what",
+                       "`--help`", "not private reasoning", "routine tool use", "unchanged knowledge",
+                       "your claims, not established facts"):
             self.assertIn(needle, line)
         self.assertIn("authority: ADVISORY", ctx, "the control-event line is kept")
         self.assertLess(ctx.index("authority: ADVISORY"), start)
