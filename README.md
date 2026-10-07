@@ -48,6 +48,10 @@ id → storyboard id → URL), created at session start by
 storyboard link at any time. Advisory events posted to the investigation (cue,
 question, challenge) reach the session at its next tool boundary through a
 per-session background poller, so a tool call never waits on the network.
+When its understanding materially changes, the session checkpoints it to the
+same ordered stream (`cardinal-storyboard investigation checkpoint`: sparse,
+batched hypothesis / experiment / finding / decision / question events, each
+the agent's claim, never a fact or owner authority).
 Claude also ships two model-invocable skills for Cardinal's Investigation
 Storyboards: [`/cardinal:storyboard`](adapters/claude/skills/storyboard/README.md)
 improves, frames and publishes that live storyboard (evidence-bound, scene by
