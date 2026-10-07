@@ -330,6 +330,47 @@ class PromoteTests(_HomeCase):
         self.assertIn(f"2 promoted to {SB}", lines[2])
         self.assertNotIn(TOKEN, res.stdout + res.stderr)
 
+    def test_env_connection_never_reads_settings(self):
+        # CARDINAL_CONNECTION=env (a development session against another
+        # Maestro): promote uploads there, never to the one in settings.json.
+        other = StubEvidenceRoute()
+        self.addCleanup(other.close)
+        self.connect(other.port)  # settings.json points at "prod"
+        a = self.capture()
+        env = self._env(CARDINAL_CONNECTION="env", CARDINAL_MCP_API_KEY=API_KEY,
+                        CARDINAL_MCP_URL=f"http://127.0.0.1:{self.stub.port}/api/orgs/{ORG}/mcp")
+        res = self.run_cli("promote", "--storyboard", SB, a["evidence_id"], env=env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual((len(self.stub.requests), len(other.requests)), (1, 0))
+        self.assertEqual(self.stub.requests[0]["headers"]["x-cardinalhq-api-key"], API_KEY)
+        # env mode without a URL is not connected: nothing goes to settings.json's server either.
+        b = self.capture(tool="fresh")
+        res = self.run_cli("promote", "--storyboard", SB, b["evidence_id"],
+                           env=self._env(CARDINAL_CONNECTION="env", CARDINAL_MCP_API_KEY=API_KEY))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(len(other.requests), 0)
+        cli = _load_cli()
+        self.assertEqual(cli.connection(self.home, {"CARDINAL_CONNECTION": "env"}), {})
+        (self.home / ".claude" / "cardinal-disconnected").write_text("{}\n")
+        self.assertEqual(cli.connection(self.home, {"CARDINAL_CONNECTION": "env", "CARDINAL_MCP_API_KEY": API_KEY,
+                                                    "CARDINAL_MCP_URL": "http://127.0.0.1:9/api/orgs/o/mcp"}), {})
+
+    def test_the_control_log_is_refused_in_plain_words(self):
+        self.connect(self.stub.port)
+        self.store_token()
+        a = self.capture()
+        b = self.capture(tool="other")
+        self.stub.respond = lambda req, body: (200, {"storyboard_id": SB, "results": [
+            {"index": 0, "error": {"code": "control_log_not_evidence", "message": "x"}},
+            {"index": 1, "receipt_id": "rcpt_" + "1" * 24}]}, {})
+        res = self.run_cli("promote", "--storyboard", SB, a["evidence_id"], b["evidence_id"])
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("control log", res.stdout)
+        self.assertIn("is never evidence and never public", res.stdout)
+        self.stub.respond = lambda req, body: (422, {"error": "control_log_not_evidence", "message": "x"}, {})
+        res = self.run_cli("promote", "--storyboard", SB, b["evidence_id"], a["evidence_id"])
+        self.assertIn("is never evidence and never public", res.stdout + res.stderr)
+
     def test_storyboard_is_inferred_from_the_session_token(self):
         self.connect(self.stub.port)
         self.store_token()
