@@ -6,9 +6,7 @@ start (no command, no skill) and gives Claude the private storyboard URL. A stor
 a scene-by-scene explanation of the investigation, private to your org members while it
 is live, and shareable by link once you publish a reviewed version. Every number in it
 traces to a receipt from the tools Claude used, and each scene has its own interactive
-visual. A Cardinal with automatic projection keeps it up to date from the
-investigation's checkpoints, with no request. This skill is for what stays your call:
-publishing, sharing, and changing scenes by hand; see SKILL.md for the flow.
+visual. This skill is how Claude improves that storyboard; see SKILL.md for the flow.
 Drawing and previewing the visuals is the [canvas](../canvas/README.md) skill.
 
 ## Before you start
@@ -43,10 +41,11 @@ storyboard?"* or *"Give me the storyboard link"* at any time and Claude gives yo
 private live URL (`cardinal-storyboard investigation link` prints it too). Asked *"Do I
 invoke the storyboard skill before I ask my question?"*, the answer is no: work normally.
 
-You don't ask for the storyboard to be written: a Cardinal with automatic projection
-builds and updates its scenes from the investigation's checkpoints (an older one leaves
-it to you to ask for scenes). To change what it shows, say so (*"Show the rollback with
-the before/after latency."*): Claude edits the live storyboard and validates it with
+On a Cardinal that keeps the storyboard up to date from the investigation's checkpoints
+(Claude's session-start context says so), you never ask for it to be written. Otherwise,
+or to change what it shows, say so in plain words: *"Storyboard this for the team."* or
+*"Show how we found the checkout regression, with visuals."*
+Claude drafts the scenes in the session's live storyboard and validates them with
 `storyboard__preview`. The plugin renders each scene locally and hands Claude the
 pictures, which it critiques before it revises. Publishing (only when you ask) freezes a
 reviewed version you can share; nothing is published or shared automatically. Published

@@ -267,6 +267,11 @@ def _ensure(home, sid, conn, client, wanted, started_at, opener, timeout, force,
         }
         if out.get("question_status") in ("provisional", "stated"):
             fields["question_status"] = out["question_status"]
+        # Whether this Cardinal keeps the storyboard up to date from the
+        # checkpoints itself (automatic projection): only an explicit
+        # {"storyboard_projection": {"enabled": true}} says so. Always
+        # written, so a resumed binding never keeps a stale answer.
+        fields["storyboard_projection"] = projection_enabled(out)
         source = "env" if wanted else "auto"
         b, _ = ie.adopt(home, sid, out["investigation_id"], source, fields, now=now)
         with contextlib.suppress(OSError):
@@ -286,6 +291,14 @@ def _bind_join(home: Path, sid: str, inv: str, conn: dict, state: dict, now: flo
         return b
     except (OSError, ValueError):
         return ie.read_binding(home, sid)
+
+
+def projection_enabled(answer: Any) -> bool:
+    """ensure-session-investigation's `storyboard_projection.enabled`: True
+    only when the server says it projects; absent (an older Cardinal), not
+    an object, or anything but true is False."""
+    p = answer.get("storyboard_projection") if isinstance(answer, dict) else None
+    return isinstance(p, dict) and p.get("enabled") is True
 
 
 def started_now(now: Optional[float] = None) -> str:
@@ -308,4 +321,5 @@ def describe(binding: Optional[dict]) -> dict:
         "investigation_url": safe_url(b.get("investigation_url"), None),
         "bootstrap_status": st.get("status"),
         "is_author": b.get("is_author") is not False,
+        "storyboard_projection": b.get("storyboard_projection") is True,
     }

@@ -10,6 +10,7 @@ Requires cardinal_core vendored: python3 build/vendor.py claude
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -81,6 +82,7 @@ class FakeMaestro:
         self.storyboards: dict = {INV: SB}
         self.questions: dict = {}
         self.join_is_author = True
+        self.projection = None   # ensure's storyboard_projection (None: absent, as on an older Cardinal)
         self.lock = threading.Lock()
         fake = self
 
@@ -149,6 +151,8 @@ class FakeMaestro:
             inv = self.sessions[key]
         sb = self.storyboards[inv]
         extra = {"joined": True, "is_author": self.join_is_author} if body.get("investigation_id") else {}
+        if self.projection is not None:
+            extra["storyboard_projection"] = self.projection
         return (201 if created else 200), {**extra,
             "investigation_id": inv, "storyboard_id": sb, "created": created,
             "view_url": f"https://app.example.test/storyboards/{sb}?org=o1",
@@ -621,14 +625,45 @@ class SessionStartBootstrap(Base):
                        "When they ask for the storyboard, its link or the investigation, give these URLs",
                        "`cardinal-storyboard investigation link`",
                        f"never storyboard__create another for this session",
-                       f"No storyboard step is needed: where this Cardinal supports it, it keeps this storyboard "
-                       f"({SB}) up to date from the investigation record (your checkpoints)",
-                       "Edit, publish or share it only when the user asks (the storyboard skill)",
                        "`cardinal-storyboard investigation question",
                        "authority: ADVISORY"):
             self.assertIn(needle, ctx)
         self.assertNotIn("Pass it as session_id to storyboard__create", ctx)
-        self.assertNotIn("improves this storyboard", ctx)
+        # No storyboard_projection in the answer (an older Cardinal): 0.43.0's sentence, unchanged.
+        self.assertIn(f"The storyboard skill improves this storyboard ({SB}); never storyboard__create another for "
+                      "this session. Pass the session id as session_id to storyboard__find and storyboard__add_act.",
+                      ctx)
+        self.assertNotIn("no storyboard step is needed", ctx)
+        self.assertIs(b["storyboard_projection"], False)
+
+    def test_only_a_cardinal_that_says_it_projects_drops_the_storyboard_step(self):
+        old = (f"The storyboard skill improves this storyboard ({SB}); never storyboard__create another for this "
+               "session. Pass the session id as session_id to storyboard__find and storyboard__add_act.")
+        new = (f"Cardinal keeps this storyboard ({SB}) up to date from the investigation record (your checkpoints), "
+               "so no storyboard step is needed; never storyboard__create another for this session. Edit, publish "
+               "or share it only when the user asks (the storyboard skill). Pass the session id as session_id to "
+               "storyboard__find and storyboard__add_act.")
+        for answer, projected in (({"enabled": True}, True), ({"enabled": False}, False), ({"enabled": "yes"}, False),
+                                  (True, False), ({}, False)):
+            self.fake.projection = answer
+            with contextlib.suppress(FileNotFoundError):
+                self.binding_file().unlink()
+            ctx = self.start()
+            self.assertIs(self.binding()["storyboard_projection"], projected, answer)
+            self.assertIn(new if projected else old, ctx, answer)
+            self.assertNotIn(old if projected else new, ctx, answer)
+        # Resume reuses the binding with no request, and keeps its answer.
+        self.fake.projection = {"enabled": True}
+        self.binding_file().unlink()
+        self.start()
+        n = len(self.ensures())
+        self.assertIn(new, self.start(source="resume"))
+        self.assertEqual(len(self.ensures()), n)
+        # A later answer without the flag (a rolled-back Cardinal) goes back to 0.43.0's text.
+        self.fake.projection = None
+        self.binding_file().unlink()
+        self.assertIn(old, self.start())
+        self.assertIs(self.binding()["storyboard_projection"], False)
 
     def test_restart_and_resume_reuse_the_binding_with_no_request(self):
         self.start()
