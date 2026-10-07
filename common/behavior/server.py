@@ -66,14 +66,28 @@ def compact(raw: dict) -> dict:
 class Behavior:
     def __init__(self, config: dict):
         self.config = config
+        self.version = config.get('diagnostic_version', VERSION)
+        self.population = config.get('population', POPULATION)
+        self.description = config.get('description', DESCRIPTION)
+        if not isinstance(self.version, str) or not re.fullmatch('[a-f0-9]{64}', self.version):
+            raise ValueError('diagnostic_version must be a SHA-256 content address')
+        if self.version != VERSION and any(not config.get(k) for k in ('population', 'description', 'artifacts')):
+            raise ValueError('a custom DiagnosticVersion requires population, description, and artifacts')
+        if not isinstance(self.population, str) or not self.population.strip():
+            raise ValueError('population must be a nonempty service name')
+        if not isinstance(self.description, str) or not self.description.strip():
+            raise ValueError('description must be nonempty')
         self.output = Path(config['output_dir']).expanduser().resolve()
         self.output.mkdir(parents=True, exist_ok=True, mode=0o700)
-        artifacts = Path(config.get('artifacts', ROOT / 'artifacts'))
-        self.definition = json.loads((artifacts / 'versions' / f'{VERSION}.json').read_text())
+        artifacts = Path(config.get('artifacts', ROOT / 'artifacts')).expanduser()
+        self.definition = json.loads((artifacts / 'versions' / f'{self.version}.json').read_text())
         payload = {k: v for k, v in self.definition.items() if k != 'version'}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
-        if self.definition['version'] != VERSION or digest != VERSION:
+        if self.definition['version'] != self.version or digest != self.version:
             raise ValueError('accepted DiagnosticVersion integrity check failed')
+        self.adapter_sha256 = config.get('adapter_sha256', self.definition['profile_sha256'])
+        if not isinstance(self.adapter_sha256, str) or not re.fullmatch('[a-f0-9]{64}', self.adapter_sha256):
+            raise ValueError('adapter_sha256 must be a SHA-256 content address')
         self.preview = json.loads((artifacts / 'previews' / f'{self.definition["preview_version"]}.json').read_text())
         preview_payload = {k: v for k, v in self.preview.items() if k != 'version'}
         preview_digest = hashlib.sha256(json.dumps(preview_payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
@@ -114,32 +128,35 @@ class Behavior:
 
     def read(self, execution_id):
         state = json.loads(self.state_path(execution_id).read_text())
-        if state['execution_id'] != execution_id or state['diagnostic_version'] != VERSION:
+        if state['execution_id'] != execution_id or state['diagnostic_version'] != self.version:
             raise ValueError('receipt identity mismatch')
         return state
 
     def select(self):
-        return {'diagnostic_version': VERSION, 'accepted_behavior': VERSION,
-                'description': DESCRIPTION, 'population': POPULATION,
+        selection = {'diagnostic_version': self.version, 'accepted_behavior': self.version,
+                'description': self.description, 'population': self.population,
                 'contract': [c['interpretation'] for c in self.preview['clauses']],
                 'window': {'start': self.config['start'], 'end': self.config['end']},
-                'selection': 'Existing accepted DiagnosticVersion; no new compilation.'}
+                'selection': 'Existing accepted DiagnosticVersion; no compilation performed by this tool.'}
+        if self.config.get('compile_receipt_ref'):
+            selection['compile_receipt_ref'] = str(self.config['compile_receipt_ref'])
+        return selection
 
     def start(self, accepted_behavior, population):
-        if accepted_behavior != VERSION or population != POPULATION:
+        if accepted_behavior != self.version or population != self.population:
             raise ValueError('unsupported accepted behavior or population')
-        payload = {'diagnostic_version': VERSION, 'org': self.config['org'],
-                   'service_name': POPULATION, 'start': self.config['start'], 'end': self.config['end']}
+        payload = {'diagnostic_version': self.version, 'org': self.config['org'],
+                   'service_name': self.population, 'start': self.config['start'], 'end': self.config['end']}
         response = self.request('POST', '/api/v1/behavior-executions', payload)
         execution_id = response['execution_id']
-        state = {'execution_id': execution_id, 'diagnostic_version': VERSION,
+        state = {'execution_id': execution_id, 'diagnostic_version': self.version,
                  'population_specification': payload, 'status': response['status'],
                  'cursor': 0, 'results': [], 'counts': {}, 'receipt': None,
                  'submission': {'method': 'POST', 'url': self.config['base_url'].rstrip('/') + '/api/v1/behavior-executions',
                                 'submitted_at': time.time(), 'response': response}}
         private_json(self.state_path(execution_id), state)
         return {'execution_id': execution_id, 'execution_status': state['status'],
-                'diagnostic_version': VERSION, 'population': POPULATION,
+                'diagnostic_version': self.version, 'population': self.population,
                 'submission': {'method': 'POST', 'endpoint': state['submission']['url'], 'accepted': True}}
 
     def poll(self, execution_id, wait_seconds=20):
@@ -159,9 +176,9 @@ class Behavior:
                 if item['verdict'] not in VERDICTS:
                     raise ValueError('API returned an invalid verdict')
                 identity = item.get('execution_identity', {})
-                expected = {'diagnostic_version': VERSION, 'profile_sha256': self.definition['profile_sha256'],
+                expected = {'diagnostic_version': self.version, 'profile_sha256': self.definition['profile_sha256'],
                             'udf_sha256': self.definition['source_sha256'],
-                            'adapter_sha256': self.definition['profile_sha256']}
+                            'adapter_sha256': self.adapter_sha256}
                 if any(identity.get(k) != v for k, v in expected.items()):
                     raise ValueError('result does not belong to the accepted DiagnosticVersion')
                 seen.add(item['trace_id'])
@@ -196,23 +213,23 @@ class Behavior:
         return response
 
     def render(self, receipt, accepted_behavior):
-        if accepted_behavior != VERSION:
+        if accepted_behavior != self.version:
             raise ValueError('accepted behavior does not match this execution')
         state = self.read(receipt)
         output = self.state_path(receipt).parent / f'storyboard-{receipt}.html'
         return render_storyboard(state, self.definition, self.preview, output)
 
 
-def tools_list():
+def tools_list(behavior: Behavior):
     def tool(name, description, properties, required):
         return {'name': name, 'description': description,
                 'inputSchema': {'type': 'object', 'properties': properties, 'required': required, 'additionalProperties': False}}
-    version = {'type': 'string', 'enum': [VERSION]}
+    version = {'type': 'string', 'enum': [behavior.version]}
     execution = {'type': 'string', 'description': 'Reference returned by execute_behavior'}
     return {'tools': [
-        tool('select_behavior', 'Inspect the existing accepted behavior for investigator agents claiming enough evidence before submitting their report. Read its contract and select it only if it matches the user request. ' + DESCRIPTION, {}, []),
+        tool('select_behavior', 'Inspect the configured accepted behavior. Read its contract and select it only if it matches the user request. ' + behavior.description, {}, []),
         tool('execute_behavior', 'Submit the selected accepted behavior to the deployed Cardinal API. First inspect select_behavior. The production investigation runs independently of polling.',
-             {'accepted_behavior': version, 'population': {'type': 'string', 'enum': [POPULATION]}}, ['accepted_behavior', 'population']),
+             {'accepted_behavior': version, 'population': {'type': 'string', 'enum': [behavior.population]}}, ['accepted_behavior', 'population']),
         tool('next_behavior_result', 'Observe newly committed compact findings while Cardinal investigates. Repeat until receipt appears. Empty results mean the execution is still running; do not fabricate findings. The total population is unknown until COMPLETED: evaluated_so_far is progress, never a total denominator.',
              {'execution_id': execution, 'wait_seconds': {'type': 'number', 'minimum': 0, 'maximum': 30, 'default': 20}}, ['execution_id']),
         tool('render_storyboard', 'Render the existing evidence Storyboard from a completed execution receipt. Evidence remains expandable in the HTML; raw receipts never enter this chat.',
@@ -236,7 +253,7 @@ def main():
                 value = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}},
                          'serverInfo': {'name': 'cardinal-behavior', 'version': '0.1.0'}}
             elif method == 'tools/list':
-                value = tools_list()
+                value = tools_list(behavior)
             elif method == 'ping':
                 value = {}
             elif method == 'tools/call':

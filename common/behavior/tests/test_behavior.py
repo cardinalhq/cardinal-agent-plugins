@@ -1,11 +1,12 @@
 import copy
 import json
+import hashlib
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from server import Behavior, VERSION, compact, private_json
+from server import Behavior, VERSION, compact, private_json, tools_list
 
 ID = 'a' * 32
 
@@ -99,6 +100,98 @@ class BehaviorTests(unittest.TestCase):
         self.responses.append(self.page([self.result(), self.result()]))
         with self.assertRaisesRegex(ValueError, 'duplicate'):
             self.behavior.poll(ID, 0)
+
+    def configured_behavior(self):
+        artifacts = Path(self.temp.name) / 'custom-artifacts'
+        def freeze(kind, payload):
+            digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+            value = dict(payload, version=digest)
+            private_json(artifacts / kind / f'{digest}.json', value)
+            return value
+        preview = freeze('previews', {'clauses': [{'kind': 'trigger', 'interpretation': 'Detect the configured Megan behavior.'}]})
+        definition = freeze('versions', {
+            'diagnostic_id': 'megan-custom-behavior', 'preview_version': preview['version'],
+            'source_sha256': '1' * 64, 'profile_sha256': '2' * 64,
+            'population': {'agent': 'megan'}, 'evaluation_policy': {}, 'finality_policy': {}})
+        config = dict(self.behavior.config, diagnostic_version=definition['version'],
+                      population='megan', description='The newly compiled Megan behavior.',
+                      artifacts=str(artifacts), adapter_sha256='3' * 64,
+                      compile_receipt_ref='compiler-receipt-42')
+        return Behavior(config), config
+
+    def test_configured_version_selection_schema_submit_projection_and_render(self):
+        behavior, config = self.configured_behavior()
+        calls = []
+        responses = [{'execution_id': ID, 'status': 'PENDING'}]
+        def request(method, path, payload=None):
+            calls.append((method, path, payload))
+            return responses.pop(0)
+        behavior.request = request
+        selected = behavior.select()
+        self.assertEqual(selected['diagnostic_version'], config['diagnostic_version'])
+        self.assertEqual(selected['population'], 'megan')
+        self.assertEqual(selected['compile_receipt_ref'], 'compiler-receipt-42')
+        self.assertIn('no compilation performed', selected['selection'])
+        schemas = {tool['name']: tool for tool in tools_list(behavior)['tools']}
+        execute = schemas['execute_behavior']['inputSchema']['properties']
+        self.assertEqual(execute['accepted_behavior']['enum'], [behavior.version])
+        self.assertEqual(execute['population']['enum'], ['megan'])
+        self.assertIn(config['description'], schemas['select_behavior']['description'])
+        started = behavior.start(behavior.version, 'megan')
+        self.assertEqual(started['diagnostic_version'], behavior.version)
+        self.assertEqual(calls[0][2]['diagnostic_version'], behavior.version)
+        self.assertEqual(calls[0][2]['service_name'], 'megan')
+        raw = self.result()
+        raw['execution_identity'] = {'diagnostic_version': behavior.version,
+                                     'udf_sha256': '1' * 64, 'profile_sha256': '2' * 64,
+                                     'adapter_sha256': '3' * 64}
+        responses.append(self.page([raw], 'COMPLETED', population=1))
+        result = behavior.poll(ID, 0)
+        self.assertNotIn('RAW_SECRET_MARKER', json.dumps(result))
+        self.assertEqual(set(result['results'][0]), {'trace_id', 'verdict', 'reason', 'witness_refs', 'coverage_gaps'})
+        rendered = behavior.render(result['receipt'], behavior.version)
+        self.assertIn('megan-custom-behavior', Path(rendered['storyboard']).read_text())
+
+    def test_configured_identity_rejects_changed_adapter_profile_or_source(self):
+        behavior, _ = self.configured_behavior()
+        for field in ('diagnostic_version', 'profile_sha256', 'udf_sha256', 'adapter_sha256'):
+            with self.subTest(field=field):
+                responses = [{'execution_id': ID, 'status': 'PENDING'}]
+                behavior.request = lambda *args, **kwargs: responses.pop(0)
+                behavior.start(behavior.version, 'megan')
+                raw = self.result()
+                raw['execution_identity'] = {'diagnostic_version': behavior.version,
+                                             'udf_sha256': '1' * 64, 'profile_sha256': '2' * 64,
+                                             'adapter_sha256': '3' * 64}
+                raw['execution_identity'][field] = 'f' * 64
+                responses.append(self.page([raw]))
+                with self.assertRaisesRegex(ValueError, 'DiagnosticVersion'):
+                    behavior.poll(ID, 0)
+
+    def test_configured_artifacts_are_content_verified(self):
+        behavior, config = self.configured_behavior()
+        path = Path(config['artifacts']) / 'versions' / f'{behavior.version}.json'
+        original = path.read_text()
+        changed = json.loads(original)
+        changed['profile_sha256'] = 'f' * 64
+        path.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(ValueError, 'DiagnosticVersion integrity'):
+            Behavior(config)
+        path.write_text(original)
+        preview_path = Path(config['artifacts']) / 'previews' / f'{behavior.definition["preview_version"]}.json'
+        preview = json.loads(preview_path.read_text())
+        preview['clauses'][0]['interpretation'] = 'A different contract'
+        preview_path.write_text(json.dumps(preview))
+        with self.assertRaisesRegex(ValueError, 'preview integrity'):
+            Behavior(config)
+
+    def test_custom_version_requires_explicit_product_context(self):
+        for field in ('population', 'description', 'artifacts'):
+            with self.subTest(field=field):
+                _, config = self.configured_behavior()
+                config.pop(field)
+                with self.assertRaisesRegex(ValueError, 'requires population'):
+                    Behavior(config)
 
     def test_reason_does_not_use_unrelated_yes_receipt(self):
         result = self.result()
