@@ -60,10 +60,11 @@ of 1-20 events, author only). Each is a producer claim, never a fact and
 never owner authority, and never InvestigationState. They are never
 delivered at a tool boundary (deliverable() passes only cue / question /
 challenge); the cursor advances past them like past an acknowledgment. An
-`ev_` id a checkpoint cites as evidence is promoted first into the
-session's storyboard (cardinal_core.evidence_promote.promote_cited, the
-path `cardinal-evidence promote` takes): the worker named it, so it is the
-same "upload only what is cited" rule; nothing else leaves the machine.
+`ev_` id a checkpoint cites as evidence is uploaded first as a receipt of
+the Investigation (upload_cited, maestro upload-investigation-evidence),
+never through a storyboard, so a published storyboard cannot block it: the
+worker named it, so it is the same "upload only what is cited" rule the
+storyboard path follows; nothing else leaves the machine.
 
 Standard library only. Fails open: check() never raises; any error means no
 output and an unchanged cursor.
@@ -529,6 +530,17 @@ CAPTURED_REF_RE = re.compile(r"ev_[0-9a-f]{12}")                                
 CHECKPOINT_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,100}")                                   # fullmatch
 CHECKPOINT_TIMEOUT = 20.0
 
+# upload-investigation-evidence: the cited ev_ entries as receipts of the
+# investigation ({investigation_id, session_id, items: [the storyboard
+# evidence route's item shape]} -> {results: [{index, receipt_id} | {index,
+# error: {code, message}}]}). The server answers the same receipt for the
+# same item every time, so a retried checkpoint cites the same receipts.
+# Batches stay under the storyboard-tools router's 2 MB body parser.
+EVIDENCE_BATCH_ITEMS = 50
+EVIDENCE_BATCH_BYTES = 1_500_000
+EVIDENCE_UNSUPPORTED = ("this Cardinal server cannot store investigation evidence yet; cite rcpt_ receipts "
+                        "(nothing was checkpointed)")
+
 CHECKPOINT_UNSUPPORTED = ("this Cardinal server does not support investigation checkpoints yet (it needs a newer "
                           "Maestro); nothing was recorded")
 
@@ -540,7 +552,8 @@ _CHECKPOINT_PLAIN = {
     "checkpoint_requires_investigation_author": ("only the investigation's author session records checkpoints; "
                                                  "others post cues, questions or challenges"),
     "semantic_object_exists": "that id was already proposed, started or opened in this investigation",
-    "semantic_object_not_found": "nothing earlier in this investigation proposes, starts or opens that id",
+    "semantic_object_not_found": ("nothing earlier in this investigation proposes, starts or opens that id: "
+                                  "propose/start/open it first (the same batch is fine)"),
     "invalid_semantic_transition": ("that lifecycle step is not allowed (resolved or completed twice, revised "
                                     "after a retraction, ...)"),
     "semantic_ref_not_found": "a ref, based_on or tests item names nothing earlier in this investigation",
@@ -560,6 +573,46 @@ class CheckpointInputError(ValueError):
     """A checkpoint request that is malformed before anything is sent."""
 
 
+class EvidenceRefused(Exception):
+    """The cited ev_ evidence could not become receipts; nothing was
+    checkpointed. code: evidence_not_citable (withheld, not on this machine:
+    nothing was sent), evidence_unsupported (an older server) or
+    evidence_refused (the server refused an item)."""
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+
+# The prefixes workers write for a family, mapped to its own, longest first
+# (P4: "fnd_prep" was the commonest refused id). Deterministic: the same
+# input always names the same object.
+_ID_ALIASES = (("hypothesis_", "hyp_"), ("experiment_", "exp_"), ("fnd_", "finding_"), ("dec_", "decision_"),
+               ("qn_", "question_"), ("f_", "finding_"), ("d_", "decision_"), ("q_", "question_"), ("h_", "hyp_"),
+               ("e_", "exp_"))
+
+
+def normalize_id(x: Any, family_prefix: Optional[str] = None) -> Any:
+    """A semantic id with its family's own prefix: an alias prefix (fnd_,
+    f_ -> finding_; dec_, d_ -> decision_; q_, qn_ -> question_; h_,
+    hypothesis_ -> hyp_; e_, experiment_ -> exp_) is replaced; an id with
+    no known prefix gets `family_prefix` (an event's own id, a tests item)
+    or, without one (refs, based_on), stays as it is. An id of another
+    family than `family_prefix`, a #seq and a non-string are returned
+    unchanged for the checks to judge."""
+    if not isinstance(x, str):
+        return x
+    for p in _ID_PREFIX.values():
+        if x.startswith(p):
+            return x
+    for alias, canon in _ID_ALIASES:
+        if x.startswith(alias):
+            return canon + x[len(alias):] if family_prefix in (None, canon) else x
+    if family_prefix is None or x.startswith("#"):
+        return x
+    return family_prefix + x
+
+
 def _id_shape(prefixes: tuple) -> str:
     return " or ".join(f"{p}<1-64 of A-Z a-z 0-9 _ ->" for p in prefixes)
 
@@ -569,6 +622,8 @@ def _list_item(name: str, x: Any, where: str) -> str:
         x = f"#{x}"
     if not isinstance(x, str):
         raise CheckpointInputError(f"{where}: {name} items are strings")
+    if name != "evidence":
+        x = normalize_id(x, "hyp_" if name == "tests" else None)
     if name == "evidence":
         if RECEIPT_REF_RE.fullmatch(x) or CAPTURED_REF_RE.fullmatch(x):
             return x
@@ -607,6 +662,7 @@ def _semantic_event(e: Any, i: int) -> dict:
         raise CheckpointInputError(f"{where}: \"id\" and \"semantic_id\" differ; give one")
     sid = alias if sid is None else sid
     prefix = _ID_PREFIX[t.split(".", 1)[0]]
+    sid = normalize_id(sid, prefix)
     if not isinstance(sid, str) or not sid.startswith(prefix) or not SEMANTIC_ID_RE.fullmatch(sid):
         raise CheckpointInputError(f"{where}: \"id\" is {_id_shape((prefix,))}, the same id in its later events")
     required, texts, lists = SEMANTIC_FIELDS[t]
@@ -655,9 +711,11 @@ def checkpoint_events(raw: Any) -> list:
     ({"type": "finding.proposed", "id": "finding_prep", "statement": "...",
     "evidence": ["rcpt_...", "ev_..."], "refs": ["hyp_s3", "#41"]}; "id" or
     "semantic_id") or nested ({"type", "payload": {"semantic_id", ...}}).
-    Field names per type: SEMANTIC_FIELDS. A ref may be an int seq (41 ->
-    "#41"); duplicate list items and empty lists are dropped. Raises
-    CheckpointInputError naming the event index."""
+    Field names per type: SEMANTIC_FIELDS. Ids are normalized first
+    (normalize_id: "fnd_prep" -> "finding_prep", a bare id gets its
+    family's prefix). A ref may be an int seq (41 -> "#41"); duplicate list
+    items and empty lists are dropped. Raises CheckpointInputError naming
+    the event index."""
     if isinstance(raw, dict) and set(raw) == {"events"}:
         raw = raw["events"]
     elif isinstance(raw, dict) and "type" in raw:
@@ -695,11 +753,88 @@ def with_receipts(events: list, receipts: dict) -> list:
     return out
 
 
+def upload_cited(conn: dict, investigation_id: str, session_id: str, ids: list, *, client: str, item_client: str,
+                 home: Optional[Path] = None, opener=None, timeout: float = CHECKPOINT_TIMEOUT) -> dict:
+    """{ev_id: rcpt_id}: the captured entries a checkpoint cites, uploaded as
+    receipts of the investigation (upload-investigation-evidence), in the
+    item shape `cardinal-evidence promote` sends (evidence_promote.wire_item).
+
+    Only the named entries are read. Every one is checked on this machine
+    first (in the spool, not a withheld stub, fits one upload); if any is
+    not, EvidenceRefused(evidence_not_citable) names each and NOTHING is
+    sent. An older server: EvidenceRefused(evidence_unsupported). A refused
+    item: EvidenceRefused(evidence_refused). Any other refusal of the whole
+    upload raises sync.ServerError. No storyboard is involved."""
+    from . import evidence
+    from . import evidence_promote as promote
+    root = evidence.default_root(home or home_dir())
+    rows, bad = [], []
+    for ev_id in ids:
+        entry = evidence.read_entry(root, ev_id) if CAPTURED_REF_RE.fullmatch(str(ev_id)) else None
+        if entry is None or entry.get("evidence_id") != ev_id:
+            bad.append(f"{_tok(ev_id)}: not in this machine's evidence spool (captured elsewhere, removed after 14 "
+                       "days, or capture was off)")
+        elif promote.is_withheld(entry):
+            bad.append(f"{ev_id}: {promote.withheld_reason(entry)}; nothing of that call was kept, so it cannot be "
+                       "cited")
+        else:
+            try:
+                item = promote.wire_item(entry, item_client)
+                size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            except (ValueError, TypeError) as e:
+                bad.append(f"{ev_id}: {_one_line(e)}")
+                continue
+            if size + 512 > EVIDENCE_BATCH_BYTES:
+                bad.append(f"{ev_id}: larger than one upload")
+                continue
+            rows.append((ev_id, item, size))
+    if bad:
+        raise EvidenceRefused("; ".join(bad), "evidence_not_citable")
+    batches, cur, size = [], [], 0
+    for row in rows:
+        if cur and (len(cur) >= EVIDENCE_BATCH_ITEMS or size + row[2] + 512 > EVIDENCE_BATCH_BYTES):
+            batches.append(cur)
+            cur, size = [], 0
+        cur.append(row)
+        size += row[2] + 1
+    if cur:
+        batches.append(cur)
+    out: dict = {}
+    for batch in batches:
+        body = {"investigation_id": investigation_id, "session_id": session_id, "items": [r[1] for r in batch]}
+        try:
+            answer = sync._post(conn, "upload-investigation-evidence", body, client=client, opener=opener,
+                                timeout=timeout)
+        except sync.ServerError as e:
+            if checkpoint_unsupported(e):
+                raise EvidenceRefused(EVIDENCE_UNSUPPORTED, "evidence_unsupported")
+            raise
+        results = answer.get("results")
+        if answer.get("investigation_id") not in (None, investigation_id) or not isinstance(results, list):
+            raise ist.FetchError("upload-investigation-evidence answered for another investigation or without "
+                                 "per-item results; nothing was checkpointed")
+        by_index = {r["index"]: r for r in results if isinstance(r, dict) and isinstance(r.get("index"), int)}
+        failed = []
+        for i, (ev_id, _, _) in enumerate(batch):
+            r = by_index.get(i) or {}
+            rid = r.get("receipt_id")
+            if isinstance(rid, str) and RECEIPT_REF_RE.fullmatch(rid):
+                out[ev_id] = rid
+                continue
+            err = r.get("error") if isinstance(r.get("error"), dict) else {}
+            failed.append(f"{ev_id}: {_tok(err.get('code') or 'no_result')}"
+                          + (f": {_one_line(err['message'])}" if isinstance(err.get("message"), str) else ""))
+        if failed:
+            raise EvidenceRefused("; ".join(failed), "evidence_refused")
+    return out
+
+
 def checkpoint_key(investigation_id: str, session_id: str, events: list) -> str:
     """The default idempotency key: "c" + 40 hex of the sha256 of the
-    canonical JSON of (investigation, session, events): the same checkpoint
-    retried (whatever its key order) is deduplicated by the server; any
-    change is a new checkpoint."""
+    canonical JSON of (investigation, session, events AS CITED: normalized,
+    with their ev_ ids, before any upload): the same checkpoint retried
+    (whatever its key order, whatever happened to local upload records) is
+    deduplicated by the server; any change is a new checkpoint."""
     canon = json.dumps({"investigation_id": investigation_id, "session_id": session_id, "events": events},
                        sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "c" + hashlib.sha256(canon.encode("utf-8")).hexdigest()[:40]
@@ -707,15 +842,15 @@ def checkpoint_key(investigation_id: str, session_id: str, events: list) -> str:
 
 def checkpoint(conn: dict, investigation_id: str, session_id: str, events: Any, *,
                idempotency_key: Optional[str] = None, client: str, producer_client: Optional[str] = None,
-               promote: Optional[Callable[[list], dict]] = None, opener=None,
-               timeout: float = CHECKPOINT_TIMEOUT) -> dict:
+               home: Optional[Path] = None, opener=None, timeout: float = CHECKPOINT_TIMEOUT,
+               timing: Optional[dict] = None) -> dict:
     """checkpoint-investigation: append `events` (see checkpoint_events) to
     the investigation as ONE batch (consecutive seqs, or nothing).
 
-    Cited ev_ ids are resolved first by promote(ids) -> {ev_id: rcpt_id}
-    (the caller's explicit-citation upload; it raises to refuse, and then
-    nothing is posted); without `promote`, citing one is refused. The
-    default key is checkpoint_key() of what is sent. Returns the server's
+    The default key is checkpoint_key() of the events as cited. Cited ev_
+    ids are then uploaded (upload_cited; it raises EvidenceRefused, and
+    then nothing is posted) and replaced by their receipts. timing, when
+    given, gets "upload" (seconds). Returns the server's
     answer {investigation_id, events, first_seq, last_seq, duplicate?} with
     the idempotency_key used. Raises CheckpointInputError (malformed),
     sync.ServerError (refused; checkpoint_unsupported / checkpoint_refusal
@@ -729,18 +864,17 @@ def checkpoint(conn: dict, investigation_id: str, session_id: str, events: Any, 
                                             and CHECKPOINT_KEY_RE.fullmatch(idempotency_key)):
         raise CheckpointInputError("the checkpoint key is 1-100 characters of A-Z a-z 0-9 . _ : -")
     events = checkpoint_events(events)
+    key = idempotency_key or checkpoint_key(investigation_id, session_id, events)
     cited = cited_captures(events)
     if cited:
-        if promote is None:
-            raise CheckpointInputError(f"cannot promote captured evidence here ({', '.join(cited)}): cite rcpt_ "
-                                       "receipts")
-        receipts = promote(cited)
-        missing = [x for x in cited if not (isinstance(receipts, dict) and isinstance(receipts.get(x), str)
-                                            and RECEIPT_REF_RE.fullmatch(receipts[x]))]
-        if missing:
-            raise ist.FetchError(f"no receipt for {', '.join(missing)}; nothing was checkpointed")
+        started = time.monotonic()
+        try:
+            receipts = upload_cited(conn, investigation_id, session_id, cited, client=client,
+                                    item_client=producer_client or client, home=home, opener=opener, timeout=timeout)
+        finally:
+            if timing is not None:
+                timing["upload"] = time.monotonic() - started
         events = with_receipts(events, receipts)
-    key = idempotency_key or checkpoint_key(investigation_id, session_id, events)
     body: dict = {"investigation_id": investigation_id, "idempotency_key": key, "session_id": session_id,
                   "events": events}
     if producer_client:

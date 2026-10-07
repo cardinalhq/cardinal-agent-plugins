@@ -1,27 +1,24 @@
 """Semantic Investigation WAL, client side: the worker's batched checkpoint
 (cardinal_core.investigation_events.checkpoint, maestro
 checkpoint-investigation), how its flat input maps to the server's events,
-its derived idempotency key, the promotion of cited ev_ evidence
-(evidence_promote.promote_cited), refusals in words, and the compatibility
+its id-prefix normalization, its idempotency key (derived from the batch
+as cited), the upload of cited ev_ evidence as receipts of the
+investigation (upload_cited, maestro upload-investigation-evidence; never a
+storyboard), refusals in words, and the compatibility
 of delivery with semantic events in the same stream (a released client
 never delivers them, and its cursor moves past them)."""
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
 import sys
 import unittest
-import urllib.error
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest import mock
 
-from cardinal_core import evidence
 from cardinal_core import evidence_capture as cap
-from cardinal_core import evidence_promote as promote
 from cardinal_core import investigation_events as ie
 from cardinal_core import investigation_state as ist
 from cardinal_core import investigation_state_sync as sync
@@ -29,11 +26,9 @@ from cardinal_core import investigation_state_sync as sync
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_investigation_events import FORGED, INV, OTHER_INV, SID, FakeMaestro, event
 
-SB = "sb_" + "2" * 24
 RCPT = "rcpt_" + "a" * 24
 RCPT2 = "rcpt_" + "b" * 24
 EV = "ev_" + "c" * 12
-EV2 = "ev_" + "d" * 12
 
 
 def semantic(seq, type_, payload, *, author=True, session=SID):
@@ -52,8 +47,30 @@ class CheckpointMaestro(FakeMaestro):
         super().__init__()
         self.batches: dict = {}
         self.ckpt_status = None   # (status, body) to answer every checkpoint with
+        self.receipts: dict = {}  # canonical item (without client) -> receipt id (CONTRACT S2)
+        self.upload_status = None  # (status, body) to answer every evidence upload with
+        self.refuse_items = set()  # tools whose items the upload refuses
+
+    def upload(self, body):
+        """upload-investigation-evidence: the same item (whatever its
+        client) is the same receipt every time."""
+        if self.upload_status:
+            return self.upload_status
+        if body.get("investigation_id") != INV:
+            return 404, {"error": "investigation_not_found"}
+        results = []
+        for i, item in enumerate(body["items"]):
+            if item.get("tool") in self.refuse_items:
+                results.append({"index": i, "error": {"code": "control_log_not_evidence", "message": "no\nway"}})
+                continue
+            canon = json.dumps({k: v for k, v in item.items() if k != "client"}, sort_keys=True)
+            rid = self.receipts.setdefault(canon, f"rcpt_{len(self.receipts) + 1:024x}")
+            results.append({"index": i, "receipt_id": rid})
+        return 200, {"investigation_id": INV, "results": results}
 
     def answer(self, tool, body):
+        if tool == "upload-investigation-evidence" and self.mode != "old":
+            return self.upload(body)
         if tool != "checkpoint-investigation" or self.mode == "old":
             return super().answer(tool, body)
         if self.ckpt_status:
@@ -129,6 +146,41 @@ class Mapping(unittest.TestCase):
         for raw in ([flat], [nested], {"events": [nested]}, flat, ie.checkpoint_events([flat])):
             self.assertEqual(ie.checkpoint_events(raw), want, raw)
 
+    def test_id_prefixes_are_normalized_to_the_family_deterministically(self):
+        raw = [{"type": "finding.proposed", "id": "fnd_prep", "statement": "s", "refs": ["h_s3", "e_phases", "#4",
+                                                                                         "dec_cache", "qn_c"]},
+               {"type": "finding.revised", "id": "f_prep", "statement": "s"},
+               {"type": "hypothesis.proposed", "id": "s3", "statement": "s"},
+               {"type": "hypothesis.resolved", "id": "hypothesis_s3", "outcome": "supported"},
+               {"type": "experiment.started", "id": "experiment_phases", "statement": "s", "tests": ["s3", "h_x"]},
+               {"type": "experiment.completed", "id": "e_phases", "outcome": "o"},
+               {"type": "decision.proposed", "id": "d_cache", "statement": "s", "based_on": ["fnd_prep", "hypothesis_s3",
+                                                                                           "exp_phases"]},
+               {"type": "decision.revised", "id": "dec_cache", "statement": "s"},
+               {"type": "question.opened", "id": "q_c", "statement": "s"},
+               {"type": "question.resolved", "id": "qn_c", "answer": "a"}]
+        got = ie.checkpoint_events(raw)
+        self.assertEqual([e["payload"]["semantic_id"] for e in got], [
+            "finding_prep", "finding_prep", "hyp_s3", "hyp_s3", "exp_phases", "exp_phases", "decision_cache",
+            "decision_cache", "question_c", "question_c"])
+        self.assertEqual(got[0]["payload"]["refs"], ["hyp_s3", "exp_phases", "#4", "decision_cache", "question_c"])
+        self.assertEqual(got[4]["payload"]["tests"], ["hyp_s3", "hyp_x"])
+        self.assertEqual(got[6]["payload"]["based_on"], ["finding_prep", "hyp_s3", "exp_phases"])
+        self.assertEqual(ie.checkpoint_events(raw), got, "deterministic")
+        canonical = ie.checkpoint_events([{"type": "finding.proposed", "id": "finding_prep", "statement": "s"}])
+        alias = ie.checkpoint_events([{"type": "finding.proposed", "id": "fnd_prep", "statement": "s"}])
+        self.assertEqual(ie.checkpoint_key(INV, SID, alias), ie.checkpoint_key(INV, SID, canonical),
+                         "normalized before the key")
+        for bad, needle in (({"type": "hypothesis.proposed", "id": "finding_x", "statement": "s"}, '"id" is hyp_'),
+                            ({"type": "hypothesis.proposed", "id": "fnd_x", "statement": "s"}, '"id" is hyp_'),
+                            ({"type": "finding.proposed", "id": "finding_a", "statement": "s", "refs": ["bare"]},
+                             "refs items are ids"),
+                            ({"type": "decision.proposed", "id": "decision_a", "statement": "s", "based_on": ["q_x"]},
+                             "based_on items are")):
+            with self.assertRaises(ie.CheckpointInputError, msg=bad) as cm:
+                ie.checkpoint_events([bad])
+            self.assertIn(needle, str(cm.exception))
+
     def test_malformed_input_is_refused_with_the_event_index_before_anything_is_sent(self):
         cases = [
             ([], "JSON array of 1-20 events"),
@@ -200,13 +252,27 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.fake = CheckpointMaestro()
         self.addCleanup(self.fake.close)
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(os.path.realpath(tmp.name))
 
     def ckpt(self, events, **kw):
         kw.setdefault("client", "claude-plugin/test")
+        kw.setdefault("home", self.home)
         return ie.checkpoint(self.fake.conn, INV, SID, events, **kw)
 
     def posts(self):
         return [r for r in self.fake.requests if r[0] == "checkpoint-investigation"]
+
+    def uploads(self):
+        return [r[1] for r in self.fake.requests if r[0] == "upload-investigation-evidence"]
+
+    def capture(self, command, stdout, tuid):
+        source, tool = cap.classify_mcp_name("Bash", "claude-code", ("cardinal",))
+        call = cap.ToolCall(runtime="claude-code", tool_name="Bash", source=source, tool=tool,
+                            tool_input={"command": command}, response={"stdout": stdout, "stderr": ""}, error=None,
+                            session_id=SID, tool_use_id=tuid, cwd=None, client="claude-code/0.43.0")
+        return cap.capture_call(call, self.home, env={}).entry
 
 
 class Checkpoint(Base):
@@ -242,38 +308,98 @@ class Checkpoint(Base):
                 self.ckpt([FLAT_ALL[0]], idempotency_key=bad)
         self.assertEqual(len(self.posts()), 2)
 
-    def test_cited_ev_ids_are_promoted_first_and_replaced_by_their_receipts(self):
-        calls = []
-
-        def fake_promote(ids):
-            calls.append(list(ids))
-            return {EV: RCPT2, EV2: RCPT}
-
-        events = [{"type": "finding.proposed", "id": "finding_a", "statement": "s", "evidence": [EV, RCPT, EV2]},
-                  {"type": "question.resolved", "id": "question_q", "answer": "a", "evidence": [EV2, EV]}]
-        out = self.ckpt(events, promote=fake_promote)
-        self.assertEqual(calls, [[EV, EV2]], "promoted once, in citation order")
+    def test_cited_ev_ids_become_investigation_receipts_and_nothing_else_is_uploaded(self):
+        a = self.capture("make bench", "prep 15.6s of 25.5s", "t1")["evidence_id"]
+        b = self.capture("make trace", "phases", "t2")["evidence_id"]
+        self.capture("make other", "UNCITED OUTPUT", "t3")
+        events = [{"type": "finding.proposed", "id": "finding_a", "statement": "s", "evidence": [a, RCPT, b]},
+                  {"type": "question.resolved", "id": "question_q", "answer": "a", "evidence": [b, a]}]
+        timing: dict = {}
+        out = self.ckpt(events, producer_client="claude-code/0.43.0", timing=timing)
+        (upload,) = self.uploads()
+        self.assertEqual(set(upload), {"investigation_id", "session_id", "items"})
+        self.assertEqual((upload["investigation_id"], upload["session_id"]), (INV, SID))
+        self.assertEqual([i["tool"] for i in upload["items"]], ["Bash", "Bash"])
+        self.assertEqual([i["provenance"] for i in upload["items"]], ["captured", "captured"])
+        self.assertIn("prep 15.6s", json.dumps(upload["items"][0]))
+        self.assertNotIn("UNCITED OUTPUT", json.dumps(upload))
+        self.assertFalse([p for p in self.fake.requests if p[0] == "evidence"], "never a storyboard route")
         sent = self.posts()[0][1]["events"]
-        self.assertEqual(sent[0]["payload"]["evidence"], [RCPT2, RCPT], "deduplicated after the swap")
-        self.assertEqual(sent[1]["payload"]["evidence"], [RCPT, RCPT2])
+        ra, rb = "rcpt_" + f"{1:024x}", "rcpt_" + f"{2:024x}"
+        self.assertEqual(sent[0]["payload"]["evidence"], [ra, RCPT, rb])
+        self.assertEqual(sent[1]["payload"]["evidence"], [rb, ra])
         self.assertNotIn("ev_", json.dumps(sent))
-        self.assertEqual(out["idempotency_key"], ie.checkpoint_key(INV, SID, sent))
+        cited = ie.checkpoint_events(events)
+        self.assertEqual(out["idempotency_key"], ie.checkpoint_key(INV, SID, cited), "the key is of the batch as cited")
+        self.assertIn("upload", timing)
 
-    def test_unpromotable_citations_post_nothing(self):
-        events = [{"type": "finding.proposed", "id": "finding_a", "statement": "s", "evidence": [EV]}]
-        with self.assertRaises(ie.CheckpointInputError) as cm:
+    def test_a_retry_with_no_local_record_is_deduplicated_with_one_receipt(self):
+        # P2: there is no local upload ledger to lose; the key never depends
+        # on the receipts, and the server answers the same receipt again.
+        a = self.capture("make bench", "prep 15.6s of 25.5s", "t1")["evidence_id"]
+        events = [{"type": "finding.proposed", "id": "fnd_prep", "statement": "s", "evidence": [a]}]
+        first = self.ckpt(events)
+        promoted = self.home / ".cardinal" / "evidence" / SID / "promoted.json"
+        if promoted.exists():
+            promoted.unlink()
+        again = self.ckpt(events)
+        self.assertTrue(again.get("duplicate"))
+        self.assertEqual(ie.checkpoint_line(again), "already checkpointed #1 (retry deduplicated)")
+        self.assertEqual(again["idempotency_key"], first["idempotency_key"])
+        self.assertEqual(len(self.fake.receipts), 1, "one receipt for one call")
+        self.assertEqual(len(self.fake.events), 1)
+        self.assertEqual(first["events"][0]["payload"]["semantic_id"], "finding_prep", "the stored id")
+
+    def test_uncitable_evidence_uploads_and_posts_nothing(self):
+        ok = self.capture("make bench", "fine", "t1")["evidence_id"]
+        withheld = self.capture("cat ~/.aws/credentials", "aws_secret_access_key=x", "t2")
+        self.assertIsNotNone(withheld.get("withheld"))
+        for ev, needle in ((withheld["evidence_id"], f"{withheld['evidence_id']}: withheld"),
+                           (EV, f"{EV}: not in this machine's evidence spool")):
+            events = [{"type": "finding.proposed", "id": "finding_a", "statement": "s", "evidence": [ok, ev]}]
+            with self.assertRaises(ie.EvidenceRefused) as cm:
+                self.ckpt(events)
+            self.assertEqual(cm.exception.code, "evidence_not_citable")
+            self.assertIn(needle, str(cm.exception))
+        self.assertEqual((self.uploads(), self.posts()), ([], []))
+
+    def test_an_older_server_without_the_evidence_route_posts_nothing(self):
+        ok = self.capture("make bench", "fine", "t1")["evidence_id"]
+        events = [{"type": "finding.proposed", "id": "finding_a", "statement": "s", "evidence": [ok]}]
+        for answer in ((403, {"error": "insufficient_scope"}), (404, None), (405, {"error": "x"})):
+            self.fake.upload_status = answer
+            with self.assertRaises(ie.EvidenceRefused) as cm:
+                self.ckpt(events)
+            self.assertEqual(cm.exception.code, "evidence_unsupported")
+            self.assertEqual(str(cm.exception), "this Cardinal server cannot store investigation evidence yet; cite "
+                                                "rcpt_ receipts (nothing was checkpointed)")
+        self.fake.upload_status = (403, {"error": "checkpoint_requires_investigation_author"})
+        with self.assertRaises(sync.ServerError) as cm:
             self.ckpt(events)
-        self.assertIn(EV, str(cm.exception))
-
-        def refuse(ids):
-            raise promote.PromoteError(f"{ids[0]}: withheld: secret", code="evidence_not_citable")
-
-        with self.assertRaises(promote.PromoteError):
-            self.ckpt(events, promote=refuse)
-        with self.assertRaises(ist.FetchError) as cm:
-            self.ckpt(events, promote=lambda ids: {EV: "rcpt_nope"})
-        self.assertIn("nothing was checkpointed", str(cm.exception))
+        self.assertIn("only the investigation's author session", ie.checkpoint_refusal(cm.exception))
         self.assertEqual(self.posts(), [])
+        self.assertIsNotNone(self.ckpt([{"type": "finding.proposed", "id": "finding_a", "statement": "s",
+                                         "evidence": [RCPT]}]), "rcpt_ citations need no upload")
+
+    def test_a_refused_item_names_the_entry_and_posts_nothing(self):
+        ok = self.capture("make bench", "fine", "t1")["evidence_id"]
+        self.fake.refuse_items = {"Bash"}
+        with self.assertRaises(ie.EvidenceRefused) as cm:
+            self.ckpt([{"type": "finding.proposed", "id": "finding_a", "statement": "s", "evidence": [ok]}])
+        self.assertEqual(cm.exception.code, "evidence_refused")
+        self.assertEqual(str(cm.exception), f"{ok}: control_log_not_evidence: no way")
+        self.assertEqual(self.posts(), [])
+
+    def test_many_citations_are_uploaded_in_bounded_batches(self):
+        ids = [self.capture(f"make t{i}", "x" * 200_000, f"t{i}")["evidence_id"] for i in range(9)]
+        events = [{"type": "finding.proposed", "id": f"finding_{i}", "statement": "s", "evidence": [ev]}
+                  for i, ev in enumerate(ids)]
+        self.ckpt(events)
+        ups = self.uploads()
+        self.assertGreater(len(ups), 1)
+        self.assertEqual(sum(len(u["items"]) for u in ups), 9)
+        for u in ups:
+            self.assertLess(len(json.dumps(u).encode()), ie.EVIDENCE_BATCH_BYTES)
 
     def test_an_answer_that_is_not_this_batch_is_refused(self):
         for answer in ({"investigation_id": OTHER_INV, "events": []},
@@ -312,7 +438,8 @@ class Refusals(Base):
         err = self.refusal(409, {"error": "semantic_object_not_found", "index": 2, "semantic_id": "finding_x",
                                  "message": "finding.revised needs an earlier finding.proposed"})
         self.assertEqual(ie.checkpoint_refusal(err), "semantic_object_not_found at event 2 (finding_x): nothing "
-                                                     "earlier in this investigation proposes, starts or opens that id")
+                                                     "earlier in this investigation proposes, starts or opens that id: "
+                                                     "propose/start/open it first (the same batch is fine)")
         err = self.refusal(409, {"error": "invalid_semantic_transition", "index": 0, "semantic_id": "hyp_s3"})
         self.assertIn("invalid_semantic_transition at event 0 (hyp_s3): that lifecycle step is not allowed",
                       ie.checkpoint_refusal(err))
@@ -425,92 +552,6 @@ class Rendering(unittest.TestCase):
         self.assertEqual((ident, body), ('"decision\\u2028x"', '"s" [based on: finding_x]'))
         ident, body = ie.semantic_body(semantic(12, "question.opened", "not an object"))
         self.assertEqual((ident, body), ("unknown", ""))
-
-
-class PromoteCited(unittest.TestCase):
-    """promote_cited: the explicit-citation upload a checkpoint uses. It
-    reads and sends only the named entries; a withheld or unknown one fails
-    the whole call before anything is sent."""
-
-    def setUp(self):
-        self.tmp = TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.home = Path(os.path.realpath(self.tmp.name))
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.requests: list = []
-        self.adapter = promote.PromoteAdapter(
-            runtime="claude-code", client="claude-code/0.43.0",
-            connection=lambda home, env: {"origin": "https://maestro.example.test", "org": "o1", "key": "ck"})
-
-    def capture(self, tool_input, response, tuid):
-        source, tool = cap.classify_mcp_name("Bash", "claude-code", ("cardinal",))
-        call = cap.ToolCall(runtime="claude-code", tool_name="Bash", source=source, tool=tool, tool_input=tool_input,
-                            response=response, error=None, session_id=SID, tool_use_id=tuid, cwd=None,
-                            client="claude-code/0.43.0")
-        return cap.capture_call(call, self.home, env={}).entry
-
-    def opener(self):
-        test = self
-
-        class Resp(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                self.close()
-
-        class Opener:
-            def open(self, req, timeout=None):
-                body = json.loads(req.data)
-                test.requests.append((req.full_url, req.headers, body))
-                return Resp(json.dumps({"results": [{"index": i, "receipt_id": f"rcpt_{len(test.requests):08x}{i:016x}"}
-                                                    for i in range(len(body["items"]))]}).encode())
-        return Opener()
-
-    def test_only_the_cited_entries_are_uploaded_and_reused_after(self):
-        cited = self.capture({"command": "make bench"}, {"stdout": "p50 25.5s", "stderr": ""}, "t1")
-        self.capture({"command": "make other"}, {"stdout": "not cited", "stderr": ""}, "t2")
-        got = promote.promote_cited([cited["evidence_id"]], SB, self.adapter, opener=self.opener())
-        self.assertEqual(list(got), [cited["evidence_id"]])
-        self.assertRegex(got[cited["evidence_id"]], r"^rcpt_[0-9a-f]{24}$")
-        (url, _, body), = self.requests
-        self.assertEqual(url, f"https://maestro.example.test/api/orgs/o1/storyboards/{SB}/evidence")
-        self.assertEqual(len(body["items"]), 1)
-        self.assertNotIn("not cited", json.dumps(body))
-        again = promote.promote_cited([cited["evidence_id"]], SB, self.adapter, opener=self.opener())
-        self.assertEqual(again, got)
-        self.assertEqual(len(self.requests), 1, "an entry promoted before reuses its receipt")
-
-    def test_a_withheld_or_unknown_citation_uploads_nothing(self):
-        ok = self.capture({"command": "make bench"}, {"stdout": "ok", "stderr": ""}, "t1")
-        withheld = self.capture({"command": "cat ~/.aws/credentials"}, {"stdout": "aws_secret_access_key=x"}, "t3")
-        self.assertIsNotNone(withheld.get("withheld"))
-        for ids, needle in (([ok["evidence_id"], withheld["evidence_id"]], f"{withheld['evidence_id']}: withheld"),
-                            ([ok["evidence_id"], EV], f"{EV}: not in this machine's evidence spool"),
-                            (["../etc/passwd"], "not an evidence id")):
-            with self.assertRaises(promote.PromoteError) as cm:
-                promote.promote_cited(ids, SB, self.adapter, opener=self.opener())
-            self.assertEqual(cm.exception.code, "evidence_not_citable")
-            self.assertIn(needle, str(cm.exception))
-        with self.assertRaises(promote.PromoteError) as cm:
-            promote.promote_cited([ok["evidence_id"]], None, self.adapter, opener=self.opener())
-        self.assertEqual(cm.exception.code, "no_storyboard")
-        self.assertEqual(self.requests, [])
-
-    def test_a_refused_upload_names_the_entry(self):
-        ok = self.capture({"command": "make bench"}, {"stdout": "ok", "stderr": ""}, "t1")
-
-        class Refusing:
-            def open(self, req, timeout=None):
-                raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, io.BytesIO(b'{"error":"published"}'))
-
-        with self.assertRaises(promote.PromoteError) as cm:
-            promote.promote_cited([ok["evidence_id"]], SB, self.adapter, opener=Refusing())
-        self.assertEqual(cm.exception.code, "promote_failed")
-        self.assertIn(f"{ok['evidence_id']}: not_uploaded", str(cm.exception))
-        self.assertIn("published", str(cm.exception))
 
 
 if __name__ == "__main__":
