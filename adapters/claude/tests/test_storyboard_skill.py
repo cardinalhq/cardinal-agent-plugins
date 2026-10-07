@@ -283,9 +283,11 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # for every connected session; the skill improves that projection.
         # No guidance may say the storyboard comes at the end, is a write-up
         # of a finished investigation, or that an Investigation must be
-        # created first.
+        # created first. The checkpoint guidance's "right then, not as a
+        # summary at the end" says the opposite (the record is kept live), so
+        # that exact negation is not the old lifecycle.
         for path in GUIDANCE:
-            text = _flat(path).lower()
+            text = _flat(path).lower().replace("not as a summary at the end", "")
             for phrase in OLD_LIFECYCLE:
                 self.assertNotIn(phrase.lower(), text, f"{path.relative_to(REPO)} still says {phrase!r}")
 
