@@ -41,10 +41,17 @@ Writing to Cardinal needs an API key (sign up at https://app.cardinalhq.io,
 then `/cardinal:connect` creates one for the machine); there is no OAuth sign-in. See
 [adapters/claude/README.md](adapters/claude/README.md).
 
+Connected, every Claude session automatically has an Investigation and a
+private live Investigation Storyboard on Cardinal (session id → investigation
+id → storyboard id → URL), created at session start by
+`hooks/storyboard-session.py` with no command or skill; ask Claude for the
+storyboard link at any time. Advisory events posted to the investigation (cue,
+question, challenge) reach the session at its next tool boundary through a
+per-session background poller, so a tool call never waits on the network.
 Claude also ships two model-invocable skills for Cardinal's Investigation
 Storyboards: [`/cardinal:storyboard`](adapters/claude/skills/storyboard/README.md)
-turns an investigation into an evidence-bound, scene-by-scene storyboard
-through the `storyboard__*` MCP tools, and
+improves, frames and publishes that live storyboard (evidence-bound, scene by
+scene) through the `storyboard__*` MCP tools, and
 [`/cardinal:canvas`](adapters/claude/skills/canvas/README.md) draws each
 scene's visual and previews it. `storyboard__preview` returns one
 self-contained page per scene. A synchronous `PostToolUse` hook on
@@ -56,8 +63,8 @@ to Read. `render_preview.py` stays the manual fallback (dark theme, a subset,
 a timed-out run). Nothing is rendered server-side, and publish trust is
 deterministic. Local preview supports macOS and Linux, not Windows. A
 synchronous `SessionStart` hook (`hooks/storyboard-session.py`) puts the
-session id in context for `storyboard__create`. The skills are Claude-only
-for now.
+session id, the investigation and the live storyboard URL in context. The
+skills are Claude-only for now.
 
 Every adapter ships generic local evidence capture for storyboards: every
 tool call the agent makes (shell commands, file reads and edits, searches,
