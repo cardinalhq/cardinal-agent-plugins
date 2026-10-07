@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Launch the opt-in deployed behavior MCP from a Cardinal plugin source checkout."""
+from pathlib import Path
+import runpy
+import sys
+
+behavior = Path(__file__).resolve().parents[3] / 'common' / 'behavior'
+if not (behavior / 'server.py').exists():
+    raise SystemExit('This preview requires the Cardinal agent plugin source checkout.')
+sys.path.insert(0, str(behavior))
+runpy.run_path(str(behavior / 'server.py'), run_name='__main__')
