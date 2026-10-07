@@ -110,6 +110,11 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/evidence-capture.py",
             "timeout": 2
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/investigation-events.sh",
+            "timeout": 3
           }
         ]
       }
@@ -122,6 +127,11 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/evidence-capture.py",
             "timeout": 2
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/investigation-events.sh",
+            "timeout": 3
           }
         ]
       }
@@ -137,7 +147,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-session.py",
-            "timeout": 3
+            "timeout": 6
           },
           {
             "type": "command",
@@ -177,6 +187,11 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/plan-usage.py",
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/investigation-events.sh",
+            "timeout": 3
           }
         ]
       }

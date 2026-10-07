@@ -16,8 +16,25 @@ import unittest
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+REPO = PLUGIN_ROOT.parent.parent
 STORYBOARD_SKILL = PLUGIN_ROOT / "skills" / "storyboard" / "SKILL.md"
 CANVAS_SKILL = PLUGIN_ROOT / "skills" / "canvas" / "SKILL.md"
+
+# Everything that tells Claude or the user how Storyboards come about.
+GUIDANCE = (
+    STORYBOARD_SKILL, CANVAS_SKILL, STORYBOARD_SKILL.parent / "README.md", PLUGIN_ROOT / "README.md",
+    REPO / "README.md", PLUGIN_ROOT / "bin" / "cardinal-storyboard", PLUGIN_ROOT / "hooks" / "storyboard-session.py",
+)
+# The old lifecycle (SPEC §4): the storyboard as the end-of-investigation
+# write-up, and the Investigation as something to create by hand first.
+OLD_LIFECYCLE = (
+    "finished investigation", "finished (or stalled)", "turn a finished", "at the end",
+    "write-up", "write up", "write this up", "show me how we got here", "after investigating",
+    "after using cardinal tools", "turns an investigation into", "turns a cardinal investigation into",
+    "before any storyboard: `investigation create`", "investigation create`, then",
+    "`investigation create` binds the session", "create an investigation manually",
+    "invoke the skill at the end", "run the storyboard skill as usual",
+)
 
 EVIDENCE_CONTRACT = (
     "> Rendered pixels may suggest a hypothesis but never establish a factual claim. Any quantitative or "
@@ -119,7 +136,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
         for needle in (
             # SessionStart hook (hooks/storyboard-session.py)
             '"Cardinal session id for this session: …"',
-            "Pass it to `storyboard__create`, `storyboard__find` and `storyboard__add_act`",
+            "Pass it to `storyboard__find` and `storyboard__add_act`",
             # PreToolUse context hook (hooks/storyboard-context.py)
             "the context hook adds it if you forget",
             # PostToolUse preview hook (hooks/storyboard-preview.py)
@@ -145,7 +162,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "reported by <client>",
             "`cardinal-evidence show ev_…`",
             "`[evidence:ev_…]`",
-            "promote the ones you cite before binding them",
+            "Promote the ones you cite before binding them",
             "`cardinal-evidence promote --storyboard <id> ev_… [ev_…]`",
             "`ev_… -> rcpt_…`",
             "Nothing is uploaded until a storyboard cites it",
@@ -174,7 +191,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "## Update, don't duplicate",
             "cardinal-storyboard context",
             "storyboard__find",
-            "on every storyboard request, before `storyboard__create`",
+            "before `storyboard__add_act` or `storyboard__create`",
             "storyboard__find {session_id, context}",
             "follow its `rule`",
             # Associations (plugin 0.40): context is stamped by the hook, the
@@ -261,6 +278,66 @@ class StoryboardSkillTextTests(unittest.TestCase):
         self.assertLess(flow.index("find"), flow.index("ask before adding"))
         self.assertLess(flow.index("ask before adding"), flow.index("storyboard__create"))
 
+    def test_skills_teach_the_live_storyboard_not_a_finished_write_up(self):
+        # SPEC §4: Cardinal creates the Investigation and its live Storyboard
+        # for every connected session; the skill improves that projection.
+        # No guidance may say the storyboard comes at the end, is a write-up
+        # of a finished investigation, or that an Investigation must be
+        # created first. The checkpoint guidance's "right then, not as a
+        # summary at the end" says the opposite (the record is kept live), so
+        # that exact negation is not the old lifecycle.
+        for path in GUIDANCE:
+            text = _flat(path).lower().replace("not as a summary at the end", "")
+            for phrase in OLD_LIFECYCLE:
+                self.assertNotIn(phrase.lower(), text, f"{path.relative_to(REPO)} still says {phrase!r}")
+
+    def test_the_control_log_is_never_evidence(self):
+        # Conductor refuses it too (control_log_not_evidence); the plugin never
+        # captures `cardinal-storyboard investigation` calls.
+        self.assertIn("**The control log is never evidence** and never public: never cite, promote or record "
+                      "investigation events or `cardinal-storyboard investigation …` calls.", _flat(STORYBOARD_SKILL))
+
+    def test_the_live_storyboard_is_the_default_target(self):
+        text = _flat(STORYBOARD_SKILL)
+        for needle in (
+            "## Which storyboard",
+            "This session's live storyboard (`sb_…` in the session-start context, or "
+            "`cardinal-storyboard investigation link`): author it directly, no find, no question, never "
+            "`storyboard__create` a second one.",
+            "when `storyboard__set_frame` is listed, frame it",
+            "`cardinal-storyboard investigation question \"<text>\"`",
+            "not owner authority",
+            "## Publish and share",
+            "never published or shared on its own",
+            "Publishing freezes a reviewed version",
+            "Share only a published act, only when asked",
+            "state init --investigation <inv_…>",
+        ):
+            self.assertIn(needle, text)
+        raw = STORYBOARD_SKILL.read_text()
+        self.assertLess(raw.index("## Which storyboard"), raw.index("## Update, don't duplicate"))
+
+    def test_do_i_start_the_storyboard_first_is_answered_no(self):
+        # The bug: asked "before I ask the question do I invoke the storyboard
+        # skill?", Claude answered "No. Ask your question first and invoke
+        # the skill at the end". The frontmatter description is in Claude's
+        # context in every session, so the answer has to be there too.
+        description = re.search(r"^description: (.*)$", STORYBOARD_SKILL.read_text(), re.M).group(1)
+        for needle in ("Cardinal creates every connected session's Investigation and private live Storyboard",
+                       "the user never starts one", "they work normally",
+                       "may ask for the storyboard link any time", "no skill needed"):
+            self.assertIn(needle, description)
+        for phrase in ("finished", "stalled", "at the end", "after using", "write"):
+            self.assertNotIn(phrase, description.lower())
+        self.assertIn('"Do I invoke the storyboard skill before I ask my question?" No. You never need to start '
+                      "Storyboards. This session already has an Investigation and Storyboard. Work normally, and ask "
+                      "for the Storyboard whenever you want to see or share the investigation.",
+                      _flat(STORYBOARD_SKILL))
+        readme = _flat(STORYBOARD_SKILL.parent / "README.md")
+        self.assertIn("You never need to start a storyboard.", readme)
+        self.assertIn("the answer is no: work normally", readme)
+        self.assertIn("`cardinal-storyboard investigation link`", readme)
+
     def test_storyboard_readme_explains_acts(self):
         readme = _flat(STORYBOARD_SKILL.parent / "README.md")
         self.assertNotIn("To change one, ask for a new storyboard", readme)
@@ -340,6 +417,11 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # "Investigation state" (InvestigationState step 1: state init /
         # check after publish; its authoring guide is printed by `state
         # init`, not pasted here) added 9 lines / 77 words: 2839 / 296.
+        # Investigations (state before any storyboard) fit in by rewording it.
+        # The live lifecycle (every session's Storyboard exists from session
+        # start; the skill improves it; "Which storyboard", "Publish and
+        # share", the do-I-start-it answer) replaced the finished-investigation
+        # framing and was paid for by trimming: still 2840 / 296.
         # No headroom left: trim before adding.
         paths = (STORYBOARD_SKILL, CANVAS_SKILL)
         total = sum(len(p.read_text().splitlines()) for p in paths)
