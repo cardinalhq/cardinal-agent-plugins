@@ -30,6 +30,7 @@ class LifecycleMaestro(FakeMaestro):
     def __init__(self):
         super().__init__()
         self.ensure_answer = None   # (status, body[, headers]) to answer every ensure with
+        self.capabilities = None    # ensure's capabilities block (None: absent, as from an older Cardinal)
         self.sessions: dict = {}
         self.join_is_author = True
 
@@ -48,6 +49,8 @@ class LifecycleMaestro(FakeMaestro):
         elif inv != INV:
             return 404, {"error": "investigation_not_found"}
         extra = {"joined": True, "is_author": self.join_is_author} if body.get("investigation_id") else {}
+        if self.capabilities is not None:
+            extra["capabilities"] = self.capabilities
         return (201 if created else 200), {**extra,
             "investigation_id": inv, "storyboard_id": SB, "created": created,
             "view_url": f"https://app.example.test/storyboards/{SB}?org=o1",
@@ -87,6 +90,20 @@ class BootstrapTests(Base):
         for _ in range(3):
             self.assertEqual(boot.ensure(self.home, SID, self.fake.conn, "c")["status"], "reused")
         self.assertEqual(len(self.ensures()), 1)
+
+    def test_the_binding_keeps_what_the_server_advertises_and_an_older_server_advertises_nothing(self):
+        b = boot.ensure(self.home, SID, self.fake.conn, "c")["binding"]
+        self.assertEqual(b["capabilities"], {})   # an older Cardinal: every capability off
+        self.assertNotIn("storyboard_projection", b)
+        self.fake.capabilities = {"projection": {"enabled": True, "why": "flag"}, "owner_input": {"enabled": False}}
+        ie.update_fields(self.home, SID, {"bootstrap": {"status": "failed", "retry_after": 0}})
+        b = boot.ensure(self.home, SID, self.fake.conn, "c")["binding"]
+        self.assertEqual(b["capabilities"], {"projection": {"enabled": True}, "owner_input": {"enabled": False}})
+        self.assertEqual(boot.describe(b)["capabilities"], b["capabilities"])
+        # A later answer without the block (a rolled-back Cardinal) turns every capability off again.
+        self.fake.capabilities = None
+        ie.update_fields(self.home, SID, {"bootstrap": {"status": "failed", "retry_after": 0}})
+        self.assertEqual(boot.ensure(self.home, SID, self.fake.conn, "c")["binding"]["capabilities"], {})
 
     def test_resume_keeps_the_cursor(self):
         boot.ensure(self.home, SID, self.fake.conn, "c")
@@ -147,16 +164,39 @@ class BootstrapTests(Base):
             self.assertIsNone(boot.safe_url(bad, o), bad)
 
 
-class ProjectionCapabilityTests(unittest.TestCase):
-    def test_only_an_explicit_enabled_true_counts(self):
-        self.assertTrue(boot.projection_enabled({"storyboard_projection": {"enabled": True}}))
-        for answer in ({}, {"storyboard_projection": None}, {"storyboard_projection": True},
-                       {"storyboard_projection": {"enabled": False}}, {"storyboard_projection": {"enabled": "true"}},
-                       {"storyboard_projection": {"enabled": 1}}, None, "x"):
-            self.assertFalse(boot.projection_enabled(answer), answer)
-        self.assertIs(boot.describe({"storyboard_projection": True})["storyboard_projection"], True)
-        self.assertIs(boot.describe({})["storyboard_projection"], False)
-        self.assertIs(boot.describe({"storyboard_projection": "yes"})["storyboard_projection"], False)
+class CapabilityTests(unittest.TestCase):
+    def test_capabilities_are_validated_and_only_an_explicit_enabled_true_counts(self):
+        on = {"capabilities": {"projection": {"enabled": True, "detail": "x"}, "owner_input": {"enabled": False}}}
+        self.assertEqual(boot.capabilities(on), {"projection": {"enabled": True}, "owner_input": {"enabled": False}})
+        self.assertTrue(boot.capability_enabled(on["capabilities"], boot.PROJECTION))
+        self.assertFalse(boot.capability_enabled(on["capabilities"], "owner_input"))
+        self.assertFalse(boot.capability_enabled(on["capabilities"], "unheard_of"))
+        # An older Cardinal (no block), a block that is not an object, a malformed entry: off.
+        for answer in ({}, {"capabilities": None}, {"capabilities": []}, {"capabilities": "projection"},
+                       {"capabilities": {"projection": True}}, {"capabilities": {"projection": None}},
+                       {"capabilities": {"projection": {"enabled": "true"}}},
+                       {"capabilities": {"projection": {"enabled": 1}}}, {"capabilities": {"projection": {}}},
+                       {"storyboard_projection": {"enabled": True}}, None, "x"):
+            self.assertFalse(boot.capability_enabled(answer.get("capabilities") if isinstance(answer, dict) else answer,
+                                                     boot.PROJECTION), answer)
+        self.assertEqual(boot.capabilities({}), {})
+        self.assertEqual(boot.capabilities({"storyboard_projection": {"enabled": True}}), {})
+        self.assertEqual(boot.capabilities({"capabilities": {"projection": True, "Bad Name": {"enabled": True},
+                                                             "x" * 65: {"enabled": True},
+                                                             "ok": {"enabled": 1}}}),
+                         {"ok": {"enabled": False}})
+        many = {"capabilities": {f"c{i}": {"enabled": True} for i in range(100)}}
+        self.assertEqual(len(boot.capabilities(many)), boot.MAX_CAPABILITIES)
+
+    def test_describe_reads_the_bindings_capabilities(self):
+        self.assertEqual(boot.describe({"capabilities": {"projection": {"enabled": True}}})["capabilities"],
+                         {"projection": {"enabled": True}})
+        self.assertEqual(boot.describe({})["capabilities"], {})
+        self.assertEqual(boot.describe(None)["capabilities"], {})
+        self.assertEqual(boot.describe({"capabilities": "yes"})["capabilities"], {})
+        self.assertEqual(boot.describe({"capabilities": {"projection": {"enabled": "yes"}}})["capabilities"],
+                         {"projection": {"enabled": False}})
+        self.assertNotIn("storyboard_projection", boot.describe({"storyboard_projection": True}))
 
 
 class PruneTests(Base):

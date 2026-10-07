@@ -16,8 +16,10 @@ At session start (and lazily after a failure) the adapter calls ensure():
     and never creates an Investigation.
   - the answer is written into the session's binding
     (investigation_events: investigation_id, storyboard_id, view_url,
-    investigation_url, org, bootstrap {status: ok}); a binding to the same
-    investigation keeps its cursor.
+    investigation_url, org, capabilities, bootstrap {status: ok}); a binding
+    to the same investigation keeps its cursor. `capabilities` is what the
+    server advertises, validated to {name: {enabled: bool}}; {} from an
+    older Cardinal, so every capability is off.
 
 Failure never blocks the session (fail open). It is recorded, never
 announced repeatedly: with a binding (an explicit join) in its
@@ -267,11 +269,12 @@ def _ensure(home, sid, conn, client, wanted, started_at, opener, timeout, force,
         }
         if out.get("question_status") in ("provisional", "stated"):
             fields["question_status"] = out["question_status"]
-        # Whether this Cardinal keeps the storyboard up to date from the
-        # checkpoints itself (automatic projection): only an explicit
-        # {"storyboard_projection": {"enabled": true}} says so. Always
-        # written, so a resumed binding never keeps a stale answer.
-        fields["storyboard_projection"] = projection_enabled(out)
+        # What this Cardinal advertises (`capabilities`, e.g. projection: it
+        # keeps the storyboard up to date from the checkpoints itself), validated
+        # to {name: {enabled: bool}}. Always written, so a resumed binding never
+        # keeps a stale answer; an older Cardinal without the block gets {}
+        # (every capability off).
+        fields["capabilities"] = capabilities(out)
         source = "env" if wanted else "auto"
         b, _ = ie.adopt(home, sid, out["investigation_id"], source, fields, now=now)
         with contextlib.suppress(OSError):
@@ -293,12 +296,36 @@ def _bind_join(home: Path, sid: str, inv: str, conn: dict, state: dict, now: flo
         return ie.read_binding(home, sid)
 
 
-def projection_enabled(answer: Any) -> bool:
-    """ensure-session-investigation's `storyboard_projection.enabled`: True
-    only when the server says it projects; absent (an older Cardinal), not
-    an object, or anything but true is False."""
-    p = answer.get("storyboard_projection") if isinstance(answer, dict) else None
-    return isinstance(p, dict) and p.get("enabled") is True
+# Capabilities a Cardinal advertises on ensure-session-investigation and
+# get-investigation: {"capabilities": {"<name>": {"enabled": bool, ...}}}.
+# The plugin does nothing for a capability that is not advertised as enabled.
+PROJECTION = "projection"   # the server keeps the live storyboard up to date from the checkpoints
+CAPABILITY_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")   # fullmatch
+MAX_CAPABILITIES = 32
+
+
+def capabilities(answer: Any) -> dict:
+    """`answer`'s capabilities block, validated to {name: {"enabled": bool}}:
+    {} when it is absent (an older Cardinal) or not an object; an entry whose
+    name is not a plain identifier or whose value is not an object is
+    dropped; `enabled` is True only for an explicit true. Anything else the
+    server says about a capability is not kept."""
+    caps = answer.get("capabilities") if isinstance(answer, dict) else None
+    if not isinstance(caps, dict):
+        return {}
+    out: dict = {}
+    for name, v in caps.items():
+        if len(out) >= MAX_CAPABILITIES:
+            break
+        if isinstance(name, str) and CAPABILITY_NAME_RE.fullmatch(name) and isinstance(v, dict):
+            out[name] = {"enabled": v.get("enabled") is True}
+    return out
+
+
+def capability_enabled(caps: Any, name: str) -> bool:
+    """Whether `caps` (a capabilities block, raw or validated) says `name` is
+    enabled. A missing block, a missing key or a malformed entry is off."""
+    return capabilities({"capabilities": caps}).get(name, {}).get("enabled") is True
 
 
 def started_now(now: Optional[float] = None) -> str:
@@ -309,8 +336,9 @@ def started_now(now: Optional[float] = None) -> str:
 
 def describe(binding: Optional[dict]) -> dict:
     """The binding's public facts: {investigation_id, storyboard_id,
-    view_url, investigation_url, bootstrap_status} (None values when
-    unknown). Never a key or an org secret."""
+    view_url, investigation_url, bootstrap_status, is_author, capabilities}
+    (None values when unknown; capabilities validated, {} when unknown).
+    Never a key or an org secret."""
     b = binding or {}
     st = b.get("bootstrap") if isinstance(b.get("bootstrap"), dict) else {}
     sb = b.get("storyboard_id")
@@ -321,5 +349,5 @@ def describe(binding: Optional[dict]) -> dict:
         "investigation_url": safe_url(b.get("investigation_url"), None),
         "bootstrap_status": st.get("status"),
         "is_author": b.get("is_author") is not False,
-        "storyboard_projection": b.get("storyboard_projection") is True,
+        "capabilities": capabilities(b),
     }

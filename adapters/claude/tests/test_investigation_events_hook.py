@@ -82,7 +82,7 @@ class FakeMaestro:
         self.storyboards: dict = {INV: SB}
         self.questions: dict = {}
         self.join_is_author = True
-        self.projection = None   # ensure's storyboard_projection (None: absent, as on an older Cardinal)
+        self.capabilities = None   # ensure's capabilities block (None: absent, as from an older Cardinal)
         self.lock = threading.Lock()
         fake = self
 
@@ -115,7 +115,8 @@ class FakeMaestro:
         self.server.server_close()
 
     def add(self, type_, payload, *, to=None, session=None, kind="user", pid="u_sup", key_id="k_sup", author=False,
-            client=None, key=None):
+            client=None, key=None, cls=None):
+        """One event; cls: the `class` a newer Cardinal stamps on it (None: none, as from an older one)."""
         e = {"investigation_id": INV, "seq": len(self.events) + 1, "type": type_, "payload": payload,
              "to_session_id": to,
              "producer": {"principal": {"kind": kind, "id": pid}, "key_id": key_id,
@@ -123,6 +124,8 @@ class FakeMaestro:
                           "is_investigation_author": author},
              "authority": "advisory", "idempotency_key": key or f"k{len(self.events) + 1}",
              "created_at": "2026-10-06T12:00:00.000Z"}
+        if cls is not None:
+            e["class"] = cls
         self.events.append(e)
         return e
 
@@ -151,8 +154,8 @@ class FakeMaestro:
             inv = self.sessions[key]
         sb = self.storyboards[inv]
         extra = {"joined": True, "is_author": self.join_is_author} if body.get("investigation_id") else {}
-        if self.projection is not None:
-            extra["storyboard_projection"] = self.projection
+        if self.capabilities is not None:
+            extra["capabilities"] = self.capabilities
         return (201 if created else 200), {**extra,
             "investigation_id": inv, "storyboard_id": sb, "created": created,
             "view_url": f"https://app.example.test/storyboards/{sb}?org=o1",
@@ -178,6 +181,8 @@ class FakeMaestro:
         if tool == "read-investigation-events":
             after, limit, to = body.get("after", 0), body.get("limit", 100), body.get("to_session_id")
             evs = [e for e in self.events if e["seq"] > after and (to is None or e["to_session_id"] in (None, to))]
+            if body.get("class"):
+                evs = [e for e in evs if e.get("class") == body["class"]]
             evs = evs[:limit]
             return 200, {"investigation_id": INV, "events": evs, "next_after": evs[-1]["seq"] if evs else after,
                          "head_seq": len(self.events)}
@@ -458,6 +463,35 @@ class Delivery(Base):
         self.assertIn("still open", ctx)
         self.assertEqual(self.binding()["cursor"], 3)
 
+    def test_delivers_by_the_wire_class_and_never_an_unknown_class(self):
+        self.bind()
+        self.fake.add("owner_input.recorded", {"text": "SECRET OWNER TEXT"}, author=True, session=SID,
+                      cls="owner_input")
+        self.fake.add("cue.added", {"text": "a cue a newer server reclassified"}, cls="something_new")
+        self.fake.add("hypothesis.proposed", {"semantic_id": "hyp_a", "statement": "s"}, author=True, cls="semantic")
+        res = self.hook()
+        self.assertEqual((res.returncode, res.stdout, res.stderr), (0, "", ""))
+        self.assertFalse(self.inbox_file().exists())
+        self.assertEqual(self.binding()["cursor"], 3)   # consumed, never delivered
+        self.fake.add("challenge.added", {"text": "a classed challenge"}, cls="control")
+        self.fake.add("owner_input.recorded", {"text": "SECRET OWNER TEXT 2"}, author=True, cls="owner_input")
+        ctx = self.context(self.hook())
+        self.assertIn('"a classed challenge"', ctx)
+        self.assertIn("event #4 · challenge.added · authority: ADVISORY", ctx)
+        self.assertNotIn("SECRET", ctx)
+        self.assertNotIn("#5", ctx)
+        self.assertEqual(self.binding()["cursor"], 5)
+
+    def test_an_older_server_without_class_delivers_by_type(self):
+        self.bind()
+        self.fake.add("hypothesis.proposed", {"semantic_id": "hyp_a", "statement": "s", "text": "t"}, author=True)
+        self.fake.add("cue.added", {"text": "unclassed cue"})
+        self.assertNotIn("class", self.fake.events[1])
+        ctx = self.context(self.hook())
+        self.assertIn('"unclassed cue"', ctx)
+        self.assertNotIn("#1 ·", ctx)
+        self.assertEqual(self.binding()["cursor"], 2)
+
     def test_network_failure_is_silent_and_keeps_the_cursor(self):
         self.bind()
         self.fake.add("challenge.added", {"text": "x"})
@@ -629,41 +663,64 @@ class SessionStartBootstrap(Base):
                        "authority: ADVISORY"):
             self.assertIn(needle, ctx)
         self.assertNotIn("Pass it as session_id to storyboard__create", ctx)
-        # No storyboard_projection in the answer (an older Cardinal): 0.43.0's sentence, unchanged.
+        # No capabilities in the answer (an older Cardinal): 0.43.0's sentence, unchanged.
         self.assertIn(f"The storyboard skill improves this storyboard ({SB}); never storyboard__create another for "
                       "this session. Pass the session id as session_id to storyboard__find and storyboard__add_act.",
                       ctx)
         self.assertNotIn("no storyboard step is needed", ctx)
-        self.assertIs(b["storyboard_projection"], False)
+        self.assertEqual(b["capabilities"], {})
+        self.assertNotIn("storyboard_projection", b)
 
-    def test_only_a_cardinal_that_says_it_projects_drops_the_storyboard_step(self):
+    def test_only_a_cardinal_that_advertises_projection_drops_the_storyboard_step(self):
         old = (f"The storyboard skill improves this storyboard ({SB}); never storyboard__create another for this "
                "session. Pass the session id as session_id to storyboard__find and storyboard__add_act.")
         new = (f"Cardinal keeps this storyboard ({SB}) up to date from the investigation record (your checkpoints), "
                "so no storyboard step is needed; never storyboard__create another for this session. Edit, publish "
                "or share it only when the user asks (the storyboard skill). Pass the session id as session_id to "
                "storyboard__find and storyboard__add_act.")
-        for answer, projected in (({"enabled": True}, True), ({"enabled": False}, False), ({"enabled": "yes"}, False),
-                                  (True, False), ({}, False)):
-            self.fake.projection = answer
+        on = {"projection": {"enabled": True}}
+        for answer, projected in ((on, True), ({"projection": {"enabled": True, "x": 1}, "owner_input": {}}, True),
+                                  ({"projection": {"enabled": False}}, False),
+                                  ({"projection": {"enabled": "yes"}}, False), ({"projection": True}, False),
+                                  ({"owner_input": {"enabled": True}}, False), ({}, False), ([], False),
+                                  ("projection", False)):
+            self.fake.capabilities = answer
             with contextlib.suppress(FileNotFoundError):
                 self.binding_file().unlink()
             ctx = self.start()
-            self.assertIs(self.binding()["storyboard_projection"], projected, answer)
+            caps = self.binding()["capabilities"]
+            self.assertIsInstance(caps, dict, answer)
+            self.assertIs(caps.get("projection", {}).get("enabled") is True, projected, answer)
             self.assertIn(new if projected else old, ctx, answer)
             self.assertNotIn(old if projected else new, ctx, answer)
+        # #172's ad hoc flag means nothing: only the capabilities block counts.
+        self.fake.capabilities = None
+        self.binding_file().unlink()
+        orig = self.fake.ensure
+        self.fake.ensure = lambda body: (lambda r: (r[0], {**r[1], "storyboard_projection": {"enabled": True}}))(
+            orig(body))
+        try:
+            self.assertIn(old, self.start())
+        finally:
+            self.fake.ensure = orig
         # Resume reuses the binding with no request, and keeps its answer.
-        self.fake.projection = {"enabled": True}
+        self.fake.capabilities = on
         self.binding_file().unlink()
         self.start()
         n = len(self.ensures())
         self.assertIn(new, self.start(source="resume"))
         self.assertEqual(len(self.ensures()), n)
-        # A later answer without the flag (a rolled-back Cardinal) goes back to 0.43.0's text.
-        self.fake.projection = None
+        # A 0.43.0 binding (no capabilities) reused on resume: off.
+        b = self.binding()
+        del b["capabilities"]
+        self.binding_file().write_text(json.dumps(b))
+        self.assertIn(old, self.start(source="resume"))
+        self.assertEqual(len(self.ensures()), n)
+        # A later answer without the block (a rolled-back Cardinal) goes back to 0.43.0's text.
+        self.fake.capabilities = None
         self.binding_file().unlink()
         self.assertIn(old, self.start())
-        self.assertIs(self.binding()["storyboard_projection"], False)
+        self.assertEqual(self.binding()["capabilities"], {})
 
     def test_restart_and_resume_reuse_the_binding_with_no_request(self):
         self.start()
@@ -1025,6 +1082,44 @@ class Cli(Base):
         self.assertEqual(len(res.stdout.splitlines()), 120)
         reads = [b for t, b in self.fake.requests if t == "read-investigation-events"]
         self.assertEqual([(b["after"], b["limit"]) for b in reads], [(0, 50), (50, 50), (100, 50)])
+
+    def test_events_lists_by_class_and_never_prints_an_unknown_class(self):
+        self.fake.add("cue.added", {"text": "old cue"})                                   # an older server: no class
+        self.fake.add("cue.added", {"text": "new cue"}, cls="control")
+        self.fake.add("hypothesis.proposed", {"semantic_id": "hyp_a", "statement": "because"}, author=True,
+                      cls="semantic")
+        self.fake.add("owner_input.recorded", {"text": "SECRET OWNER TEXT"}, author=True, cls="owner_input")
+        self.fake.add("question.added", {"text": "classed oddly"}, cls="semantic")
+        res = self.cli("events", INV)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        lines = res.stdout.splitlines()
+        self.assertEqual(len(lines), 5)
+        self.assertTrue(lines[0].endswith(': "old cue"'), lines[0])
+        self.assertTrue(lines[1].endswith(': "new cue"'), lines[1])
+        self.assertIn("hypothesis.proposed hyp_a from user:u_sup (author)", lines[2])
+        self.assertIn('"because"', lines[2])
+        self.assertTrue(lines[3].startswith("#4 2026-10-06T12:00:00.000Z owner_input.recorded from user:u_sup"),
+                        lines[3])
+        self.assertTrue(lines[3].endswith(": [unknown class]"), lines[3])
+        self.assertNotIn("SECRET", res.stdout)
+        self.assertNotIn("classed oddly", lines[4])   # rendered as its class says (semantic), not as a text event
+        res = self.cli("events", INV, "--class", "semantic")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual([b.get("class") for t, b in self.fake.requests if t == "read-investigation-events"][-1],
+                         "semantic")
+        self.assertEqual(len(res.stdout.splitlines()), 2)
+        res = self.cli("events", INV, "--class", "owner_input")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("invalid choice", res.stderr)
+
+    def test_cli_choices_come_from_the_core_vocabularies(self):
+        res = self.cli("post", INV, "--type", "nudge", "--text", "x")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("choose from 'cue', 'question', 'challenge'", res.stderr)
+        res = self.cli("ack", INV, "1", "--disposition", "ignored")
+        self.assertIn("choose from 'accepted', 'declined', 'noted'", res.stderr)
+        res = self.cli("events", "--help")
+        self.assertIn("{control,semantic}", res.stdout)
 
     def test_ack_by_a_non_author_and_of_nothing_is_refused_in_words(self):
         self.fake.add("cue.added", {"text": "x"})

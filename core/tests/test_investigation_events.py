@@ -52,6 +52,8 @@ class FakeMaestro:
         self.status = None        # (status, body): every read refused with it
         self.max_ok_limit = None  # a larger page answers a truncated (non-JSON) body
         self.requests: list = []
+        self.hidden: set = set()
+        self.next_after = None    # overrides the answer's next_after
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -90,8 +92,15 @@ class FakeMaestro:
         evs = [e for e in self.events if e["seq"] > after and (to is None or e["to_session_id"] in (None, to))]
         if body.get("types"):
             evs = [e for e in evs if e["type"] in body["types"]]
-        evs = evs[:limit]
-        return 200, {"investigation_id": INV, "events": evs, "next_after": evs[-1]["seq"] if evs else after,
+        if body.get("class"):
+            evs = [e for e in evs if e.get("class") == body["class"]]
+        scanned = evs[:limit]
+        # self.hidden: seqs the server scans but does not show this caller
+        # (C1's known-type allowlist); next_after still moves past them.
+        evs = [e for e in scanned if e["seq"] not in self.hidden]
+        return 200, {"investigation_id": INV, "events": evs,
+                     "next_after": self.next_after if self.next_after is not None
+                     else scanned[-1]["seq"] if scanned else after,
                      "head_seq": max([e["seq"] for e in self.events], default=0)}
 
 
@@ -167,6 +176,59 @@ class Deliverable(unittest.TestCase):
         self.assertEqual([e["seq"] for e in ie.deliverable([spoof], SID, INV)], [1])
         # The author's principal from another session: not this session's own either.
         self.assertEqual([e["seq"] for e in ie.deliverable([event(2, session=SID2, author=True)], SID, INV)], [2])
+
+
+def classed(e, cls):
+    """`e` as a newer Cardinal sends it: with the server's `class`."""
+    return {**e, "class": cls}
+
+
+class EventClass(unittest.TestCase):
+    """Delivery and rendering go by the `class` the server stamps on every
+    event; an older Cardinal sends none, and the type lists decide."""
+
+    def test_the_wire_class_wins_and_the_type_lists_are_only_a_fallback(self):
+        self.assertEqual(ie.EVENT_CLASSES, ("control", "semantic"))
+        for type_ in ("cue.added", "question.added", "challenge.added", "acknowledged"):
+            self.assertEqual(ie.event_class(event(1, type_)), "control", type_)
+        for type_ in ie.SEMANTIC_TYPES:
+            self.assertEqual(ie.event_class(event(1, type_)), "semantic", type_)
+        for type_ in ("owner_input.recorded", "finding.added", None, 7):
+            self.assertIsNone(ie.event_class(event(1, type_)), type_)
+        self.assertEqual(ie.event_class(classed(event(1, "cue.added"), "control")), "control")
+        self.assertEqual(ie.event_class(classed(event(1, "cue.added"), "semantic")), "semantic")
+        # A class this client does not know (a newer Cardinal's), or a malformed one: unknown, whatever the type.
+        for cls in ("owner_input", "Control", "", 1, True, ["control"], {"c": 1}):
+            self.assertIsNone(ie.event_class(classed(event(1, "cue.added"), cls)), cls)
+        # null is no class: the type decides (as from an older Cardinal).
+        self.assertEqual(ie.event_class(classed(event(1, "cue.added"), None)), "control")
+        self.assertIsNone(ie.event_class("x"))
+
+    def test_an_older_server_without_class_still_delivers_by_type(self):
+        evs = [event(1), event(2, "cue.added"), ack(3, 1), event(4, "hypothesis.proposed",
+                                                                   payload={"semantic_id": "hyp_a", "text": "t"})]
+        self.assertNotIn("class", evs[0])
+        self.assertEqual([e["seq"] for e in ie.deliverable(evs, SID, INV)], [2])
+
+    def test_only_control_class_is_delivered(self):
+        evs = [classed(event(1), "control"), classed(event(2, "cue.added"), "control"),
+               # An unknown class with a text payload and a deliverable type: never delivered.
+               classed(event(3, "owner_input.recorded", "fix the login bug"), "owner_input"),
+               classed(event(4, "cue.added", "reclassified by a newer server"), "owner_input"),
+               classed(event(5, "question.added"), "semantic"),
+               classed(event(6, "hypothesis.proposed", payload={"semantic_id": "hyp_a", "text": "x"}), "semantic")]
+        self.assertEqual([e["seq"] for e in ie.deliverable(evs, SID, INV)], [1, 2])
+        # An `acknowledged` of an unknown class does not hide what it names.
+        evs = [classed(event(1), "control"), classed(ack(2, 1), "future")]
+        self.assertEqual([e["seq"] for e in ie.deliverable(evs, SID, INV)], [1])
+        self.assertEqual(ie.deliverable([classed(event(1), "control"), classed(ack(2, 1), "control")], SID, INV), [])
+
+    def test_render_leaves_out_anything_but_control_cue_question_challenge(self):
+        out = ie.render([classed(event(1, text="advice"), "control"),
+                         classed(event(2, "owner_input.recorded", "SECRET OWNER TEXT"), "owner_input")], SID, INV)
+        self.assertIn("event #1 ·", out)
+        self.assertNotIn("SECRET OWNER TEXT", out)
+        self.assertNotIn("#2", out)
 
 
 class Render(unittest.TestCase):
@@ -409,6 +471,44 @@ class Check(Base):
         self.assertIn("event #5 ·", out)
         self.assertIsNone(self.check(stop=True, stop_hook_active=True))
         self.assertEqual(ie.read_binding(self.home, SID)["stop_blocks"], 0)
+
+    def test_an_unknown_class_is_never_delivered_and_the_cursor_moves_past_it(self):
+        self.fake.events = [classed(event(1, "owner_input.recorded", "SECRET OWNER TEXT"), "owner_input"),
+                            classed(event(2, "hypothesis.proposed", payload={"semantic_id": "hyp_a"}), "semantic")]
+        ie.bind(self.home, SID, INV, "auto")
+        self.assertIsNone(self.check())
+        self.assertEqual(self.cursor(), 2)
+        self.fake.events.append(classed(event(3, text="a cue"), "control"))
+        out = self.check()
+        self.assertIn("event #3 ·", out)
+        self.assertNotIn("SECRET OWNER TEXT", out)
+        self.assertEqual(self.cursor(), 3)
+
+    def test_the_cursor_moves_past_rows_the_server_scanned_but_does_not_show(self):
+        # C1's known-type allowlist: rows this caller cannot see are skipped,
+        # and next_after is the last seq scanned, so the cursor reaches the head.
+        self.fake.events = [event(1), event(2, session=SID, author=True), event(3, session=SID, author=True)]
+        self.fake.hidden = {2, 3}
+        ie.bind(self.home, SID, INV, "auto")
+        self.assertIn("event #1 ·", self.check())
+        self.assertEqual(self.cursor(), 3)
+        self.assertEqual(ie.read_events(self.fake.conn, INV, after=0, client="t")["last_seq"], 3)
+        # A next_after past the head, behind the page or not an int is not trusted.
+        self.fake.hidden = set()
+        for bogus, want in ((99, 3), (0, 3), (True, 3), ("3", 3)):
+            self.fake.next_after = bogus
+            self.assertEqual(ie.read_events(self.fake.conn, INV, after=0, client="t")["last_seq"], want, bogus)
+
+    def test_class_filter_is_sent_and_checked(self):
+        self.fake.events = [classed(event(1), "control"),
+                            classed(event(2, "hypothesis.proposed", payload={"semantic_id": "hyp_a"}), "semantic")]
+        page = ie.read_events(self.fake.conn, INV, after=0, client="t", class_="semantic")
+        self.assertEqual([e["seq"] for e in page["events"]], [2])
+        self.assertEqual(self.fake.requests[-1][1]["class"], "semantic")
+        ie.read_events(self.fake.conn, INV, after=0, client="t")
+        self.assertNotIn("class", self.fake.requests[-1][1])
+        with self.assertRaises(ie.ist.FetchError):
+            ie.read_events(self.fake.conn, INV, after=0, client="t", class_="owner_input")
 
     def test_paginates_to_the_head(self):
         self.fake.events = [event(s, session=SID, author=True) for s in range(1, 46)] + [event(46)]

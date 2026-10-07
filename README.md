@@ -51,10 +51,13 @@ per-session background poller, so a tool call never waits on the network.
 When its understanding materially changes, the session checkpoints it to the
 same ordered stream (`cardinal-storyboard investigation checkpoint`: sparse,
 batched hypothesis / experiment / finding / decision / question events, each
-the agent's claim, never a fact or owner authority). A Cardinal that answers
-`storyboard_projection: {enabled: true}` keeps the live storyboard up to date
-from those checkpoints itself, and the session is told no storyboard step is
-needed; any other keeps the skill-driven flow below.
+the agent's claim, never a fact or owner authority). A Cardinal that
+advertises `capabilities: {projection: {enabled: true}}` keeps the live
+storyboard up to date from those checkpoints itself, and the session is told no
+storyboard step is needed; any other keeps the skill-driven flow below. Events
+are delivered and listed by the `class` Cardinal stamps on each one (`control`
+or `semantic`; an older Cardinal without it: by type); an event of a class this
+plugin does not know is never delivered to the model.
 Claude also ships two model-invocable skills for Cardinal's Investigation
 Storyboards: [`/cardinal:storyboard`](adapters/claude/skills/storyboard/README.md)
 improves, frames and publishes that live storyboard (evidence-bound, scene by

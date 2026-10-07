@@ -339,7 +339,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
         self.assertIn("`cardinal-storyboard investigation link`", readme)
 
     def test_the_skill_defers_to_automatic_projection_only_when_cardinal_projects(self):
-        # Plugin 0.44.0: a Cardinal that answers storyboard_projection.enabled
+        # Plugin 0.44.0: a Cardinal that advertises capabilities.projection.enabled
         # keeps the live storyboard up to date from the checkpoints, and the
         # session-start context says so; everywhere else (prod without the
         # projector) the skill's explain / hand off / post-mortem trigger is
