@@ -1,10 +1,11 @@
 # Deployed behavior product loop
 
-This opt-in Cardinal Claude MCP bridge uses the accepted investigator DiagnosticVersion
-from LakeRunner PR #1892. It submits to the deployed API and observes committed
+This opt-in Cardinal Claude MCP bridge uses a configured accepted DiagnosticVersion.
+It submits to the deployed API and observes committed
 findings. It imports no evaluator, trace adapter, compiler runtime, or local fixture.
 Claude selects the existing accepted contract; this preview does not compile new
-behaviors. MATCH means a readiness statement occurred before `submit_report`, not
+behaviors. The default is the investigator version from LakeRunner PR #1892:
+MATCH means a readiness statement occurred before `submit_report`, not
 that the investigator's evidence was actually insufficient.
 
 Create a private runtime configuration from `config.example.json`. `headers_file`
@@ -13,6 +14,19 @@ set `api_key_env` to an environment variable containing the Cardinal API key (de
 `CARDINAL_MCP_API_KEY`), or `internal_key_env` for an internal key. Keys are never
 returned to the model. The private output directory retains execution receipts and
 the expandable evidence Storyboard. Keep it outside the source repository.
+
+For another compiled and accepted diagnostic registered with the deployed backend,
+set `diagnostic_version`, `population` (the exact service name), `description`, and
+`artifacts` (a directory containing the accepted `versions/` and `previews/`).
+Set `adapter_sha256` when it differs from the profile digest. An optional
+`compile_receipt_ref` identifies the prior compilation receipt in the selection
+response. Compilation and acceptance happen before registration; this bridge
+selects and executes the resulting immutable version.
+
+The Megan trial uses this configuration to check whether an analytics answer offers
+visitor-behavior explanations that its retrieved reports do not establish, including
+hedged explanations as review candidates. MATCH semantics come from the selected
+contract, rather than the investigator default.
 
 Use this source checkout's `adapters/claude/bin/cardinal-behavior --config /absolute/config.json`
 as the command and arguments of an optional Claude MCP server named `cardinal-behavior`.
@@ -35,8 +49,8 @@ coverage gaps, and execution status. Raw records, JEV receipts, result locations
 and worker details stay in private host files and the expandable HTML artifact.
 
 The renderer reuses the HTML body from the proven `experiments/behavior_stream.py`
-prototype with a deployed receipt loader. The version and preview are copied
-unchanged from PR #1892's accepted artifacts and verified by their content hashes.
+prototype with a deployed receipt loader. The selected version and preview are
+verified by their content hashes; the default artifacts are copied from PR #1892.
 Each result must identify that version, UDF, profile, and adapter. Rendering requires
 all population results and matching final counts. Polling never evaluates traces
 and uses the server's cursor unchanged.
