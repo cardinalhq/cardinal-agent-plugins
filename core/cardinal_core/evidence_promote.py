@@ -22,6 +22,10 @@ Commands (main()):
   show ev_...                the scrubbed entry exactly as promote would cite it
   off | on | status
 
+promote_cited() is the same upload for the ev_ ids an investigation
+checkpoint cites (cardinal_core.investigation_events.checkpoint): only those,
+and none at all when one of them is withheld or not on this machine.
+
 Each adapter supplies a PromoteAdapter: its client string, how to find the
 Cardinal connection (URL + key), which environment variables name the
 current session, and how to tell the user to reconnect.
@@ -41,6 +45,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import http.client
+import io
 import json
 import os
 import re
@@ -392,10 +397,7 @@ def pick_storyboard(root: Path, entries: dict) -> tuple:
 
 def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, opener=None, sleep=time.sleep,
                 now=None) -> int:
-    home = home_dir()
-    root = evidence.default_root(home)
     prog = adapter.prog
-
     ids = []
     for raw in args.evidence_ids:
         if not evidence.EVIDENCE_ID_RE.match(raw):
@@ -407,7 +409,25 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
     if sb is not None and not evidence.STORYBOARD_ID_RE.match(sb):
         err.write(f"{prog}: not a storyboard id: {clip(sb, 80)!r} (expected sb_ + 24 hex)\n")
         return EXIT_FAILED
+    try:
+        results, sb, reused = promote_ids(ids, sb, adapter, force=getattr(args, "force", False), err=err,
+                                          opener=opener, sleep=sleep, now=now)
+    except PromoteError as e:
+        err.write(f"{prog}: {e}\n")
+        return EXIT_FAILED
+    return report(ids, results, out, err, sb, reused)
 
+
+def promote_ids(ids: list, sb: Optional[str], adapter: PromoteAdapter, *, force: bool = False, err=sys.stderr,
+                opener=None, sleep=time.sleep, now=None) -> tuple:
+    """The upload behind `promote`: (results, storyboard_id, reused), where
+    results maps each id to ("ok", receipt_id, what) or ("error", code,
+    message). `ids` are distinct, well-formed ev_ ids. A refusal of the
+    whole promotion before anything is sent (no storyboard to promote into,
+    not connected, another org, no credential) raises PromoteError. Only
+    the entries named are read and uploaded; a withheld one never is."""
+    home = home_dir()
+    root = evidence.default_root(home)
     results: dict = {}
     entries: dict = {}
     for ev_id in ids:
@@ -424,29 +444,26 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
             entries[ev_id] = entry
 
     if not entries:
-        return report(ids, results, out, err)
+        return results, sb, 0
     if sb is None:
         sb, why = pick_storyboard(root, entries)
         if sb is None:
-            err.write(f"{prog}: " + why + "\n")
-            return EXIT_FAILED
+            raise PromoteError(why)
 
     # Already promoted into this storyboard: print the receipt it got, send nothing.
     reused = 0
-    if not getattr(args, "force", False):
+    if not force:
         for ev_id in list(entries):
             prior = evidence.promoted_receipt(root, entries[ev_id].get("session_id"), sb, ev_id, now)
             if prior:
                 results[ev_id] = ("ok", prior, f"{summary_of(entries.pop(ev_id))}, captured, already promoted")
                 reused += 1
     if not entries:
-        return report(ids, results, out, err, sb, reused)
+        return results, sb, reused
 
     conn = adapter.connection(home, dict(os.environ))
     if not conn:
-        err.write(f"{prog}: not connected to Cardinal (no usable Cardinal MCP URL): run "
-                  f"{adapter.connect_hint}\n")
-        return EXIT_FAILED
+        raise PromoteError(f"not connected to Cardinal (no usable Cardinal MCP URL): run {adapter.connect_hint}")
 
     token = None
     for _, _, rec in evidence.find_tokens(root, sb):
@@ -455,23 +472,20 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
             break
     org = token["org"] if token else conn.get("org")
     if token and conn.get("org") and conn["org"] != token["org"]:
-        err.write(f"{prog}: storyboard {sb} was created in org {token['org']}, but this agent is "
-                  f"connected to org {conn['org']}: reconnect to that org ({adapter.reconnect_hint})\n")
-        return EXIT_FAILED
+        raise PromoteError(f"storyboard {sb} was created in org {token['org']}, but this agent is "
+                           f"connected to org {conn['org']}: reconnect to that org ({adapter.reconnect_hint})")
     if not org:
-        err.write(f"{prog}: no org for storyboard {sb}: the Cardinal MCP URL names none and no evidence "
-                  "token was stored for it (call storyboard__preview to get a fresh one)\n")
-        return EXIT_FAILED
+        raise PromoteError(f"no org for storyboard {sb}: the Cardinal MCP URL names none and no evidence "
+                           "token was stored for it (call storyboard__preview to get a fresh one)")
     auths = []
     if token:
         auths.append(("token", {"Authorization": "CardinalEvidence " + token["evidence_token"]}))
     if conn.get("key"):
         auths.append(("key", {"X-CardinalHQ-API-Key": conn["key"]}))
     if not auths:
-        err.write(f"{prog}: no credential for storyboard {sb}: no live evidence token was stored "
-                  f"for it (call storyboard__preview for a fresh one) and there is no Cardinal MCP key "
-                  f"(run {adapter.connect_hint})\n")
-        return EXIT_FAILED
+        raise PromoteError(f"no credential for storyboard {sb}: no live evidence token was stored "
+                           f"for it (call storyboard__preview for a fresh one) and there is no Cardinal MCP key "
+                           f"(run {adapter.connect_hint})")
 
     rows = []
     for ev_id in ids:
@@ -511,7 +525,7 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
         if answer is None:
             # A whole-request refusal (auth, org, a published storyboard) would
             # refuse every later batch the same way: stop here.
-            err.write(f"{prog}: upload to {sb} failed: {failure}\n")
+            err.write(f"{adapter.prog}: upload to {sb} failed: {failure}\n")
             for rest in planned[bi:]:
                 for ev_id, _, _ in rest:
                     results[ev_id] = ("error", "not_uploaded", str(failure))
@@ -538,9 +552,58 @@ def cmd_promote(args, adapter: PromoteAdapter, out=sys.stdout, err=sys.stderr, o
             evidence.record_promoted(root, session, sb, receipts, now)
         except (OSError, ValueError) as e:
             # The receipts are minted and printed; only the reuse is lost.
-            err.write(f"{prog}: could not record the promotion locally ({type(e).__name__}); "
+            err.write(f"{adapter.prog}: could not record the promotion locally ({type(e).__name__}); "
                       "promoting these entries again would upload them again\n")
-    return report(ids, results, out, err, sb, reused)
+    return results, sb, reused
+
+
+def promote_cited(ids: list, storyboard_id: str, adapter: PromoteAdapter, *, opener=None, sleep=time.sleep,
+                  now=None) -> dict:
+    """{ev_id: rcpt_id} for captured entries a caller explicitly cites
+    (an investigation checkpoint's evidence), promoted into `storyboard_id`
+    through promote_ids, the path `promote` takes: the same "upload only
+    what is cited" rule, nothing else is read or sent.
+
+    Every id is checked on this machine first (well formed, in the spool,
+    not a withheld stub); if any is not, PromoteError names each one and
+    NOTHING is uploaded. An entry already promoted into that storyboard
+    reuses its receipt. If any upload fails, PromoteError names it (the
+    entries that did upload keep their receipts and are reused next time)."""
+    if not evidence.STORYBOARD_ID_RE.match(storyboard_id or ""):
+        raise PromoteError("no storyboard to promote the cited ev_ evidence into: cite rcpt_ receipts instead",
+                           code="no_storyboard")
+    root = evidence.default_root(home_dir())
+    wanted, bad = [], []
+    for ev_id in ids:
+        if not isinstance(ev_id, str) or not evidence.EVIDENCE_ID_RE.match(ev_id):
+            bad.append(f"{clip(ev_id, 40)}: not an evidence id (ev_ + 12 hex)")
+            continue
+        if ev_id in wanted:
+            continue
+        entry = evidence.read_entry(root, ev_id)
+        if entry is None or entry.get("evidence_id") != ev_id:
+            bad.append(f"{ev_id}: not in this machine's evidence spool (captured elsewhere, removed after 14 days, "
+                       "or capture was off)")
+        elif is_withheld(entry):
+            bad.append(f"{ev_id}: {withheld_reason(entry)}; nothing of that call was kept, so it cannot be cited")
+        else:
+            wanted.append(ev_id)
+    if bad:
+        raise PromoteError("; ".join(bad), code="evidence_not_citable")
+    if not wanted:
+        return {}
+    results, _, _ = promote_ids(wanted, storyboard_id, adapter, err=io.StringIO(), opener=opener, sleep=sleep,
+                                now=now)
+    out, failed = {}, []
+    for ev_id in wanted:
+        kind, a, b = results.get(ev_id, ("error", "not_uploaded", ""))
+        if kind == "ok":
+            out[ev_id] = a
+        else:
+            failed.append(f"{ev_id}: {a}: {clip(b, 200)}")
+    if failed:
+        raise PromoteError("; ".join(failed), code="promote_failed")
+    return out
 
 
 def summary_of(entry: dict) -> str:
