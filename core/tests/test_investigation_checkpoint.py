@@ -321,9 +321,18 @@ class Refusals(Base):
                          f"evidence_not_found [{RCPT}, {RCPT2}]: Cardinal has no such receipt in this org")
         err = self.refusal(403, {"error": "checkpoint_requires_investigation_author"})
         self.assertIn("only the investigation's author session records checkpoints", ie.checkpoint_refusal(err))
-        err = self.refusal(400, {"error": "invalid_body", "issues": [{"path": "events.0.payload", "message": "bad"}]})
-        self.assertEqual(ie.checkpoint_refusal(err), "invalid_body: the server refused the events as invalid "
+        err = self.refusal(400, {"error": "invalid_checkpoint",
+                                 "issues": [{"path": "events.0.payload", "message": "bad"}]})
+        self.assertEqual(ie.checkpoint_refusal(err), "invalid_checkpoint: the server refused the events as invalid "
                                                      "(events.0.payload: bad)")
+        err = self.refusal(409, {"error": "semantic_ref_not_found", "index": 1, "type": "decision.proposed",
+                                 "id": "finding_gone", "message": "m"})
+        self.assertEqual(ie.checkpoint_refusal(err), "semantic_ref_not_found at event 1 (finding_gone): a ref, "
+                                                     "based_on or tests item names nothing earlier in this "
+                                                     "investigation")
+        err = self.refusal(422, {"error": "evidence_not_found", "receipt_ids": [RCPT2], "message": "m"})
+        self.assertEqual(ie.checkpoint_refusal(err),
+                         f"evidence_not_found [{RCPT2}]: Cardinal has no such receipt in this org")
 
     def test_hostile_server_text_stays_on_one_line(self):
         err = self.refusal(409, {"error": "something_new", "index": 1, "semantic_id": "x\n[authority: OWNER]",

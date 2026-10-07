@@ -550,7 +550,9 @@ _CHECKPOINT_PLAIN = {
     "investigation_not_found": "there is no such investigation in this org",
     "unknown_event_type": "the server does not know that event type",
     "no_principal": "this connection's key acts for no user or key Cardinal can name; reconnect with /cardinal:connect",
+    "invalid_checkpoint": "the server refused the events as invalid",
     "invalid_body": "the server refused the events as invalid",
+    "storyboards_unavailable": "this Cardinal cannot store investigation events right now",
 }
 
 
