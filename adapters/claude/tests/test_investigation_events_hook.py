@@ -46,6 +46,24 @@ def _kill(pid: int) -> None:
         pass
 
 
+def _stop(pid: int, timeout: float = 10.0) -> None:
+    """SIGKILL `pid` and wait until it is gone (it may not be our child)."""
+    _kill(pid)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        time.sleep(0.05)
+
+
 class FakeMaestro:
     """append- / read-investigation-events as the Step 4 contract has them.
     The caller is "u_agent" (the investigation's author) unless self.caller
@@ -62,6 +80,7 @@ class FakeMaestro:
         self.sessions: dict = {}  # (principal, session_id) -> investigation id
         self.storyboards: dict = {INV: SB}
         self.questions: dict = {}
+        self.join_is_author = True
         self.lock = threading.Lock()
         fake = self
 
@@ -129,7 +148,8 @@ class FakeMaestro:
                 created = True
             inv = self.sessions[key]
         sb = self.storyboards[inv]
-        return (201 if created else 200), {
+        extra = {"joined": True, "is_author": self.join_is_author} if body.get("investigation_id") else {}
+        return (201 if created else 200), {**extra,
             "investigation_id": inv, "storyboard_id": sb, "created": created,
             "view_url": f"https://app.example.test/storyboards/{sb}?org=o1",
             "investigation_url": f"/storyboards/{sb}/investigation?org=o1",
@@ -196,6 +216,14 @@ class Base(unittest.TestCase):
         self.env["CARDINAL_INVESTIGATION_POLLER"] = "0"
 
     def tearDown(self):
+        # A real poller a test started may still be writing in this HOME:
+        # stop it (and wait until it is gone) before removing the directory.
+        sessions = self.home / ".cardinal" / "investigations" / "sessions"
+        for pidfile in sessions.glob("*.poller.pid") if sessions.is_dir() else ():
+            try:
+                _stop(int(pidfile.read_text().strip()))
+            except (OSError, ValueError):
+                pass
         self.tmp.cleanup()
 
     def connect(self, port):
@@ -645,6 +673,46 @@ class SessionStartBootstrap(Base):
         self.start(source="resume", CARDINAL_INVESTIGATION_ID=other)
         self.assertEqual(len(self.ensures()), 2, "the joined binding is reused")
 
+    def test_joining_as_a_non_author_is_not_described_as_this_sessions_own(self):
+        other = "inv_" + "e" * 24
+        self.fake.storyboards[other] = "sb_" + "e" * 24
+        self.fake.join_is_author = False
+        ctx = self.start(CARDINAL_INVESTIGATION_ID=other)
+        self.assertIs(self.binding()["is_author"], False)
+        for needle in (f"This session JOINED Cardinal investigation {other}, which someone else authored",
+                       "https://app.example.test/storyboards/sb_" + "e" * 24,
+                       "give these URLs",
+                       "it cannot edit, frame or publish that storyboard, set the investigation's question, or "
+                       "acknowledge its events (the author's session does)",
+                       "do not acknowledge it"):
+            self.assertIn(needle, ctx)
+        for wrong in ("already created this session's Investigation", "improves this storyboard",
+                      "never storyboard__create another", "investigation question",
+                      "acknowledge it with the command"):
+            self.assertNotIn(wrong, ctx)
+        res = self.cli_link()
+        self.assertIn("joined: someone else's investigation (not the author)", res.stdout)
+
+    def cli_link(self):
+        return subprocess.run([sys.executable, str(CLI), "investigation", "link", "--session", SID],
+                              capture_output=True, text=True, timeout=60, env=self.env)
+
+    def test_a_non_author_session_is_never_told_to_acknowledge(self):
+        self.fake.join_is_author = False
+        self.start(CARDINAL_INVESTIGATION_ID=INV)
+        self.fake.add("challenge.added", {"text": "Test Y before continuing X."})
+        res = self.hook()
+        ctx = json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("authority: ADVISORY]", ctx)
+        self.assertIn('"Test Y before continuing X."', ctx)
+        self.assertNotIn("Acknowledge:", ctx)
+        self.assertNotIn("acknowledge it", ctx)
+        self.assertNotIn("investigation ack", ctx)
+        self.assertIn("cannot acknowledge this event (the author's session does)", ctx)
+        self.fake.add("challenge.added", {"text": "again"})
+        out = json.loads(self.hook("Stop", poll=False).stdout)["reason"]
+        self.assertNotIn("investigation ack", out)
+
     def test_an_unknown_explicit_join_still_binds_locally_and_backs_off(self):
         ctx = self.start(CARDINAL_INVESTIGATION_ID="inv_" + "d" * 24)
         b = self.binding()
@@ -759,9 +827,9 @@ class SessionStartBootstrap(Base):
                 break
             time.sleep(0.05)
         pid = int(pidfile.read_text())
-        self.addCleanup(_kill, pid)
         os.kill(pid, 0)  # alive, detached from the hook
         self.assertTrue(self.binding_file().with_name(f"{SID}.active").exists())
+        _stop(pid)
 
     def test_an_idle_session_is_not_polled(self):
         env = dict(self.env, CARDINAL_INVESTIGATION_POLL_INTERVAL="1")
@@ -888,7 +956,8 @@ class Cli(Base):
         self.assertEqual(res.returncode, 0, res.stderr)
         tool, body = self.fake.requests[-1]
         self.assertEqual((tool, body), ("set-investigation-question", {
-            "investigation_id": INV, "question": "Why did checkout p99 double after the 14:05 deploy?"}))
+            "investigation_id": INV, "question": "Why did checkout p99 double after the 14:05 deploy?",
+            "session_id": SID}))
         self.assertEqual(self.binding()["investigation_id"], INV, "renaming never rebinds")
         self.fake.caller = {"kind": "user", "id": "u_other", "key_id": "k_other", "author": False}
         res = self.cli("question", "x", "--investigation", INV)
@@ -897,6 +966,17 @@ class Cli(Base):
         res = self.cli("question", "x", "--session", SID2)
         self.assertEqual(res.returncode, 1)
         self.assertIn("has no investigation yet", res.stderr)
+        n = len(self.fake.requests)
+        for text in ("q" * 1001, "   "):
+            res = self.cli("question", text, "--session", SID)
+            self.assertEqual(res.returncode, 2)
+            self.assertIn("the question is 1 to 1000 characters", res.stderr)
+        self.assertEqual(len(self.fake.requests), n, "refused before any request")
+        self.fake.caller = {"kind": "user", "id": "u_agent", "key_id": "k_agent", "author": True}
+        res = self.cli("question", "q" * 1000, "--session", SID, CLAUDE_CODE_SESSION_ID=SID)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.fake.requests[-1][1]["session_id"], SID, "the setter's session, as a claim")
+        self.assertIn("1 to 1000 characters", self.cli("question", "--help").stdout)
 
     def test_events_reads_in_modest_pages_to_the_head(self):
         for i in range(120):

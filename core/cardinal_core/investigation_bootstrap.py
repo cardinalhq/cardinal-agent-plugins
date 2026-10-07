@@ -253,7 +253,12 @@ def _ensure(home, sid, conn, client, wanted, started_at, opener, timeout, force,
                 ie._ensure_dirs(home)
                 ie.write_json(pending_path(home, sid), failed)
             return {"status": "failed", "binding": b, "error": failed["last_error"], "reason": failed["reason"]}
+        # Joining someone else's investigation is not authoring it: the server
+        # says so (is_author on a join); an unknown answer to a join counts as
+        # not the author. A session's own (created) investigation is its own.
+        is_author = out.get("is_author") if isinstance(out.get("is_author"), bool) else join is None
         fields = {
+            "is_author": is_author,
             "storyboard_id": out.get("storyboard_id"),
             "view_url": safe_url(out.get("view_url"), conn.get("origin")),
             "investigation_url": safe_url(out.get("investigation_url"), conn.get("origin")),
@@ -302,4 +307,5 @@ def describe(binding: Optional[dict]) -> dict:
         "view_url": safe_url(b.get("view_url"), None),
         "investigation_url": safe_url(b.get("investigation_url"), None),
         "bootstrap_status": st.get("status"),
+        "is_author": b.get("is_author") is not False,
     }

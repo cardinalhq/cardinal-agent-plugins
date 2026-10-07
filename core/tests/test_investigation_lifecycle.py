@@ -31,6 +31,7 @@ class LifecycleMaestro(FakeMaestro):
         super().__init__()
         self.ensure_answer = None   # (status, body[, headers]) to answer every ensure with
         self.sessions: dict = {}
+        self.join_is_author = True
 
     def answer(self, tool, body):
         if tool != "ensure-session-investigation":
@@ -46,7 +47,8 @@ class LifecycleMaestro(FakeMaestro):
             inv = self.sessions[body["session_id"]]
         elif inv != INV:
             return 404, {"error": "investigation_not_found"}
-        return (201 if created else 200), {
+        extra = {"joined": True, "is_author": self.join_is_author} if body.get("investigation_id") else {}
+        return (201 if created else 200), {**extra,
             "investigation_id": inv, "storyboard_id": SB, "created": created,
             "view_url": f"https://app.example.test/storyboards/{SB}?org=o1",
             "investigation_url": f"/storyboards/{SB}/investigation?org=o1",
@@ -168,6 +170,33 @@ class PruneTests(Base):
         self.assertEqual(boot.ensure(self.home, SID, self.fake.conn, "c", force=True)["status"], "unsupported")
         self.assertFalse(boot.needs_retry(self.home, SID))
         self.assertEqual(ip.run(self.home, SID, connection=lambda: self.fake.conn, client="c", tick=0.01), "unbound")
+
+
+class AuthorshipTests(Base):
+    def test_own_session_investigation_is_authored(self):
+        b = boot.ensure(self.home, SID, self.fake.conn, "c")["binding"]
+        self.assertIs(b["is_author"], True)
+        self.assertTrue(ie.can_ack(b))
+
+    def test_joining_someone_elses_investigation_is_not_authoring_it(self):
+        self.fake.join_is_author = False
+        b = boot.ensure(self.home, SID, self.fake.conn, "c", wanted=INV)["binding"]
+        self.assertIs(b["is_author"], False)
+        self.assertFalse(boot.describe(b)["is_author"])
+        self.fake.events = [event(1, text="Test Y first.")]
+        ie.poll_once(self.home, SID, self.fake.conn, "c")
+        self.assertTrue(ie.deliver_inbox(self.home, SID, self.emit))
+        self.assertNotIn("Acknowledge:", self.emitted[0])
+        self.assertNotIn("acknowledge it", self.emitted[0])
+        self.assertNotIn("investigation ack", self.emitted[0])
+        self.assertIn("cannot acknowledge this event (the author's session does)", self.emitted[0])
+        self.assertIn("authority: ADVISORY]", self.emitted[0])
+
+    def test_a_join_without_an_answer_counts_as_not_the_author(self):
+        self.fake.ensure_answer = (200, {"investigation_id": INV, "storyboard_id": SB, "view_url": None,
+                                         "investigation_url": None})
+        b = boot.ensure(self.home, SID, self.fake.conn, "c", wanted=INV)["binding"]
+        self.assertIs(b["is_author"], False)
 
 
 class InboxTests(Base):

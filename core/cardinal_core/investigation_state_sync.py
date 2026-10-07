@@ -373,18 +373,27 @@ def ensure_session_investigation(conn: dict, session_id: str, *, investigation_i
     return out
 
 
+MAX_INVESTIGATION_QUESTION = 1000  # set-investigation-question: the storyboard's own bound
+
+
 def set_investigation_question(conn: dict, investigation_id: str, question: str, *, client: str,
-                               opener=None) -> dict:
+                               session_id: Optional[str] = None, opener=None) -> dict:
     """maestro set-investigation-question: the investigation's question (and
     its live storyboard's draft question while no act is published). The
-    server records who set it; the client claims no authority."""
+    server records who set it; the client claims no authority (session_id
+    is recorded as the setter's CLAIMED session)."""
     _check_investigation_id(investigation_id)
-    if not isinstance(question, str) or not question.strip() or len(question) > MAX_QUESTION:
-        raise ist.FetchError(f"the question is required, at most {MAX_QUESTION} characters")
+    if not isinstance(question, str) or not question.strip():
+        raise ist.FetchError("the question is required")
+    if len(question) > MAX_INVESTIGATION_QUESTION:
+        raise ist.FetchError(f"the question is at most {MAX_INVESTIGATION_QUESTION} characters "
+                             f"(this one has {len(question)})")
     if any(ord(c) < 32 and c not in "\n\t" for c in question):
         raise ist.FetchError("the question may not contain control characters other than newline and tab")
-    out = _post(conn, "set-investigation-question", {"investigation_id": investigation_id, "question": question},
-                client=client, opener=opener)
+    body: dict = {"investigation_id": investigation_id, "question": question}
+    if session_id is not None and SESSION_ID_RE.match(session_id):
+        body["session_id"] = session_id
+    out = _post(conn, "set-investigation-question", body, client=client, opener=opener)
     if out.get("investigation_id") not in (None, investigation_id):
         raise ist.FetchError("set-investigation-question answered for another investigation")
     return out
