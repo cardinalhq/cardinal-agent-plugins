@@ -340,33 +340,16 @@ class CitedEvidence(CheckpointBase):
             if (self.home / ".cardinal" / "evidence" / SID).exists() else set()
         self.assertEqual(after, before)
 
-    def test_a_command_that_also_checkpoints_keeps_the_rest_as_evidence(self):
-        # The Phase-1 gate: the worker's decisive code read shared one Bash
-        # command with the control-log CLI and was lost. The CLI records what
-        # it printed; the capture keeps the rest without the CLI's part.
+    def test_a_command_combined_with_the_control_cli_is_still_never_captured(self):
+        # The Phase-1 gate lost the worker's code read because it shared one
+        # Bash command with `investigation question`. Salvaging the rest was
+        # reviewed and rejected (its output cannot be attributed safely), so
+        # the call stays uncaptured and the guidance says to run the CLI on
+        # its own instead.
         self.start()
-        res = self.ckpt(EVENTS[:1], "--session", SID)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        link = subprocess.run([sys.executable, str(CLI), "investigation", "link", "--session", SID],
-                              capture_output=True, text=True, timeout=60, env=self.env)
-        self.assertEqual(link.returncode, 0, link.stderr)
-        code = "def load_settings(path):\n    SETTINGS.update(json.load(open(path)))\n"
-        cmd = (f"cardinal-storyboard investigation link --session {SID}; cat ledgerkit/config.py && "
-               f"cardinal-storyboard investigation checkpoint --session {SID} <<'EOF'\n{json.dumps(EVENTS[:1])}\nEOF")
-        ev = self.capture(cmd, link.stdout + code + res.stdout, "toolu_mixed")
-        self.assertIsNotNone(ev)
-        (path,) = (self.home / ".cardinal" / "evidence" / SID).glob(f"{ev}.json")
-        entry = json.loads(path.read_text())
-        text = json.dumps(entry)
-        self.assertIn("SETTINGS.update(json.load(open(path)))", text)
-        for gone in ("checkpointed", "hyp_s3", SB, "cardinal-storyboard", "contradicted"):
-            self.assertNotIn(gone, text)
-        self.assertEqual(entry["result"]["structured"]["stdout"], code)
-        # The receipt it becomes is citable: a checkpoint can cite it.
-        out = self.ckpt([{"type": "finding.proposed", "id": "finding_m", "statement": "s", "evidence": [ev]}],
-                        "--session", SID)
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(len(self.fake.uploads), 1)
+        got = self.capture('cardinal-storyboard investigation question "Why?" ; cat ledgerkit/config.py',
+                           'investigation inv_x now asks: "Why?"\nSETTINGS.update(...)\n', "toolu_mixed")
+        self.assertIsNone(got)
 
 
 class Guidance(CheckpointBase):
@@ -380,8 +363,9 @@ class Guidance(CheckpointBase):
         start = ctx.index(CHECKPOINT_SENTENCE)
         line = ctx[start:]
         # v3 was 894 characters with a UUID; v3.1 (cite the evidence that
-        # shows the mechanism, plugin 0.44.0) is 998.
-        self.assertLess(len(line), 1000)
+        # shows the mechanism; run the control CLI on its own, plugin 0.44.0)
+        # is 1092.
+        self.assertLess(len(line), 1100)
         self.assertEqual(len(SID), 36)
         for needle in (f"`cardinal-storyboard investigation checkpoint --session {SID}`",
                        "someone may need to take it over mid-way", "materially changes",
@@ -391,6 +375,8 @@ class Guidance(CheckpointBase):
                        "Write each entry for a reader who sees only the record: say why, not just what",
                        "citing the ev_ that shows each claim (for a cause, the code/config/history read, not only "
                        "the symptom)",
+                       "Run cardinal-storyboard commands on their own: a command combined with one is never "
+                       "captured.",
                        "`--help`", "not private reasoning", "routine tool use", "unchanged knowledge",
                        "your claims, not established facts"):
             self.assertIn(needle, line)

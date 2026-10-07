@@ -147,6 +147,18 @@ class BootstrapTests(Base):
             self.assertIsNone(boot.safe_url(bad, o), bad)
 
 
+class ProjectionCapabilityTests(unittest.TestCase):
+    def test_only_an_explicit_enabled_true_counts(self):
+        self.assertTrue(boot.projection_enabled({"storyboard_projection": {"enabled": True}}))
+        for answer in ({}, {"storyboard_projection": None}, {"storyboard_projection": True},
+                       {"storyboard_projection": {"enabled": False}}, {"storyboard_projection": {"enabled": "true"}},
+                       {"storyboard_projection": {"enabled": 1}}, None, "x"):
+            self.assertFalse(boot.projection_enabled(answer), answer)
+        self.assertIs(boot.describe({"storyboard_projection": True})["storyboard_projection"], True)
+        self.assertIs(boot.describe({})["storyboard_projection"], False)
+        self.assertIs(boot.describe({"storyboard_projection": "yes"})["storyboard_projection"], False)
+
+
 class PruneTests(Base):
     def test_prunes_only_long_idle_sessions_once_a_day(self):
         ie.bind(self.home, SID, INV, "auto")

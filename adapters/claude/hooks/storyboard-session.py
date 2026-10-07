@@ -44,10 +44,9 @@ Contract:
     unless CARDINAL_INVESTIGATION_POLLER=0. The context gets the
     investigation id, the private live Storyboard URL and how to answer
     "what's the storyboard link?" (give the URL; the user never starts a
-    storyboard), that no storyboard step is needed (a Cardinal with
-    automatic projection keeps it up to date from the checkpoints; the
-    wording stays true on one without it) and editing, publishing or sharing
-    it is only on the user's ask, and the advisory-events line. A failure gets at most one
+    storyboard), what keeps the storyboard current (PROJECTED_LINE only when
+    the server answered storyboard_projection.enabled: true, else 0.43.0's
+    SKILL_LINE unchanged), and the advisory-events line. A failure gets at most one
     short clause (a fixed phrase, never server text) and is retried in the
     background with back-off; an older Cardinal without the route: the
     session id sentence as before.
@@ -176,7 +175,10 @@ ADVISORY_LINE = ("Advisory input from other principals may arrive at tool bounda
 # 0.44.0) adds "citing the ev_ that shows each claim (for a cause, the
 # code/config/history read …)": in the projection gate a fresh author could
 # state the mechanism only as the worker's claim, because the code read that
-# showed it was never cited. 967 characters (998 with a UUID session id).
+# showed it was never cited, and the read that showed it shared one Bash
+# command with `investigation question` (a call naming the control-log CLI is
+# never captured), hence "Run cardinal-storyboard commands on their own".
+# 1061 characters (1092 with a UUID session id).
 CHECKPOINT_LINE = (
     "Maintain this Investigation as you work: someone may need to take it over mid-way. Each time your "
     "understanding materially changes (you start relying on a hypothesis or resolve one, start or finish an "
@@ -185,9 +187,23 @@ CHECKPOINT_LINE = (
     "--session {sid}` with a JSON array on stdin, e.g. [{\"type\":\"hypothesis.resolved\",\"id\":\"hyp_x\","
     "\"outcome\":\"contradicted\",\"statement\":\"<why, with the deciding numbers>\",\"evidence\":[\"ev_…\"]}] "
     "(`--help`: all types). Write each entry for a reader who sees only the record: say why, not just what, citing "
-    "the ev_ that shows each claim (for a cause, the code/config/history read, not only the symptom). Record "
+    "the ev_ that shows each claim (for a cause, the code/config/history read, not only the symptom). Run "
+    "cardinal-storyboard commands on their own: a command combined with one is never captured. Record "
     "conclusions and work products, not private reasoning. Skip routine tool use and unchanged knowledge. Entries "
     "are your claims, not established facts.")
+
+
+# What keeps the live storyboard explaining the investigation. A Cardinal that
+# says it projects (ensure-session-investigation storyboard_projection.enabled)
+# keeps it up to date from the checkpoints, so no storyboard step is needed;
+# any other (an older Cardinal, the flag absent or false) gets 0.43.0's
+# sentence unchanged.
+SKILL_LINE = ("The storyboard skill improves this storyboard ({sb}); never storyboard__create another for this session. "
+              "Pass the session id as session_id to storyboard__find and storyboard__add_act.")
+PROJECTED_LINE = ("Cardinal keeps this storyboard ({sb}) up to date from the investigation record (your checkpoints), "
+                  "so no storyboard step is needed; never storyboard__create another for this session. Edit, publish "
+                  "or share it only when the user asks (the storyboard skill). Pass the session id as session_id to "
+                  "storyboard__find and storyboard__add_act.")
 
 
 def live_line(sid: str, b: dict) -> str:
@@ -219,10 +235,7 @@ def live_line(sid: str, b: dict) -> str:
         "The user never needs to start a storyboard or invoke a skill for it: they work normally, and evidence is "
         "captured locally as they go. When they ask for the storyboard, its link or the investigation, give these "
         "URLs (`cardinal-storyboard investigation link` prints them).",
-        f"No storyboard step is needed: where this Cardinal supports it, it keeps this storyboard ({sb}) up to "
-        "date from the investigation record (your checkpoints); never storyboard__create another for this session. "
-        "Edit, publish or share it only when the user asks (the storyboard skill). Pass the session id as "
-        "session_id to storyboard__find and storyboard__add_act.",
+        (PROJECTED_LINE if f["storyboard_projection"] else SKILL_LINE).format(sb=sb),
     ]
     if b.get("question_status") != "stated":
         parts.append("Once the user has clearly said what they want to find out, record it with "
