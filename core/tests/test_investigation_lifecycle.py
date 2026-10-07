@@ -105,6 +105,73 @@ class BootstrapTests(Base):
         ie.update_fields(self.home, SID, {"bootstrap": {"status": "failed", "retry_after": 0}})
         self.assertEqual(boot.ensure(self.home, SID, self.fake.conn, "c")["binding"]["capabilities"], {})
 
+    def test_a_reused_binding_is_refreshed_once_per_start_off_the_session_start_path(self):
+        self.fake.capabilities = {"projection": {"enabled": True}}
+        boot.ensure(self.home, SID, self.fake.conn, "c")
+        self.assertFalse(boot.wants_refresh(self.home, SID), "a fresh answer needs no refresh")
+        self.assertEqual(boot.refresh_capabilities(self.home, SID, self.fake.conn, "c"), "none")
+        # The flag is turned off; a resumed start reuses the binding with no request...
+        self.fake.capabilities = {"projection": {"enabled": False}}
+        n = len(self.ensures())
+        self.assertEqual(boot.ensure(self.home, SID, self.fake.conn, "c")["status"], "reused")
+        self.assertEqual(len(self.ensures()), n)
+        self.assertTrue(boot.wants_refresh(self.home, SID))
+        self.assertEqual(ie.read_binding(self.home, SID)["capabilities"], {"projection": {"enabled": True}})
+        # ...and the refresh (the poller's) stores the current answer, joining the bound investigation.
+        ie.update_fields(self.home, SID, {"cursor": 4})
+        self.assertEqual(boot.refresh_capabilities(self.home, SID, self.fake.conn, "c"), "ok")
+        self.assertEqual(self.ensures()[-1][1], {"session_id": SID, "investigation_id": INV})
+        b = ie.read_binding(self.home, SID)
+        self.assertEqual((b["capabilities"], b["cursor"], b["bootstrap"]["status"]),
+                         ({"projection": {"enabled": False}}, 4, "ok"))
+        self.assertFalse(boot.wants_refresh(self.home, SID))
+        self.assertEqual(boot.refresh_capabilities(self.home, SID, self.fake.conn, "c"), "none")
+        self.assertEqual(len(self.ensures()), n + 1)
+
+    def test_a_refresh_that_fails_keeps_the_binding_or_turns_capabilities_off(self):
+        self.fake.capabilities = {"projection": {"enabled": True}}
+        boot.ensure(self.home, SID, self.fake.conn, "c")
+        boot.ensure(self.home, SID, self.fake.conn, "c")   # reused: marker
+        # Transient (5xx, 429, network): raises, the marker and the last answer stay, nothing marked failed.
+        for answer in ((503, {"error": "unavailable"}), (429, {"error": "quota_exceeded"})):
+            self.fake.ensure_answer = answer
+            with self.assertRaises(Exception):
+                boot.refresh_capabilities(self.home, SID, self.fake.conn, "c")
+            b = ie.read_binding(self.home, SID)
+            self.assertEqual((b["capabilities"], b["bootstrap"]["status"]), ({"projection": {"enabled": True}}, "ok"))
+            self.assertTrue(boot.wants_refresh(self.home, SID))
+        with self.assertRaises(Exception):
+            boot.refresh_capabilities(self.home, SID, dict(self.fake.conn, origin="http://127.0.0.1:9"), "c")
+        self.assertTrue(boot.wants_refresh(self.home, SID))
+        # A refusal for good (a rolled-back Cardinal without the route, 403): every capability off.
+        for answer in ((404, None), (403, {"error": "forbidden"})):
+            ie.update_fields(self.home, SID, {"capabilities": {"projection": {"enabled": True}}})
+            boot.refresh_path(self.home, SID).touch()
+            self.fake.ensure_answer = answer
+            self.assertEqual(boot.refresh_capabilities(self.home, SID, self.fake.conn, "c"), "off")
+            self.assertEqual(ie.read_binding(self.home, SID)["capabilities"], {})
+            self.assertFalse(boot.wants_refresh(self.home, SID))
+        # The binding moved to another investigation meanwhile: its capabilities are not overwritten.
+        self.fake.ensure_answer = None
+        boot.refresh_path(self.home, SID).touch()
+        orig = ie.read_binding
+        moved = {"n": 0}
+
+        def read(home, sid):
+            b = orig(home, sid)
+            moved["n"] += 1
+            if b is not None and moved["n"] > 1:
+                b["investigation_id"] = "inv_" + "c" * 24
+            return b
+        boot.ie.read_binding = read
+        try:
+            ie.update_fields(self.home, SID, {"capabilities": {"keep": {"enabled": True}}})
+            moved["n"] = 0
+            boot.refresh_capabilities(self.home, SID, self.fake.conn, "c")
+        finally:
+            boot.ie.read_binding = orig
+        self.assertEqual(ie.read_binding(self.home, SID)["capabilities"], {"keep": {"enabled": True}})
+
     def test_resume_keeps_the_cursor(self):
         boot.ensure(self.home, SID, self.fake.conn, "c")
         ie.update_fields(self.home, SID, {"cursor": 9})
@@ -362,6 +429,28 @@ class PollerTests(Base):
         st = ip.read_status(self.home, SID)
         self.assertEqual(st["last"], "inbox")
         self.assertFalse(ip.fresh(self.home, SID), "an inbox is waiting: Stop must not skip")
+
+    def test_refreshes_capabilities_once_even_while_idle_and_backs_off_on_failure(self):
+        self.fake.capabilities = {"projection": {"enabled": True}}
+        boot.ensure(self.home, SID, self.fake.conn, "c")
+        boot.ensure(self.home, SID, self.fake.conn, "c")   # a resumed start: reused, marker left
+        self.fake.capabilities = {}
+        run = lambda: ip.run(self.home, SID, connection=lambda: self.fake.conn, client="c", idle=-1,  # noqa: E731
+                             max_lifetime=0.3, tick=0.05)
+        self.fake.ensure_answer = (503, {"error": "unavailable"})
+        run()
+        st = ip.read_status(self.home, SID)
+        self.assertEqual(st["refresh_failures"], 1)
+        self.assertEqual(len(self.ensures()), 2, "one try, then back-off (not one per tick)")
+        self.assertTrue(boot.wants_refresh(self.home, SID))
+        self.fake.ensure_answer = None
+        run()   # idle (idle=-1): no event reads, but the refresh still runs
+        self.assertEqual(ie.read_binding(self.home, SID)["capabilities"], {})
+        self.assertFalse(boot.wants_refresh(self.home, SID))
+        self.assertEqual(self.reads(), [])
+        n = len(self.ensures())
+        run()
+        self.assertEqual(len(self.ensures()), n, "once per start")
 
     def test_backs_off_silently_after_a_failure(self):
         ie.bind(self.home, SID, INV, "auto")

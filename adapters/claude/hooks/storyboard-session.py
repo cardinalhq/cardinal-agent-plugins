@@ -35,7 +35,8 @@ Contract:
     session gets an Investigation and its live Storyboard with no command
     (cardinal_core.investigation_bootstrap.ensure). A binding that already
     bootstrapped (restart, resume, compaction) is reused with its cursor and
-    no request; otherwise one ensure-session-investigation request (3 s;
+    no request (its capabilities are refreshed afterwards by the background
+    poller, for the next start); otherwise one ensure-session-investigation request (3 s;
     idempotent per session, so concurrent hooks and resumes get the same
     pair). CARDINAL_INVESTIGATION_ID=inv_... at launch is an explicit join
     of that investigation instead (never creates one). The binding:

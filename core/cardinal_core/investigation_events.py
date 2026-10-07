@@ -391,9 +391,10 @@ def read_events(conn: dict, investigation_id: str, *, after: int = 0, limit: int
                 opener=None, timeout: float = 30.0, class_: Optional[str] = None) -> dict:
     """One page of read-investigation-events, validated:
     {investigation_id, events: [ascending seq > after], last_seq, page_size,
-    head_seq}. last_seq is the server's next_after when it is past the last
-    event returned (rows the server scanned but does not show this caller)
-    and not past the head; else the last event's seq. class_: only one class
+    head_seq}. last_seq is the server's next_after when the page is short
+    (fewer than `limit` events) and next_after is past the last event
+    returned (rows the server scanned but does not show this caller) and not
+    past the head; else the last event's seq. class_: only one class
     (EVENT_CLASSES)."""
     if not valid_investigation(investigation_id):
         raise ist.FetchError(f"not an investigation id: {investigation_id!r}")
@@ -420,8 +421,8 @@ def read_events(conn: dict, investigation_id: str, *, after: int = 0, limit: int
         if e.get("investigation_id") == investigation_id:
             kept.append(e)
     nxt = out.get("next_after")
-    if isinstance(nxt, int) and not isinstance(nxt, bool) and last < nxt <= head:
-        last = nxt
+    if len(events) < int(limit) and isinstance(nxt, int) and not isinstance(nxt, bool) and last < nxt <= head:
+        last = nxt   # a short page: the server scanned past what it showed
     return {"investigation_id": investigation_id, "events": kept, "last_seq": last, "page_size": len(events),
             "head_seq": head}
 

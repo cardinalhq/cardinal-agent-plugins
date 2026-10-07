@@ -710,6 +710,21 @@ class SessionStartBootstrap(Base):
         n = len(self.ensures())
         self.assertIn(new, self.start(source="resume"))
         self.assertEqual(len(self.ensures()), n)
+        # Turned off later: the resumed start still answers from the binding with no request (no added
+        # latency); the poller then refreshes it once, and the next start reads the current answer.
+        self.fake.capabilities = {"projection": {"enabled": False}}
+        self.assertIn(new, self.start(source="resume"))
+        self.assertEqual(len(self.ensures()), n)
+        self.poll()
+        self.assertEqual(len(self.ensures()), n + 1)
+        self.assertEqual(self.binding()["capabilities"], {"projection": {"enabled": False}})
+        self.assertIn(old, self.start(source="resume"))
+        self.poll()
+        self.assertEqual(len(self.ensures()), n + 2, "once per session start")
+        self.poll()
+        self.assertEqual(len(self.ensures()), n + 2)
+        self.fake.capabilities = on
+        n = len(self.ensures())
         # A 0.43.0 binding (no capabilities) reused on resume: off.
         b = self.binding()
         del b["capabilities"]
@@ -1108,18 +1123,36 @@ class Cli(Base):
         self.assertEqual([b.get("class") for t, b in self.fake.requests if t == "read-investigation-events"][-1],
                          "semantic")
         self.assertEqual(len(res.stdout.splitlines()), 2)
-        res = self.cli("events", INV, "--class", "owner_input")
-        self.assertEqual(res.returncode, 2)
-        self.assertIn("invalid choice", res.stderr)
+        self.assertEqual(self.cli("events", INV, "--class", "owner_input").returncode, 2)
 
     def test_cli_choices_come_from_the_core_vocabularies(self):
-        res = self.cli("post", INV, "--type", "nudge", "--text", "x")
-        self.assertEqual(res.returncode, 2)
-        self.assertIn("choose from 'cue', 'question', 'challenge'", res.stderr)
-        res = self.cli("ack", INV, "1", "--disposition", "ignored")
-        self.assertIn("choose from 'accepted', 'declined', 'noted'", res.stderr)
-        res = self.cli("events", "--help")
-        self.assertIn("{control,semantic}", res.stdout)
+        # On the parser itself, not argparse's message wording (it changes between Python versions).
+        import argparse
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("cardinal_storyboard_cli", str(CLI))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        from cardinal_core import investigation_events as ie
+
+        def sub(parser, name):
+            action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+            return action.choices[name]
+
+        def choices(cmd, dest):
+            p = sub(sub(mod.build_parser(), "investigation"), cmd)
+            return tuple(next(a for a in p._actions if a.dest == dest).choices)
+
+        self.assertEqual(choices("post", "type"), tuple(ie.POST_TYPES))
+        self.assertEqual(choices("post", "type"), ("cue", "question", "challenge"))
+        self.assertEqual(choices("ack", "disposition"), ie.DISPOSITIONS)
+        self.assertEqual(choices("events", "event_class"), ie.EVENT_CLASSES)
+        self.assertEqual(choices("events", "event_class"), ("control", "semantic"))
+        # And argparse refuses anything else (exit 2), whatever its wording.
+        self.assertEqual(self.cli("post", INV, "--type", "nudge", "--text", "x").returncode, 2)
+        self.assertEqual(self.cli("ack", INV, "1", "--disposition", "ignored").returncode, 2)
+        self.assertEqual(self.cli("events", INV, "--class", "owner_input").returncode, 2)
 
     def test_ack_by_a_non_author_and_of_nothing_is_refused_in_words(self):
         self.fake.add("cue.added", {"text": "x"})

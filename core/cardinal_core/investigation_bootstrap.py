@@ -81,6 +81,19 @@ def pending_path(home: Path, sid: str) -> Path:
     return ie.sessions_dir(home) / f"{ie.binding_path(home, sid).stem}.bootstrap.json"
 
 
+def refresh_path(home: Path, sid: str) -> Path:
+    """Marker: this session started on a reused binding, so its capabilities
+    are to be asked again (by the background poller, refresh_capabilities)."""
+    return ie.sessions_dir(home) / f"{ie.binding_path(home, sid).stem}.refresh"
+
+
+def wants_refresh(home: Path, sid: str) -> bool:
+    try:
+        return refresh_path(home, sid).exists()
+    except (OSError, ValueError):
+        return False
+
+
 def read_pending(home: Path, sid: str) -> Optional[dict]:
     try:
         data = json.loads(pending_path(home, sid).read_text(encoding="utf-8"))
@@ -226,6 +239,13 @@ def _ensure(home, sid, conn, client, wanted, started_at, opener, timeout, force,
         if not got:
             return {"status": "busy", "binding": b, "error": None}
         if reusable(b, conn, wanted):
+            # No request on the session-start path: the background poller asks
+            # again for what the server advertises (refresh_capabilities), so a
+            # capability turned off or rolled back reaches the binding within
+            # moments of this start, for the next start (resume, compaction).
+            with contextlib.suppress(OSError, ValueError):
+                ie._ensure_dirs(home)
+                refresh_path(home, sid).touch()
             return {"status": "reused", "binding": b, "error": None}
         same_org = b is not None and b.get("org") in (None, conn.get("org"))
         join = wanted or (b["investigation_id"] if b and same_org else None)
@@ -271,14 +291,16 @@ def _ensure(home, sid, conn, client, wanted, started_at, opener, timeout, force,
             fields["question_status"] = out["question_status"]
         # What this Cardinal advertises (`capabilities`, e.g. projection: it
         # keeps the storyboard up to date from the checkpoints itself), validated
-        # to {name: {enabled: bool}}. Always written, so a resumed binding never
-        # keeps a stale answer; an older Cardinal without the block gets {}
-        # (every capability off).
+        # to {name: {enabled: bool}}; an older Cardinal without the block gets {}
+        # (every capability off). Written on every answer. A reused binding
+        # (above) is not asked here: the poller refreshes it once per session
+        # start (refresh_capabilities). Guidance only: the server enforces.
         fields["capabilities"] = capabilities(out)
         source = "env" if wanted else "auto"
         b, _ = ie.adopt(home, sid, out["investigation_id"], source, fields, now=now)
-        with contextlib.suppress(OSError):
-            pending_path(home, sid).unlink()
+        for done in (pending_path(home, sid), refresh_path(home, sid)):   # this answer is current
+            with contextlib.suppress(OSError):
+                done.unlink()
         return {"status": "ok", "binding": b, "error": None}
 
 
@@ -320,6 +342,49 @@ def capabilities(answer: Any) -> dict:
         if isinstance(name, str) and CAPABILITY_NAME_RE.fullmatch(name) and isinstance(v, dict):
             out[name] = {"enabled": v.get("enabled") is True}
     return out
+
+
+def refresh_capabilities(home: Path, sid: str, conn: dict, client: str, *, opener=None,
+                         timeout: float = 10.0) -> str:
+    """Ask ensure-session-investigation again (joining the bound
+    investigation: idempotent, never creates one) and store only what it
+    now advertises in the binding's `capabilities`. Run by the background
+    poller when wants_refresh(). Returns:
+      ok     refreshed; the marker is gone
+      off    the server refused for good (no route: an older Cardinal; any
+             other 4xx but 408 / 429): capabilities {}; the marker is gone
+      none   nothing to do (no marker, no binding, no connection)
+    Raises on a transient failure (network, 5xx, 408, 429, a malformed
+    answer): the marker stays and the caller retries with back-off."""
+    if not wants_refresh(home, sid):
+        return "none"
+    b = ie.read_binding(home, sid)
+    if b is None:
+        with contextlib.suppress(OSError):
+            refresh_path(home, sid).unlink()
+        return "none"
+    if not (conn and conn.get("origin") and conn.get("org") and conn.get("key")):
+        return "none"
+    inv = b["investigation_id"]
+    refused = False
+    try:
+        out = sync.ensure_session_investigation(conn, sid, investigation_id=inv, client=client, opener=opener,
+                                                timeout=timeout)
+        caps = capabilities(out)
+    except sync.ServerError as e:
+        if not (sync.unsupported(e) or (400 <= e.status < 500 and e.status not in (408, 429))):
+            raise
+        caps, refused = {}, True
+    with ie.locked(home, sid, wait=2.0) as got:
+        if not got:
+            raise OSError("the session's binding is locked by another process")
+        cur = ie.read_binding(home, sid)
+        if cur is not None and cur["investigation_id"] == inv:
+            cur["capabilities"] = caps
+            ie.write_binding(home, sid, cur)
+    with contextlib.suppress(OSError):
+        refresh_path(home, sid).unlink()
+    return "off" if refused else "ok"
 
 
 def capability_enabled(caps: Any, name: str) -> bool:

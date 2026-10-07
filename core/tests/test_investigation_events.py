@@ -493,6 +493,13 @@ class Check(Base):
         self.assertIn("event #1 ·", self.check())
         self.assertEqual(self.cursor(), 3)
         self.assertEqual(ie.read_events(self.fake.conn, INV, after=0, client="t")["last_seq"], 3)
+        # A full page: next_after past it is not trusted (the next page continues from what was returned).
+        self.fake.hidden = set()
+        self.fake.next_after = 3
+        self.assertEqual(ie.read_events(self.fake.conn, INV, after=0, limit=1, client="t")["last_seq"], 1)
+        self.assertEqual(ie.read_events(self.fake.conn, INV, after=0, limit=2, client="t")["last_seq"], 2)
+        self.assertEqual(ie.read_events(self.fake.conn, INV, after=0, limit=4, client="t")["last_seq"], 3)
+        self.fake.next_after = None
         # A next_after past the head, behind the page or not an int is not trusted.
         self.fake.hidden = set()
         for bogus, want in ((99, 3), (0, 3), (True, 3), ("3", 3)):
