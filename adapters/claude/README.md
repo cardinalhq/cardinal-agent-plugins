@@ -120,7 +120,13 @@ git-state, usage
   edit or publish that storyboard or acknowledge events). Nothing is uploaded
   by this: captured evidence stays local until a storyboard cites it. The
   control log is never evidence: `cardinal-storyboard investigation …` calls
-  are never captured.
+  are never captured. A shell command that also does other work (`… question
+  "…"; cat src/config.py`) is captured without its control-log part: that
+  statement (and its stdin) becomes `[Cardinal control-log command omitted]`
+  and the lines the CLI printed (it records them for 30 minutes under
+  `~/.cardinal/investigations/control-output/`) are left out of the output;
+  anything uncertain (`events`, a piped or substituted call, an unrecorded
+  output) skips the whole call, as before.
 - **Investigation events (connected).** Advisory events posted to the
   session's investigation (cue, question, challenge from other principals)
   reach it at its next main-thread tool boundary. A per-session background

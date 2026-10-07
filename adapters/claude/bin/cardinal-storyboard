@@ -163,8 +163,10 @@ Commands:
   adds one. An investigation created outside a session has no oracle:
   nothing in its state rests on a quote unless --session names one.
 
-The storyboard skill authors this session's live storyboard (its id is in
-the session-start context and in `investigation link`). To add to another
+Cardinal keeps this session's live storyboard up to date from its
+checkpoints where it supports that (its id is in the session-start context
+and in `investigation link`); the storyboard skill publishes, shares or edits
+it when the user asks. To add to another
 storyboard it runs `context` and passes the object to storyboard__find, then
 follows the rule find returns. The fields are labels for finding a
 storyboard, never authorization.
@@ -1259,7 +1261,51 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _Recorder:
+    """A text stream that also keeps what is written to it (bounded)."""
+
+    def __init__(self, stream, kept: list, budget: list):
+        self._stream, self._kept, self._budget = stream, kept, budget
+
+    def write(self, s):
+        if isinstance(s, str) and self._budget[0] >= 0:
+            self._budget[0] -= len(s)
+            self._kept.append(s if self._budget[0] >= 0 else "")
+        return self._stream.write(s)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _recorded(run, home: Path, cap) -> int:
+    """Run an `investigation` subcommand, then record every line it printed
+    (stdout and stderr) for the evidence-capture hook: a shell command that
+    also runs this CLI is captured without the control log's lines
+    (cardinal_core.evidence_capture.salvage_control_plane)."""
+    kept: list = []
+    budget = [cap.CONTROL_OUTPUT_MAX_BYTES]
+    out, err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Recorder(out, kept, budget), _Recorder(err, kept, budget)
+    try:
+        return run()
+    finally:
+        sys.stdout, sys.stderr = out, err
+        cap.record_control_output(home, "".join(kept), overflow=budget[0] < 0)
+
+
 def main(argv: list | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["investigation"]:
+        try:
+            from cardinal_core import evidence_capture as cap
+        except ImportError:
+            cap = None
+        if cap is not None and hasattr(cap, "record_control_output"):
+            return _recorded(lambda: _main(argv), _home(), cap)
+    return _main(argv)
+
+
+def _main(argv: list) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):
