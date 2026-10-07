@@ -78,6 +78,8 @@ jobs:
           import cardinal_core.investigation_state
           import cardinal_core.investigation_state_sync
           import cardinal_core.investigation_events
+          import cardinal_core.investigation_bootstrap
+          import cardinal_core.investigation_poller
           print('ok: all core modules import under 3.9')
           "
 

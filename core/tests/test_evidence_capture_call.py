@@ -268,6 +268,29 @@ class ClaudeShapeTests(_Case):
         self.assertNotIn("sk-abcdefghijklmnopqrstu", json.dumps(e))
 
 
+class ControlPlaneTests(_Case):
+    """The investigation's control log is never evidence: a call that runs
+    `cardinal-storyboard investigation …` is never captured (tool-neutral:
+    any string of any tool's input)."""
+
+    def test_control_log_calls_are_not_captured(self):
+        for cmd in ("cardinal-storyboard investigation ack inv_x 3 --disposition noted",
+                    "/home/u/.claude/plugins/cache/cardinal/bin/cardinal-storyboard investigation events inv_x",
+                    "cd /tmp && cardinal-storyboard investigation link --json",
+                    "python3 \"$P/bin/cardinal-storyboard\" investigation question 'why?'",
+                    "x=$(cardinal-storyboard investigation link)"):
+            self.assertTrue(cap.control_plane({"command": cmd}), cmd)
+            self.assertIsNone(cap.capture_call(self.call("Bash", {"command": cmd}, {"stdout": "ok"}), self.home,
+                                               env={}), cmd)
+        self.assertFalse((self.root / SESSION).exists() and list((self.root / SESSION).glob("ev_*.json")))
+
+    def test_other_cardinal_storyboard_calls_are_captured(self):
+        for cmd in ("cardinal-storyboard context --json", "cardinal-storyboard state check s.json",
+                    "grep investigation cardinal-storyboard.log", "echo cardinal-storyboard-investigation"):
+            self.assertFalse(cap.control_plane({"command": cmd}), cmd)
+        self.capture("Bash", {"command": "cardinal-storyboard context"}, {"stdout": "{}"})
+
+
 class PipelineTests(_Case):
     def test_cardinal_source_is_skipped(self):
         c = self.call("mcp__plugin_cardinal_cardinal__lakerunner__x", {}, "x")

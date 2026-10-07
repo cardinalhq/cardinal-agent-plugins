@@ -54,6 +54,9 @@ LOCAL_ONLY_HOOKS = ("invariant-check.py",)
 # A POSIX sh fast path (no Python, no network) in front of a gated Python
 # hook: the sh only checks for a local binding file.
 FAST_PATH_HOOKS = {"investigation-events.sh": "investigation-events.py"}
+# Not in hooks.json: started in the background by a hook (the session's
+# investigation poller). Gated like a hook.
+BACKGROUND_HOOKS = ("investigation-poller.py",)
 
 GUARD = textwrap.dedent('''\
     import os, runpy, socket, subprocess, sys
@@ -74,7 +77,7 @@ GUARD = textwrap.dedent('''\
         return _popen(self, args, *a, **k)
     subprocess.Popen.__init__ = _spy
     hook = sys.argv[1]
-    sys.argv = [hook]
+    sys.argv = [hook] + sys.argv[2:]
     runpy.run_path(hook, run_name="__main__")
 ''')
 
@@ -280,7 +283,7 @@ class HookRegistrationTests(unittest.TestCase):
             text = (HOOKS / sh).read_text()
             for tool in ("python", "curl", "wget", "nc "):
                 self.assertNotIn(tool, text.split("\n", 1)[1].replace("investigation-events.py", ""), sh)
-        for name in list(GATED_HOOKS) + list(FAST_PATH_HOOKS.values()):
+        for name in list(GATED_HOOKS) + list(FAST_PATH_HOOKS.values()) + list(BACKGROUND_HOOKS):
             text = (HOOKS / name).read_text()
             self.assertIn("import _connection", text, name)
             self.assertIn("if not _connection.is_connected():", text, name)
@@ -321,13 +324,14 @@ class _GuardedCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def guarded_run(self, hook_path: Path, payload, env: dict, timeout: float = 30.0, raw_env: dict | None = None):
+    def guarded_run(self, hook_path: Path, payload, env: dict, timeout: float = 30.0, raw_env: dict | None = None,
+                    args: tuple = ()):
         """`env` is made hermetic; `raw_env` is added after, as-is (to put a
         CARDINAL_MCP_* var in the hook's process environment on purpose)."""
         env = hermetic(dict(env))
         env.update(raw_env or {})
         env["NET_GUARD_LOG"] = str(self.guard_log)
-        return subprocess.run([sys.executable, str(self.guard), str(hook_path)],
+        return subprocess.run([sys.executable, str(self.guard), str(hook_path), *args],
                               input=json.dumps(payload) if not isinstance(payload, str) else payload,
                               text=True, capture_output=True, env=env, timeout=timeout)
 
@@ -454,13 +458,36 @@ class StoryboardHooksUnconnectedTests(_GuardedCase):
         self.assertIn("Cardinal is not connected", ctx)
         self.assertEqual(self.guard_lines(), [])
 
-    def _session(self, sid=SESSION, source="startup", raw_env=None) -> str:
+    def test_no_investigation_bootstrap_or_poller_when_not_connected(self):
+        # SPEC §1: only a connected session gets an Investigation. Unconnected:
+        # no request, no poller, no binding, even with an explicit join.
+        proc = self.guarded_run(HOOKS / "storyboard-session.py",
+                                {"session_id": SESSION, "hook_event_name": "SessionStart", "source": "startup"},
+                                self.env, raw_env={"CARDINAL_INVESTIGATION_ID": "inv_" + "c" * 24})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.guard_lines(), [])
+        self.assertFalse((self.home / ".cardinal" / "investigations").exists())
+        # A binding left from a connected time: the poller does nothing.
+        sessions = self.home / ".cardinal" / "investigations" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / f"{SESSION}.json").write_text(json.dumps({"investigation_id": "inv_" + "c" * 24, "cursor": 0}))
+        proc = self.guarded_run(HOOKS / "investigation-poller.py", "", self.env, args=("--session", SESSION, "--once"))
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+        self.assertEqual(self.guard_lines(), [])
+        self.assertFalse((sessions / f"{SESSION}.poller.json").exists())
+
+    def _session(self, sid=SESSION, source="startup", raw_env=None, bootstrap=False) -> str:
+        """bootstrap=True: connected with an MCP URL and key, so the hook asks
+        Cardinal for the session's Investigation (one request, which the
+        guard refuses: it fails open). The poller is never started here."""
         payload = {"hook_event_name": "SessionStart", "source": source}
         if sid:
             payload["session_id"] = sid
-        proc = self.guarded_run(HOOKS / "storyboard-session.py", payload, self.env, raw_env=raw_env)
+        proc = self.guarded_run(HOOKS / "storyboard-session.py", payload, self.env,
+                                raw_env=dict(raw_env or {}, CARDINAL_INVESTIGATION_POLLER="0"))
         self.assertEqual((proc.returncode, proc.stderr), (0, ""))
-        self.assertEqual(self.guard_lines(), [])
+        self.assertEqual(self.guard_lines(), ["net"] if bootstrap else [])
+        self.guard_log.unlink(missing_ok=True)
         return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"] if proc.stdout else ""
 
     def _settings(self, env: dict) -> None:
@@ -511,7 +538,7 @@ class StoryboardHooksUnconnectedTests(_GuardedCase):
         for i, (label, settings, raw_env, connected) in enumerate(cases):
             with self.subTest(label):
                 self._settings(settings)
-                ctx = self._session(sid=f"s-{i}", raw_env=raw_env)
+                ctx = self._session(sid=f"s-{i}", raw_env=raw_env, bootstrap=label == "connected")
                 (self.assertIn if connected else self.assertNotIn)(f"s-{i}", ctx)
                 self.assertNotIn("CARDINAL_MCP_API_KEY", ctx)
 
@@ -542,7 +569,7 @@ class StoryboardHooksUnconnectedTests(_GuardedCase):
         )):
             with self.subTest(i):
                 self._settings(settings)
-                ctx = self._session(sid=f"c-{i}")
+                ctx = self._session(sid=f"c-{i}", bootstrap=i == 0)
                 self.assertIn(f"c-{i}", ctx)
                 self.assertNotIn("Cardinal is not connected", ctx)
         self.assertFalse((self.home / ".cardinal" / "connect-hint").exists())
