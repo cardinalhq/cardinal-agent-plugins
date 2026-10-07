@@ -198,5 +198,31 @@ class BehaviorTests(unittest.TestCase):
         result['jev_receipts'][0]['decision_evidence_refs'] = ['unrelated']
         self.assertEqual(compact(result)['reason'], 'Claim before submission')
 
+    def test_receipt_inspection_keeps_evidence_private_and_does_not_advance_cursor(self):
+        raw = self.result(verdict='ERROR')
+        raw['jev_receipts'] = [dict(raw['jev_receipts'][0], decision='ERROR',
+            proposition='Does the response ask for clarification?',
+            evidence=[{'ref': 'message', 'text': 'PRIVATE_MODEL_INPUT'}],
+            config={'model': 'pinned-model', 'model_version': 'v1', 'secret': 'PRIVATE_CONFIG'},
+            attempts=[{'status': 'invalid_after_retry', 'error': 'BackendTimeout'}]) for _ in range(10)]
+        page = self.page([raw], 'COMPLETED', population=1, match=0)
+        page['counts']['ERROR'] = 1
+        self.responses.append(page)
+        self.behavior.poll(ID, 0)
+        before = self.behavior.state_path(ID).read_bytes()
+        summary = self.behavior.inspect(ID, 't1')
+        self.assertEqual(summary['receipt'], ID)
+        self.assertEqual(summary['next_jev'], 8)
+        self.assertEqual(len(summary['jev_receipts']), 8)
+        self.assertEqual(summary['jev_receipts'][0]['decision'], 'ERROR')
+        self.assertEqual(summary['jev_receipts'][0]['attempts'][0]['error'], 'BackendTimeout')
+        self.assertNotIn('PRIVATE_', json.dumps(summary))
+        self.assertNotIn('RAW_SECRET_MARKER', json.dumps(summary))
+        self.assertNotIn('SHARD_SECRET_MARKER', json.dumps(summary))
+        self.assertEqual(self.behavior.inspect(ID, 't1', 8)['next_jev'], None)
+        self.assertEqual(self.behavior.state_path(ID).read_bytes(), before)
+        with self.assertRaisesRegex(ValueError, 'not present'): self.behavior.inspect(ID, 'foreign')
+        with self.assertRaisesRegex(ValueError, 'nonnegative'): self.behavior.inspect(ID, 't1', -1)
+
 if __name__ == '__main__':
     unittest.main()

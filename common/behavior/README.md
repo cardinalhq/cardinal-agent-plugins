@@ -1,5 +1,11 @@
 # Deployed behavior product loop
 
+`get_behavior_execution` inspects the receipt already retained by result polling.
+It exposes durable shard references and, for a selected trace, paginated JEV
+receipt metadata (proposition, model identity, hashes, verdict and failures).
+Model input text remains in the private receipt artifact and Storyboard. This
+inspection does not advance the incremental result cursor.
+
 This opt-in Cardinal Claude MCP bridge uses a configured accepted DiagnosticVersion.
 It submits to the deployed API and observes committed
 findings. It imports no evaluator, trace adapter, compiler runtime, or local fixture.

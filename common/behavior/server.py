@@ -219,6 +219,50 @@ class Behavior:
         output = self.state_path(receipt).parent / f'storyboard-{receipt}.html'
         return render_storyboard(state, self.definition, self.preview, output)
 
+    def inspect(self, execution_id, trace_id=None, after_jev=0):
+        """Inspect observed receipt metadata without returning model input packets."""
+        if type(after_jev) is not int or after_jev < 0:
+            raise ValueError('after_jev must be a nonnegative integer')
+        state = self.read(execution_id)
+        response = {'execution_id': execution_id, 'diagnostic_version': self.version,
+                    'execution_status': state['status'], 'receipt': state.get('receipt'),
+                    'received': len(state['results']), 'counts': state['counts'],
+                    'receipt_file': str(self.state_path(execution_id)),
+                    'observation': 'Retained through next_behavior_result; poll for newer commits.',
+                    'shards': [{k: shard[k] for k in ('shard', 'status', 'root_ref', 'root_sha256', 'generation')
+                                if k in shard}
+                               for shard in state.get('last_response', {}).get('shards', [])[:4]]}
+        if trace_id is not None:
+            result = next((r for r in state['results'] if r['trace_id'] == trace_id), None)
+            if result is None:
+                raise ValueError('trace is not present in this execution receipt')
+            response['finding'] = compact(result)
+            receipts = result.get('jev_receipts', [])
+            summaries = []
+            for receipt in receipts[after_jev:after_jev + 8]:
+                summaries.append({
+                    'receipt_id': bounded_text(receipt.get('receipt_id'), 64),
+                    'proposition': bounded_text(receipt.get('proposition'), 1000),
+                    'evidence_refs': [bounded_text(item.get('ref'), 256) for item in receipt.get('evidence', [])[:64]],
+                    'packet_sha256': bounded_text(receipt.get('packet_sha256'), 64),
+                    'request_sha256': bounded_text(receipt.get('request_sha256'), 64),
+                    'config_digest': bounded_text(receipt.get('config_digest'), 64),
+                    'model': bounded_text(receipt.get('config', {}).get('model'), 256),
+                    'model_version': bounded_text(receipt.get('config', {}).get('model_version'), 256),
+                    'decision': bounded_text(receipt.get('decision'), 16),
+                    'parse_status': bounded_text(receipt.get('parse_status'), 64),
+                    'reason': bounded_text(receipt.get('reason'), 300),
+                    'usage': {k: v for k, v in receipt.get('usage', {}).items()
+                              if k in ('input_tokens', 'output_tokens') and type(v) is int},
+                    'cost_usd': receipt.get('cost_usd') if type(receipt.get('cost_usd')) in (int, float) else None,
+                    'replay_key': bounded_text(receipt.get('replay_key'), 64),
+                    'attempts': [{'status': bounded_text(a.get('status'), 64),
+                                  'error': bounded_text(a.get('error'), 256)}
+                                 for a in receipt.get('attempts', [])[:3]]})
+            response.update(jev_receipts=summaries, jev_receipt_count=len(receipts),
+                            next_jev=after_jev + len(summaries) if after_jev + len(summaries) < len(receipts) else None)
+        return response
+
 
 def tools_list(behavior: Behavior):
     def tool(name, description, properties, required):
@@ -232,6 +276,9 @@ def tools_list(behavior: Behavior):
              {'accepted_behavior': version, 'population': {'type': 'string', 'enum': [behavior.population]}}, ['accepted_behavior', 'population']),
         tool('next_behavior_result', 'Observe newly committed compact findings while Cardinal investigates. Repeat until receipt appears. Empty results mean the execution is still running; do not fabricate findings. The total population is unknown until COMPLETED: evaluated_so_far is progress, never a total denominator.',
              {'execution_id': execution, 'wait_seconds': {'type': 'number', 'minimum': 0, 'maximum': 30, 'default': 20}}, ['execution_id']),
+        tool('get_behavior_execution', 'Inspect the retained execution receipt and durable shard references. Optionally inspect bounded JEV receipt metadata for one trace; model input text stays in the receipt artifact. This does not advance result polling.',
+             {'execution_id': execution, 'trace_id': {'type': 'string'},
+              'after_jev': {'type': 'integer', 'minimum': 0, 'default': 0}}, ['execution_id']),
         tool('render_storyboard', 'Render the existing evidence Storyboard from a completed execution receipt. Evidence remains expandable in the HTML; raw receipts never enter this chat.',
              {'receipt': execution, 'accepted_behavior': version}, ['receipt', 'accepted_behavior'])]}
 
@@ -259,7 +306,8 @@ def main():
             elif method == 'tools/call':
                 params = request['params']
                 functions = {'select_behavior': behavior.select, 'execute_behavior': behavior.start,
-                             'next_behavior_result': behavior.poll, 'render_storyboard': behavior.render}
+                             'next_behavior_result': behavior.poll, 'render_storyboard': behavior.render,
+                             'get_behavior_execution': behavior.inspect}
                 result = functions[params['name']](**params.get('arguments', {}))
                 value = {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}]}
             else:
