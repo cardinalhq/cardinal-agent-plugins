@@ -6,9 +6,8 @@ description: Improve, frame, publish and share the live Investigation Storyboard
 # storyboard — improve this session's live storyboard
 
 Cardinal created this session's Investigation and live Storyboard at session start (the
-session-start context names both, with the private URL). This skill improves how that
-storyboard explains the investigation: you author the view and the argument; Cardinal owns
-the runtime and the evidence. The **canvas** skill is the visual half and covers previews.
+session-start context names both, with the private URL). This skill improves how it
+explains the investigation; the **canvas** skill is the visual half and covers previews.
 
 "Do I invoke the storyboard skill before I ask my question?" No. You never need to start
 Storyboards. This session already has an Investigation and Storyboard. Work normally, and
@@ -31,8 +30,7 @@ not work from memory. This skill adds only what is specific to Claude Code.
 Needs Cardinal (maestro) newer than v1.97.16; ask the user to upgrade an older one.
 
 No `storyboard__*` tools: not connected. Tell the user once: sign up at
-https://app.cardinalhq.io, run `/cardinal:connect` (it stores an API key; self-hosted:
-`--host <url>`), restart Claude Code. Captured evidence stays local meanwhile.
+https://app.cardinalhq.io, run `/cardinal:connect`, restart Claude Code.
 
 ## Evidence in Claude Code
 
@@ -56,6 +54,8 @@ https://app.cardinalhq.io, run `/cardinal:connect` (it stores an API key; self-h
   works. `cardinal-evidence show ev_…` prints what you would cite; bind the exact field
   (`/exit_code`, a `stdout` line) that carries the claim.
 - **Reported** (`storyboard__record_evidence`): a result with no `ev_…` id (capture off).
+- **The control log is never evidence** and never public: never cite, promote or record
+  investigation events or `cardinal-storyboard investigation …` calls.
 
 ## Which storyboard
 

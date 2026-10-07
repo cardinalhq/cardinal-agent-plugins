@@ -289,6 +289,12 @@ class StoryboardSkillTextTests(unittest.TestCase):
             for phrase in OLD_LIFECYCLE:
                 self.assertNotIn(phrase.lower(), text, f"{path.relative_to(REPO)} still says {phrase!r}")
 
+    def test_the_control_log_is_never_evidence(self):
+        # Conductor refuses it too (control_log_not_evidence); the plugin never
+        # captures `cardinal-storyboard investigation` calls.
+        self.assertIn("**The control log is never evidence** and never public: never cite, promote or record "
+                      "investigation events or `cardinal-storyboard investigation …` calls.", _flat(STORYBOARD_SKILL))
+
     def test_the_live_storyboard_is_the_default_target(self):
         text = _flat(STORYBOARD_SKILL)
         for needle in (

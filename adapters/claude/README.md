@@ -115,8 +115,12 @@ git-state, usage
   request never blocks the session: it adds one short clause, is retried in
   the background with back-off, and `cardinal-storyboard investigation link`
   retries at once. `CARDINAL_INVESTIGATION_ID=inv_…` at launch joins an
-  existing investigation instead. Nothing is uploaded by this: captured
-  evidence stays local until a storyboard cites it.
+  existing investigation instead; joining someone else's, the session is told
+  it is not the author (it gets the links and the advisory events, but cannot
+  edit or publish that storyboard or acknowledge events). Nothing is uploaded
+  by this: captured evidence stays local until a storyboard cites it. The
+  control log is never evidence: `cardinal-storyboard investigation …` calls
+  are never captured.
 - **Investigation events (connected).** Advisory events posted to the
   session's investigation (cue, question, challenge from other principals)
   reach it at its next main-thread tool boundary. A per-session background
