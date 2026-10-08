@@ -14,7 +14,10 @@ The normal Claude workflow is:
 
 1. `get_behavior_sdk`: fetch the deployed SDK artifact and read its real Python
    sources, profiles, CompilePlan schema, and executable examples. LakeRunner
-   creates this artifact from the same canonical source its workers import. The
+   imports this exact immutable release artifact from the public
+   [cardinalhq/behavior-sdk](https://github.com/cardinalhq/behavior-sdk) repository.
+   The SDK version, source commit, public artifact URL, and SHA-256 appear in the
+   response and are retained with compilation and acceptance. The
    plugin verifies its SHA-256 content address and caches the immutable artifact;
    it contains no independently maintained SDK declarations.
 2. Author a candidate from the user's contract, then call `compile_behavior`

@@ -200,13 +200,14 @@ class Behavior:
         for field in ('source_sha256', 'adapter_sha256') + SDK_IDENTITIES:
             if not re.fullmatch('[a-f0-9]{64}', result[field]):
                 raise ValueError('API returned an invalid program identity')
+        self.sdk_source(result)
         if hashlib.sha256(result['source'].encode()).hexdigest() != result['source_sha256']:
             raise ValueError('compiled source integrity check failed')
         if not isinstance(result['behavior_contract'].get('clauses'), list):
             raise ValueError('API returned an invalid Behavior Contract')
         if path.exists():
             previous = json.loads(path.read_text())
-            for field in ('source_sha256', 'adapter_sha256', 'behavior_contract') + SDK_IDENTITIES:
+            for field in ('source_sha256', 'adapter_sha256', 'behavior_contract', 'sdk_source') + SDK_IDENTITIES:
                 if previous[field] != result[field]:
                     raise ValueError('immutable program identity changed')
             result = dict(result)
@@ -228,15 +229,36 @@ class Behavior:
         if self.identities(actual) != self.identities(expected):
             raise ValueError('SDK/profile/runtime identity mismatch; read get_behavior_sdk and recompile')
 
+    @staticmethod
+    def sdk_source(value):
+        source = value.get('sdk_source')
+        repository = 'https://github.com/cardinalhq/behavior-sdk'
+        if (not isinstance(source, dict) or source.get('repository') != repository
+                or not re.fullmatch('[a-f0-9]{40}', source.get('commit', ''))
+                or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', source.get('version', ''))
+                or source.get('sdk_runtime_sha256') != value.get('sdk_runtime_sha256')):
+            raise ValueError('public SDK source/version identity is missing or invalid')
+        url = f"{repository}/releases/download/v{source['version']}/behavior-sdk-{source['sdk_runtime_sha256']}.json"
+        if source.get('artifact_url') != url:
+            raise ValueError('public SDK artifact URL does not match its version/digest')
+        return source
+
+    def check_sdk_source(self, actual, expected):
+        if self.sdk_source(actual) != self.sdk_source(expected):
+            raise ValueError('public SDK source/version identity mismatch')
+
     def sdk(self):
         result = self.request('GET', '/api/v1/behavior-programs/sdk')
         self.identities(result)
+        source = self.sdk_source(result)
         artifact = result.get('artifact')
         if (not isinstance(artifact, dict) or artifact.get('format') != 'behavior-sdk-authoring-v1'
                 or not isinstance(artifact.get('files'), dict) or not artifact['files']
                 or any(not isinstance(path, str) or not isinstance(source, str)
                        for path, source in artifact['files'].items())):
             raise ValueError('API did not return the canonical SDK authoring artifact')
+        if result.get('sdk_version') != source['version'] or artifact.get('version') != source['version']:
+            raise ValueError('public SDK artifact version mismatch')
         digest = hashlib.sha256(json.dumps(artifact, sort_keys=True, separators=(',', ':'),
                                            ensure_ascii=False).encode()).hexdigest()
         if result['sdk_runtime_sha256'] != digest or result.get('sdk_artifact_sha256') != digest:
@@ -273,6 +295,7 @@ class Behavior:
         if result.get('error') and not result.get('diagnostic_version'):
             return result
         self.check_identities(result, identities)
+        self.check_sdk_source(result, self.sdk_observation)
         return self.retain_program(result)
 
     def test(self, diagnostic_version, trace_ids, service_name, start, end, expected_verdicts=None, udf_source=None):
@@ -305,6 +328,7 @@ class Behavior:
         for item in results:
             identity = item.get('execution_identity', {})
             self.check_identities(identity, program)
+            self.check_sdk_source(identity, program)
             if (identity.get('diagnostic_version') != diagnostic_version
                     or identity.get('udf_sha256') != program['source_sha256']
                     or identity.get('adapter_sha256') != program['adapter_sha256']):
@@ -320,6 +344,7 @@ class Behavior:
         if digest != result['test_receipt']:
             raise ValueError('teaching test receipt integrity check failed')
         self.check_identities(receipt, program)
+        self.check_sdk_source(receipt, program)
         if receipt.get('diagnostic_version') != diagnostic_version or receipt.get('results') != results:
             raise ValueError('teaching test receipt does not match returned results')
         receipt_path = self.output / 'teaching' / f'{digest}.json'
@@ -352,6 +377,7 @@ class Behavior:
         result = self.request('POST', f'/api/v1/behavior-programs/{diagnostic_version}/accept',
                               {**self.identities(program), 'test_receipt': program['test_receipt']})
         self.check_identities(result, program)
+        self.check_sdk_source(result, program)
         if result.get('diagnostic_version') != diagnostic_version or not result.get('acceptance_id'):
             raise ValueError('acceptance identity mismatch')
         if result.get('test_receipt') != program['test_receipt']:
@@ -372,7 +398,7 @@ class Behavior:
         program = json.loads(path.read_text())
         definition = {'version': version, 'diagnostic_id': program.get('diagnostic_id', version),
                       'profile_sha256': program['profile_sha256'], 'source_sha256': program['source_sha256'],
-                      **self.identities(program)}
+                      **self.identities(program), 'sdk_source': self.sdk_source(program)}
         return definition, program['behavior_contract'], program['adapter_sha256']
 
     def start(self, accepted_behavior, population, start=None, end=None):
@@ -425,7 +451,7 @@ class Behavior:
                             'udf_sha256': definition['source_sha256'],
                             'adapter_sha256': adapter_sha256}
                 if not self.legacy:
-                    expected.update(self.identities(definition))
+                    expected.update(self.identities(definition), sdk_source=definition['sdk_source'])
                 if any(identity.get(k) != v for k, v in expected.items()):
                     raise ValueError('result does not belong to the accepted DiagnosticVersion')
                 seen.add(item['trace_id'])

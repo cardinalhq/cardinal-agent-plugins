@@ -27,20 +27,24 @@ class HostedBehaviorTests(unittest.TestCase):
             'profile_sha256': 'c' * 64, 'adapter_sha256': 'd' * 64,
             'behavior_contract': {'clauses': [{'kind': 'trigger', 'interpretation': 'Authored check'}]},
             'compile_receipt': {'receipt_id': 'compile-1'}}
-        artifact = {'format': 'behavior-sdk-authoring-v1', 'files': {'behavior_sdk/__init__.py': '# canonical runtime source'}}
+        artifact = {'format': 'behavior-sdk-authoring-v1', 'version': '0.1.1', 'files': {'behavior_sdk/__init__.py': '# canonical runtime source'}}
         digest = hashlib.sha256(json.dumps(artifact, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
         self.sdk = {'artifact': artifact, 'sdk_runtime_sha256': digest, 'sdk_artifact_sha256': digest,
                     'profile_sha256': 'c' * 64, 'host_runtime_sha256': 'f' * 64}
-        self.program.update({key: self.sdk[key] for key in SDK_IDENTITIES})
+        provenance = {'repository': 'https://github.com/cardinalhq/behavior-sdk', 'commit': '2' * 40,
+                      'version': '0.1.1', 'sdk_runtime_sha256': digest,
+                      'artifact_url': f'https://github.com/cardinalhq/behavior-sdk/releases/download/v0.1.1/behavior-sdk-{digest}.json'}
+        self.sdk.update(sdk_source=provenance, sdk_version='0.1.1')
+        self.program.update({key: self.sdk[key] for key in SDK_IDENTITIES}, sdk_source=provenance)
         self.behavior.sdk_observation = self.sdk
-        self.teaching = {'diagnostic_version': self.version, 'test_receipt': '1' * 64,
+        self.teaching = {'sdk_source': provenance, 'diagnostic_version': self.version, 'test_receipt': '1' * 64,
                          **{key: self.sdk[key] for key in SDK_IDENTITIES},
                          'results': [{'trace_id': 'e' * 32, 'verdict': 'NON_MATCH', 'expected_verdict': 'NON_MATCH',
                                       'records': [], 'witness_refs': [], 'jev_receipts': []}]}
-        self.teaching['results'][0]['execution_identity'] = {
+        self.teaching['results'][0]['execution_identity'] = {'sdk_source': provenance,
             **{key: self.sdk[key] for key in SDK_IDENTITIES}, 'diagnostic_version': self.version,
             'udf_sha256': self.program['source_sha256'], 'adapter_sha256': self.program['adapter_sha256']}
-        self.acceptance = {'diagnostic_version': self.version, 'acceptance_id': 'accepted-1',
+        self.acceptance = {'sdk_source': provenance, 'diagnostic_version': self.version, 'acceptance_id': 'accepted-1',
                            'test_receipt': '1' * 64, **{key: self.sdk[key] for key in SDK_IDENTITIES}}
         self.responses = []
         self.calls = []
@@ -79,7 +83,7 @@ class HostedBehaviorTests(unittest.TestCase):
         self.behavior.start(self.version, 'service', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z')
         self.assertNotIn('org', self.calls[-1][2])
         raw = {'trace_id': 'e' * 32, 'verdict': 'NON_MATCH', 'execution_identity': {
-            'diagnostic_version': self.version, 'udf_sha256': self.program['source_sha256'],
+            'sdk_source': self.sdk['sdk_source'], 'diagnostic_version': self.version, 'udf_sha256': self.program['source_sha256'],
             'profile_sha256': 'c' * 64, 'adapter_sha256': 'd' * 64,
             **{key: self.sdk[key] for key in SDK_IDENTITIES}},
             'semantic_occurrences': [{'id': 'witness-1', 'output': '<script>unsafe()</script>'}],
@@ -159,7 +163,7 @@ class HostedBehaviorTests(unittest.TestCase):
                 self.assertEqual(opened.call_args.kwargs['timeout'], expected)
 
     def test_sdk_tampering_and_compiler_identity_skew_fail_closed(self):
-        self.responses.append(dict(self.sdk, artifact={'format': 'behavior-sdk-authoring-v1', 'files': {'x.py': 'different'}}))
+        self.responses.append(dict(self.sdk, artifact={'format': 'behavior-sdk-authoring-v1', 'version': '0.1.1', 'files': {'x.py': 'different'}}))
         with self.assertRaisesRegex(ValueError, 'integrity'):
             self.behavior.sdk()
         self.responses.append(self.sdk)
@@ -251,3 +255,14 @@ class HostedBehaviorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'identity mismatch'):
             self.teaching_test()
         self.assertNotIn('test_receipt', json.loads(self.behavior.program_path(self.version).read_text()))
+
+    def test_public_sdk_version_and_source_mismatch_fail_closed(self):
+        self.responses.append(dict(self.sdk, sdk_version='0.1.2'))
+        with self.assertRaisesRegex(ValueError, 'version mismatch'):
+            self.behavior.sdk()
+        changed = copy.deepcopy(self.program)
+        changed['sdk_source']['commit'] = '3' * 40
+        self.responses.append(changed)
+        with self.assertRaisesRegex(ValueError, 'source/version identity mismatch'):
+            self.behavior.compile('Check', 'service', self.source, {})
+        self.assertFalse(self.behavior.program_path(self.version).exists())
