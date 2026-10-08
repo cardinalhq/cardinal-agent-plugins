@@ -23,7 +23,7 @@ class ConnectionTests(unittest.TestCase):
                 self.assertEqual(config['base_url'], f'https://app.example/api/orgs/{ORG}/behavior')
                 with patch.dict('os.environ', {'CARDINAL_MCP_API_KEY': 'scoped-test-key'}), \
                         patch('urllib.request.OpenerDirector.open', return_value=io.BytesIO(b'{}')) as opened:
-                    Behavior(config).sdk()
+                    Behavior(config).request('GET', '/api/v1/behavior-programs/sdk')
                 request = opened.call_args.args[0]
                 self.assertEqual(request.full_url, f'https://app.example/api/orgs/{ORG}/behavior/api/v1/behavior-programs/sdk')
                 self.assertEqual(request.get_header('X-cardinalhq-api-key'), 'scoped-test-key')
@@ -42,12 +42,12 @@ class ConnectionTests(unittest.TestCase):
             with patch.dict('os.environ', {'CARDINAL_MCP_API_KEY': 'scoped-test-key'}, clear=True), \
                     patch('urllib.request.OpenerDirector.open') as opened:
                 with self.assertRaisesRegex(ValueError, 'CARDINAL_QUERY_API_KEY'):
-                    Behavior(config).sdk()
+                    Behavior(config).request('GET', '/api/v1/behavior-programs/sdk')
                 opened.assert_not_called()
             with patch.dict('os.environ', {'CARDINAL_MCP_API_KEY': 'scoped-test-key',
                                            'CARDINAL_QUERY_API_KEY': 'data-plane-test-key'}, clear=True), \
                     patch('urllib.request.OpenerDirector.open', return_value=io.BytesIO(b'{}')) as opened:
-                Behavior(config).sdk()
+                Behavior(config).request('GET', '/api/v1/behavior-programs/sdk')
                 self.assertEqual(opened.call_args.args[0].get_header('X-cardinalhq-api-key'), 'data-plane-test-key')
 
     def test_missing_connection_does_not_guess_a_data_plane_host(self):
@@ -55,7 +55,7 @@ class ConnectionTests(unittest.TestCase):
             config = default_config({'CARDINAL_BEHAVIOR_OUTPUT_DIR': output})
             self.assertIsNone(config['base_url'])
             with self.assertRaisesRegex(ValueError, 'Connect the Cardinal plugin'):
-                Behavior(config).sdk()
+                Behavior(config).request('GET', '/api/v1/behavior-programs/sdk')
 
     def test_malformed_or_ambiguous_connection_is_rejected(self):
         for url in (f'https://user:password@app.example/api/orgs/{ORG}/mcp',

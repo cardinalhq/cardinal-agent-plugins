@@ -44,7 +44,7 @@ class BehaviorReleaseTests(unittest.TestCase):
             self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "cardinal-behavior")
             self.assertIn("get_behavior_execution", [tool["name"] for tool in responses[1]["result"]["tools"]])
             names = {tool['name'] for tool in responses[1]['result']['tools']}
-            self.assertTrue({'get_behavior_sdk', 'compile_behavior', 'inspect_behavior', 'accept_behavior',
+            self.assertTrue({'get_behavior_sdk', 'compile_behavior', 'inspect_behavior', 'test_behavior', 'accept_behavior',
                              'execute_behavior', 'next_behavior_result', 'render_storyboard'} <= names)
             self.assertNotIn('select_behavior', names)
             self.assertEqual((package / ".mcp.json").read_bytes(),
