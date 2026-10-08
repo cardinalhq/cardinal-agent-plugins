@@ -1,6 +1,7 @@
 # Investigation v1 — consolidation plan
 
-Status: APPROVED 2026-10-07 (all five decisions in §6; dark-deploy sequencing in §4).
+Status: APPROVED 2026-10-07; rollout decision updated 2026-10-08 (§4).
+The original audit below is historical; the production rollout record in §4 is authoritative.
 Audited 2026-10-07
 against conductor `origin/main` e019b95a (maestro v1.102.0), cardinal-agent-plugins
 `origin/main` 0b28f99 (plugin 0.43.0), and the unmerged work below.
@@ -14,7 +15,7 @@ under which names, and in what merge order.
 > evidence behind it. It continuously explains itself to humans through a
 > Storyboard and can be observed and challenged by other agents.
 
-## 0. What was audited
+## 0. What was audited (historical, 2026-10-07)
 
 | Work | Where | State |
 |---|---|---|
@@ -325,35 +326,163 @@ consumers   poller → inbox → delivery (render by wire class/authority) · `i
 CLI         investigation link|question|checkpoint|events|post|ack|show|grant|state …
 ```
 
-## 4. PR and migration sequence (approved: deploy dark, then enable)
+## 4. PR and migration sequence (Cardinal rollout approved 2026-10-08)
 
 Each step leaves prod working. "Deploy" means merge → tag → kubernetes-clusters
 bump → fully rolled out, with CI green, review done and a prod smoke test.
-Every capability ships **off** or inert. Investigation v1 is fully deployed
-before any flag is flipped, and each flip is a separate, explicit owner
-decision.
+C3 and C4 shipped with automatic projection off. The owner then authorized
+Cardinal-only automatic projection after both production smoke tests passed.
+Owner input remains off; it is not a prerequisite for Storyboards.
 
 | # | Repo · branch | Contents | Migration | Gate before the next step |
 |---|---|---|---|---|
 | D0 | plugins · `docs/investigation-v1` | This doc replaces #173 | — | — |
 | C0 | conductor · `fix/bedrock-claude5-temperature` | 90b67874 from #2073 on its own; conductor #2075 merged as-is alongside it | — | CI |
 | C1 | conductor · `refactor/investigation-reader` | Registry + JSON export + Go/SQL contract tests; `InvestigationReader` and `access.ts` for the existing two classes; wire `class` / `authority` / `trust`; **known-type allowlist**; `capabilities` block on ensure (empty-safe); UI reads `class` from the wire. No behaviour change. | none | deployed; prod smoke: read/post/checkpoint/ack/ensure unchanged |
-| P1 | plugins · `feat/investigation-capabilities` (0.44.0) | #172 content on `capabilities.projection`; render_preview env fix; render by wire class; CLI `choices` from core constants. Merging auto-releases. | — | released; C1 deployed first |
-| C2 | conductor · `feat/investigation-owner-input` | Owner input (`record-owner-input`, `owner_input.recorded`), grants (grant / list / revoke, `CardinalInvestigation`, `grantee:<id>`), reader visibility, grantee `session_id` rule, redactor identifiers, `control_log_not_evidence` patterns, gateway enum, UI; flag `INVESTIGATION_OWNER_INPUT_ENABLED` **off** → `capabilities.owner_input` | `20261015090000_maestro_investigation_owner_input_grants` | deployed dark; prod `schema_migrations` = 20261015 |
+| P1 | plugins · `feat/investigation-capabilities` (shipped 0.44.1) | #172 content on `capabilities.projection`; render_preview env fix; render by wire class; CLI `choices` from core constants. Merging auto-releases. | — | released; C1 deployed first |
+| C2 | conductor · `feat/investigation-owner-input` | Owner input (`record-owner-input`, `owner_input.recorded`), grants (grant / list / revoke, `CardinalInvestigation`, `grantee:<id>`), reader visibility, grantee `session_id` rule, redactor identifiers, `control_log_not_evidence` patterns, gateway enum, UI; flag `INVESTIGATION_OWNER_INPUT_ENABLED` **off** → `capabilities.owner_input` | `20261015090000_maestro_investigation_owner_input_grants` | deployed dark; prod `gomigrate_maestro` = 20261015090000 |
 | P2 | plugins · `feat/investigation-owner-input` (0.45.0) | Owner-input hook (capability-gated; drop on 404 / absent; outbox only for transient errors), NUL strip, turn renumbering, `grant` CLI, token-aware `events` / `post` / `show`, renamed strings | — | released; inert against the dark server |
 | C3 | conductor · `feat/storyboard-projection-v1` | #2073 re-cut onto C1/C2: projector reads only through `InvestigationReader.for(projector)`; D3–D6 and D11 removed; `authorLive` → access.ts; capability `projection`; flag `STORYBOARD_PROJECTION_ENABLED` **off** | `20261016090000_maestro_storyboard_projections` (12+13 squashed) | deployed dark; a test proves the projector never sees owner_input rows (real rows present) |
 | C4 | conductor · `feat/storyboard-projection-ui` | #2072 rebuilt on C3: imports shared states; handles the 429 daily cap, 409 `projection_disabled`, and the new publish gate | — | deployed |
 
-**Milestone: Investigation v1 deployed dark.** After it, each step is its own owner decision:
+**Shipping decision (2026-10-08):** ordinary Cardinal engineering sessions should
+leave an evidence-backed private Storyboard automatically, without asking the
+worker to create one. The earlier owner-input → supervision-experiment →
+projection sequence is superseded. The supervision experiment remains parked;
+no owner-input capture, grantee dogfood, or new primitive is part of this rollout.
 
-1. Enable owner_input for the Cardinal org.
-2. Run the real supervision experiment.
-3. Enable projection for the Cardinal org.
-4. Run a combined dogfood of Investigation v1 as a whole: a real engineering
-   task, with owner input captured, checkpoints, the Storyboard evolving
-   automatically, and a grantee observing, challenging, and the worker
-   responding. The next primitive (likely Activity) is chosen from that run,
-   not before.
+### Production rollout record (2026-10-08 UTC)
+
+| Step | Merged PR / commit | Release / deployment | Verification |
+|---|---|---|---|
+| D0 | plugins #174, amended by #179 | consolidation contract | original audit retained above |
+| C0 | conductor #2075 and the isolated model compatibility fix | deployed before this rollout | unchanged |
+| C1 | conductor #2078 | Maestro v1.103.0 | canonical reader, registry and capabilities; original smoke 11/11 |
+| P1 | plugins #175 | plugin 0.44.1 | capabilities-aware bootstrap |
+| C2 | conductor #2080 | Maestro v1.104.0 (v1.104.1 was live at shipping audit) | original smoke 19/19; owner input off |
+| P2 | plugins #177 | plugin 0.45.0; installed/current Claude plugin at shipping audit 0.46.1 | capture remains inert when capability is off |
+| C3 | conductor #2081, `69aa343528def10797bd8028d0ca1ff0d99e7fab` | Maestro v1.105.0; kubernetes-clusters #2143 | 177 real-Postgres + 15 unit tests; production smoke 9/9 |
+| C4 | fresh conductor #2083, `4df64043545cfe84fde63bb20b24af9cc3d8b3c4` | Maestro v1.106.0; kubernetes-clusters #2144 | 164 targeted UI tests; production smoke 9/9; real browser verified |
+| Cardinal org scope | conductor #2084, `6d31493c8edebee8243aa7f1a64434394997883b` | Maestro v1.107.0; kubernetes-clusters #2145 | 180 real-Postgres + 18 unit tests, including excluded-org isolation before candidate LIMIT |
+
+The shipping diff review found and fixed one C3 blocker: a failed receipt read
+could previously count as dereferenced evidence. Receipt IDs now enter the
+successfully-read set only after canonical evidence lookup succeeds; a regression
+test covers the failure. No projector feature or visual/prompt tuning was added.
+C4 was recut from final C3, including `draft_through_seq`, shared state constants,
+daily-cap/disabled responses and catch-up-before-publish behavior.
+
+All merged conductor changes passed their normal CI gates. Full local `make
+check` was also run: C3 9,733 passed / 64 failed / 63 skipped; C4 9,734 / 85 / 41;
+org scope 9,759 / 68 / 39. These aggregate runs were **not green**: unrelated
+minimal/shared Postgres fixture conflicts, and (C4/scope) renderer RSS checks
+under full load failed. C4 also hit a preview socket failure. Relevant isolated
+Postgres suites passed against migrated databases; the C4 preview follow-up
+passed, and isolated canvas checks passed 47 with 1 skipped. The normal CI
+renderer smoke passed. These failures were not bypassed or reported as passing.
+
+C3 applied the fresh consolidated migration `20261016090000`; production
+`gomigrate_maestro` reports that version with `dirty=false`. C4 and org scope add
+no migrations. Retired 20261012/13/14 migrations were not revived.
+
+Release image-copy workflows for v1.105.0 and v1.106.0 initially failed during
+post-copy registry verification; normal failed-job retries passed, including the
+published-image smoke, before deployment. No workflow safeguards were changed.
+
+Deployment #2145 merged as `6e3d49f8fd41c45fffae89893f7417a87a1367ec`.
+Maestro v1.107.0 passed the published-image smoke on normal retry (the same
+post-copy verification failure as the earlier releases), then rolled out two
+ready replicas with Argo Synced/Healthy. The production API reports projection
+enabled and owner input disabled for Cardinal HQ.
+
+Production policy:
+
+- `STORYBOARD_PROJECTION_ENABLED=true`.
+- `STORYBOARD_PROJECTION_ORG_IDS=c4375e34-dfcf-498a-8ba3-a02d119baf82`
+  (Cardinal HQ only). The allowlist gates candidate selection before LIMIT,
+  execution, requests, capabilities and private status. An empty configured
+  list denies all orgs; absent configuration retains the existing global-flag
+  semantics. Invalid UUID configuration fails startup.
+- `INVESTIGATION_OWNER_INPUT_ENABLED=false`.
+- Existing limits remain: 12 runs per Storyboard/day, 40 per org/rolling day,
+  two concurrent runs per process, and the existing model/run budgets.
+- Automatic output stays draft; publish/share remain explicit, and manual
+  edits pause projection. **Before or atomically with rollback below v1.107.0,
+  set the global projection flag false**: older binaries ignore the allowlist.
+- Companion documentation cardinal-docs #132 and chart guidance charts #458
+  are merged. No chart defaults were enabled for other installations.
+
+Superseded conductor #2073 and #2072 are closed with replacement links. The two
+clean, idle local `feat/task-intent` branches were renamed to
+`archive/task-intent-2026-10-08`, retaining their worktrees and exact tips:
+conductor `186ab3e42ef8e65273e3f85eea6b4fd736b84c55`, plugins
+`9e72d3bebd3c7d773ef773a0edad9b55d6951170`. Historical experimental artifacts
+remain available; none were deleted.
+
+### Real Claude acceptance (2026-10-08 UTC)
+
+This was a fresh authenticated Claude Code session using installed Cardinal
+plugin 0.46.1 and its normal hooks, not an API-only synthetic smoke. The initial
+ordinary engineering question asked whether a user-owned API key can author an
+Investigation after org removal; the continuation asked about a Viewer downgrade.
+Neither prompt requested a Storyboard. The worker inspected repository source
+and existing tests, did not change files, and explicitly reported that it read
+rather than executed the tests.
+
+- Session: `0f00d88c-ad02-4184-80fb-c719992b4739`.
+- Investigation: `inv_0a8bae479a3f307f6fa83c6d` (automatic binding).
+- Private [Storyboard](https://app.cardinalhq.io/storyboards/sb_7b177404bbaedc773777e3ad),
+  ID `sb_7b177404bbaedc773777e3ad`.
+- Session began 06:43:19.613; Investigation created 06:43:24.743. Browser showed
+  Investigation active, then Building visual explanation after checkpoint #1.
+- Worker checkpoint #1 at 06:45:17.732 cited five captured tool receipts. The
+  first automatic sweep ran 06:45:38.270–06:48:59.396: 201.126 seconds of run
+  time, 221.664 seconds checkpoint-to-apply, $0.636158, 24 model turns, 30 tool
+  calls, five receipts actually dereferenced, five scenes added, revision 2,
+  watermark 1. The browser showed the generated visual explanation and opened
+  the captured source response in the Evidence drawer.
+- The continuation reused the same session, Investigation and Storyboard. It
+  recorded checkpoint #2 at 06:50:57.069 with five additional receipts. The
+  existing page automatically showed through #1 / new changes not yet reflected
+  / updating, while the second sweep observed head 2.
+
+The second automatic sweep ran 06:51:17.602–06:54:30.576: 192.974 seconds of
+run time, 213.507 seconds checkpoint-to-apply, $0.735673, 21 model turns,
+30 tool calls, all ten receipts dereferenced. It added two scenes, revised
+three and removed none, applying revision 4 / watermark 2 in place. Revision 3
+was the worker's question update; it did not manually edit Storyboard content.
+The existing browser page updated without a refresh to seven scenes, ten
+captured receipts and through #2. Both runs used
+`us.anthropic.claude-sonnet-4-6`; combined projector cost was **$1.371831**.
+The Claude CLI separately reported list-price worker cost $1.2216916 after the
+first phase and $1.9380392 on resume completion; these are not projector costs.
+
+The generated answer matches the source-backed Investigation: removal prevents
+org access; a Viewer user key can authenticate but cannot read/write
+Investigations or Storyboards, and `principalLive` stops automatic projection
+for that author. Existing tests cover component boundaries; the worker did not
+execute them in this acceptance session or prove a real user removal/downgrade
+end to end. The displayed open test-gap scene must not be read as proof that
+those complete scenarios were tested. This session tests automatic production
+projection, not a production permission mutation.
+
+Privacy and authorization checks at 06:55:17 UTC: draft status, `published_at`
+null, zero shares, zero owner-input rows, zero projection runs outside Cardinal
+HQ. Publish remained an explicit disabled action while the time window was
+open. The worker's only Cardinal commands were question updates and semantic
+checkpoints; it never invoked Storyboard authoring. The projector consumed
+canonical durable events and cited captured tool responses. No transcript or
+owner-input payload was supplied to it; the local Claude execution transcript
+was used only to audit the acceptance run, and was not uploaded as evidence.
+C3 tests additionally cover real owner-input rows being invisible to the
+projector and forbid a transcript dependency.
+
+The enablement also processed existing Cardinal backlog. At 06:55:17 UTC there
+were eight applied runs ($3.231145 including this session), one budget-turn
+failure ($1.442473), one manual-content stand-down, and one active run. The older
+Storyboard `sb_4bc06af4a5ab499088c9ba06` hit the existing 40-turn limit; this is a
+dogfood follow-up, not a reason to raise caps or tune the prompt in this shipping
+change. No security, migration or partial-apply regression was observed.
 
 C2 and C3 have no schema dependency. C2 goes first so the projector is built
 and tested against a reader that already holds real owner_input rows.
@@ -363,8 +492,9 @@ and tested against a reader that already holds real owner_input rows.
 Activity capture, the WAL→state reducer, compliance tracking, delegated
 supervisor authority (no tool veto, no ack on the author's behalf), new
 projector features, Phase 4 delivery fixes, idle wake, Codex / Cursor / Gemini
-adapters, flipping `STORYBOARD_PROJECTION_ENABLED`, and fixing the
-out-of-scope duplications listed in §2.1.
+adapters, enabling owner input, enabling projection for other customer orgs, and
+fixing the out-of-scope duplications listed in §2.1. Cardinal-only projection
+enablement is explicitly in scope under the 2026-10-08 shipping decision.
 
 ## 6. Decisions (approved 2026-10-07)
 
