@@ -237,9 +237,18 @@ loudly (table exists) instead of silently skipping:
      patterns cover the new route and CLI.
    - Never public; grant ids and `granted_by` are added to the redactor's
      identifiers.
-   - Scrubbed, at most 32 KiB, with `prompt_sha256` of the original. One row
-     per (investigation, session, turn); first write wins; a different hash
+   - Scrubbed, at most 32 KiB. `prompt_sha256` is the hash of the
+     **scrubbed**, untruncated text, never the original: a hash of the
+     original would let any reader brute-force a redacted secret offline
+     (amended 2026-10-07 after the P2 privacy review). One row per
+     (investigation, session, turn); first write wins; a different hash
      returns 409.
+   - **Disclosure before capture**: the user sees a notice (a `systemMessage`,
+     not only model context) before the first prompt of a session is
+     recorded, including when capture turns on mid-session.
+   - Known, accepted: a prompt that another parallel `UserPromptSubmit` hook
+     blocks may still be recorded, and machine-generated prompts (`/loop`,
+     scheduled runs, `claude -p`) are recorded as `user_prompt`.
    - No OTEL prompt logging, and `git-state` stays "never args".
    - The local outbox is 0600 and bounded, and is used only for transient
      errors when the server **advertises** the capability. An absent
