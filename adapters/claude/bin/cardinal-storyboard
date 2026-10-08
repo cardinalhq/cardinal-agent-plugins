@@ -1234,7 +1234,8 @@ def cmd_investigation_grant(args: argparse.Namespace) -> int:
     try:
         out = gr.grant(conn, inv_id, scopes, ttl_seconds=ttl, label=args.label, client=client)
     except sync.ServerError as e:
-        sys.stderr.write(_refused(e, "no access granted") + "\n")
+        said = gr.refusal(e)
+        sys.stderr.write((f"no access granted: {said}" if said else _refused(e, "no access granted")) + "\n")
         return 1
     except ist.FetchError as e:
         sys.stderr.write(f"no access granted: {e}\n")

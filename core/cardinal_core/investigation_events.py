@@ -122,6 +122,10 @@ except ImportError:  # pragma: no cover
 SESSION_ID_RE = sync.SESSION_ID_RE
 INVESTIGATION_ID_RE = ist.INVESTIGATION_ID_RE
 IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")  # fullmatch
+# Prefixes the server keeps for its own writes (400 reserved_idempotency_key
+# on append / checkpoint); this client never generates them (post:, ack:,
+# c<hex>) and refuses a user-supplied one before sending.
+RESERVED_KEY_PREFIXES = ("oi:", "ckpt:")
 
 DELIVERABLE = ("cue.added", "question.added", "challenge.added")
 ACKNOWLEDGED = "acknowledged"
@@ -178,6 +182,7 @@ _PLAIN = {
     "token_scope_mismatch": ("the access grant does not cover that (another investigation, route or event type)"),
     "session_id_not_allowed_for_grantee": "a grantee cannot post as a session",
     "grant_revoked": "the investigation's author revoked this access grant; ask them for a new one",
+    "reserved_idempotency_key": "that idempotency key starts with a prefix Cardinal reserves (oi:, ckpt:)",
     "Invalid token": ("CARDINAL_INVESTIGATION_TOKEN is not valid (expired, malformed or for another server); ask "
                       "the investigation's author for a new grant"),
 }
@@ -495,6 +500,8 @@ def append_event(conn: dict, investigation_id: str, type_: str, payload: dict, *
         raise ist.FetchError("owner input is recorded only by the plugin's prompt hook")
     if not isinstance(idempotency_key, str) or not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
         raise ist.FetchError("the idempotency key is 1-128 characters of A-Z a-z 0-9 . _ : -")
+    if idempotency_key.startswith(RESERVED_KEY_PREFIXES):
+        raise ist.FetchError(f"idempotency keys starting {' or '.join(RESERVED_KEY_PREFIXES)} are reserved by Cardinal")
     for name, sid in (("--to-session", to_session_id), ("session", session_id)):
         if sid is not None and not valid_session(sid):
             raise ist.FetchError(f"not a session id ({name}): {sid!r}")
@@ -628,6 +635,7 @@ _CHECKPOINT_PLAIN = {
     "invalid_checkpoint": "the server refused the events as invalid",
     "invalid_body": "the server refused the events as invalid",
     "storyboards_unavailable": "this Cardinal cannot store investigation events right now",
+    "reserved_idempotency_key": "that checkpoint key starts with a prefix Cardinal reserves (oi:, ckpt:)",
 }
 
 
@@ -925,6 +933,9 @@ def checkpoint(conn: dict, investigation_id: str, session_id: str, events: Any, 
     if idempotency_key is not None and not (isinstance(idempotency_key, str)
                                             and CHECKPOINT_KEY_RE.fullmatch(idempotency_key)):
         raise CheckpointInputError("the checkpoint key is 1-100 characters of A-Z a-z 0-9 . _ : -")
+    if idempotency_key is not None and idempotency_key.startswith(RESERVED_KEY_PREFIXES):
+        raise CheckpointInputError(f"checkpoint keys starting {' or '.join(RESERVED_KEY_PREFIXES)} are reserved by "
+                                   "Cardinal")
     events = checkpoint_events(events)
     key = idempotency_key or checkpoint_key(investigation_id, session_id, events)
     cited = cited_captures(events)

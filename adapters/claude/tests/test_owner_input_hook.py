@@ -63,6 +63,7 @@ class FakeMaestro:
         self.old_server = False
         self.principals = None     # the read answer's `principals` map (C2)
         self.read_status = None    # answered to every read-investigation-events
+        self.grant_status = None   # answered to every grant-investigation-access
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -125,6 +126,8 @@ class FakeMaestro:
         if tool == "get-investigation":
             return 200, {"investigation_id": body["investigation_id"], "storyboard_id": SB}
         if tool == "grant-investigation-access":
+            if self.grant_status:
+                return self.grant_status
             return 201, {"grant_id": GRANT, "token": TOKEN, "expires_at": "2026-10-07T16:00:00.000Z",
                          "scopes": body["scopes"], "label": body.get("label"), "principal": "grantee:" + GRANT,
                          "investigation_id": body["investigation_id"], "org": "o1"}
@@ -443,6 +446,13 @@ class GrantCli(Base):
                      ("--ttl", "1m"), ("--label", "")):
             self.assertEqual(self.cli("grant", *args, CLAUDE_CODE_SESSION_ID=SID).returncode, 2, args)
         self.assertEqual(self.fake.requests, [])
+
+    def test_grant_limit_says_which(self):
+        self.bind()
+        self.fake.grant_status = (409, {"error": "grant_limit_reached", "scope": "lifetime", "limit": 100})
+        res = self.cli("grant", CLAUDE_CODE_SESSION_ID=SID)
+        self.assertEqual((res.returncode, res.stdout), (1, ""))
+        self.assertIn("lifetime limit of access grants (100)", res.stderr)
 
     def test_grants_and_revoke(self):
         self.bind()

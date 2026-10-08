@@ -63,6 +63,7 @@ class FakeMaestro:
         self.old_server = False  # no record-owner-input route at all
         self.principals = None   # the read answer's `principals` map (C2), when set
         self.trickle = 0.0       # record-owner-input sends its answer one byte at a time for this long
+        self.conflict_code = "owner_input_turn_conflict"   # what a taken turn answers (409)
         self.answered: list = []  # statuses answered to record-owner-input
         fake = self
 
@@ -146,7 +147,7 @@ class FakeMaestro:
                     and e["payload"]["turn"] == p["turn"]:
                 if e["payload"]["prompt_sha256"] == p["prompt_sha256"]:
                     return 200, {"event": e, "duplicate": True, "trust": TRUST}
-                return 409, {"error": "owner_input_turn_conflict", "investigation_id": INV,
+                return 409, {"error": self.conflict_code, "investigation_id": INV,
                              "session_id": body["session_id"], "turn": p["turn"], "event": e, "message": "m"}
         e = {"investigation_id": body["investigation_id"], "seq": len(self.events) + 1, "type": oi.TYPE,
              "class": "owner_input", "authority": "owner_input_client_attested", "payload": p,
@@ -569,6 +570,16 @@ class TurnRenumbering(Base):
         self.assertEqual(self.submit("next"), "posted")
         self.assertEqual(self.fake.records()[-1]["payload"]["turn"], 4)
 
+    def test_a_key_conflict_renumbers_too(self):
+        self.bind()
+        self.fake.conflict_code = "owner_input_key_conflict"
+        self.fake.add_owner_input(1, "a" * 64)
+        self.fake.add_owner_input(2, "b" * 64)
+        self.assertEqual(self.submit("after the binding was lost"), "posted")
+        self.assertEqual(self.fake.records()[-1]["payload"]["turn"], 3)
+        self.assertEqual(self.binding()["owner_input_turn"], 3)
+        self.assertFalse(self.outbox().exists())
+
 
 class NeverDelivered(Base):
     def test_the_agent_cannot_append_owner_input(self):
@@ -576,6 +587,19 @@ class NeverDelivered(Base):
             with self.assertRaises(ist.FetchError):
                 ie.append_event(self.fake.conn, INV, t, {"text": "x"}, idempotency_key="k1", client="t")
         self.assertEqual(self.fake.requests, [])
+
+    def test_reserved_idempotency_keys_are_never_sent(self):
+        for key in ("oi:1", "ckpt:x"):
+            with self.assertRaises(ist.FetchError):
+                ie.append_event(self.fake.conn, INV, "cue.added", {"text": "x"}, idempotency_key=key, client="t")
+            with self.assertRaises(ie.CheckpointInputError):
+                ie.checkpoint(self.fake.conn, INV, SID, [{"type": "question.opened", "id": "question_a",
+                                                          "statement": "s"}], idempotency_key=key, client="t")
+        self.assertEqual(self.fake.requests, [])
+        # What the plugin generates never uses them.
+        events = ie.checkpoint_events([{"type": "question.opened", "id": "question_a", "statement": "s"}])
+        for key in (ie.ack_key(SID, 3), ie.checkpoint_key(INV, SID, events)):
+            self.assertFalse(key.startswith(ie.RESERVED_KEY_PREFIXES), key)
 
     def test_never_deliverable_and_never_kept_in_the_inbox(self):
         self.bind()
@@ -684,6 +708,15 @@ class Grants(Base):
         self.assertEqual(self.fake.requests[-1][:2], ("revoke-investigation-grant", {"grant_id": GRANT}))
         with self.assertRaises(ist.FetchError):
             gr.revoke(self.fake.conn, "grt_nope", client="t")
+
+    def test_grant_limit_names_its_scope(self):
+        active = gr.refusal(sync.ServerError(409, {"error": "grant_limit_reached", "scope": "active", "limit": 20}, "x"))
+        self.assertIn("active access grants (20)", active)
+        self.assertIn("revoke", active)
+        lifetime = gr.refusal(sync.ServerError(409, {"error": "grant_limit_reached", "scope": "lifetime",
+                                                     "limit": 100}, "x"))
+        self.assertIn("lifetime limit of access grants (100)", lifetime)
+        self.assertIsNone(gr.refusal(sync.ServerError(400, {"error": "invalid_scopes"}, "x")))
 
     def test_token_connection_from_the_environment_only(self):
         self.assertIsNone(gr.token_connection({}))

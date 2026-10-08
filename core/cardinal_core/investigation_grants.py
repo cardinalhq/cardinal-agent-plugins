@@ -141,6 +141,25 @@ def revoke(conn: dict, grant_id: str, *, client: str, opener=None) -> dict:
     return sync._post(conn, "revoke-investigation-grant", {"grant_id": grant_id}, client=client, opener=opener)
 
 
+def refusal(err: "sync.ServerError") -> Optional[str]:
+    """A grant refusal that needs more than its code: grant_limit_reached
+    names which limit (scope "active": unrevoked, unexpired grants;
+    "lifetime": every grant ever made for the investigation) and how many.
+    None for anything else (the caller says it as usual)."""
+    body = err.body if isinstance(err.body, dict) else {}
+    if err.status != 409 or body.get("error") != "grant_limit_reached":
+        return None
+    scope, limit = body.get("scope"), body.get("limit")
+    n = f" ({limit})" if isinstance(limit, int) and not isinstance(limit, bool) else ""
+    if scope == "active":
+        return (f"this investigation already has its limit of active access grants{n}; revoke one "
+                "(`cardinal-storyboard investigation grants`, then `investigation revoke <grant_id>`)")
+    if scope == "lifetime":
+        return (f"this investigation reached its lifetime limit of access grants{n}; revoking does not free one, "
+                "so no more grants can be made for it")
+    return f"this investigation reached a limit of access grants{n} (scope {ie._tok(scope)})"
+
+
 def grant_id_of(g: dict) -> Any:
     return g.get("grant_id") if g.get("grant_id") is not None else g.get("id")
 

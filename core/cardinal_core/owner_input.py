@@ -56,7 +56,8 @@ turn, never the prompt or its hash.
 
 Turns: the binding's `owner_input_turn` counts the session's captured
 prompts. A lost binding restarts it, so the server may already hold another
-prompt at that turn (409 owner_input_turn_conflict): this session's
+prompt at that turn (409 owner_input_turn_conflict, or
+owner_input_key_conflict): this session's
 owner_input rows are read (class owner_input; its author may) and the
 entry, with everything queued after it, is renumbered past the server's
 highest turn, once; without time for that it stays queued.
@@ -92,6 +93,9 @@ CAPABILITY = "owner_input"                   # capabilities.owner_input.enabled
 ROUTE = "record-owner-input"
 SOURCE = "user_prompt"
 TURN_CONFLICT = "owner_input_turn_conflict"
+# 409s that mean "this session's turn is taken on the server" (a lost
+# binding restarted the counter): renumbered past the server's highest turn.
+TURN_CONFLICTS = (TURN_CONFLICT, "owner_input_key_conflict")
 
 MAX_TEXT_BYTES = 32768                       # payload.text, UTF-8 bytes, after scrubbing
 HASHED_CHARS = 4 * MAX_TEXT_BYTES            # a longer prompt is cut to this before the scrub (and the hash)
@@ -267,14 +271,15 @@ def record(conn: dict, investigation_id: str, session_id: str, body_payload: dic
 
 def disposition(err: Exception) -> str:
     """What a failed post means:
-      conflict   409 owner_input_turn_conflict (renumber, once)
+      conflict   409 owner_input_turn_conflict / owner_input_key_conflict
+                 (renumber past the server's highest turn, once)
       transient  network, timeout, a malformed answer, 5xx, 408, 429: queue
       off        404 (no route, owner_input_disabled, no such investigation),
                  401, 403, 405: drop this and the whole outbox, capability off
       drop       any other refusal (400, 413, 422, a 409 cap): drop this entry"""
     if not isinstance(err, sync.ServerError):
         return "transient"
-    if err.status == 409 and err.body.get("error") == TURN_CONFLICT:
+    if err.status == 409 and err.body.get("error") in TURN_CONFLICTS:
         return "conflict"
     if err.status in (408, 429) or err.status >= 500:
         return "transient"
