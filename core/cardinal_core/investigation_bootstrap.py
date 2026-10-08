@@ -301,7 +301,12 @@ def _ensure(home, sid, conn, client, wanted, started_at, opener, timeout, force,
         for done in (pending_path(home, sid), refresh_path(home, sid)):   # this answer is current
             with contextlib.suppress(OSError):
                 done.unlink()
-        _owner_input_gate(home, sid, b)
+        if _owner_input_gate(home, sid, b):
+            with ie.locked(home, sid, wait=2.0) as got_lock:
+                cur = ie.read_binding(home, sid)
+                if got_lock and cur is not None and _owner_input_gate(home, sid, cur):
+                    ie.write_binding(home, sid, cur)
+                    b = cur
         return {"status": "ok", "binding": b, "error": None}
 
 
@@ -383,21 +388,27 @@ def refresh_capabilities(home: Path, sid: str, conn: dict, client: str, *, opene
         cur = ie.read_binding(home, sid)
         if cur is not None and cur["investigation_id"] == inv:
             cur["capabilities"] = caps
+            _owner_input_gate(home, sid, cur)
             ie.write_binding(home, sid, cur)
-        _owner_input_gate(home, sid, cur)
     with contextlib.suppress(OSError):
         refresh_path(home, sid).unlink()
     return "off" if refused else "ok"
 
 
-def _owner_input_gate(home: Path, sid: str, binding: Optional[dict]) -> None:
-    """The capabilities just written no longer let this session record
-    owner input (owner_input off or absent, or not the author): its owner
-    input outbox goes, so nothing queued is sent later."""
-    with contextlib.suppress(Exception):
+def _owner_input_gate(home: Path, sid: str, binding: Optional[dict]) -> bool:
+    """The capabilities just read no longer let this session record owner
+    input (owner_input off or absent, or not the author): its owner input
+    outbox goes, so nothing queued is sent later, and `binding` (mutated;
+    the caller writes it) forgets that the user was told, so turning the
+    capability on again discloses again. Whether `binding` changed."""
+    try:
         from . import owner_input
-        if not owner_input.enabled(binding):
-            owner_input.drop_outbox(home, sid)
+        if owner_input.enabled(binding):
+            return False
+        owner_input.drop_outbox(home, sid)
+        return isinstance(binding, dict) and binding.pop("owner_input_disclosed", None) is not None
+    except Exception:
+        return False
 
 
 def capability_enabled(caps: Any, name: str) -> bool:

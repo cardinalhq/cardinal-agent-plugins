@@ -13,20 +13,35 @@ this as what the owner typed", never more. One row per (investigation,
 session, turn): the same turn with the same prompt_sha256 is a replay (200
 duplicate: true), with another one 409 owner_input_turn_conflict.
 
-Capture happens only when ALL of these hold (enabled(); the adapter adds
-its kill switch and skips task notifications):
+Capture happens only when ALL of these hold (enabled() and disclosed(); the
+adapter adds its kill switch and skips task notifications):
   - the session's binding says it authors its Investigation (is_author true:
     a joined investigation never gets the joiner's prompts);
   - the server advertised capabilities.owner_input.enabled: true (on
     ensure-session-investigation; refreshed once per session start). An
     older Cardinal, a capability absent or off: nothing is captured, sent or
-    queued.
+    queued;
+  - the user was told, in a message shown to them, that this session's
+    prompts are recorded: the binding's `owner_input_disclosed` (set by
+    mark_disclosed when the adapter shows DISCLOSURE, at SessionStart or on
+    the first prompt that would otherwise be captured; that prompt itself is
+    not captured). Cleared whenever the capability is seen off, so turning
+    it back on mid-session discloses again.
 
 What is sent: the prompt made wire-safe (NUL removed, an unpaired surrogate
-becomes U+FFFD), scrubbed of credentials (evidence_capture.scrub_prompt) and
-cut to 32 KiB of UTF-8, with the sha256 and length of the ORIGINAL prompt.
+becomes U+FFFD) and scrubbed of credentials (evidence_capture.scrub_prompt);
+`text` is that, cut to 32 KiB of UTF-8. `prompt_sha256` is the sha256 of the
+SCRUBBED text before that cut (never of the original, so a redacted secret
+cannot be brute-forced from it); `original_length` is the original
+prompt's UTF-8 length. To check a record against a transcript: sha256 of
+scrubbed_of(the transcript's prompt). A prompt longer than HASHED_CHARS
+characters is cut to that before the scrub (bounded time) and loses its
+last SCRUB_SLACK characters after it, so no secret split by the cut
+survives; such a record is truncated.
 
-Posting (submit): synchronously within ~1.5 s. A transient failure
+Posting (submit): synchronously, with a hard wall-clock bound of ~1.5 s for
+everything on the network (a worker thread joined with a timeout: slow DNS
+or a trickling server count). A timeout or a transient failure
 (network, timeout, 5xx, 408, 429) puts the prompt in the session's outbox
 (<sid>.owner-input-outbox.json, 0600, bounded: the oldest entries go
 first), posted oldest first by the next prompt or at Stop (flush), only
@@ -62,6 +77,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -78,7 +94,7 @@ SOURCE = "user_prompt"
 TURN_CONFLICT = "owner_input_turn_conflict"
 
 MAX_TEXT_BYTES = 32768                       # payload.text, UTF-8 bytes, after scrubbing
-SCRUB_CHARS = 2 * MAX_TEXT_BYTES             # a longer prompt is cut before the scrub
+HASHED_CHARS = 4 * MAX_TEXT_BYTES            # a longer prompt is cut to this before the scrub (and the hash)
 SCRUB_SLACK = 1024                           # then this much more, so a secret the cut split is gone
 BUDGET = 1.5                                 # wall-clock of one prompt's requests (outbox + its own)
 MIN_REQUEST = 0.2                            # less left than this: queue instead of asking
@@ -110,6 +126,35 @@ def enabled(binding: Optional[dict]) -> bool:
     from . import investigation_bootstrap as boot
     return isinstance(binding, dict) and binding.get("is_author") is True \
         and boot.capability_enabled(binding.get("capabilities"), CAPABILITY)
+
+
+DISCLOSURE = ("This session's prompts are recorded to Investigation {inv} as owner input (credentials scrubbed, "
+              "up to 32 KiB); only you and grantees you authorize can read them.")
+
+
+def disclosed(binding: Optional[dict]) -> bool:
+    """The user was shown DISCLOSURE for this session's binding."""
+    return isinstance(binding, dict) and binding.get("owner_input_disclosed") is True
+
+
+def mark_disclosed(home: Path, sid: str) -> Optional[str]:
+    """Record that DISCLOSURE is being shown to the user now, if this
+    session records owner input (enabled): returns the disclosure text to
+    show, or None (nothing recorded; show nothing). The caller must show it
+    (a user-visible systemMessage). Never raises."""
+    try:
+        with ie.locked(home, sid, wait=1.0) as got:
+            if not got:
+                return None
+            b = ie.read_binding(home, sid)
+            if not enabled(b):
+                return None
+            if b.get("owner_input_disclosed") is not True:
+                b["owner_input_disclosed"] = True
+                ie.write_binding(home, sid, b)
+            return DISCLOSURE.format(inv=b["investigation_id"])
+    except Exception:
+        return None
 
 
 def drop_outbox(home: Path, sid: str) -> bool:
@@ -148,37 +193,47 @@ def wire_safe(s: str) -> str:
     return s
 
 
-def text_of(prompt: str) -> tuple:
-    """(text, truncated): the prompt made wire-safe, scrubbed
-    (evidence_capture.scrub_prompt) and cut to MAX_TEXT_BYTES of UTF-8
-    without splitting a character. A very long prompt is cut before the
-    scrub (bounded time), and then SCRUB_SLACK more, so nothing past a
-    possibly split secret stays."""
+def scrubbed_of(prompt: str) -> tuple:
+    """(scrubbed, cut): the prompt made wire-safe (wire_safe) and scrubbed
+    (evidence_capture.scrub_prompt). A prompt longer than HASHED_CHARS is
+    cut to that before the scrub (bounded time) and then SCRUB_SLACK more
+    after it, so nothing of a secret the cut split stays; cut is then True.
+    prompt_sha256 is the sha256 of this text, so a record can be checked by
+    computing the same from the transcript."""
     from .evidence_capture import scrub_prompt
-    text, truncated = wire_safe(prompt), False
-    if len(text) > SCRUB_CHARS:
-        text, truncated = text[:SCRUB_CHARS], True
+    text, cut = wire_safe(prompt), False
+    if len(text) > HASHED_CHARS:
+        text, cut = text[:HASHED_CHARS], True
     text = scrub_prompt(text)
-    if truncated:
+    if cut:
         text = text[:max(0, len(text) - SCRUB_SLACK)]
-    data = text.encode("utf-8", "replace")   # wire_safe left no lone surrogate
+    return text, cut
+
+
+def text_of(prompt: str) -> tuple:
+    """(text, truncated, prompt_sha256): the scrubbed prompt (scrubbed_of)
+    cut to MAX_TEXT_BYTES of UTF-8 without splitting a character, and the
+    sha256 of the scrubbed text before that cut."""
+    scrubbed, truncated = scrubbed_of(prompt)
+    data = scrubbed.encode("utf-8", "replace")   # wire_safe left no lone surrogate
+    sha = hashlib.sha256(data).hexdigest()
     if len(data) > MAX_TEXT_BYTES:
         data, truncated = data[:MAX_TEXT_BYTES], True
-    return data.decode("utf-8", "ignore"), truncated
+    return data.decode("utf-8", "ignore"), truncated, sha
 
 
 def payload(prompt: str, turn: int, now: Optional[float] = None) -> dict:
-    """record-owner-input's payload for one prompt. prompt_sha256 and
-    original_length are of the ORIGINAL prompt (UTF-8), before the scrub and
-    the cut, so the record can be checked against the transcript."""
+    """record-owner-input's payload for one prompt. prompt_sha256 is of the
+    scrubbed text (scrubbed_of), never of the original; original_length is
+    the original prompt's UTF-8 length."""
     if not isinstance(prompt, str):
         raise ValueError("the prompt is a string")
     if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1:
         raise ValueError("the turn is an integer >= 1")
-    raw = prompt.encode("utf-8", "surrogatepass")
-    text, truncated = text_of(prompt)
-    out: dict = {"text": text, "truncated": truncated, "original_length": len(raw),
-                 "prompt_sha256": hashlib.sha256(raw).hexdigest(), "source": SOURCE, "turn": turn,
+    text, truncated, sha = text_of(prompt)
+    out: dict = {"text": text, "truncated": truncated,
+                 "original_length": len(prompt.encode("utf-8", "surrogatepass")),
+                 "prompt_sha256": sha, "source": SOURCE, "turn": turn,
                  "captured_at": _iso_ms(time.time() if now is None else now)}
     cmd = slash_command(prompt)
     if cmd:
@@ -393,6 +448,7 @@ def _turn_off(home: Path, sid: str, inv: str) -> None:
         caps = dict(caps)
         caps[CAPABILITY] = {"enabled": False}
         b["capabilities"] = caps
+        b.pop("owner_input_disclosed", None)
         ie.write_binding(home, sid, b)
     drop_outbox(home, sid)
 
@@ -504,23 +560,64 @@ def _usable(conn: Any) -> bool:
         and not conn.get("token")
 
 
+def _bounded(fn, deadline: float) -> tuple:
+    """(finished, fn's result): fn run in a daemon worker thread joined until
+    `deadline` (time.monotonic()), so nothing on the network (slow DNS, a
+    server trickling its answer) holds the hook past it. Unfinished: the
+    worker is abandoned (it dies with the hook's process; anything it posted
+    is a replay next time) and the caller treats it as a transient failure.
+    fn's own exception counts as finished with None."""
+    out: dict = {}
+
+    def work() -> None:
+        try:
+            out["v"] = fn()
+        except Exception:
+            out["v"] = None
+
+    t = threading.Thread(target=work, name="owner-input-post", daemon=True)
+    t.start()
+    t.join(max(0.0, deadline - time.monotonic()))
+    if t.is_alive():
+        return False, None
+    return True, out.get("v")
+
+
 def flush(home: Path, sid: str, conn: dict, client: str, *, deadline: Optional[float] = None,
           now: Optional[float] = None, opener=None) -> bool:
     """Post this session's queued owner input, oldest first (at Stop),
     while the capability is enabled; when it is not, the outbox is deleted.
-    Returns True when the outbox is empty afterwards. Never raises."""
+    Bounded by `deadline` in wall-clock time (_bounded). Returns True when
+    the outbox is empty afterwards. Never raises."""
     try:
         if not ie.valid_session(sid) or not outbox_path(home, sid).exists():
             return True
-        if not enabled(ie.read_binding(home, sid)):
+        b = ie.read_binding(home, sid)
+        if not enabled(b):
             drop_outbox(home, sid)
             return True
         if not _usable(conn):
             return False
-        return _drain(home, sid, conn, client, time.monotonic() + BUDGET if deadline is None else deadline,
-                      time.time() if now is None else now, opener)[0]
+        deadline = time.monotonic() + BUDGET if deadline is None else deadline
+        now = time.time() if now is None else now
+        done, got = _bounded(lambda: _drain(home, sid, conn, client, deadline, now, opener), deadline)
+        if not done:
+            _hold_back(home, sid, now + RETRY_FAILURE)
+            return False
+        return bool(got and got[0])
     except Exception:
         return False
+
+
+def _hold_back(home: Path, sid: str, until: float) -> None:
+    """A timed-out drain: later prompts queue without asking until `until`."""
+    with contextlib.suppress(Exception):
+        with ie.locked(home, sid, wait=0.2) as got:
+            if got:
+                box = read_outbox(home, sid)
+                if box["entries"]:
+                    box["retry_after"] = max(box["retry_after"], until)
+                    write_outbox(home, sid, box)
 
 
 def submit(home: Path, sid: str, prompt: str, conn: dict, client: str, *, budget: float = BUDGET,
@@ -529,15 +626,16 @@ def submit(home: Path, sid: str, prompt: str, conn: dict, client: str, *, budget
     code for the debug log (never the prompt):
 
       posted / duplicate   recorded (a replay counts)
-      queued               in the outbox (a transient failure, the back-off of
-                           an earlier one, the outbox not yet empty, no time,
-                           a turn conflict that could not be recovered now)
+      queued               in the outbox (a transient failure or a timeout, the
+                           back-off of an earlier one, no time, a turn
+                           conflict that could not be recovered now)
       dropped              refused for good (logged by code); nothing queued
-      unbound / not_author / capability_off / no_connection / busy / invalid
-                           nothing recorded, nothing queued
+      unbound / not_author / capability_off / not_disclosed / no_connection /
+      busy / invalid       nothing recorded, nothing queued
 
-    The turn is taken from the binding (`owner_input_turn`, under the
-    session lock) before anything is sent. Never raises."""
+    Everything on the network finishes by started + budget (_bounded). The
+    turn is taken from the binding (`owner_input_turn`, under the session
+    lock) before anything is sent. Never raises."""
     started = time.monotonic() if started is None else started
     now = time.time() if now is None else now
     try:
@@ -546,10 +644,8 @@ def submit(home: Path, sid: str, prompt: str, conn: dict, client: str, *, budget
         return "error"
 
 
-def _submit(home, sid, prompt, conn, client, deadline, now, opener) -> str:
-    if not ie.valid_session(sid) or not isinstance(prompt, str):
-        return "invalid"
-    b = ie.read_binding(home, sid)
+def _gate(home: Path, sid: str, b: Optional[dict]) -> Optional[str]:
+    """Why `b` does not capture (and its outbox goes), or None."""
     if b is None:
         return "unbound"     # no capability is known without a binding: nothing is kept
     if b.get("is_author") is not True:
@@ -558,34 +654,49 @@ def _submit(home, sid, prompt, conn, client, deadline, now, opener) -> str:
     if not enabled(b):
         drop_outbox(home, sid)
         return "capability_off"
+    if not disclosed(b):
+        return "not_disclosed"
+    return None
+
+
+def _submit(home, sid, prompt, conn, client, deadline, now, opener) -> str:
+    if not ie.valid_session(sid) or not isinstance(prompt, str):
+        return "invalid"
+    why = _gate(home, sid, ie.read_binding(home, sid))
+    if why:
+        return why
     if not _usable(conn):
         return "no_connection"
+    body = payload(prompt, 1, now)   # the scrub, outside the lock; its turn is set under it
     with ie.locked(home, sid, wait=1.0) as got:
         if not got:
             return "busy"
         b = ie.read_binding(home, sid)
-        if not enabled(b):
-            drop_outbox(home, sid)
-            return "capability_off"
+        why = _gate(home, sid, b)
+        if why:
+            return why
         box = read_outbox(home, sid)
         top = max([int(ie._num(b.get("owner_input_turn")))] + [e["payload"]["turn"] for e in box["entries"]])
-        turn = top + 1
-        entry = {"investigation_id": b["investigation_id"], "payload": payload(prompt, turn, now),
-                 "queued_at": ie._now_iso(now)}
+        body["turn"] = turn = top + 1
+        entry = {"investigation_id": b["investigation_id"], "payload": body, "queued_at": ie._now_iso(now)}
         b["owner_input_turn"] = turn
         ie.write_binding(home, sid, b)
-    try:
-        _, status, retry_after = _drain(home, sid, conn, client, deadline, now, opener, extra=entry)
-    except Exception:
-        status, retry_after = None, None
+    done, got = _bounded(lambda: _drain(home, sid, conn, client, deadline, now, opener, extra=entry), deadline)
+    if done and got:
+        _, status, retry_after = got
+    else:
+        # Timed out (or failed unexpectedly): transient, with the back-off saved.
+        status, retry_after = None, now + RETRY_FAILURE
     if status is not None:
         return status
-    with ie.locked(home, sid, wait=1.0):
-        if not enabled(ie.read_binding(home, sid)):
-            drop_outbox(home, sid)
+    with ie.locked(home, sid, wait=1.0) as got_lock:
+        if not got_lock:
+            return "busy"    # never an unlocked write; the prompt is not kept
+        if _gate(home, sid, ie.read_binding(home, sid)):
             return "capability_off"
         box = read_outbox(home, sid)
-        box["entries"].append(entry)
+        if _entry_key(entry) not in {_entry_key(e) for e in box["entries"]}:
+            box["entries"].append(entry)
         if retry_after is not None:
             box["retry_after"] = max(box["retry_after"], retry_after)
         write_outbox(home, sid, box)

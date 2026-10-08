@@ -62,6 +62,7 @@ class FakeMaestro:
         self.status = None       # (status, body) answered to every record-owner-input
         self.old_server = False  # no record-owner-input route at all
         self.principals = None   # the read answer's `principals` map (C2), when set
+        self.trickle = 0.0       # record-owner-input sends its answer one byte at a time for this long
         self.answered: list = []  # statuses answered to record-owner-input
         fake = self
 
@@ -70,6 +71,19 @@ class FakeMaestro:
                 body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
                 tool = self.path.rsplit("/", 1)[-1]
                 fake.requests.append((tool, body, {k.lower(): v for k, v in self.headers.items()}))
+                if tool == "record-owner-input" and fake.trickle:
+                    self.send_response(201)
+                    self.send_header("Content-Length", "100000")
+                    self.end_headers()
+                    end = time.monotonic() + fake.trickle
+                    try:
+                        while time.monotonic() < end:
+                            self.wfile.write(b" ")
+                            self.wfile.flush()
+                            time.sleep(0.1)
+                    except OSError:
+                        pass
+                    return
                 status, out = fake.answer(tool, body)
                 if tool == "record-owner-input":
                     fake.answered.append(status)
@@ -155,7 +169,7 @@ class Base(unittest.TestCase):
 
     def bind(self, **fields):
         b = {"investigation_id": INV, "cursor": 0, "bound_at": "t", "source": "auto", "is_author": True,
-             "capabilities": ON, "bootstrap": {"status": "ok"}}
+             "capabilities": ON, "bootstrap": {"status": "ok"}, "owner_input_disclosed": True}
         b.update(fields)
         ie.write_binding(self.home, SID, b)
 
@@ -182,10 +196,12 @@ class Base(unittest.TestCase):
 
 
 class Payload(unittest.TestCase):
-    def test_hash_and_length_are_of_the_original_and_the_text_is_scrubbed(self):
+    def test_the_hash_is_of_the_scrubbed_text_never_the_original(self):
         prompt = f"Deploy with OPENAI_API_KEY={SECRET} — café ☕\n"
         p = oi.payload(prompt, 3, now=1_000_000.5)
-        self.assertEqual(p["prompt_sha256"], hashlib.sha256(prompt.encode()).hexdigest())
+        self.assertEqual(p["prompt_sha256"], hashlib.sha256(p["text"].encode()).hexdigest())
+        self.assertEqual(p["prompt_sha256"], hashlib.sha256(oi.scrubbed_of(prompt)[0].encode()).hexdigest())
+        self.assertNotEqual(p["prompt_sha256"], hashlib.sha256(prompt.encode()).hexdigest())
         self.assertEqual(p["original_length"], len(prompt.encode()))
         self.assertNotIn(SECRET, p["text"])
         self.assertTrue(p["text"].startswith("Deploy with OPENAI_API_KEY="))
@@ -200,7 +216,8 @@ class Payload(unittest.TestCase):
         prompt = "a\x00b \ud800 c"
         p = oi.payload(prompt, 1)
         self.assertEqual(p["text"], "ab � c")
-        self.assertEqual(p["prompt_sha256"], hashlib.sha256(prompt.encode("utf-8", "surrogatepass")).hexdigest())
+        self.assertEqual(p["prompt_sha256"], hashlib.sha256("ab \ufffd c".encode()).hexdigest())
+        self.assertEqual(p["original_length"], len(prompt.encode("utf-8", "surrogatepass")))
         json.dumps(p, ensure_ascii=False).encode("utf-8")   # wire-encodable
 
     def test_cut_to_32_kib_without_splitting_a_character(self):
@@ -210,6 +227,18 @@ class Payload(unittest.TestCase):
         self.assertLessEqual(len(p["text"].encode()), oi.MAX_TEXT_BYTES)
         self.assertEqual(set(p["text"]), {"é"})
         self.assertEqual(p["original_length"], 80000)
+        # The hash covers the whole scrubbed prompt, not just the 32 KiB sent.
+        self.assertEqual(p["prompt_sha256"], hashlib.sha256(("é" * 40000).encode()).hexdigest())
+
+    def test_a_huge_prompt_is_cut_before_the_scrub_and_loses_the_slack(self):
+        prompt = "x " * oi.HASHED_CHARS + SECRET
+        scrubbed, cut = oi.scrubbed_of(prompt)
+        self.assertTrue(cut)
+        self.assertEqual(len(scrubbed), oi.HASHED_CHARS - oi.SCRUB_SLACK)
+        p = oi.payload(prompt, 1)
+        self.assertTrue(p["truncated"])
+        self.assertEqual(p["prompt_sha256"], hashlib.sha256(scrubbed.encode()).hexdigest())
+        self.assertNotIn(SECRET, json.dumps(p))
 
     def test_slash_command(self):
         self.assertEqual(oi.payload("/cardinal:connect --host x", 1)["slash_command"], "/cardinal:connect")
@@ -252,6 +281,23 @@ class Gate(Base):
                 b.pop("is_author", None)
                 ie.write_binding(self.home, SID, b)
             self.assert_nothing("not_author")
+
+    def test_not_disclosed_captures_nothing(self):
+        self.bind(owner_input_disclosed=False)
+        self.assert_nothing("not_disclosed")
+        b = self.binding()
+        del b["owner_input_disclosed"]
+        ie.write_binding(self.home, SID, b)
+        self.assert_nothing("not_disclosed")
+
+    def test_mark_disclosed_only_when_enabled(self):
+        self.bind(owner_input_disclosed=False, capabilities={})
+        self.assertIsNone(oi.mark_disclosed(self.home, SID))
+        self.assertFalse(oi.disclosed(self.binding()))
+        self.bind(owner_input_disclosed=False)
+        self.assertEqual(oi.mark_disclosed(self.home, SID), oi.DISCLOSURE.format(inv=INV))
+        self.assertTrue(oi.disclosed(self.binding()))
+        self.assertEqual(self.submit("now it records"), "posted")
 
     def test_unbound_keeps_nothing_even_with_a_pending_bootstrap(self):
         ie._ensure_dirs(self.home)
@@ -320,6 +366,7 @@ class NeverQueued(Base):
         self.assert_dropped("http_404")
         # The capability is off for the rest of the session: no more requests.
         self.assertFalse(oi.enabled(self.binding()))
+        self.assertFalse(oi.disclosed(self.binding()), "turning it on again discloses again")
         n = len(self.fake.requests)
         self.assertEqual(self.submit("hello again"), "capability_off")
         self.assertEqual(len(self.fake.requests), n)
@@ -396,6 +443,45 @@ class Transient(Base):
         self.assertEqual(self.submit("b", conn=dict(self.fake.conn, origin="http://127.0.0.1:9")), "queued")
         self.assertTrue(self.outbox().exists())
 
+    def test_a_trickling_server_is_cut_off_at_the_budget(self):
+        self.bind()
+        self.fake.trickle = 6.0
+        t = time.monotonic()
+        self.assertEqual(self.submit("slow"), "queued")
+        self.assertLess(time.monotonic() - t, oi.BUDGET + 0.5)
+        box = oi.read_outbox(self.home, SID)
+        self.assertEqual([e["payload"]["turn"] for e in box["entries"]], [1])
+        self.assertGreaterEqual(box["retry_after"], self.now + oi.RETRY_FAILURE)
+        self.assertEqual(oct(self.outbox().stat().st_mode & 0o777), "0o600")
+
+    def test_flush_is_bounded_too(self):
+        self.bind()
+        self.queue(1)
+        self.fake.trickle = 6.0
+        t = time.monotonic()
+        self.assertFalse(oi.flush(self.home, SID, self.fake.conn, "t", now=self.now + 100))
+        self.assertLess(time.monotonic() - t, oi.BUDGET + 0.5)
+        self.assertTrue(self.outbox().exists())
+
+    def test_never_an_unlocked_outbox_write(self):
+        self.bind()
+        held = []
+
+        def timed_out(fn, deadline):
+            cm = ie.locked(self.home, SID, wait=1.0)
+            self.assertTrue(cm.__enter__())
+            held.append(cm)
+            return False, None
+
+        orig = oi._bounded
+        oi._bounded = timed_out
+        try:
+            self.assertEqual(self.submit("x"), "busy")
+        finally:
+            oi._bounded = orig
+            held[0].__exit__(None, None, None)
+        self.assertFalse(self.outbox().exists())
+
     def test_the_outbox_is_bounded(self):
         self.bind()
         for i in range(oi.MAX_OUTBOX_ENTRIES + 5):
@@ -446,6 +532,19 @@ class CapabilityOff(Base):
             sync.ensure_session_investigation = orig
         self.assertFalse(self.outbox().exists())
         self.assertFalse(oi.enabled(self.binding()))
+        self.assertFalse(oi.disclosed(self.binding()), "a later refresh that turns it on discloses again")
+
+    def test_ensure_with_the_capability_off_forgets_the_disclosure(self):
+        self.bind(bootstrap={"status": "failed", "retry_after": 0})   # asked again, not reused
+        orig = sync.ensure_session_investigation
+        sync.ensure_session_investigation = lambda *a, **k: {"investigation_id": INV, "storyboard_id": None,
+                                                             "is_author": True, "capabilities": {}}
+        try:
+            res = boot.ensure(self.home, SID, self.fake.conn, "t", force=True)
+        finally:
+            sync.ensure_session_investigation = orig
+        self.assertEqual(res["status"], "ok")
+        self.assertFalse(oi.disclosed(self.binding()))
 
     def test_a_join_never_records(self):
         self.bind()
@@ -597,6 +696,13 @@ class Grants(Base):
                          "https://x.example")
         with self.assertRaises(ValueError):
             gr.token_connection({gr.TOKEN_ENV: TOKEN})   # no origin anywhere
+        for origin in ("https://app.cardinalhq.io", "http://localhost:8080", "http://127.0.0.1:9", "http://[::1]:3000"):
+            self.assertEqual(gr.token_connection({gr.TOKEN_ENV: TOKEN, gr.ORIGIN_ENV: origin})["origin"], origin)
+        for origin in ("http://app.cardinalhq.io", "http://10.0.0.5:8080", "ftp://x.io", "https://x.io/path"):
+            with self.assertRaises(ValueError, msg=origin):
+                gr.token_connection({gr.TOKEN_ENV: TOKEN, gr.ORIGIN_ENV: origin})
+        with self.assertRaises(ValueError):
+            gr.token_connection({gr.TOKEN_ENV: TOKEN}, fallback_origin="http://cardinal.internal")
         for bad in ("nope", jwt({"typ": "JWT"}, {"org": "o1", "inv": INV}),
                     jwt({"typ": "CardinalInvestigation"}, {"org": "o1"})):
             with self.assertRaises(ValueError):

@@ -142,19 +142,33 @@ git-state, usage
   types into the session's Investigation (`record-owner-input`, type
   `owner_input.recorded`, authority `owner_input_client_attested`) only
   when the session authors it, the server advertised
-  `capabilities.owner_input.enabled: true`, the prompt is not a task
-  notification, and `CARDINAL_OWNER_INPUT` is not `0` / `false` / `off` /
-  `no` (environment or `~/.claude/settings.json` `env`). An older Cardinal,
-  or the capability absent or off: nothing is captured, sent or queued. The
-  text is scrubbed of credentials, NUL-stripped and cut to 32 KiB, with the
-  sha256 of the original. It is posted within ~1.5 s; only a transient
-  failure (network, timeout, 5xx, 429) waits in
-  `<sid>.owner-input-outbox.json` (0600, bounded) for the next prompt or
-  Stop; a 404, 400, 401 or 403 drops it (the code alone is logged). The
-  outbox is deleted when the capability turns off. After a lost binding,
-  turns are renumbered past the server's highest. Owner input is
-  never delivered to the model, and nothing the agent can call writes it.
-  The session-start context then says once that prompts are recorded.
+  `capabilities.owner_input.enabled: true`, the user has been shown the
+  disclosure, the prompt is not a task notification, and
+  `CARDINAL_OWNER_INPUT` is not `0` / `false` / `off` / `no`. That kill
+  switch is read from the environment, `~/.claude/settings.json` `env`
+  and the project's `.claude/settings.json` / `.claude/settings.local.json`
+  `env`; any one of them turns it off. An older Cardinal, or the capability
+  absent or off: nothing is captured, sent or queued.
+  - Disclosure first: the user is shown a `systemMessage` (user-visible,
+    not model context) saying the session's prompts are recorded, at
+    session start, or, when the capability arrives later, on the first
+    prompt that would be captured (that prompt itself is not). Capture
+    starts only after it (`owner_input_disclosed` in the binding).
+  - The text is scrubbed of credentials, NUL-stripped and cut to 32 KiB.
+    `prompt_sha256` is the sha256 of the scrubbed text before that cut,
+    never of the original (no redacted secret can be brute-forced from it);
+    re-scrubbing the transcript's prompt reproduces it.
+  - Posting is bounded to ~1.5 s of wall-clock time in total; a timeout or
+    a transient failure (network, 5xx, 429) waits in
+    `<sid>.owner-input-outbox.json` (0600, bounded) for the next prompt or
+    Stop; a 404, 400, 401 or 403 drops it (the code alone is logged). The
+    outbox is deleted when the capability turns off. After a lost binding,
+    turns are renumbered past the server's highest. Owner input is never
+    delivered to the model, and nothing the agent can call writes it.
+  - Known limits: hooks run in parallel, so a prompt another
+    UserPromptSubmit hook blocks may still be recorded; and a
+    machine-generated prompt (`/loop`, a scheduled task, `claude -p`) is
+    recorded as `user_prompt` like one the user typed.
 - **Semantic checkpoints (connected, author sessions).** The session-start
   context asks the investigating session to checkpoint material changes in
   its understanding (a hypothesis relied on or resolved, an experiment

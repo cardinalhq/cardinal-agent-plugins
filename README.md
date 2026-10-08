@@ -61,8 +61,8 @@ of a class this plugin does not know, and owner input, is never delivered to
 the model. Only when Cardinal advertises `capabilities: {owner_input:
 {enabled: true}}` does the author session record the owner's prompts as owner
 input (`hooks/owner-input.py`: credentials scrubbed, up to 32 KiB, readable only
-by the author and grantees with `owner_input:read`; `CARDINAL_OWNER_INPUT=0`
-turns it off on this machine). `cardinal-storyboard investigation grant`
+by the author and grantees with `owner_input:read`; shown to the user before
+capture starts; `CARDINAL_OWNER_INPUT=0` turns it off on this machine). `cardinal-storyboard investigation grant`
 gives someone else scoped, revocable access to the Investigation through
 `CARDINAL_INVESTIGATION_TOKEN`, never this machine's key.
 Claude also ships two model-invocable skills for Cardinal's Investigation

@@ -17,7 +17,8 @@ Scopes: `read` (the control and semantic events, get-investigation),
 most 20 live grants per investigation.
 
 The grantee uses the token alone: CARDINAL_INVESTIGATION_TOKEN (and
-CARDINAL_INVESTIGATION_ORIGIN, else this machine's configured origin).
+CARDINAL_INVESTIGATION_ORIGIN, else this machine's configured origin; https,
+or plain http only to localhost / 127.0.0.1 / [::1]).
 token_connection() reads them; investigation_state_sync._post then sends
 `Authorization: CardinalInvestigation <token>` and never a key. The org and
 the investigation come from the token's own claims (`org`, `inv`), read
@@ -54,7 +55,8 @@ PRINCIPAL_PREFIX = "grantee:"
 
 GRANT_ID_RE = re.compile(r"grt_[0-9a-f]{24}")                                     # fullmatch
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{2,4096}\.[A-Za-z0-9_-]{2,4096}\.[A-Za-z0-9_-]{2,4096}")  # fullmatch
-_ORIGIN_RE = re.compile(r"https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?")              # fullmatch
+_ORIGIN_RE = re.compile(r"(https?)://([A-Za-z0-9.-]+|\[::1\])(?::[0-9]{1,5})?")  # fullmatch
+LOOPBACK = ("localhost", "127.0.0.1", "[::1]")
 _ORG_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")                                   # fullmatch
 
 
@@ -216,7 +218,12 @@ def token_connection(environ: Optional[dict] = None, fallback_origin: Optional[s
     origin = origin.rstrip("/")
     if not origin:
         raise ValueError(f"set {ORIGIN_ENV} (`cardinal-storyboard investigation grant` prints it)")
-    if not _ORIGIN_RE.fullmatch(origin):
-        raise ValueError(f"{ORIGIN_ENV} is an http(s) origin (scheme, host, port; no path)")
+    m = _ORIGIN_RE.fullmatch(origin)
+    if not m:
+        raise ValueError(f"{ORIGIN_ENV} is an https origin (scheme, host, port; no path)")
+    if m.group(1) != "https" and m.group(2).lower() not in LOOPBACK:
+        # The token is a bearer credential: never over plain http, except to
+        # this machine.
+        raise ValueError(f"{ORIGIN_ENV} must be https (plain http only for localhost, 127.0.0.1 or [::1])")
     return {"origin": origin, "org": claims["org"], "token": token, "investigation_id": claims["inv"],
             "grant_id": claims["gid"] if valid_grant_id(claims["gid"]) else None, "scopes": claims["scopes"]}

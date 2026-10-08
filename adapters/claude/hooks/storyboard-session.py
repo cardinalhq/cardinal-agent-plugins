@@ -58,13 +58,16 @@ Contract:
     why, not facts, never reasoning or routine tool use. A joined
     non-author session cannot checkpoint and is not told to; nothing else
     is said when unconnected or unbound.
-  - Owner input transparency (OWNER_INPUT_LINE): only when this session's
-    prompts are recorded (owner-input.py): it authors its Investigation, the
-    server advertised capabilities.owner_input.enabled: true, and the kill
-    switch is not set (CARDINAL_OWNER_INPUT=0; _owner_input.py). One
-    informational sentence naming the investigation, for the user, not an
-    instruction to Claude. Never said for a joined investigation, an older
-    Cardinal, or the capability absent or off.
+  - Owner input transparency: only when this session's prompts are recorded
+    (owner-input.py): it authors its Investigation, the server advertised
+    capabilities.owner_input.enabled: true, and the kill switch is not set
+    (CARDINAL_OWNER_INPUT=0, environment, user or project settings;
+    _owner_input.py). Then the user is shown the disclosure as a top-level
+    `systemMessage` (user-visible, not model context), the binding records
+    it (owner_input_disclosed: capture only starts once it is set), and the
+    model's context gets the same sentence (OWNER_INPUT_LINE), informational,
+    not an instruction. Never for a joined investigation, an older Cardinal,
+    or the capability absent or off.
   - Fail open: never blocks or delays session start, never prints an error.
 """
 
@@ -220,13 +223,16 @@ OWNER_INPUT_LINE = ("This session's prompts are recorded to Investigation {inv} 
                     "up to 32 KiB); only you and grantees you authorize can read them.")
 
 
+PAYLOAD_CWD = None   # the SessionStart payload's cwd (project settings for the kill switch)
+
+
 def owner_input_line(b) -> str | None:
     """OWNER_INPUT_LINE when owner-input.py records this session's prompts
     (owner_input.enabled and no kill switch), else None."""
     try:
         import _owner_input
         from cardinal_core import owner_input
-        if _owner_input.disabled() or not owner_input.enabled(b):
+        if _owner_input.disabled(PAYLOAD_CWD) or not owner_input.enabled(b):
             return None
         return OWNER_INPUT_LINE.format(inv=b["investigation_id"])
     except Exception:
@@ -338,7 +344,26 @@ def investigation_line(sid: str | None, source=None) -> str | None:
     return line
 
 
+def owner_input_disclosure(sid: str | None) -> str | None:
+    """The user-visible disclosure (a systemMessage) when this session's
+    prompts are recorded, recorded in the binding first; else None."""
+    if not sid:
+        return None
+    try:
+        import _owner_input
+        from cardinal_core import investigation_events as ie
+        from cardinal_core import owner_input
+        home = Path(os.environ.get("HOME") or str(Path.home()))
+        if not ie.valid_session(sid) or not owner_input_line(ie.read_binding(home, sid)):
+            return None
+        text = owner_input.mark_disclosed(home, sid)
+        return _owner_input.disclosure_message(text) if text else None
+    except Exception:
+        return None
+
+
 def main() -> None:
+    global PAYLOAD_CWD
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
@@ -346,6 +371,7 @@ def main() -> None:
             payload = {}
     except Exception:
         payload = {}
+    PAYLOAD_CWD = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     sid = session_id(payload)
     try:
         connected = _connection.is_connected()
@@ -374,12 +400,16 @@ def main() -> None:
         parts.append(hint)
     if not parts:
         return
-    sys.stdout.write(json.dumps({
+    out: dict = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": " ".join(parts),
         }
-    }))
+    }
+    told = owner_input_disclosure(sid) if connected else None
+    if told:
+        out["systemMessage"] = told
+    sys.stdout.write(json.dumps(out))
 
 
 if __name__ == "__main__":

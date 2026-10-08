@@ -171,7 +171,8 @@ class Base(unittest.TestCase):
 
     def bind(self, **fields):
         b = {"investigation_id": INV, "cursor": 0, "bound_at": "t", "source": "auto", "is_author": True,
-             "storyboard_id": SB, "org": "o1", "bootstrap": {"status": "ok"}, "capabilities": ON}
+             "storyboard_id": SB, "org": "o1", "bootstrap": {"status": "ok"}, "capabilities": ON,
+             "owner_input_disclosed": True}
         b.update(fields)
         self.sessions().mkdir(parents=True, exist_ok=True)
         (self.sessions() / f"{SID}.json").write_text(json.dumps(b))
@@ -251,9 +252,46 @@ class Hook(Base):
         self.bind()
         for v in ("0", "false", "OFF", "no"):
             self.silent(self.run_hook("hello", env=dict(self.env, CARDINAL_OWNER_INPUT=v)))
-        self.connect(CARDINAL_OWNER_INPUT="0")
-        self.silent(self.run_hook("hello"))
+        for v in ("0", False, 0, "no"):   # settings.json values of any JSON type
+            self.connect(CARDINAL_OWNER_INPUT=v)
+            self.silent(self.run_hook("hello"))
         self.assert_nothing()
+
+    def test_the_kill_switch_in_project_settings(self):
+        self.bind()
+        (self.base / ".claude").mkdir()
+        for name in ("settings.json", "settings.local.json"):
+            f = self.base / ".claude" / name
+            f.write_text(json.dumps({"env": {"CARDINAL_OWNER_INPUT": False}}))
+            self.silent(self.run_hook("hello"))
+            self.assert_nothing()
+            f.unlink()
+        self.silent(self.run_hook("now it records"))
+        self.assertEqual(len(self.fake.records()), 1)
+
+    def test_discloses_to_the_user_before_the_first_capture(self):
+        self.bind(owner_input_disclosed=False)
+        res = self.run_hook("first prompt")
+        self.assertEqual((res.returncode, res.stderr), (0, ""))
+        out = json.loads(res.stdout)
+        self.assertEqual(list(out), ["systemMessage"], "user-visible only: no context, no decision")
+        self.assertIn(LINE, out["systemMessage"])
+        self.assertIn("CARDINAL_OWNER_INPUT=0", out["systemMessage"])
+        self.assertEqual(self.fake.requests, [], "the disclosing prompt is not captured")
+        self.assertIs(self.binding()["owner_input_disclosed"], True)
+        self.silent(self.run_hook("second prompt"))
+        self.assertEqual([b["payload"]["text"] for b in self.fake.records()], ["second prompt"])
+
+    def test_no_disclosure_when_nothing_would_be_captured(self):
+        for fields in ({"capabilities": {}}, {"is_author": False, "source": "env"}):
+            self.bind(owner_input_disclosed=False, **fields)
+            self.silent(self.run_hook("hello"))
+            self.assertNotIn("owner_input_disclosed", {k for k, v in self.binding().items() if v is True})
+        self.bind(owner_input_disclosed=False)
+        self.silent(self.run_hook("hello", env=dict(self.env, CARDINAL_OWNER_INPUT="0")))
+        self.assertFalse(self.binding()["owner_input_disclosed"])
+        self.silent(self.run_hook("<task-notification>x</task-notification>"))
+        self.assertFalse(self.binding()["owner_input_disclosed"])
 
     def test_task_notifications_are_not_owner_turns(self):
         self.bind()
@@ -337,11 +375,15 @@ class Stop(Base):
 
 
 class SessionStart(Base):
-    def context(self, env=None) -> str:
-        res = subprocess.run([str(SESSION_HOOK)], input=json.dumps({"session_id": SID, "source": "resume"}),
+    def output(self, env=None) -> dict:
+        res = subprocess.run([str(SESSION_HOOK)], input=json.dumps({"session_id": SID, "source": "resume",
+                                                                     "cwd": str(self.base)}),
                              capture_output=True, text=True, timeout=30, env=env or self.env, cwd=str(self.base))
         self.assertEqual(res.returncode, 0, res.stderr)
-        return json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
+        return json.loads(res.stdout)
+
+    def context(self, env=None) -> str:
+        return self.output(env)["hookSpecificOutput"]["additionalContext"]
 
     def test_the_line_only_when_prompts_are_recorded(self):
         self.bind()
@@ -354,6 +396,29 @@ class SessionStart(Base):
         self.assertNotIn("owner input", self.context())
         self.bind()
         self.assertNotIn("owner input", self.context(env=dict(self.env, CARDINAL_OWNER_INPUT="off")))
+
+    def test_the_user_is_shown_the_disclosure_and_it_is_recorded(self):
+        self.bind(owner_input_disclosed=False)
+        out = self.output()
+        self.assertEqual(set(out), {"hookSpecificOutput", "systemMessage"})
+        self.assertIn(LINE, out["systemMessage"])
+        self.assertNotIn("systemMessage", out["hookSpecificOutput"])
+        self.assertIs(self.binding()["owner_input_disclosed"], True)
+        self.silent(self.run_hook("captured, no second disclosure"))
+        self.assertEqual(len(self.fake.records()), 1)
+
+    def test_no_disclosure_when_off(self):
+        for fields in ({"capabilities": {}}, {"is_author": False, "source": "env"}):
+            self.bind(owner_input_disclosed=False, **fields)
+            self.assertNotIn("systemMessage", self.output())
+            self.assertFalse(self.binding()["owner_input_disclosed"])
+        self.bind(owner_input_disclosed=False)
+        (self.base / ".claude").mkdir()
+        (self.base / ".claude" / "settings.local.json").write_text(json.dumps({"env": {"CARDINAL_OWNER_INPUT": 0}}))
+        out = self.output()
+        self.assertNotIn("systemMessage", out)
+        self.assertNotIn("owner input", out["hookSpecificOutput"]["additionalContext"])
+        self.assertFalse(self.binding()["owner_input_disclosed"])
 
 
 class GrantCli(Base):

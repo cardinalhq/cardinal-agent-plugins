@@ -87,13 +87,13 @@ def main() -> None:
         deliver(home, sid, ie, emit, event, payload)
     finally:
         if stop:
-            flush_owner_input(home, sid)
+            flush_owner_input(home, sid, payload.get("cwd"))
 
 
 STOP_BUDGET = 2.6   # hooks.json gives the hook 3 s
 
 
-def flush_owner_input(home: Path, sid: str) -> None:
+def flush_owner_input(home: Path, sid: str, cwd=None) -> None:
     """Post the session's queued owner input with what is left of the
     budget, or delete it when owner input is off. Never raises."""
     try:
@@ -101,7 +101,7 @@ def flush_owner_input(home: Path, sid: str) -> None:
         if not owner_input.outbox_path(home, sid).exists():
             return
         import _owner_input
-        if _owner_input.disabled():
+        if _owner_input.disabled(cwd):
             owner_input.drop_outbox(home, sid)
             return
         deadline = START + STOP_BUDGET
