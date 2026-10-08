@@ -1131,7 +1131,7 @@ def handle_session_start(payload: dict[str, Any]) -> None:
     try:
         # The session id line (any directory: an incident storyboard needs no
         # repo) + the storyboards that may relate to this checkout. Bounded
-        # well inside hooks.json's 5 s.
+        # bounded alongside bootstrap within hooks.json's 8 s.
         from cardinal_core import storyboard_agent
 
         wiring = storyboard_wiring()
@@ -1139,9 +1139,10 @@ def handle_session_start(payload: dict[str, Any]) -> None:
         sid = session_id_from_payload(payload)
         live = investigation_agent.start(wiring, sid, payload.get("source"))
         investigation_agent.spawn_poller(wiring, sid, str(INVESTIGATION_POLLER))
-        storyboard = live or storyboard_agent.session_start_text(
-            wiring, cwd, session_id_from_payload(payload),
-            auto_context=auto_context(payload, wiring), deadline=min(started + 3.5, time.monotonic() + 2.0))
+        discovery = storyboard_agent.session_start_text(
+            wiring, cwd, sid, include_session_line=not bool(live),
+            auto_context=auto_context(payload, wiring), deadline=min(started + 6.5, time.monotonic() + 1.5))
+        storyboard = "\n\n".join(text for text in (live, discovery) if text)
         if storyboard:
             parts.append(storyboard)
     except Exception:

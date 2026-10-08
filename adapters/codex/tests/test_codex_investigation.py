@@ -45,6 +45,8 @@ class InvestigationTests(unittest.TestCase):
         self.assertIn(f"/storyboards/{SB}", first)
         self.assertIn("automatically projects", first)
         self.assertIn("first progress update", first)
+        self.assertIn("written from branch fix/checkout", first)
+        self.assertNotIn("pass it as session_id", first)
         self.assertIn("checkpoint", second)
         ensures = [r for r in self.fake.requests if r["path"].endswith("/ensure-session-investigation")]
         self.assertEqual(len(ensures), 1)
