@@ -14,7 +14,8 @@ type: `false` and `0` count) in ANY of: the hook's environment,
 and $CLAUDE_PROJECT_DIR when Claude Code passes it). Any one of them turns
 owner input off on this machine whatever the server advertises: nothing is
 captured, the outbox is deleted instead of flushed at Stop, and nothing
-says prompts are recorded. Never raises.
+says prompts are recorded. The reliable place is ~/.claude/settings.json
+`env`: a repo's settings `env` can override a shell export. Never raises.
 
 Disclosure (disclosure_message): the user-visible systemMessage that must
 precede capture (cardinal_core.owner_input.mark_disclosed). Claude Code

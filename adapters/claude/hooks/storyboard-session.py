@@ -63,11 +63,14 @@ Contract:
     capabilities.owner_input.enabled: true, and the kill switch is not set
     (CARDINAL_OWNER_INPUT=0, environment, user or project settings;
     _owner_input.py). Then the user is shown the disclosure as a top-level
-    `systemMessage` (user-visible, not model context), the binding records
-    it (owner_input_disclosed: capture only starts once it is set), and the
-    model's context gets the same sentence (OWNER_INPUT_LINE), informational,
-    not an instruction. Never for a joined investigation, an older Cardinal,
-    or the capability absent or off.
+    `systemMessage` (user-visible, not model context) and the model's
+    context gets the same sentence (OWNER_INPUT_LINE), informational, not an
+    instruction. Only as the very last step, after that output was written
+    and flushed, does the binding record it (owner_input_disclosed: capture
+    starts only once it is set; a failed write records nothing). The kill
+    switch makes the binding forget it, so removing the switch discloses
+    again before capture resumes. Never for a joined investigation, an older
+    Cardinal, or the capability absent or off.
   - Fail open: never blocks or delays session start, never prints an error.
 """
 
@@ -346,7 +349,11 @@ def investigation_line(sid: str | None, source=None) -> str | None:
 
 def owner_input_disclosure(sid: str | None) -> str | None:
     """The user-visible disclosure (a systemMessage) when this session's
-    prompts are recorded, recorded in the binding first; else None."""
+    prompts are recorded, else None. Nothing is recorded here: the binding
+    says it was disclosed only once the message has been written
+    (mark_owner_input_disclosed, after the output is flushed), so a prompt
+    submitted while this hook still runs is never captured unannounced.
+    The kill switch makes the binding forget an earlier disclosure."""
     if not sid:
         return None
     try:
@@ -354,12 +361,26 @@ def owner_input_disclosure(sid: str | None) -> str | None:
         from cardinal_core import investigation_events as ie
         from cardinal_core import owner_input
         home = Path(os.environ.get("HOME") or str(Path.home()))
-        if not ie.valid_session(sid) or not owner_input_line(ie.read_binding(home, sid)):
+        if not ie.valid_session(sid):
             return None
-        text = owner_input.mark_disclosed(home, sid)
-        return _owner_input.disclosure_message(text) if text else None
+        if _owner_input.disabled(PAYLOAD_CWD):
+            owner_input.forget_disclosure(home, sid)
+            return None
+        b = ie.read_binding(home, sid)
+        if not owner_input_line(b):
+            return None
+        return _owner_input.disclosure_message(owner_input.DISCLOSURE.format(inv=b["investigation_id"]))
     except Exception:
         return None
+
+
+def mark_owner_input_disclosed(sid: str) -> None:
+    """The disclosure reached Claude Code: from now on prompts are captured."""
+    try:
+        from cardinal_core import owner_input
+        owner_input.mark_disclosed(Path(os.environ.get("HOME") or str(Path.home())), sid)
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -410,6 +431,10 @@ def main() -> None:
     if told:
         out["systemMessage"] = told
     sys.stdout.write(json.dumps(out))
+    sys.stdout.flush()   # a failed write raises here: the disclosure is then not recorded
+    if told:
+        # Last step, after the message is out: only now may prompts be captured.
+        mark_owner_input_disclosed(sid)
 
 
 if __name__ == "__main__":

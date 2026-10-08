@@ -59,8 +59,9 @@ prompts. A lost binding restarts it, so the server may already hold another
 prompt at that turn (409 owner_input_turn_conflict, or
 owner_input_key_conflict): this session's
 owner_input rows are read (class owner_input; its author may) and the
-entry, with everything queued after it, is renumbered past the server's
-highest turn, once; without time for that it stays queued.
+entry, with everything queued after it, is renumbered past both the
+server's highest turn and the conflicted one (never that turn again), at
+most MAX_SHIFTS times per drain; without time for that it stays queued.
 
 When the capability turns off (refresh, ensure, a 404), the outbox is
 deleted (drop_outbox).
@@ -107,6 +108,7 @@ MAX_OUTBOX_BYTES = 2 << 20
 MAX_LOG_BYTES = 64 << 10
 RETRY_FAILURE = 30.0                         # network, 5xx: later prompts queue without asking
 RETRY_MAX = 600.0
+MAX_SHIFTS = 3                               # renumberings per drain (each moves past the conflicted turn)
 SLASH_COMMAND_RE = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}(?=\s|$)")  # match at the prompt's start
 
 
@@ -159,6 +161,20 @@ def mark_disclosed(home: Path, sid: str) -> Optional[str]:
             return DISCLOSURE.format(inv=b["investigation_id"])
     except Exception:
         return None
+
+
+def forget_disclosure(home: Path, sid: str) -> None:
+    """The user turned owner input off (the kill switch): forget that they
+    were told, so capture resumes only after they are told again. Never
+    raises."""
+    with contextlib.suppress(Exception):
+        b = ie.read_binding(home, sid)
+        if b is None or "owner_input_disclosed" not in b:
+            return
+        with ie.locked(home, sid, wait=1.0) as got:
+            b = ie.read_binding(home, sid) if got else None
+            if b is not None and b.pop("owner_input_disclosed", None) is not None:
+                ie.write_binding(home, sid, b)
 
 
 def drop_outbox(home: Path, sid: str) -> bool:
@@ -399,16 +415,19 @@ def server_turns(conn: dict, client: str, inv: str, sid: str, deadline: float, o
 
 
 def _shift(home: Path, sid: str, pending: list, rows: dict) -> bool:
-    """After a turn conflict (the binding was lost and its counter
-    restarted): renumber `pending` (the entries not yet sent, oldest first;
-    mutated in place) consecutively after the server's highest turn for this
-    session, keeping their order; an entry the server already holds at its
-    turn with its hash keeps it (a replay). The binding's counter moves past
-    them. False when the session lock is busy."""
+    """After a turn or key conflict on pending[0]'s turn (the binding was
+    lost and its counter restarted, or the turn's key is held by something
+    that is not an owner_input row): renumber `pending` (the entries not yet
+    sent, oldest first; mutated in place) consecutively after BOTH the
+    server's highest owner_input turn for this session and the conflicted
+    turn, so that turn is never tried again, keeping their order; an entry
+    the server already holds at its turn with its hash keeps it (a replay).
+    The binding's counter moves past them. False when the session lock is
+    busy."""
     with ie.locked(home, sid, wait=0.5) as got:
         if not got:
             return False
-        turn = max(rows) if rows else 0
+        turn = max([max(rows) if rows else 0, pending[0]["payload"]["turn"] if pending else 0])
         for e in pending:
             p = e["payload"]
             if rows.get(p["turn"]) == p["prompt_sha256"]:
@@ -484,7 +503,7 @@ def _drain(home: Path, sid: str, conn: dict, client: str, deadline: float, now: 
     done: set = set()      # indices settled now
     spent: list = []       # their turns as sent
     retry_after = None
-    shifted = False
+    shifts = 0             # renumberings this drain (at most MAX_SHIFTS)
     status = None
     if now >= box["retry_after"]:
         i = 0
@@ -515,13 +534,13 @@ def _drain(home: Path, sid: str, conn: dict, client: str, deadline: float, now: 
                     status = "dropped"
                 i += 1
                 continue
-            if got == "conflict" and not shifted:
+            if got == "conflict" and shifts < MAX_SHIFTS:
                 try:
                     rows = server_turns(conn, client, inv, sid, deadline, opener)
                 except Exception:
                     rows = None
                 if rows is not None and _shift(home, sid, entries[i:], rows):
-                    shifted = True
+                    shifts += 1
                     _log(home, sid, "renumbered", turn=e["payload"]["turn"], server_top=max(rows or [0]),
                          count=len(entries) - i)
                     continue   # this entry again, with its new turn
@@ -534,7 +553,7 @@ def _drain(home: Path, sid: str, conn: dict, client: str, deadline: float, now: 
             i += 1
     if not queued:
         return True, status, retry_after   # only `extra`: the caller queues it with the back-off
-    if not (done or shifted) and retry_after is None:
+    if not (done or shifts) and retry_after is None:
         return False, status, None   # nothing changed (the back-off holds, or no time): the outbox stays as it is
     with ie.locked(home, sid, wait=1.0) as got_lock:
         if not got_lock:

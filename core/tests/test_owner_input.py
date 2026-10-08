@@ -63,7 +63,9 @@ class FakeMaestro:
         self.old_server = False  # no record-owner-input route at all
         self.principals = None   # the read answer's `principals` map (C2), when set
         self.trickle = 0.0       # record-owner-input sends its answer one byte at a time for this long
-        self.conflict_code = "owner_input_turn_conflict"   # what a taken turn answers (409)
+        # (session, turn) whose idempotency key a row that is NOT owner_input
+        # holds: as the real server, 409 owner_input_key_conflict for it.
+        self.key_held: set = set()
         self.answered: list = []  # statuses answered to record-owner-input
         fake = self
 
@@ -142,12 +144,15 @@ class FakeMaestro:
         if self.status:
             return self.status
         p = body["payload"]
+        if (body["session_id"], p["turn"]) in self.key_held:
+            return 409, {"error": "owner_input_key_conflict", "investigation_id": INV,
+                         "session_id": body["session_id"], "turn": p["turn"], "message": "m"}
         for e in self.events:
             if e["type"] == oi.TYPE and e["producer"]["session_id"] == body["session_id"] \
                     and e["payload"]["turn"] == p["turn"]:
                 if e["payload"]["prompt_sha256"] == p["prompt_sha256"]:
                     return 200, {"event": e, "duplicate": True, "trust": TRUST}
-                return 409, {"error": self.conflict_code, "investigation_id": INV,
+                return 409, {"error": "owner_input_turn_conflict", "investigation_id": INV,
                              "session_id": body["session_id"], "turn": p["turn"], "event": e, "message": "m"}
         e = {"investigation_id": body["investigation_id"], "seq": len(self.events) + 1, "type": oi.TYPE,
              "class": "owner_input", "authority": "owner_input_client_attested", "payload": p,
@@ -290,6 +295,12 @@ class Gate(Base):
         del b["owner_input_disclosed"]
         ie.write_binding(self.home, SID, b)
         self.assert_nothing("not_disclosed")
+
+    def test_forget_disclosure(self):
+        self.bind()
+        oi.forget_disclosure(self.home, SID)
+        self.assertFalse(oi.disclosed(self.binding()))
+        self.assertEqual(self.submit("x"), "not_disclosed")
 
     def test_mark_disclosed_only_when_enabled(self):
         self.bind(owner_input_disclosed=False, capabilities={})
@@ -570,15 +581,36 @@ class TurnRenumbering(Base):
         self.assertEqual(self.submit("next"), "posted")
         self.assertEqual(self.fake.records()[-1]["payload"]["turn"], 4)
 
-    def test_a_key_conflict_renumbers_too(self):
-        self.bind()
-        self.fake.conflict_code = "owner_input_key_conflict"
+    def test_a_key_conflict_renumbers_past_the_conflicted_turn(self):
+        # The server's owner_input rows stop at 2, but turn 3's key is held by
+        # something else: never turn 3 again, and not 3 via "top + 1" either.
+        self.bind(owner_input_turn=2)
         self.fake.add_owner_input(1, "a" * 64)
         self.fake.add_owner_input(2, "b" * 64)
-        self.assertEqual(self.submit("after the binding was lost"), "posted")
-        self.assertEqual(self.fake.records()[-1]["payload"]["turn"], 3)
-        self.assertEqual(self.binding()["owner_input_turn"], 3)
+        self.fake.key_held.add((SID, 3))
+        self.assertEqual(self.submit("next"), "posted")
+        self.assertEqual([b["payload"]["turn"] for b in self.fake.records()], [3, 4])
+        self.assertEqual(self.binding()["owner_input_turn"], 4)
         self.assertFalse(self.outbox().exists())
+
+    def test_a_key_conflict_does_not_block_the_queue(self):
+        self.bind()
+        self.queue(2)                       # turns 1 and 2 wait in the outbox
+        self.fake.key_held.add((SID, 1))    # no owner_input rows at all
+        self.assertEqual(self.submit("third", now=self.now + 100), "posted")
+        sent = [(b["payload"]["turn"], b["payload"]["text"]) for b in self.fake.records()
+                if b["payload"]["turn"] not in [t for s_, t in self.fake.key_held]]
+        self.assertEqual(sent[-3:], [(2, "queued 0"), (3, "queued 1"), (4, "third")])
+        self.assertFalse(self.outbox().exists())
+        self.assertEqual(self.binding()["owner_input_turn"], 4)
+        self.assertEqual(self.submit("fourth", now=self.now + 101), "posted")
+        self.assertEqual(self.fake.records()[-1]["payload"]["turn"], 5)
+
+    def test_repeated_key_conflicts_move_on_each_time(self):
+        self.bind()
+        self.fake.key_held.update({(SID, 1), (SID, 2)})
+        self.assertEqual(self.submit("x"), "posted")
+        self.assertEqual([b["payload"]["turn"] for b in self.fake.records()], [1, 2, 3])
 
 
 class NeverDelivered(Base):
@@ -589,7 +621,7 @@ class NeverDelivered(Base):
         self.assertEqual(self.fake.requests, [])
 
     def test_reserved_idempotency_keys_are_never_sent(self):
-        for key in ("oi:1", "ckpt:x"):
+        for key in ("oi:1", "ckpt:x", "OI:1", "Ckpt:x", "oI:z"):
             with self.assertRaises(ist.FetchError):
                 ie.append_event(self.fake.conn, INV, "cue.added", {"text": "x"}, idempotency_key=key, client="t")
             with self.assertRaises(ie.CheckpointInputError):

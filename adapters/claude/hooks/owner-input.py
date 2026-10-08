@@ -81,6 +81,7 @@ def main() -> str:
     if _owner_input.disabled(payload.get("cwd")):
         from cardinal_core import owner_input
         owner_input.drop_outbox(home, sid)
+        owner_input.forget_disclosure(home, sid)   # removing the switch tells the user again first
         return "disabled"
     if not _connection.is_connected():
         return "unconnected"

@@ -147,13 +147,20 @@ git-state, usage
   `CARDINAL_OWNER_INPUT` is not `0` / `false` / `off` / `no`. That kill
   switch is read from the environment, `~/.claude/settings.json` `env`
   and the project's `.claude/settings.json` / `.claude/settings.local.json`
-  `env`; any one of them turns it off. An older Cardinal, or the capability
-  absent or off: nothing is captured, sent or queued.
+  `env`; any one of them turns it off. The reliable switch is
+  `CARDINAL_OWNER_INPUT=0` in `~/.claude/settings.json` `env`: a repo's
+  settings `env` can override a shell export of the same variable. Setting
+  it also forgets the disclosure, so removing it later discloses again
+  before capture resumes. An older Cardinal, or the capability absent or
+  off: nothing is captured, sent or queued.
   - Disclosure first: the user is shown a `systemMessage` (user-visible,
     not model context) saying the session's prompts are recorded, at
     session start, or, when the capability arrives later, on the first
     prompt that would be captured (that prompt itself is not). Capture
-    starts only after it (`owner_input_disclosed` in the binding).
+    starts only after it (`owner_input_disclosed` in the binding, recorded
+    only once the message has been written). `claude -p` in text mode never
+    displays a `systemMessage`, so a non-interactive session's user does not
+    see it; its prompts are still recorded once disclosed.
   - The text is scrubbed of credentials, NUL-stripped and cut to 32 KiB.
     `prompt_sha256` is the sha256 of the scrubbed text before that cut,
     never of the original (no redacted secret can be brute-forced from it);

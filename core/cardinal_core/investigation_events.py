@@ -123,8 +123,9 @@ SESSION_ID_RE = sync.SESSION_ID_RE
 INVESTIGATION_ID_RE = ist.INVESTIGATION_ID_RE
 IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")  # fullmatch
 # Prefixes the server keeps for its own writes (400 reserved_idempotency_key
-# on append / checkpoint); this client never generates them (post:, ack:,
-# c<hex>) and refuses a user-supplied one before sending.
+# on append / checkpoint, matched case-insensitively); this client never
+# generates them (post:, ack:, c<hex>) and refuses a user-supplied one before
+# sending (reserved_key).
 RESERVED_KEY_PREFIXES = ("oi:", "ckpt:")
 
 DELIVERABLE = ("cue.added", "question.added", "challenge.added")
@@ -500,7 +501,7 @@ def append_event(conn: dict, investigation_id: str, type_: str, payload: dict, *
         raise ist.FetchError("owner input is recorded only by the plugin's prompt hook")
     if not isinstance(idempotency_key, str) or not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
         raise ist.FetchError("the idempotency key is 1-128 characters of A-Z a-z 0-9 . _ : -")
-    if idempotency_key.startswith(RESERVED_KEY_PREFIXES):
+    if reserved_key(idempotency_key):
         raise ist.FetchError(f"idempotency keys starting {' or '.join(RESERVED_KEY_PREFIXES)} are reserved by Cardinal")
     for name, sid in (("--to-session", to_session_id), ("session", session_id)):
         if sid is not None and not valid_session(sid):
@@ -518,6 +519,11 @@ def append_event(conn: dict, investigation_id: str, type_: str, payload: dict, *
     if not isinstance(ev, dict) or ev.get("investigation_id") != investigation_id or not isinstance(ev.get("seq"), int):
         raise ist.FetchError("append-investigation-event answered without the event")
     return out
+
+
+def reserved_key(key: Any) -> bool:
+    """`key` starts with a prefix Cardinal reserves (oi: / ckpt:, any case)."""
+    return isinstance(key, str) and key.lower().startswith(RESERVED_KEY_PREFIXES)
 
 
 def ack_payload(seq: int, disposition: str, note: Optional[str]) -> dict:
@@ -933,7 +939,7 @@ def checkpoint(conn: dict, investigation_id: str, session_id: str, events: Any, 
     if idempotency_key is not None and not (isinstance(idempotency_key, str)
                                             and CHECKPOINT_KEY_RE.fullmatch(idempotency_key)):
         raise CheckpointInputError("the checkpoint key is 1-100 characters of A-Z a-z 0-9 . _ : -")
-    if idempotency_key is not None and idempotency_key.startswith(RESERVED_KEY_PREFIXES):
+    if idempotency_key is not None and reserved_key(idempotency_key):
         raise CheckpointInputError(f"checkpoint keys starting {' or '.join(RESERVED_KEY_PREFIXES)} are reserved by "
                                    "Cardinal")
     events = checkpoint_events(events)

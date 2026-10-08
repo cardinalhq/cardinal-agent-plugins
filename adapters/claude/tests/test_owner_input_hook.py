@@ -20,6 +20,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -260,6 +261,17 @@ class Hook(Base):
             self.silent(self.run_hook("hello"))
         self.assert_nothing()
 
+    def test_the_kill_switch_forgets_the_disclosure(self):
+        self.bind()   # disclosed earlier in the session
+        self.silent(self.run_hook("hello", env=dict(self.env, CARDINAL_OWNER_INPUT="0")))
+        self.assertNotIn("owner_input_disclosed", self.binding())
+        # The switch is removed: the user is told again before capture resumes.
+        res = self.run_hook("not captured")
+        self.assertIn(LINE, json.loads(res.stdout)["systemMessage"])
+        self.assertEqual(self.fake.records(), [])
+        self.silent(self.run_hook("captured"))
+        self.assertEqual([b["payload"]["text"] for b in self.fake.records()], ["captured"])
+
     def test_the_kill_switch_in_project_settings(self):
         self.bind()
         (self.base / ".claude").mkdir()
@@ -269,8 +281,9 @@ class Hook(Base):
             self.silent(self.run_hook("hello"))
             self.assert_nothing()
             f.unlink()
+        self.assertIn("systemMessage", json.loads(self.run_hook("told again first").stdout))
         self.silent(self.run_hook("now it records"))
-        self.assertEqual(len(self.fake.records()), 1)
+        self.assertEqual([b["payload"]["text"] for b in self.fake.records()], ["now it records"])
 
     def test_discloses_to_the_user_before_the_first_capture(self):
         self.bind(owner_input_disclosed=False)
@@ -292,9 +305,9 @@ class Hook(Base):
             self.assertNotIn("owner_input_disclosed", {k for k, v in self.binding().items() if v is True})
         self.bind(owner_input_disclosed=False)
         self.silent(self.run_hook("hello", env=dict(self.env, CARDINAL_OWNER_INPUT="0")))
-        self.assertFalse(self.binding()["owner_input_disclosed"])
+        self.assertFalse(self.binding().get("owner_input_disclosed"))
         self.silent(self.run_hook("<task-notification>x</task-notification>"))
-        self.assertFalse(self.binding()["owner_input_disclosed"])
+        self.assertFalse(self.binding().get("owner_input_disclosed"))
 
     def test_task_notifications_are_not_owner_turns(self):
         self.bind()
@@ -410,18 +423,56 @@ class SessionStart(Base):
         self.silent(self.run_hook("captured, no second disclosure"))
         self.assertEqual(len(self.fake.records()), 1)
 
+    def run_watched(self, fail_write: bool) -> str:
+        """SessionStart with a stdout that notes, at every write, whether the
+        binding already says the user was told (and can fail the write)."""
+        log = self.base / "writes.log"
+        wrapper = (
+            "import json, runpy, sys\n"
+            f"BINDING, LOG, FAIL = {str(self.sessions() / (SID + '.json'))!r}, {str(log)!r}, {fail_write!r}\n"
+            "class Out:\n"
+            "    def write(self, s):\n"
+            "        b = json.load(open(BINDING))\n"
+            "        open(LOG, 'a').write(repr(b.get('owner_input_disclosed')) + ' ' + str('systemMessage' in s) + '\\n')\n"
+            "        if FAIL:\n"
+            "            raise BrokenPipeError('closed')\n"
+            "        return len(s)\n"
+            "    def flush(self):\n"
+            "        pass\n"
+            "sys.stdout = Out()\n"
+            f"sys.argv = [{str(SESSION_HOOK)!r}]\n"
+            f"runpy.run_path({str(SESSION_HOOK)!r}, run_name='__main__')\n")
+        res = subprocess.run([sys.executable, "-c", wrapper],
+                             input=json.dumps({"session_id": SID, "source": "startup", "cwd": str(self.base)}),
+                             capture_output=True, text=True, timeout=30, env=self.env, cwd=str(self.base))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return log.read_text()
+
+    def test_the_disclosure_is_recorded_only_after_it_was_written(self):
+        self.bind(owner_input_disclosed=False)
+        self.assertEqual(self.run_watched(fail_write=False), "False True\n")   # not yet recorded while writing
+        self.assertIs(self.binding()["owner_input_disclosed"], True)
+
+    def test_a_failed_write_records_no_disclosure(self):
+        self.bind(owner_input_disclosed=False)
+        self.assertEqual(self.run_watched(fail_write=True), "False True\n")
+        self.assertFalse(self.binding()["owner_input_disclosed"])
+        res = self.run_hook("not captured: the prompt hook discloses first")
+        self.assertIn("systemMessage", json.loads(res.stdout))
+        self.assertEqual(self.fake.records(), [])
+
     def test_no_disclosure_when_off(self):
         for fields in ({"capabilities": {}}, {"is_author": False, "source": "env"}):
             self.bind(owner_input_disclosed=False, **fields)
             self.assertNotIn("systemMessage", self.output())
-            self.assertFalse(self.binding()["owner_input_disclosed"])
+            self.assertFalse(self.binding().get("owner_input_disclosed"))
         self.bind(owner_input_disclosed=False)
         (self.base / ".claude").mkdir()
         (self.base / ".claude" / "settings.local.json").write_text(json.dumps({"env": {"CARDINAL_OWNER_INPUT": 0}}))
         out = self.output()
         self.assertNotIn("systemMessage", out)
         self.assertNotIn("owner input", out["hookSpecificOutput"]["additionalContext"])
-        self.assertFalse(self.binding()["owner_input_disclosed"])
+        self.assertFalse(self.binding().get("owner_input_disclosed"))
 
 
 class GrantCli(Base):

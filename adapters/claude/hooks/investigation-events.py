@@ -103,6 +103,7 @@ def flush_owner_input(home: Path, sid: str, cwd=None) -> None:
         import _owner_input
         if _owner_input.disabled(cwd):
             owner_input.drop_outbox(home, sid)
+            owner_input.forget_disclosure(home, sid)
             return
         deadline = START + STOP_BUDGET
         if deadline - time.monotonic() < owner_input.MIN_REQUEST:
