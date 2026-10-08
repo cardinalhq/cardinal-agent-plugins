@@ -423,7 +423,7 @@ class SessionStart(Base):
         self.silent(self.run_hook("captured, no second disclosure"))
         self.assertEqual(len(self.fake.records()), 1)
 
-    def run_watched(self, fail_write: bool) -> str:
+    def run_with_checked_stdout(self, fail_write: bool) -> str:
         """SessionStart with a stdout that notes, at every write, whether the
         binding already says the user was told (and can fail the write)."""
         log = self.base / "writes.log"
@@ -450,12 +450,12 @@ class SessionStart(Base):
 
     def test_the_disclosure_is_recorded_only_after_it_was_written(self):
         self.bind(owner_input_disclosed=False)
-        self.assertEqual(self.run_watched(fail_write=False), "False True\n")   # not yet recorded while writing
+        self.assertEqual(self.run_with_checked_stdout(fail_write=False), "False True\n")   # not yet recorded while writing
         self.assertIs(self.binding()["owner_input_disclosed"], True)
 
     def test_a_failed_write_records_no_disclosure(self):
         self.bind(owner_input_disclosed=False)
-        self.assertEqual(self.run_watched(fail_write=True), "False True\n")
+        self.assertEqual(self.run_with_checked_stdout(fail_write=True), "False True\n")
         self.assertFalse(self.binding()["owner_input_disclosed"])
         res = self.run_hook("not captured: the prompt hook discloses first")
         self.assertIn("systemMessage", json.loads(res.stdout))
