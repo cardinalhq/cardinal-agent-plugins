@@ -1,0 +1,43 @@
+name: Behavior plugin
+
+on:
+  pull_request:
+    paths:
+      - 'common/behavior/**'
+      - 'adapters/claude/bin/cardinal-behavior'
+      - 'adapters/claude/.mcp.json'
+      - 'adapters/claude/.claude-plugin/plugin.json'
+      - 'build/release.py'
+      - 'tests/test_behavior_release.py'
+      - '.github/workflows/behavior.yml'
+      - '.github/workflows/release-mirrors.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'common/behavior/**'
+      - 'adapters/claude/bin/cardinal-behavior'
+      - 'adapters/claude/.mcp.json'
+      - 'adapters/claude/.claude-plugin/plugin.json'
+      - 'build/release.py'
+      - 'tests/test_behavior_release.py'
+      - '.github/workflows/behavior.yml'
+      - '.github/workflows/release-mirrors.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  behavior:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Behavior bridge
+        run: python3 -m unittest discover -s common/behavior/tests -v
+      - name: Packaged behavior MCP smoke test
+        run: python3 -m unittest discover -s tests -p test_behavior_release.py -v
