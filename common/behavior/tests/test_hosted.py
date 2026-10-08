@@ -1,11 +1,13 @@
 """The normal plugin flow uses deployed authoring and durable receipt endpoints."""
 import copy
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from server import Behavior, tools_list
@@ -53,9 +55,13 @@ class HostedBehaviorTests(unittest.TestCase):
         raw = {'trace_id': 'e' * 32, 'verdict': 'NON_MATCH', 'execution_identity': {
             'diagnostic_version': self.version, 'udf_sha256': self.program['source_sha256'],
             'profile_sha256': 'c' * 64, 'adapter_sha256': 'd' * 64},
+            'semantic_occurrences': [{'id': 'witness-1', 'output': '<script>unsafe()</script>'}],
+            'native_trace': {'receipt': {'materialization': 'verified-native-input'}},
             'jev_receipts': [{'decision': 'NO', 'reason': 'No requested behavior.',
                               'evidence': [{'ref': 'message', 'text': 'PRIVATE_INPUT'}]}]}
         projected = copy.deepcopy(raw)
+        projected.pop('semantic_occurrences')
+        projected.pop('native_trace')
         projected['jev_receipts'][0].pop('evidence')
         self.responses.append({'execution_id': self.execution, 'status': 'COMPLETED',
             'results': [projected], 'next_cursor': 1, 'receipt': self.execution,
@@ -70,6 +76,11 @@ class HostedBehaviorTests(unittest.TestCase):
         rendered = self.behavior.render(self.execution, self.version)
         self.assertIn('PRIVATE_INPUT', Path(rendered['storyboard']).read_text())
         self.assertIn('authored-check', Path(rendered['storyboard']).read_text())
+        html = Path(rendered['storyboard']).read_text()
+        self.assertIn('Retained source events', html)
+        self.assertIn('verified-native-input', html)
+        self.assertIn('&lt;script&gt;unsafe()&lt;/script&gt;', html)
+        self.assertNotIn('<script>unsafe()', html)
         # A fresh process resumes using persisted program and receipt identities.
         restarted = Behavior(self.config)
         self.assertEqual(restarted.context(self.version)[0]['source_sha256'], self.program['source_sha256'])
@@ -103,3 +114,15 @@ class HostedBehaviorTests(unittest.TestCase):
         self.assertIn('udf_source', schemas['compile_behavior']['required'])
         self.assertIsNone(self.behavior.version)
         self.assertFalse(self.behavior.legacy)
+
+    def test_authoring_transport_allows_bounded_server_teaching_checks(self):
+        for method, path, expected in [
+            ('POST', '/api/v1/behavior-programs/compile', 310),
+            ('POST', '/api/v1/behavior-programs/' + self.version + '/accept', 310),
+            ('GET', '/api/v1/behavior-programs/' + self.version, 60),
+            ('POST', '/api/v1/behavior-executions', 60),
+        ]:
+            with self.subTest(path=path), patch.dict('os.environ', {'CARDINAL_MCP_API_KEY': 'test-key'}), \
+                    patch('urllib.request.urlopen', return_value=io.BytesIO(b'{}')) as opened:
+                Behavior.request(self.behavior, method, path)
+                self.assertEqual(opened.call_args.kwargs['timeout'], expected)

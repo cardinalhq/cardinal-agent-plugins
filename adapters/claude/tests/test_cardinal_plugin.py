@@ -299,10 +299,14 @@ class ManifestTests(unittest.TestCase):
         # missing key is never reported as a second missing variable.
         self.assertEqual(entry["url"], "${CARDINAL_MCP_URL}")
         self.assertEqual(entry["headers"], {"X-CardinalHQ-API-Key": "${CARDINAL_MCP_API_KEY:-}"})
-        # One server, named `cardinal`: tool names are
+        # The existing server remains named `cardinal`: tool names are
         # mcp__plugin_cardinal_cardinal__*, which the storyboard hooks'
         # matchers and Cardinal-server lists rely on.
-        self.assertEqual(list(data), ["cardinal"])
+        self.assertEqual(list(data), ["cardinal", "cardinal-behavior"])
+        self.assertEqual(data["cardinal-behavior"], {
+            "type": "stdio", "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/cardinal-behavior"],
+        })
         self.assertEqual(set(entry), {"type", "url", "headers"})
 
     def test_plugin_json_version_is_loaded_at_runtime(self):

@@ -5,6 +5,8 @@ on:
     paths:
       - 'common/behavior/**'
       - 'adapters/claude/bin/cardinal-behavior'
+      - 'adapters/claude/.mcp.json'
+      - 'adapters/claude/.claude-plugin/plugin.json'
       - 'build/release.py'
       - 'tests/test_behavior_release.py'
       - '.github/workflows/behavior.yml'
@@ -14,6 +16,8 @@ on:
     paths:
       - 'common/behavior/**'
       - 'adapters/claude/bin/cardinal-behavior'
+      - 'adapters/claude/.mcp.json'
+      - 'adapters/claude/.claude-plugin/plugin.json'
       - 'build/release.py'
       - 'tests/test_behavior_release.py'
       - '.github/workflows/behavior.yml'

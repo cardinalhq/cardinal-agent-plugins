@@ -25,7 +25,9 @@ def render_storyboard(state: dict, definition: dict, preview_data: dict, output:
             witness_refs=raw.get("witness_refs", []), records=raw.get("records", []),
             jev_receipts=raw.get("jev_receipts", []),
             coverage_gaps=raw.get("coverage_gaps", observations.get("coverage_gaps", [])),
-            error=raw.get("error", "")))
+            source_events=raw.get("semantic_occurrences", []),
+            native_receipt=(raw.get("native_trace") or {}).get("receipt"),
+            error=raw.get("error") or (raw.get("reason", "") if raw["verdict"] == "ERROR" else "")))
     report = SimpleNamespace(results=results, population_size=counts["population"],
         matches=counts["MATCH"], non_matches=counts["NON_MATCH"],
         unknown=counts["UNKNOWN"], errors=counts["ERROR"],
@@ -71,6 +73,9 @@ def render_storyboard(state: dict, definition: dict, preview_data: dict, output:
 
     evidence = []
     for index, item in enumerate(report.results):
+        source = (f'<h4>Retained source events</h4><pre>{code(item.source_events)}</pre>'
+                  f'<h4>Native materialization receipt</h4><pre>{code(item.native_receipt)}</pre>'
+                  if item.source_events or item.native_receipt else '')
         evidence.append(
             f'<details id="trace-{index + 1}"><summary>{escape(item.verdict)} · '
             f'{escape(item.trace_id)}</summary><p>Receipt <code>{escape(receipt)}</code>, '
@@ -78,6 +83,7 @@ def render_storyboard(state: dict, definition: dict, preview_data: dict, output:
             f'<h4>Witness refs</h4><pre>{code(item.witness_refs)}</pre>'
             f'<h4>Recorder records</h4><pre>{code(item.records)}</pre>'
             f'<h4>JEV receipts</h4><pre>{code(item.jev_receipts)}</pre>'
+            f'{source}'
             f'<h4>Coverage gaps</h4><pre>{code(item.coverage_gaps)}</pre>'
             f'<h4>Execution error</h4><pre>{code(item.error)}</pre></details>')
     html = f'''<!doctype html><html lang="en"><meta charset="utf-8">

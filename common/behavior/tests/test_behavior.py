@@ -74,6 +74,17 @@ class BehaviorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'match'):
             self.behavior.render(ID, 'wrong')
 
+    def test_storyboard_error_uses_native_runtime_reason_and_escapes_it(self):
+        raw = self.result(verdict='ERROR')
+        raw['reason'] = 'evaluate: <RuntimeError> failed'
+        page = self.page([raw], 'COMPLETED', population=1, match=0)
+        page['counts']['ERROR'] = 1
+        self.responses.append(page)
+        self.behavior.poll(ID, 0)
+        html = Path(self.behavior.render(ID, VERSION)['storyboard']).read_text()
+        self.assertIn('evaluate: &lt;RuntimeError&gt; failed', html)
+        self.assertNotIn('<RuntimeError>', html)
+
     def test_completed_must_drain_all_pages_and_match_counts(self):
         self.responses.append(self.page([self.result()], 'COMPLETED', population=2, match=2))
         got = self.behavior.poll(ID, 0)

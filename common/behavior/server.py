@@ -124,8 +124,10 @@ class Behavior:
         data = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(self.config['base_url'].rstrip('/') + path,
                                          data=data, headers=headers, method=method)
+        # Compiler/acceptance teaching checks run under the API's five-minute bound.
+        timeout = 310 if method == 'POST' and (path == '/api/v1/behavior-programs/compile' or path.endswith('/accept')) else 60
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f'Cardinal API returned HTTP {exc.code}; check the configured service and credentials') from None
@@ -410,7 +412,7 @@ def tools_list(behavior: Behavior):
     if behavior.legacy:
         authoring = [tool('select_behavior', 'Inspect the configured accepted behavior. Read its contract and select it only if it matches the user request. ' + behavior.description, {}, [])]
     return {'tools': authoring + [
-        tool('execute_behavior', 'Submit an explicitly accepted DiagnosticVersion against a service population and time window. Deployed execution runs independently of polling.',
+        tool('execute_behavior', 'Submit an explicitly accepted DiagnosticVersion against a service population and a window of at most one hour (maximum 256 selected objects / 256 MiB). Narrow the window if the API rejects its size. Deployed execution runs independently of polling.',
              execution_properties, ['accepted_behavior', 'population'] + ([] if behavior.legacy else ['start', 'end'])),
         tool('next_behavior_result', 'Observe newly committed compact findings while Cardinal investigates. Repeat until receipt appears. Empty results mean the execution is still running; do not fabricate findings. The total population is unknown until COMPLETED: evaluated_so_far is progress, never a total denominator.',
              {'execution_id': execution, 'wait_seconds': {'type': 'number', 'minimum': 0, 'maximum': 30, 'default': 20}}, ['execution_id']),
