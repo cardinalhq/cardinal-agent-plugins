@@ -1165,6 +1165,9 @@ def cmd_investigation_events(args: argparse.Namespace) -> int:
         sys.stderr.write(f"{e}\n")
         return 1
     if args.json:
+        for e in events:   # the client-side display copy (ie.resolve_grantee) is not the server's
+            if isinstance(e.get("producer"), dict):
+                e["producer"].pop("_resolved", None)
         sys.stdout.write(json.dumps({"investigation_id": inv_id, "events": events,
                                      "next_after": cursor, "head_seq": head}, indent=2, ensure_ascii=False) + "\n")
         return 0

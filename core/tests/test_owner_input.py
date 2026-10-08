@@ -36,6 +36,7 @@ SID = "11111111-2222-3333-4444-555555555555"
 SECRET = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCD"
 ON = {"owner_input": {"enabled": True}}
 GRANT = "grt_" + "0" * 24
+TRUST = "client_attested: recorded by the Cardinal plugin on the author's machine; not verified by Cardinal"
 
 
 def jwt(header: dict, claims: dict) -> str:
@@ -60,6 +61,8 @@ class FakeMaestro:
         self.requests: list = []
         self.status = None       # (status, body) answered to every record-owner-input
         self.old_server = False  # no record-owner-input route at all
+        self.principals = None   # the read answer's `principals` map (C2), when set
+        self.answered: list = []  # statuses answered to record-owner-input
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -68,6 +71,8 @@ class FakeMaestro:
                 tool = self.path.rsplit("/", 1)[-1]
                 fake.requests.append((tool, body, {k.lower(): v for k, v in self.headers.items()}))
                 status, out = fake.answer(tool, body)
+                if tool == "record-owner-input":
+                    fake.answered.append(status)
                 data = json.dumps(out).encode() if out is not None else b"<html>Cannot POST</html>"
                 self.send_response(status)
                 if status == 429:
@@ -102,10 +107,13 @@ class FakeMaestro:
             evs = [e for e in self.events if e["seq"] > body.get("after", 0)]
             if body.get("class"):
                 evs = [e for e in evs if e.get("class") == body["class"]]
-            return 200, {"investigation_id": body["investigation_id"], "events": evs[:body.get("limit", 100)],
-                         "head_seq": len(self.events)}
+            out = {"investigation_id": body["investigation_id"], "events": evs[:body.get("limit", 100)],
+                   "head_seq": len(self.events)}
+            if self.principals is not None:
+                out["principals"] = self.principals
+            return 200, out
         if tool == "grant-investigation-access":
-            return 200, {"grant_id": GRANT, "token": TOKEN, "expires_at": "2026-10-07T16:00:00.000Z",
+            return 201, {"grant_id": GRANT, "token": TOKEN, "expires_at": "2026-10-07T16:00:00.000Z",
                          "scopes": body["scopes"], "label": body.get("label"), "principal": "grantee:" + GRANT,
                          "investigation_id": body["investigation_id"], "org": "o1"}
         if tool == "list-investigation-grants":
@@ -113,7 +121,7 @@ class FakeMaestro:
                          "grants": [{"grant_id": GRANT, "scopes": ["read"], "label": "sup", "expires_at": "t",
                                      "revoked_at": None}]}
         if tool == "revoke-investigation-grant":
-            return 200, {"grant_id": body["grant_id"], "revoked": True}
+            return 200, {"grant": {"grant_id": body["grant_id"], "active": False}, "revoked": True}
         if tool != "record-owner-input" or self.old_server:
             return 404, None
         if self.status:
@@ -123,14 +131,15 @@ class FakeMaestro:
             if e["type"] == oi.TYPE and e["producer"]["session_id"] == body["session_id"] \
                     and e["payload"]["turn"] == p["turn"]:
                 if e["payload"]["prompt_sha256"] == p["prompt_sha256"]:
-                    return 200, {"event": e, "duplicate": True}
-                return 409, {"error": "owner_input_turn_conflict", "event": e}
+                    return 200, {"event": e, "duplicate": True, "trust": TRUST}
+                return 409, {"error": "owner_input_turn_conflict", "investigation_id": INV,
+                             "session_id": body["session_id"], "turn": p["turn"], "event": e, "message": "m"}
         e = {"investigation_id": body["investigation_id"], "seq": len(self.events) + 1, "type": oi.TYPE,
              "class": "owner_input", "authority": "owner_input_client_attested", "payload": p,
              "producer": {"principal": {"kind": "user", "id": "u1"}, "session_id": body["session_id"],
                           "is_investigation_author": True}}
         self.events.append(e)
-        return 200, {"event": e, "duplicate": False}
+        return 201, {"event": e, "duplicate": False, "trust": TRUST}
 
 
 class Base(unittest.TestCase):
@@ -281,6 +290,7 @@ class Posting(Base):
         self.assertNotIn("authorization", headers)
         self.assertEqual(self.binding()["owner_input_turn"], 2)
         self.assertFalse(self.outbox().exists())
+        self.assertEqual(self.fake.answered, [201, 201], "C2 answers a new record 201: success")
 
     def test_a_replay_is_success(self):
         self.bind()
@@ -289,6 +299,7 @@ class Posting(Base):
         b["owner_input_turn"] = 0
         ie.write_binding(self.home, SID, b)
         self.assertEqual(self.submit("same"), "duplicate")
+        self.assertEqual(self.fake.answered, [201, 200])
 
 
 class NeverQueued(Base):
@@ -328,11 +339,25 @@ class NeverQueued(Base):
             self.assertEqual(self.submit("hello"), "dropped")
             self.assert_dropped(status[1]["error"])
 
+    def test_the_investigation_cap_drops_never_queues(self):
+        self.bind()
+        self.fake.status = (409, {"error": "event_limit_reached", "scope": "owner_input_investigation", "limit": 500})
+        self.assertEqual(self.submit("hello"), "dropped")
+        self.assert_dropped("event_limit_reached")
+        self.assertTrue(oi.enabled(self.binding()))
+
+    def test_no_principal_drops_and_turns_off(self):
+        self.bind()
+        self.fake.status = (403, {"error": "no_principal"})
+        self.assertEqual(self.submit("hello"), "dropped")
+        self.assert_dropped("no_principal")
+        self.assertFalse(oi.enabled(self.binding()))
+
     def test_400_drops_that_prompt_only(self):
         self.bind()
-        self.fake.status = (400, {"error": "invalid_body"})
+        self.fake.status = (400, {"error": "invalid_owner_input"})
         self.assertEqual(self.submit("hello"), "dropped")
-        self.assert_dropped("invalid_body")
+        self.assert_dropped("invalid_owner_input")
         self.assertTrue(oi.enabled(self.binding()))
 
     def test_a_404_while_draining_drops_the_whole_outbox(self):
@@ -474,26 +499,64 @@ class NeverDelivered(Base):
         self.assertEqual(ie.render([e], SID, INV), "")
 
 
-class Grantee(unittest.TestCase):
-    def event(self, **producer):
-        p = {"principal": {"kind": "grantee", "id": GRANT}, "granted_by": "user:u_owner",
-             "is_investigation_author": True, "session_id": SID}
-        p.update(producer)
-        return {"investigation_id": INV, "seq": 5, "type": "challenge.added", "class": "control",
-                "payload": {"text": "why not the cache?"}, "producer": p, "created_at": "t"}
+class Grantee(Base):
+    """C2 wire: producer {principal {kind grantee, id}, granted_by,
+    is_investigation_author false}; the label and the granter's name are in
+    the read answer's `principals` map."""
 
-    def test_renders_as_advisory_from_the_label_never_the_author(self):
-        out = ie.render_event(self.event(label="ChatGPT supervisor"), SID)
-        self.assertIn('Advisory from "ChatGPT supervisor" (access granted by user:u_owner): not the investigation '
+    def add(self, **producer):
+        p = {"principal": {"kind": "grantee", "id": GRANT}, "granted_by": "user:u_owner",
+             "is_investigation_author": False}
+        p.update(producer)
+        self.fake.events.append({"investigation_id": INV, "seq": len(self.fake.events) + 1, "type": "challenge.added",
+                                 "class": "control", "authority": "advisory", "payload": {"text": "why not the cache?"},
+                                 "producer": p, "created_at": "t"})
+
+    def read(self):
+        return ie.read_events(self.fake.conn, INV, after=0, client="t")["events"]
+
+    def test_label_and_granter_name_come_from_the_principals_map(self):
+        self.add()
+        self.fake.principals = {
+            "grantee:" + GRANT: {"kind": "grantee", "id": GRANT, "name": "ChatGPT supervisor", "email": None,
+                                 "label": "ChatGPT supervisor", "granted_by": "user:u_owner", "scopes": ["read"],
+                                 "expires_at": "t", "revoked": False},
+            "user:u_owner": {"kind": "user", "id": "u_owner", "name": "Ruchir", "email": "r@example.com"},
+        }
+        out = ie.render_event(self.read()[0], SID)
+        self.assertIn('Advisory from "ChatGPT supervisor" (access granted by "Ruchir"): not the investigation '
                       "author and not the owner of this session.", out)
         self.assertIn("From: grantee:" + GRANT, out)
         self.assertNotIn("investigation author's principal", out)
         self.assertNotIn("via key", out)
-        out = ie.render_event(self.event(), SID)
-        self.assertIn("Advisory from grantee (access granted by user:u_owner): not the investigation author", out)
+        # The granter's email when it has no name.
+        self.fake.principals["user:u_owner"] = {"kind": "user", "id": "u_owner", "name": None,
+                                                "email": "r@example.com"}
+        self.assertIn('(access granted by "r@example.com")', ie.render_event(self.read()[0], SID))
 
-    def test_never_this_sessions_own(self):
-        self.assertEqual([e["seq"] for e in ie.deliverable([self.event()], SID, INV)], [5])
+    def test_without_the_map_it_falls_back(self):
+        self.add(label="spoofed on the producer", _resolved={"label": "spoofed by the server"})
+        out = ie.render_event(self.read()[0], SID)
+        self.assertIn("Advisory from grantee (access granted by user:u_owner): not the investigation author", out)
+        self.assertNotIn("spoofed", out)
+
+    def test_never_this_sessions_own_and_kept_through_the_inbox(self):
+        self.bind()
+        self.add(is_investigation_author=True, session_id=SID)
+        self.fake.principals = {"grantee:" + GRANT: {"label": "sup"}}
+        self.assertEqual([e["seq"] for e in ie.deliverable(self.fake.events, SID, INV)], [1])
+        self.assertEqual(ie.poll_once(self.home, SID, self.fake.conn, "t", now=self.now), "inbox")
+        out = []
+        ie.deliver_inbox(self.home, SID, out.append)
+        self.assertIn('Advisory from "sup" (access granted by user:u_owner)', out[0])
+
+    def test_token_errors_in_words(self):
+        for code, words in (("grant_revoked", "revoked this access grant"), ("Invalid token", "is not valid")):
+            err = sync.ServerError(401, {"error": code}, "x")
+            self.assertIn(words, ie.plain(err))
+            self.assertIn(words, sync.plain(err))
+        self.assertNotIn("does not support", sync.plain(sync.ServerError(404, {"error": "grant_not_found"}, "x")))
+        self.assertFalse(sync.unsupported(sync.ServerError(404, {"error": "grant_not_found"}, "x")))
 
 
 class Grants(Base):

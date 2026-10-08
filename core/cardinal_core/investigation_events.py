@@ -87,7 +87,12 @@ Grantees (principal kind `grantee`, id grant id; an access grant the
 author minted, cardinal_core.investigation_grants): a grantee's cue,
 question or challenge renders as advisory from the grant's label (or
 "grantee"), naming who granted the access, and never as the author, an
-API key or this session's own event.
+API key or this session's own event. The label and the granter's name come
+from the read answer's `principals` map ("grantee:<id>" -> {label}, the
+granter's "user:<id>" / "api_key:<id>" -> {name, email}); read_events
+copies them onto the event's producer as `_resolved` (a client-side field,
+so the poller's inbox keeps them) and the renderers fall back to "grantee"
+and the granter's principal id without it.
 
 Standard library only. Fails open: check() never raises; any error means no
 output and an unchanged cursor.
@@ -172,6 +177,9 @@ _PLAIN = {
                                  "owner input"),
     "token_scope_mismatch": ("the access grant does not cover that (another investigation, route or event type)"),
     "session_id_not_allowed_for_grantee": "a grantee cannot post as a session",
+    "grant_revoked": "the investigation's author revoked this access grant; ask them for a new one",
+    "Invalid token": ("CARDINAL_INVESTIGATION_TOKEN is not valid (expired, malformed or for another server); ask "
+                      "the investigation's author for a new grant"),
 }
 
 
@@ -442,6 +450,9 @@ def read_events(conn: dict, investigation_id: str, *, after: int = 0, limit: int
         last = seq
         if e.get("investigation_id") == investigation_id:
             kept.append(e)
+    principals = out.get("principals") if isinstance(out.get("principals"), dict) else {}
+    for e in kept:
+        resolve_grantee(e, principals)
     nxt = out.get("next_after")
     if len(events) < int(limit) and isinstance(nxt, int) and not isinstance(nxt, bool) and last < nxt <= head:
         last = nxt   # a short page: the server scanned past what it showed
@@ -1071,21 +1082,53 @@ def is_grantee(p: Any) -> bool:
     return isinstance(pr, dict) and pr.get("kind") == GRANTEE
 
 
+def resolve_grantee(e: Any, principals: Any) -> None:
+    """Copy a grantee event's display facts from a read answer's
+    `principals` map onto its producer as `_resolved`: {label} from
+    principals["grantee:<id>"], {granted_by_name} from the granter's entry
+    (its name, else its email). Anything else in the map is ignored; a
+    missing or malformed map leaves the event as it is."""
+    p = e.get("producer") if isinstance(e, dict) else None
+    if not isinstance(p, dict):
+        return
+    p.pop("_resolved", None)   # only ever this client's own copy
+    if not is_grantee(p) or not isinstance(principals, dict):
+        return
+    got: dict = {}
+    me = principals.get(f"{GRANTEE}:{p['principal'].get('id')}")
+    if isinstance(me, dict) and isinstance(me.get("label"), str) and me["label"].strip():
+        got["label"] = me["label"]
+    by = principals.get(p.get("granted_by")) if isinstance(p.get("granted_by"), str) else None
+    if isinstance(by, dict):
+        name = next((by[k] for k in ("name", "email") if isinstance(by.get(k), str) and by[k].strip()), None)
+        if name is not None:
+            got["granted_by_name"] = name
+    p["_resolved"] = got
+
+
+def _resolved(p: dict) -> dict:
+    r = p.get("_resolved")
+    return r if isinstance(r, dict) else {}
+
+
 def grantee_label(p: dict) -> str:
     """How a grantee's event names its producer: the grant's label (a JSON
     string: the author typed it, so it is shown as given) or "grantee"."""
-    label = p.get("label")
-    if not isinstance(label, str):
-        pr = p.get("principal") if isinstance(p.get("principal"), dict) else {}
-        label = pr.get("label")
+    label = _resolved(p).get("label")
     return _claimed(label) if isinstance(label, str) and label.strip() else GRANTEE
 
 
+def granter_name(p: dict) -> str:
+    """Who granted the access: the granter's name or email (a JSON string),
+    else its principal id (user:<id> / api_key:<id>)."""
+    name = _resolved(p).get("granted_by_name")
+    return _claimed(name) if isinstance(name, str) and name.strip() else _tok(p.get("granted_by"))
+
+
 def grantee_line(p: dict) -> str:
-    """'advisory from <label|grantee> (access granted by <who>): not the
-    investigation author'."""
-    return (f"advisory from {grantee_label(p)} (access granted by {_tok(p.get('granted_by'))}): not the "
-            "investigation author")
+    """'advisory from <label|grantee> (access granted by <name|email|id>):
+    not the investigation author'."""
+    return f"advisory from {grantee_label(p)} (access granted by {granter_name(p)}): not the investigation author"
 
 
 def deliverable(events: list, sid: str, investigation_id: str) -> list:

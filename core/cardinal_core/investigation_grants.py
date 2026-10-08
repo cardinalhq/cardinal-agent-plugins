@@ -150,7 +150,7 @@ def grant_line(g: dict) -> str:
     shown = ",".join(ie._tok(s) for s in scopes) if isinstance(scopes, list) else "unknown"
     label = g.get("label")
     state = "revoked" if g.get("revoked") is True or g.get("revoked_at") else \
-        ("expired" if g.get("expired") is True else "active")
+        ("expired" if g.get("active") is False or g.get("expired") is True else "active")
     line = f"{ie._tok(grant_id_of(g))} {state} scopes {shown} expires {ie._tok(g.get('expires_at'))}"
     if isinstance(label, str) and label:
         line += f" label {ie._claimed(label)}"

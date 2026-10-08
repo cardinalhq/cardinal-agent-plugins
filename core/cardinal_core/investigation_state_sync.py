@@ -200,7 +200,7 @@ INVESTIGATIONS_UNSUPPORTED = (
 
 # Errors the state and investigation routes themselves answer; any other 404
 # means the route is missing.
-_ROUTE_404S = ("state_not_found", "storyboard_not_found", "investigation_not_found")
+_ROUTE_404S = ("state_not_found", "storyboard_not_found", "investigation_not_found", "grant_not_found")
 
 # What the investigation routes refuse, in words.
 _PLAIN = {
@@ -218,6 +218,11 @@ _PLAIN = {
                                  "owner input"),
     "grant_limit_reached": "this investigation already has its limit of active access grants; revoke one first",
     "grant_not_found": "there is no such access grant for this investigation",
+    "invalid_scopes": "the server refused those scopes (read, owner_input:read, advise; owner_input:read needs read)",
+    "investigation_tokens_unavailable": "this Cardinal cannot issue access grants (no token signing secret configured)",
+    "grant_revoked": "the investigation's author revoked this access grant; ask them for a new one",
+    "Invalid token": ("CARDINAL_INVESTIGATION_TOKEN is not valid (expired, malformed or for another server); ask "
+                      "the investigation's author for a new grant"),
 }
 
 

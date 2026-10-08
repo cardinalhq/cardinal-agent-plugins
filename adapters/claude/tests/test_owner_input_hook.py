@@ -61,6 +61,8 @@ class FakeMaestro:
         self.requests: list = []   # (tool, body, headers, path)
         self.status = None         # answered to every record-owner-input
         self.old_server = False
+        self.principals = None     # the read answer's `principals` map (C2)
+        self.read_status = None    # answered to every read-investigation-events
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -103,13 +105,18 @@ class FakeMaestro:
                  "producer": {"principal": {"kind": "user", "id": "u1"}, "session_id": body["session_id"],
                               "is_investigation_author": True}}
             self.events.append(e)
-            return 200, {"event": e, "duplicate": False}
+            return 201, {"event": e, "duplicate": False, "trust": "client_attested: …"}
         if tool == "read-investigation-events":
+            if self.read_status:
+                return self.read_status
             evs = [e for e in self.events if e["seq"] > body.get("after", 0)]
             if body.get("class"):
                 evs = [e for e in evs if e.get("class") == body["class"]]
-            return 200, {"investigation_id": body["investigation_id"], "events": evs[:body.get("limit", 100)],
-                         "head_seq": len(self.events)}
+            out = {"investigation_id": body["investigation_id"], "events": evs[:body.get("limit", 100)],
+                   "head_seq": len(self.events)}
+            if self.principals is not None:
+                out["principals"] = self.principals
+            return 200, out
         if tool == "append-investigation-event":
             e = {"investigation_id": body["investigation_id"], "seq": len(self.events) + 1, "type": body["type"],
                  "class": "control", "payload": body["payload"], "to_session_id": body.get("to_session_id")}
@@ -118,16 +125,19 @@ class FakeMaestro:
         if tool == "get-investigation":
             return 200, {"investigation_id": body["investigation_id"], "storyboard_id": SB}
         if tool == "grant-investigation-access":
-            return 200, {"grant_id": GRANT, "token": TOKEN, "expires_at": "2026-10-07T16:00:00.000Z",
+            return 201, {"grant_id": GRANT, "token": TOKEN, "expires_at": "2026-10-07T16:00:00.000Z",
                          "scopes": body["scopes"], "label": body.get("label"), "principal": "grantee:" + GRANT,
                          "investigation_id": body["investigation_id"], "org": "o1"}
         if tool == "list-investigation-grants":
             return 200, {"investigation_id": body["investigation_id"],
-                         "grants": [{"grant_id": GRANT, "scopes": ["read", "owner_input:read"],
-                                     "label": "sup\nervisor", "expires_at": "2026-10-07T16:00:00.000Z",
-                                     "revoked_at": None, "granted_by": "user:u1"}]}
+                         "grants": [{"grant_id": GRANT, "principal": "grantee:" + GRANT,
+                                     "investigation_id": body["investigation_id"],
+                                     "scopes": ["read", "owner_input:read"], "label": "sup\nervisor",
+                                     "granted_by": "user:u1", "created_at": "t",
+                                     "expires_at": "2026-10-07T16:00:00.000Z", "revoked_at": None,
+                                     "revoked_by": None, "active": True}]}
         if tool == "revoke-investigation-grant":
-            return 200, {"grant_id": body["grant_id"], "revoked": True}
+            return 200, {"grant": {"grant_id": body["grant_id"], "active": False}, "revoked": True}
         return 404, None
 
 
@@ -390,13 +400,19 @@ class TokenMode(Base):
     def test_events_post_show_use_the_token_never_the_key(self):
         self.fake.events.append({"investigation_id": INV, "seq": 1, "type": "challenge.added", "class": "control",
                                  "payload": {"text": "why?"}, "created_at": "t",
-                                 "producer": {"principal": {"kind": "grantee", "id": GRANT}, "label": "sup",
-                                              "granted_by": "user:u1", "is_investigation_author": True}})
+                                 "producer": {"principal": {"kind": "grantee", "id": GRANT},
+                                              "granted_by": "user:u1", "is_investigation_author": False}})
+        self.fake.principals = {"grantee:" + GRANT: {"kind": "grantee", "id": GRANT, "name": "sup", "label": "sup"},
+                                "user:u1": {"kind": "user", "id": "u1", "name": "Ruchir", "email": "r@x.io"}}
         res = self.cli("events", **self.token_env())
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn(f'grantee:{GRANT} (advisory from "sup" (access granted by user:u1): not the investigation '
+        self.assertIn(f'grantee:{GRANT} (advisory from "sup" (access granted by "Ruchir"): not the investigation '
                       "author)", res.stdout)
         self.assertNotIn("(author)", res.stdout)
+        res = self.cli("events", "--json", **self.token_env())
+        self.assertNotIn("_resolved", res.stdout)   # the client's display copy is not the server's
+        self.fake.principals = None
+        self.assertIn("advisory from grantee (access granted by user:u1)", self.cli("events", **self.token_env()).stdout)
         res = self.cli("post", "--type", "challenge", "--text", "check the cache", **self.token_env(
             CLAUDE_CODE_SESSION_ID=SID))
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -408,6 +424,14 @@ class TokenMode(Base):
             self.assertNotIn("x-cardinalhq-api-key", headers, tool)
             self.assertIn("/api/orgs/o1/", path)
             self.assertEqual(body["investigation_id"], INV)
+
+    def test_a_revoked_or_invalid_token_is_said_in_words(self):
+        for body, words in (({"error": "grant_revoked"}, "revoked this access grant"),
+                            ({"error": "Invalid token"}, "CARDINAL_INVESTIGATION_TOKEN is not valid")):
+            self.fake.read_status = (401, body)
+            res = self.cli("events", **self.token_env())
+            self.assertEqual(res.returncode, 1)
+            self.assertIn(words, res.stderr)
 
     def test_another_investigation_or_a_bad_token_is_refused(self):
         self.assertEqual(self.cli("events", OTHER_INV, **self.token_env()).returncode, 2)
