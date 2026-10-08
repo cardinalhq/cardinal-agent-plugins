@@ -37,6 +37,9 @@ class HostedBehaviorTests(unittest.TestCase):
                          **{key: self.sdk[key] for key in SDK_IDENTITIES},
                          'results': [{'trace_id': 'e' * 32, 'verdict': 'NON_MATCH', 'expected_verdict': 'NON_MATCH',
                                       'records': [], 'witness_refs': [], 'jev_receipts': []}]}
+        self.teaching['results'][0]['execution_identity'] = {
+            **{key: self.sdk[key] for key in SDK_IDENTITIES}, 'diagnostic_version': self.version,
+            'udf_sha256': self.program['source_sha256'], 'adapter_sha256': self.program['adapter_sha256']}
         self.acceptance = {'diagnostic_version': self.version, 'acceptance_id': 'accepted-1',
                            'test_receipt': '1' * 64, **{key: self.sdk[key] for key in SDK_IDENTITIES}}
         self.responses = []
@@ -241,3 +244,10 @@ class HostedBehaviorTests(unittest.TestCase):
         self.behavior.program_path(self.version).write_text(json.dumps(program))
         with self.assertRaisesRegex(ValueError, 'do not match'):
             self.behavior.accept(self.version)
+
+    def test_each_teaching_result_must_match_compiled_execution_identity(self):
+        self.compile()
+        self.teaching['results'][0]['execution_identity']['sdk_runtime_sha256'] = '0' * 64
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            self.teaching_test()
+        self.assertNotIn('test_receipt', json.loads(self.behavior.program_path(self.version).read_text()))

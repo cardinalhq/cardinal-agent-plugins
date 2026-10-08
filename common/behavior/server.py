@@ -303,6 +303,12 @@ class Behavior:
                 or any(r.get('verdict') not in VERDICTS for r in results)):
             raise ValueError('teaching test results do not match the requested traces')
         for item in results:
+            identity = item.get('execution_identity', {})
+            self.check_identities(identity, program)
+            if (identity.get('diagnostic_version') != diagnostic_version
+                    or identity.get('udf_sha256') != program['source_sha256']
+                    or identity.get('adapter_sha256') != program['adapter_sha256']):
+                raise ValueError('teaching result does not belong to the compiled candidate')
             expected = expected_verdicts.get(item['trace_id'])
             if item.get('expected_verdict') != expected:
                 raise ValueError('teaching test expected verdict identity mismatch')
