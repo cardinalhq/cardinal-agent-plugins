@@ -192,7 +192,7 @@ class CodexStoryboardTests(unittest.TestCase):
         self.assertIn(f'`python3 "{CLI}" context --bare --session-id {SESSION}`', ctx)
         self.assertIn("the plugin fills session_id and context when you leave them out", ctx)
         self.assertIn(f"{SB1} · written from branch fix/checkout (subject not confirmed)", ctx)
-        find = self.fake.requests[0]
+        find = next(r for r in self.fake.requests if r["path"].endswith("/find"))
         self.assertEqual(find["path"], "/api/orgs/org-1/storyboards/mcp-tools/find")
         self.assertEqual(find["headers"]["x-cardinal-client"], f"codex/{VERSION}")
         self.assertEqual(find["headers"]["x-cardinalhq-api-key"], "ck_codex_test")
