@@ -140,7 +140,9 @@ class HostedBehaviorTests(unittest.TestCase):
     def test_sdk_tool_and_no_frozen_default(self):
         self.responses.append(self.sdk)
         result = self.behavior.sdk()
-        self.assertEqual(json.loads(Path(result['sdk_artifact_file']).read_text()), self.sdk['artifact'])
+        cached_artifact = Path(result['sdk_artifact_file']).read_bytes()
+        self.assertEqual(json.loads(cached_artifact), self.sdk['artifact'])
+        self.assertEqual(hashlib.sha256(cached_artifact).hexdigest(), result['sdk_runtime_sha256'])
         self.assertEqual(result['artifact'], self.sdk['artifact'])
         source_path = Path(result['sdk_files']['behavior_sdk/__init__.py'])
         self.assertEqual(source_path.read_bytes(), self.sdk['artifact']['files']['behavior_sdk/__init__.py'].encode())

@@ -263,16 +263,17 @@ class Behavior:
             raise ValueError('API did not return the canonical SDK authoring artifact')
         if result.get('sdk_version') != source['version'] or artifact.get('version') != source['version']:
             raise ValueError('public SDK artifact version mismatch')
-        digest = hashlib.sha256(json.dumps(artifact, sort_keys=True, separators=(',', ':'),
-                                           ensure_ascii=False).encode()).hexdigest()
+        artifact_text = json.dumps(artifact, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        artifact_bytes = artifact_text.encode('utf-8')
+        digest = hashlib.sha256(artifact_bytes).hexdigest()
         if result['sdk_runtime_sha256'] != digest or result.get('sdk_artifact_sha256') != digest:
             raise ValueError('SDK authoring artifact integrity check failed')
         path = self.output / 'sdk' / f'{digest}.json'
         if path.exists():
-            if json.loads(path.read_text()) != artifact:
+            if path.read_bytes() != artifact_bytes:
                 raise ValueError('cached SDK authoring artifact integrity check failed')
         else:
-            private_json(path, artifact)
+            private_text(path, artifact_text)
         directory = self.output / 'sdk' / digest
         if directory.is_symlink():
             raise ValueError('SDK source cache must not be a symlink')
