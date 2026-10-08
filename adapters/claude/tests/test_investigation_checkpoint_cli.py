@@ -340,6 +340,17 @@ class CitedEvidence(CheckpointBase):
             if (self.home / ".cardinal" / "evidence" / SID).exists() else set()
         self.assertEqual(after, before)
 
+    def test_a_command_combined_with_the_control_cli_is_still_never_captured(self):
+        # The Phase-1 gate lost the worker's code read because it shared one
+        # Bash command with `investigation question`. Salvaging the rest was
+        # reviewed and rejected (its output cannot be attributed safely), so
+        # the call stays uncaptured and the guidance says to run the CLI on
+        # its own instead.
+        self.start()
+        got = self.capture('cardinal-storyboard investigation question "Why?" ; cat ledgerkit/config.py',
+                           'investigation inv_x now asks: "Why?"\nSETTINGS.update(...)\n', "toolu_mixed")
+        self.assertIsNone(got)
+
 
 class Guidance(CheckpointBase):
     """SessionStart asks a bootstrapped author session for sparse checkpoints
@@ -351,7 +362,10 @@ class Guidance(CheckpointBase):
         self.assertEqual(ctx.count("investigation checkpoint"), 1)
         start = ctx.index(CHECKPOINT_SENTENCE)
         line = ctx[start:]
-        self.assertLess(len(line), 900)
+        # v3 was 894 characters with a UUID; v3.1 (cite the evidence that
+        # shows the mechanism; run the control CLI on its own, plugin 0.44.0)
+        # is 1092.
+        self.assertLess(len(line), 1100)
         self.assertEqual(len(SID), 36)
         for needle in (f"`cardinal-storyboard investigation checkpoint --session {SID}`",
                        "someone may need to take it over mid-way", "materially changes",
@@ -359,6 +373,10 @@ class Guidance(CheckpointBase):
                        '[{"type":"hypothesis.resolved","id":"hyp_x","outcome":"contradicted",'
                        '"statement":"<why, with the deciding numbers>","evidence":["ev_…"]}]',
                        "Write each entry for a reader who sees only the record: say why, not just what",
+                       "citing the ev_ that shows each claim (for a cause, the code/config/history read, not only "
+                       "the symptom)",
+                       "Run cardinal-storyboard commands on their own: a command combined with one is never "
+                       "captured.",
                        "`--help`", "not private reasoning", "routine tool use", "unchanged knowledge",
                        "your claims, not established facts"):
             self.assertIn(needle, line)

@@ -530,6 +530,57 @@ class FetchTests(unittest.TestCase):
             info = rp.connect_info(home, env)
             self.assertEqual(info, {"origin": "https://app.cardinalhq.io", "org": "o-1", "key": "k2"})
 
+    def test_connection_env_mode_never_reads_settings(self):
+        # Dogfood: a session pointed at a local stack (CARDINAL_CONNECTION=env)
+        # on a machine whose settings.json holds the production key fetched
+        # the bundles with the production key. Env mode is the environment
+        # only, as in hooks/_storyboard_discovery.connection.
+        with TemporaryDirectory() as t:
+            home = Path(t)
+            write_settings(home, "https://app.cardinalhq.io", org="o-prod", key="prod-key")
+            local = {"CARDINAL_CONNECTION": "env", "CARDINAL_MCP_URL": "http://localhost:4210/api/orgs/o-dev/mcp",
+                     "CARDINAL_MCP_API_KEY": "dev-key"}
+            self.assertEqual(rp.connect_info(home, local),
+                             {"origin": "http://localhost:4210", "org": "o-dev", "key": "dev-key"})
+            # Env mode with nothing in the environment: not connected, never the settings key.
+            self.assertEqual(rp.connect_info(home, {"CARDINAL_CONNECTION": "env"}), {})
+            # /cardinal:disconnect wins over env mode too.
+            (home / ".claude" / "cardinal-disconnected").write_text("{}\n")
+            self.assertEqual(rp.connect_info(home, local), {})
+            # Without env mode: settings first (unchanged); with no settings
+            # connection, the disconnect marker beats a stale environment key.
+            self.assertEqual(rp.connect_info(home, {k: v for k, v in local.items() if k != "CARDINAL_CONNECTION"})
+                             ["key"], "prod-key")
+            (home / ".claude" / "settings.json").write_text("{}")
+            self.assertEqual(rp.connect_info(home, {k: v for k, v in local.items() if k != "CARDINAL_CONNECTION"}),
+                             {})
+
+    def test_connect_info_matches_the_hooks_resolver(self):
+        if str(PLUGIN_ROOT / "hooks") not in sys.path:
+            sys.path.insert(0, str(PLUGIN_ROOT / "hooks"))
+        import _storyboard_discovery as disc
+        with TemporaryDirectory() as t:
+            home = Path(t)
+            local = {"CARDINAL_MCP_URL": "http://localhost:4210/api/orgs/o-dev/mcp", "CARDINAL_MCP_API_KEY": "dev"}
+            cases = [({}, False, False), (local, False, False), (local, True, False),
+                     (dict(local, CARDINAL_CONNECTION="env"), True, False),
+                     (dict(local, CARDINAL_CONNECTION="env"), True, True),
+                     ({"CARDINAL_CONNECTION": "env"}, True, False), (local, False, True)]
+            for environ, settings, disconnected in cases:
+                s = home / ".claude" / "settings.json"
+                m = home / ".claude" / "cardinal-disconnected"
+                for p in (s, m):
+                    if p.exists():
+                        p.unlink()
+                if settings:
+                    write_settings(home, "https://app.cardinalhq.io", org="o-prod", key="prod-key")
+                if disconnected:
+                    m.parent.mkdir(parents=True, exist_ok=True)
+                    m.write_text("{}\n")
+                want = disc.connection(home, environ)
+                self.assertEqual(rp.connect_info(home, environ), want if want.get("key") else {},
+                                 (environ, settings, disconnected))
+
 
 # ---------------------------------------------------------------------------
 # CDP pipe framing
