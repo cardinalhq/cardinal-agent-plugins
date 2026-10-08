@@ -27,7 +27,7 @@ class HostedBehaviorTests(unittest.TestCase):
             'profile_sha256': 'c' * 64, 'adapter_sha256': 'd' * 64,
             'behavior_contract': {'clauses': [{'kind': 'trigger', 'interpretation': 'Authored check'}]},
             'compile_receipt': {'receipt_id': 'compile-1'}}
-        artifact = {'format': 'behavior-sdk-authoring-v1', 'version': '0.1.1', 'files': {'behavior_sdk/__init__.py': '# canonical runtime source'}}
+        artifact = {'format': 'behavior-sdk-authoring-v1', 'version': '0.1.1', 'files': {'behavior_sdk/__init__.py': '# canonical runtime source\nclass TraceView:\n    pass\n'}}
         digest = hashlib.sha256(json.dumps(artifact, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
         self.sdk = {'artifact': artifact, 'sdk_runtime_sha256': digest, 'sdk_artifact_sha256': digest,
                     'profile_sha256': 'c' * 64, 'host_runtime_sha256': 'f' * 64}
@@ -142,6 +142,10 @@ class HostedBehaviorTests(unittest.TestCase):
         result = self.behavior.sdk()
         self.assertEqual(json.loads(Path(result['sdk_artifact_file']).read_text()), self.sdk['artifact'])
         self.assertEqual(result['artifact'], self.sdk['artifact'])
+        source_path = Path(result['sdk_files']['behavior_sdk/__init__.py'])
+        self.assertEqual(source_path.read_bytes(), self.sdk['artifact']['files']['behavior_sdk/__init__.py'].encode())
+        self.assertEqual(len(source_path.read_text().splitlines()), 3)
+        self.assertEqual(source_path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.calls[-1][1], '/api/v1/behavior-programs/sdk')
         schemas = {tool['name']: tool['inputSchema'] for tool in tools_list(self.behavior)['tools']}
         self.assertEqual(schemas['execute_behavior']['required'], ['accepted_behavior', 'population', 'start', 'end'])
@@ -266,3 +270,21 @@ class HostedBehaviorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source/version identity mismatch'):
             self.behavior.compile('Check', 'service', self.source, {})
         self.assertFalse(self.behavior.program_path(self.version).exists())
+
+    def test_sdk_source_materialization_rejects_tampering_and_escaping_paths(self):
+        self.responses.append(self.sdk)
+        result = self.behavior.sdk()
+        Path(result['sdk_files']['behavior_sdk/__init__.py']).write_text('tampered')
+        self.responses.append(self.sdk)
+        with self.assertRaisesRegex(ValueError, 'cached SDK source integrity'):
+            self.behavior.sdk()
+        escaping = copy.deepcopy(self.sdk)
+        escaping['artifact']['files']['../escape.py'] = 'not allowed'
+        digest = hashlib.sha256(json.dumps(escaping['artifact'], sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        escaping.update(sdk_runtime_sha256=digest, sdk_artifact_sha256=digest)
+        escaping['sdk_source'].update(sdk_runtime_sha256=digest,
+            artifact_url=f'https://github.com/cardinalhq/behavior-sdk/releases/download/v0.1.1/behavior-sdk-{digest}.json')
+        self.responses.append(escaping)
+        with self.assertRaisesRegex(ValueError, 'invalid source path'):
+            self.behavior.sdk()
+        self.assertFalse((Path(self.temp.name) / 'sdk/escape.py').exists())

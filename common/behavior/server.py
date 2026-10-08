@@ -7,7 +7,7 @@ from collections import Counter
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import sys
 import time
@@ -51,13 +51,17 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def private_json(path: Path, value: dict) -> None:
+def private_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_suffix('.tmp')
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as stream:
-        json.dump(value, stream, ensure_ascii=False)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        stream.write(value)
     temporary.replace(path)
+
+
+def private_json(path: Path, value: dict) -> None:
+    private_text(path, json.dumps(value, ensure_ascii=False))
 
 
 def bounded_text(value, limit=1400):
@@ -269,8 +273,27 @@ class Behavior:
                 raise ValueError('cached SDK authoring artifact integrity check failed')
         else:
             private_json(path, artifact)
+        directory = self.output / 'sdk' / digest
+        if directory.is_symlink():
+            raise ValueError('SDK source cache must not be a symlink')
+        files = {}
+        for name, content in artifact['files'].items():
+            relative = PurePosixPath(name)
+            if (relative.is_absolute() or '..' in relative.parts or '\\' in name
+                    or relative.as_posix() != name or not relative.parts):
+                raise ValueError('SDK artifact contains an invalid source path')
+            source_path = directory / name
+            if source_path.is_symlink() or not source_path.resolve().is_relative_to(directory.resolve()):
+                raise ValueError('SDK source cache contains a symlink or escaping path')
+            if source_path.exists():
+                if source_path.read_bytes() != content.encode('utf-8'):
+                    raise ValueError('cached SDK source integrity check failed')
+            else:
+                private_text(source_path, content)
+            files[name] = str(source_path)
         self.sdk_observation = result
-        return dict(result, sdk_artifact_file=str(path))
+        # Put paginatable source paths first, before the potentially large MCP body.
+        return dict(sdk_artifact_file=str(path), sdk_directory=str(directory), sdk_files=files, **result)
 
     def authoring_identities(self):
         if self.sdk_observation is None:

@@ -19,7 +19,10 @@ The normal Claude workflow is:
    The SDK version, source commit, public artifact URL, and SHA-256 appear in the
    response and are retained with compilation and acceptance. The
    plugin verifies its SHA-256 content address and caches the immutable artifact;
-   it contains no independently maintained SDK declarations.
+   it contains no independently maintained SDK declarations. The response starts
+   with `sdk_directory` and `sdk_files`: exact verified public files materialized
+   under the digest cache, so Claude can page through real Python source using
+   its normal Read tool even when the complete MCP response is large.
 2. Author a candidate from the user's contract, then call `compile_behavior`
    with `description`, `service_name`, `udf_source`, and `compile_plan`. The plugin
    pins the observed SDK, profile, and host runtime identities. The deployed
