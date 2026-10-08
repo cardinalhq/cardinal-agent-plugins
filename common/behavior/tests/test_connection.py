@@ -33,6 +33,22 @@ class ConnectionTests(unittest.TestCase):
         config = default_config({'CARDINAL_BEHAVIOR_API_URL': 'https://query.example',
                                  'CARDINAL_MCP_URL': 'not-used'})
         self.assertEqual(config['base_url'], 'https://query.example')
+        self.assertEqual(config['api_key_env'], 'CARDINAL_QUERY_API_KEY')
+
+    def test_direct_override_requires_query_key_and_never_falls_back_to_mcp_key(self):
+        with tempfile.TemporaryDirectory() as output:
+            config = default_config({'CARDINAL_BEHAVIOR_API_URL': 'https://query.example',
+                                     'CARDINAL_BEHAVIOR_OUTPUT_DIR': output})
+            with patch.dict('os.environ', {'CARDINAL_MCP_API_KEY': 'scoped-test-key'}, clear=True), \
+                    patch('urllib.request.OpenerDirector.open') as opened:
+                with self.assertRaisesRegex(ValueError, 'CARDINAL_QUERY_API_KEY'):
+                    Behavior(config).sdk()
+                opened.assert_not_called()
+            with patch.dict('os.environ', {'CARDINAL_MCP_API_KEY': 'scoped-test-key',
+                                           'CARDINAL_QUERY_API_KEY': 'data-plane-test-key'}, clear=True), \
+                    patch('urllib.request.OpenerDirector.open', return_value=io.BytesIO(b'{}')) as opened:
+                Behavior(config).sdk()
+                self.assertEqual(opened.call_args.args[0].get_header('X-cardinalhq-api-key'), 'data-plane-test-key')
 
     def test_missing_connection_does_not_guess_a_data_plane_host(self):
         with tempfile.TemporaryDirectory() as output:

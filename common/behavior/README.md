@@ -45,7 +45,8 @@ Multiple compiled versions can be executed and inspected after a plugin restart.
 For explicit deployments, `CARDINAL_BEHAVIOR_CONFIG` or `--config` can name a JSON
 configuration; see `config.example.json` for an operator's direct Query API
 configuration. `CARDINAL_BEHAVIOR_API_URL` also remains an explicit direct URL
-override and requires a matching data-plane credential. Direct configuration can
+override and reads its matching data-plane credential from `CARDINAL_QUERY_API_KEY`.
+It never falls back to the scoped MCP key. Direct JSON configuration can
 select its credential with `api_key_env`; it must not reuse a scoped Maestro MCP
 key. `headers_file`, if used, must be private
 (mode 0600) and contain only supported API authentication headers. Authenticated

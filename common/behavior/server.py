@@ -40,6 +40,7 @@ def default_config(environ=None):
         base_url = urllib.parse.urlunsplit((connection.scheme, connection.netloc,
                     f'/api/orgs/{match.group(1)}/behavior', '', ''))
     return {'base_url': base_url, 'org': env.get('CARDINAL_ORG_ID'),
+            'api_key_env': 'CARDINAL_QUERY_API_KEY' if env.get('CARDINAL_BEHAVIOR_API_URL') else 'CARDINAL_MCP_API_KEY',
             'output_dir': env.get('CARDINAL_BEHAVIOR_OUTPUT_DIR', str(Path.home() / '.cardinal' / 'behavior-executions'))}
 
 
@@ -143,7 +144,11 @@ class Behavior:
             headers['x-chq-internal-key'] = os.environ[self.config['internal_key_env']]
             headers['x-chq-internal-org-id'] = self.config['org']
         else:
-            headers['x-cardinalhq-api-key'] = os.environ[self.config.get('api_key_env', 'CARDINAL_MCP_API_KEY')]
+            key_env = self.config.get('api_key_env', 'CARDINAL_MCP_API_KEY')
+            key = os.environ.get(key_env)
+            if not key:
+                raise ValueError(f'{key_env} must contain the configured API credential')
+            headers['x-cardinalhq-api-key'] = key
         data = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(self.config['base_url'].rstrip('/') + path,
                                          data=data, headers=headers, method=method)
