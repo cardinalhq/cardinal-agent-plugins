@@ -61,7 +61,7 @@ def private_text(path: Path, value: str) -> None:
 
 
 def private_json(path: Path, value: dict) -> None:
-    private_text(path, json.dumps(value, ensure_ascii=False))
+    private_text(path, json.dumps(value, ensure_ascii=False, indent=2))
 
 
 def bounded_text(value, limit=1400):
@@ -378,7 +378,7 @@ class Behavior:
             private_json(receipt_path, receipt)
         program.update(test_receipt=result['test_receipt'], teaching_receipt=result)
         private_json(path, program)
-        return dict(result, receipt_file=str(receipt_path))
+        return dict(receipt_file=str(receipt_path), **result)
 
     def inspect_program(self, diagnostic_version):
         self.program_path(diagnostic_version)

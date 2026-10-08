@@ -201,7 +201,10 @@ class HostedBehaviorTests(unittest.TestCase):
         result = self.teaching_test()
         self.assertEqual(self.calls[-1][1], '/api/v1/behavior-programs/test')
         self.assertEqual(result['results'][0]['jev_receipts'][0]['receipt_id'], 'semantic-1')
-        self.assertEqual(json.loads(Path(result['receipt_file']).read_text()), self.teaching['receipt'])
+        receipt_text = Path(result['receipt_file']).read_text()
+        self.assertEqual(json.loads(receipt_text), self.teaching['receipt'])
+        self.assertGreater(len(receipt_text.splitlines()), 10)
+        self.assertEqual(next(iter(result)), 'receipt_file')
         with self.assertRaisesRegex(ValueError, 'source differs'):
             self.behavior.test(self.version, ['e' * 32], 'service', 'start', 'end', udf_source='changed')
         self.responses.append(dict(self.teaching, host_runtime_sha256='0' * 64))
