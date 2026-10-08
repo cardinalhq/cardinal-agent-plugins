@@ -188,17 +188,21 @@ class EventClass(unittest.TestCase):
     event; an older Cardinal sends none, and the type lists decide."""
 
     def test_the_wire_class_wins_and_the_type_lists_are_only_a_fallback(self):
-        self.assertEqual(ie.EVENT_CLASSES, ("control", "semantic"))
+        self.assertEqual(ie.EVENT_CLASSES, ("control", "semantic", "owner_input"))
         for type_ in ("cue.added", "question.added", "challenge.added", "acknowledged"):
             self.assertEqual(ie.event_class(event(1, type_)), "control", type_)
         for type_ in ie.SEMANTIC_TYPES:
             self.assertEqual(ie.event_class(event(1, type_)), "semantic", type_)
-        for type_ in ("owner_input.recorded", "finding.added", None, 7):
+        # Owner input is a class this client knows (plugin 0.45.0), never delivered.
+        self.assertEqual(ie.event_class(event(1, "owner_input.recorded")), "owner_input")
+        for type_ in ("finding.added", None, 7):
             self.assertIsNone(ie.event_class(event(1, type_)), type_)
         self.assertEqual(ie.event_class(classed(event(1, "cue.added"), "control")), "control")
         self.assertEqual(ie.event_class(classed(event(1, "cue.added"), "semantic")), "semantic")
         # A class this client does not know (a newer Cardinal's), or a malformed one: unknown, whatever the type.
-        for cls in ("owner_input", "Control", "", 1, True, ["control"], {"c": 1}):
+        self.assertEqual(ie.event_class(classed(event(1, "cue.added"), "owner_input")), "owner_input")
+        self.assertEqual(ie.deliverable([classed(event(1, "cue.added"), "owner_input")], SID, INV), [])
+        for cls in ("future_class", "Control", "", 1, True, ["control"], {"c": 1}):
             self.assertIsNone(ie.event_class(classed(event(1, "cue.added"), cls)), cls)
         # null is no class: the type decides (as from an older Cardinal).
         self.assertEqual(ie.event_class(classed(event(1, "cue.added"), None)), "control")
@@ -515,7 +519,7 @@ class Check(Base):
         ie.read_events(self.fake.conn, INV, after=0, client="t")
         self.assertNotIn("class", self.fake.requests[-1][1])
         with self.assertRaises(ie.ist.FetchError):
-            ie.read_events(self.fake.conn, INV, after=0, client="t", class_="owner_input")
+            ie.read_events(self.fake.conn, INV, after=0, client="t", class_="bogus")
 
     def test_paginates_to_the_head(self):
         self.fake.events = [event(s, session=SID, author=True) for s in range(1, 46)] + [event(46)]

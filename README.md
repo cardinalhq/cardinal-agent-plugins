@@ -55,9 +55,17 @@ the agent's claim, never a fact or owner authority). A Cardinal that
 advertises `capabilities: {projection: {enabled: true}}` keeps the live
 storyboard up to date from those checkpoints itself, and the session is told no
 storyboard step is needed; any other keeps the skill-driven flow below. Events
-are delivered and listed by the `class` Cardinal stamps on each one (`control`
-or `semantic`; an older Cardinal without it: by type); an event of a class this
-plugin does not know is never delivered to the model.
+are delivered and listed by the `class` Cardinal stamps on each one (`control`,
+`semantic` or `owner_input`; an older Cardinal without it: by type); an event
+of a class this plugin does not know, and owner input, is never delivered to
+the model. Only when Cardinal advertises `capabilities: {owner_input:
+{enabled: true}}` does the author session record the owner's prompts as owner
+input (`hooks/owner-input.py`: credentials scrubbed, up to 32 KiB, readable only
+by the author and grantees with `owner_input:read`; shown to the user before
+capture starts; `CARDINAL_OWNER_INPUT=0` in `~/.claude/settings.json` `env`
+turns it off on this machine). `cardinal-storyboard investigation grant`
+gives someone else scoped, revocable access to the Investigation through
+`CARDINAL_INVESTIGATION_TOKEN`, never this machine's key.
 Claude also ships two model-invocable skills for Cardinal's Investigation
 Storyboards: [`/cardinal:storyboard`](adapters/claude/skills/storyboard/README.md)
 improves, frames and publishes that live storyboard (evidence-bound, scene by

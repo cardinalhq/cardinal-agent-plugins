@@ -80,6 +80,8 @@ jobs:
           import cardinal_core.investigation_events
           import cardinal_core.investigation_bootstrap
           import cardinal_core.investigation_poller
+          import cardinal_core.investigation_grants
+          import cardinal_core.owner_input
           print('ok: all core modules import under 3.9')
           "
 

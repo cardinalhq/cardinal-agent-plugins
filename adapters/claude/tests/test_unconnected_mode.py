@@ -43,6 +43,7 @@ SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
 GATED_HOOKS = (
     "initiative-convention.py", "plan-state.py", "git-state.py", "limits-gate.py", "decision-prompt.py",
     "turn-usage.py", "plan-usage.py", "subagent-usage.py", "storyboard-discovery.py", "storyboard-edit-lookup.py",
+    "owner-input.py",
 )
 # Run in both modes: storyboards work before connect. storyboard-context.py
 # only rewrites a storyboard tool call's input locally (no network).
