@@ -301,6 +301,7 @@ def _ensure(home, sid, conn, client, wanted, started_at, opener, timeout, force,
         for done in (pending_path(home, sid), refresh_path(home, sid)):   # this answer is current
             with contextlib.suppress(OSError):
                 done.unlink()
+        _owner_input_gate(home, sid, b)
         return {"status": "ok", "binding": b, "error": None}
 
 
@@ -322,6 +323,7 @@ def _bind_join(home: Path, sid: str, inv: str, conn: dict, state: dict, now: flo
 # get-investigation: {"capabilities": {"<name>": {"enabled": bool, ...}}}.
 # The plugin does nothing for a capability that is not advertised as enabled.
 PROJECTION = "projection"   # the server keeps the live storyboard up to date from the checkpoints
+OWNER_INPUT = "owner_input"  # the server records the owner's prompts (owner_input.py)
 CAPABILITY_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")   # fullmatch
 MAX_CAPABILITIES = 32
 
@@ -382,9 +384,20 @@ def refresh_capabilities(home: Path, sid: str, conn: dict, client: str, *, opene
         if cur is not None and cur["investigation_id"] == inv:
             cur["capabilities"] = caps
             ie.write_binding(home, sid, cur)
+        _owner_input_gate(home, sid, cur)
     with contextlib.suppress(OSError):
         refresh_path(home, sid).unlink()
     return "off" if refused else "ok"
+
+
+def _owner_input_gate(home: Path, sid: str, binding: Optional[dict]) -> None:
+    """The capabilities just written no longer let this session record
+    owner input (owner_input off or absent, or not the author): its owner
+    input outbox goes, so nothing queued is sent later."""
+    with contextlib.suppress(Exception):
+        from . import owner_input
+        if not owner_input.enabled(binding):
+            owner_input.drop_outbox(home, sid)
 
 
 def capability_enabled(caps: Any, name: str) -> bool:

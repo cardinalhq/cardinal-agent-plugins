@@ -58,6 +58,13 @@ Contract:
     why, not facts, never reasoning or routine tool use. A joined
     non-author session cannot checkpoint and is not told to; nothing else
     is said when unconnected or unbound.
+  - Owner input transparency (OWNER_INPUT_LINE): only when this session's
+    prompts are recorded (owner-input.py): it authors its Investigation, the
+    server advertised capabilities.owner_input.enabled: true, and the kill
+    switch is not set (CARDINAL_OWNER_INPUT=0; _owner_input.py). One
+    informational sentence naming the investigation, for the user, not an
+    instruction to Claude. Never said for a joined investigation, an older
+    Cardinal, or the capability absent or off.
   - Fail open: never blocks or delays session start, never prints an error.
 """
 
@@ -208,14 +215,33 @@ PROJECTED_LINE = ("Cardinal keeps this storyboard ({sb}) up to date from the inv
                   "storyboard__find and storyboard__add_act.")
 
 
+# Informational, for the user's benefit; not an instruction to Claude.
+OWNER_INPUT_LINE = ("This session's prompts are recorded to Investigation {inv} as owner input (credentials scrubbed, "
+                    "up to 32 KiB); only you and grantees you authorize can read them.")
+
+
+def owner_input_line(b) -> str | None:
+    """OWNER_INPUT_LINE when owner-input.py records this session's prompts
+    (owner_input.enabled and no kill switch), else None."""
+    try:
+        import _owner_input
+        from cardinal_core import owner_input
+        if _owner_input.disabled() or not owner_input.enabled(b):
+            return None
+        return OWNER_INPUT_LINE.format(inv=b["investigation_id"])
+    except Exception:
+        return None
+
+
 def live_line(sid: str, b: dict) -> str:
     """The context for a session whose Investigation and live Storyboard exist."""
     from cardinal_core import investigation_bootstrap as boot
     f = boot.describe(b)
     inv, sb, view, iurl = f["investigation_id"], f["storyboard_id"], f["view_url"], f["investigation_url"]
+    told = owner_input_line(b)
     if not sb:
         return (f"Cardinal session id for this session: {sid}. This session is bound to Cardinal investigation {inv} "
-                "(it has no storyboard this connection can author). " + ADVISORY_LINE)
+                "(it has no storyboard this connection can author). " + ADVISORY_LINE + (" " + told if told else ""))
     where = f": {view}" if view else ""
     also = f" (investigation and control log: {iurl})" if iurl else ""
     if not f["is_author"]:
@@ -244,6 +270,8 @@ def live_line(sid: str, b: dict) -> str:
         parts.append("Once the user has clearly said what they want to find out, record it with "
                      "`cardinal-storyboard investigation question \"<their question>\"` (your statement of it, not "
                      "owner authority); do not invent one.")
+    if told:
+        parts.append(told)
     parts.append(ADVISORY_LINE)
     parts.append(CHECKPOINT_LINE.replace("{sid}", sid))
     return " ".join(parts)

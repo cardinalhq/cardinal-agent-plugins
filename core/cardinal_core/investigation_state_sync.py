@@ -141,19 +141,30 @@ def _retry_after(headers: Any) -> Optional[float]:
 
 def _post(conn: dict, tool: str, payload: dict, *, client: str, opener=None, timeout: float = 30.0) -> dict:
     """POST maestro's direct tool route with the MCP key; the JSON body, or
-    ServerError carrying the server's status and body."""
-    if not (conn.get("origin") and conn.get("org") and conn.get("key")):
+    ServerError carrying the server's status and body.
+
+    A connection with a `token` (an Investigation access grant's token,
+    investigation_grants.token_connection) authenticates with
+    `Authorization: CardinalInvestigation <token>` instead, and never sends
+    a key."""
+    token = conn.get("token")
+    if not (conn.get("origin") and conn.get("org") and (token or conn.get("key"))):
         raise ist.FetchError("not connected to Cardinal (run /cardinal:connect)")
     if opener is None:
         from .evidence_promote import no_redirect_opener
         opener = no_redirect_opener()
     url = conn["origin"] + "/api/orgs/" + urllib.parse.quote(conn["org"], safe="") + "/storyboards/mcp-tools/" + tool
-    req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST", headers={
-        "X-CardinalHQ-API-Key": conn["key"],
+    headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "X-Cardinal-Client": client,
-    })
+    }
+    if token:
+        headers["Authorization"] = "CardinalInvestigation " + token
+    else:
+        headers["X-CardinalHQ-API-Key"] = conn["key"]
+    req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
+                                 headers=headers)
     try:
         with opener.open(req, timeout=timeout) as resp:
             raw = resp.read(MAX_RESPONSE_BYTES)
@@ -202,6 +213,11 @@ _PLAIN = {
     "not_an_act_author": "you are not an author of any act of that storyboard",
     "no_principal": "this connection's key acts for no user or key Cardinal can name; reconnect with /cardinal:connect",
     "quota_exceeded": "this workspace reached its daily limit of new investigations; try again later",
+    "token_scope_mismatch": "the access grant does not cover that (another investigation, route or event type)",
+    "owner_input_not_readable": ("only the investigation's author and grantees holding owner_input:read can read its "
+                                 "owner input"),
+    "grant_limit_reached": "this investigation already has its limit of active access grants; revoke one first",
+    "grant_not_found": "there is no such access grant for this investigation",
 }
 
 

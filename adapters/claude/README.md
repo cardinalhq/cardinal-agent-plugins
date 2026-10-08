@@ -137,6 +137,24 @@ git-state, usage
   ack` command; the cursor advances only after it was delivered. The poller
   exits with the Claude Code process. `CARDINAL_INVESTIGATION_POLLER=0`
   turns it off (events then arrive only at Stop).
+- **Owner input (connected, author sessions, only when Cardinal asks).**
+  `hooks/owner-input.py` (UserPromptSubmit) records each prompt the owner
+  types into the session's Investigation (`record-owner-input`, type
+  `owner_input.recorded`, authority `owner_input_client_attested`) only
+  when the session authors it, the server advertised
+  `capabilities.owner_input.enabled: true`, the prompt is not a task
+  notification, and `CARDINAL_OWNER_INPUT` is not `0` / `false` / `off` /
+  `no` (environment or `~/.claude/settings.json` `env`). An older Cardinal,
+  or the capability absent or off: nothing is captured, sent or queued. The
+  text is scrubbed of credentials, NUL-stripped and cut to 32 KiB, with the
+  sha256 of the original. It is posted within ~1.5 s; only a transient
+  failure (network, timeout, 5xx, 429) waits in
+  `<sid>.owner-input-outbox.json` (0600, bounded) for the next prompt or
+  Stop; a 404, 400, 401 or 403 drops it (the code alone is logged). The
+  outbox is deleted when the capability turns off. After a lost binding,
+  turns are renumbered past the server's highest. Owner input is
+  never delivered to the model, and nothing the agent can call writes it.
+  The session-start context then says once that prompts are recorded.
 - **Semantic checkpoints (connected, author sessions).** The session-start
   context asks the investigating session to checkpoint material changes in
   its understanding (a hypothesis relied on or resolved, an experiment
@@ -206,5 +224,14 @@ environment), or the connect state file `~/.claude/cardinal.json`.
   investigation's advisory event stream and state (`--help`);
   `investigation create|bind` are optional, for joining or starting another
   investigation explicitly.
+- `cardinal-storyboard investigation grant [--scope read,advise]
+  [--owner-input] [--ttl 4h] [--label NAME]`: give someone else (another
+  agent acting as a supervisor) scoped access to this session's
+  Investigation; prints `export CARDINAL_INVESTIGATION_TOKEN=…
+  CARDINAL_INVESTIGATION_ORIGIN=…` once. `investigation grants` lists them
+  (never tokens), `investigation revoke <grant_id>` revokes one. With
+  `CARDINAL_INVESTIGATION_TOKEN` set, `investigation events|post|show` act
+  as that grantee (`Authorization: CardinalInvestigation`, never a key) and
+  the author-only commands refuse to run.
 - `cardinal-decision`: decision capture.
 - `cardinal-install-site`: see the install-site skill.

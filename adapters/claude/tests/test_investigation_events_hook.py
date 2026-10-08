@@ -1103,27 +1103,31 @@ class Cli(Base):
         self.fake.add("cue.added", {"text": "new cue"}, cls="control")
         self.fake.add("hypothesis.proposed", {"semantic_id": "hyp_a", "statement": "because"}, author=True,
                       cls="semantic")
-        self.fake.add("owner_input.recorded", {"text": "SECRET OWNER TEXT"}, author=True, cls="owner_input")
+        self.fake.add("owner_input.recorded", {"text": "OWNER TEXT", "turn": 1}, author=True, cls="owner_input")
         self.fake.add("question.added", {"text": "classed oddly"}, cls="semantic")
+        self.fake.add("future.recorded", {"text": "SECRET FUTURE TEXT"}, author=True, cls="future_class")
         res = self.cli("events", INV)
         self.assertEqual(res.returncode, 0, res.stderr)
         lines = res.stdout.splitlines()
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(len(lines), 6)
         self.assertTrue(lines[0].endswith(': "old cue"'), lines[0])
         self.assertTrue(lines[1].endswith(': "new cue"'), lines[1])
         self.assertIn("hypothesis.proposed hyp_a from user:u_sup (author)", lines[2])
         self.assertIn('"because"', lines[2])
-        self.assertTrue(lines[3].startswith("#4 2026-10-06T12:00:00.000Z owner_input.recorded from user:u_sup"),
-                        lines[3])
-        self.assertTrue(lines[3].endswith(": [unknown class]"), lines[3])
-        self.assertNotIn("SECRET", res.stdout)
+        # Owner input (plugin 0.45.0): a known class, labelled client-attested, for whoever may read it.
+        self.assertTrue(lines[3].startswith("#4 2026-10-06T12:00:00.000Z owner_input.recorded (owner input, "
+                                            "client-attested; turn 1"), lines[3])
+        self.assertTrue(lines[3].endswith(': "OWNER TEXT"'), lines[3])
         self.assertNotIn("classed oddly", lines[4])   # rendered as its class says (semantic), not as a text event
+        self.assertTrue(lines[5].startswith("#6 2026-10-06T12:00:00.000Z future.recorded from user:u_sup"), lines[5])
+        self.assertTrue(lines[5].endswith(": [unknown class]"), lines[5])
+        self.assertNotIn("SECRET", res.stdout)
         res = self.cli("events", INV, "--class", "semantic")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual([b.get("class") for t, b in self.fake.requests if t == "read-investigation-events"][-1],
                          "semantic")
         self.assertEqual(len(res.stdout.splitlines()), 2)
-        self.assertEqual(self.cli("events", INV, "--class", "owner_input").returncode, 2)
+        self.assertEqual(self.cli("events", INV, "--class", "future_class").returncode, 2)
 
     def test_cli_choices_come_from_the_core_vocabularies(self):
         # On the parser itself, not argparse's message wording (it changes between Python versions).
@@ -1148,11 +1152,11 @@ class Cli(Base):
         self.assertEqual(choices("post", "type"), ("cue", "question", "challenge"))
         self.assertEqual(choices("ack", "disposition"), ie.DISPOSITIONS)
         self.assertEqual(choices("events", "event_class"), ie.EVENT_CLASSES)
-        self.assertEqual(choices("events", "event_class"), ("control", "semantic"))
+        self.assertEqual(choices("events", "event_class"), ("control", "semantic", "owner_input"))
         # And argparse refuses anything else (exit 2), whatever its wording.
         self.assertEqual(self.cli("post", INV, "--type", "nudge", "--text", "x").returncode, 2)
         self.assertEqual(self.cli("ack", INV, "1", "--disposition", "ignored").returncode, 2)
-        self.assertEqual(self.cli("events", INV, "--class", "owner_input").returncode, 2)
+        self.assertEqual(self.cli("events", INV, "--class", "bogus").returncode, 2)
 
     def test_ack_by_a_non_author_and_of_nothing_is_refused_in_words(self):
         self.fake.add("cue.added", {"text": "x"})
