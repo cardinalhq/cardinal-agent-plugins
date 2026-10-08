@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from server import Behavior, tools_list
+from server import Behavior, tools_list, SDK_IDENTITIES
 
 
 class HostedBehaviorTests(unittest.TestCase):
@@ -27,6 +27,18 @@ class HostedBehaviorTests(unittest.TestCase):
             'profile_sha256': 'c' * 64, 'adapter_sha256': 'd' * 64,
             'behavior_contract': {'clauses': [{'kind': 'trigger', 'interpretation': 'Authored check'}]},
             'compile_receipt': {'receipt_id': 'compile-1'}}
+        artifact = {'format': 'behavior-sdk-authoring-v1', 'files': {'behavior_sdk/__init__.py': '# canonical runtime source'}}
+        digest = hashlib.sha256(json.dumps(artifact, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        self.sdk = {'artifact': artifact, 'sdk_runtime_sha256': digest, 'sdk_artifact_sha256': digest,
+                    'profile_sha256': 'c' * 64, 'host_runtime_sha256': 'f' * 64}
+        self.program.update({key: self.sdk[key] for key in SDK_IDENTITIES})
+        self.behavior.sdk_observation = self.sdk
+        self.teaching = {'diagnostic_version': self.version, 'test_receipt': '1' * 64,
+                         **{key: self.sdk[key] for key in SDK_IDENTITIES},
+                         'results': [{'trace_id': 'e' * 32, 'verdict': 'NON_MATCH', 'expected_verdict': 'NON_MATCH',
+                                      'records': [], 'witness_refs': [], 'jev_receipts': []}]}
+        self.acceptance = {'diagnostic_version': self.version, 'acceptance_id': 'accepted-1',
+                           'test_receipt': '1' * 64, **{key: self.sdk[key] for key in SDK_IDENTITIES}}
         self.responses = []
         self.calls = []
         def request(method, path, payload=None):
@@ -39,6 +51,16 @@ class HostedBehaviorTests(unittest.TestCase):
         return self.behavior.compile('Authored check', 'service', self.source, {},
             [{'trace': {'trace_id': 'teaching-1'}, 'expected_verdict': 'NON_MATCH'}])
 
+    def teaching_test(self, expected=True):
+        receipt = {key: value for key, value in self.teaching.items() if key not in ('receipt', 'test_receipt')}
+        self.teaching['receipt'] = receipt
+        self.teaching['test_receipt'] = hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        self.acceptance['test_receipt'] = self.teaching['test_receipt']
+        self.responses.append(self.teaching)
+        return self.behavior.test(self.version, ['e' * 32], 'service',
+                                 '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z',
+                                 {'e' * 32: 'NON_MATCH'} if expected else None)
+
     def test_compile_inspect_accept_execute_poll_inspect_render(self):
         self.compile()
         self.assertEqual(self.calls[-1][2]['udf_source'], self.source)
@@ -47,14 +69,16 @@ class HostedBehaviorTests(unittest.TestCase):
             self.behavior.start(self.version, 'service', 'start', 'end')
         self.responses.append(self.program)
         self.assertEqual(self.behavior.inspect_program(self.version)['source'], self.source)
-        self.responses.append({'diagnostic_version': self.version, 'acceptance_id': 'accepted-1'})
+        self.teaching_test()
+        self.responses.append(self.acceptance)
         self.behavior.accept(self.version)
         self.responses.append({'execution_id': self.execution, 'status': 'PENDING'})
         self.behavior.start(self.version, 'service', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z')
         self.assertNotIn('org', self.calls[-1][2])
         raw = {'trace_id': 'e' * 32, 'verdict': 'NON_MATCH', 'execution_identity': {
             'diagnostic_version': self.version, 'udf_sha256': self.program['source_sha256'],
-            'profile_sha256': 'c' * 64, 'adapter_sha256': 'd' * 64},
+            'profile_sha256': 'c' * 64, 'adapter_sha256': 'd' * 64,
+            **{key: self.sdk[key] for key in SDK_IDENTITIES}},
             'semantic_occurrences': [{'id': 'witness-1', 'output': '<script>unsafe()</script>'}],
             'native_trace': {'receipt': {'materialization': 'verified-native-input'}},
             'jev_receipts': [{'decision': 'NO', 'reason': 'No requested behavior.',
@@ -98,7 +122,8 @@ class HostedBehaviorTests(unittest.TestCase):
         self.responses.append(dict(self.program, source='changed'))
         with self.assertRaisesRegex(ValueError, 'integrity'):
             self.behavior.inspect_program(self.version)
-        self.responses.append({'diagnostic_version': 'f' * 64, 'acceptance_id': 'wrong'})
+        self.teaching_test()
+        self.responses.append(dict(self.acceptance, diagnostic_version='f' * 64, acceptance_id='wrong'))
         with self.assertRaisesRegex(ValueError, 'identity'):
             self.behavior.accept(self.version)
         self.assertNotIn('acceptance_id', json.loads(self.behavior.program_path(self.version).read_text()))
@@ -106,8 +131,10 @@ class HostedBehaviorTests(unittest.TestCase):
             self.behavior.accept('f' * 64)
 
     def test_sdk_tool_and_no_frozen_default(self):
-        self.responses.append({'sdk_documentation': 'evaluate(trace, recorder, jev)'})
-        self.assertIn('sdk_documentation', self.behavior.sdk())
+        self.responses.append(self.sdk)
+        result = self.behavior.sdk()
+        self.assertEqual(json.loads(Path(result['sdk_artifact_file']).read_text()), self.sdk['artifact'])
+        self.assertEqual(result['artifact'], self.sdk['artifact'])
         self.assertEqual(self.calls[-1][1], '/api/v1/behavior-programs/sdk')
         schemas = {tool['name']: tool['inputSchema'] for tool in tools_list(self.behavior)['tools']}
         self.assertEqual(schemas['execute_behavior']['required'], ['accepted_behavior', 'population', 'start', 'end'])
@@ -118,6 +145,7 @@ class HostedBehaviorTests(unittest.TestCase):
     def test_authoring_transport_allows_bounded_server_teaching_checks(self):
         for method, path, expected in [
             ('POST', '/api/v1/behavior-programs/compile', 310),
+            ('POST', '/api/v1/behavior-programs/test', 310),
             ('POST', '/api/v1/behavior-programs/' + self.version + '/accept', 310),
             ('GET', '/api/v1/behavior-programs/' + self.version, 60),
             ('POST', '/api/v1/behavior-executions', 60),
@@ -126,3 +154,90 @@ class HostedBehaviorTests(unittest.TestCase):
                     patch('urllib.request.OpenerDirector.open', return_value=io.BytesIO(b'{}')) as opened:
                 Behavior.request(self.behavior, method, path)
                 self.assertEqual(opened.call_args.kwargs['timeout'], expected)
+
+    def test_sdk_tampering_and_compiler_identity_skew_fail_closed(self):
+        self.responses.append(dict(self.sdk, artifact={'format': 'behavior-sdk-authoring-v1', 'files': {'x.py': 'different'}}))
+        with self.assertRaisesRegex(ValueError, 'integrity'):
+            self.behavior.sdk()
+        self.responses.append(self.sdk)
+        cached = Path(self.behavior.sdk()['sdk_artifact_file'])
+        cached.write_text('{}')
+        self.responses.append(self.sdk)
+        with self.assertRaisesRegex(ValueError, 'cached SDK'):
+            self.behavior.sdk()
+        self.responses.append(dict(self.program, sdk_runtime_sha256='0' * 64))
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            self.behavior.compile('Check', 'service', self.source, {})
+        self.assertFalse(self.behavior.program_path(self.version).exists())
+
+    def test_compilation_requires_observed_sdk_and_sends_identities(self):
+        self.behavior.sdk_observation = None
+        with self.assertRaisesRegex(ValueError, 'get_behavior_sdk'):
+            self.behavior.compile('Check', 'service', self.source, {})
+        self.responses.extend([self.sdk, self.program])
+        self.behavior.sdk()
+        self.behavior.compile('Check', 'service', self.source, {})
+        payload = self.calls[-1][2]
+        self.assertEqual(payload['teaching_examples'], [])
+        self.assertEqual({key: payload[key] for key in SDK_IDENTITIES}, self.behavior.identities(self.sdk))
+
+    def test_teaching_uses_real_trace_endpoint_and_preserves_evidence(self):
+        self.compile()
+        with self.assertRaisesRegex(ValueError, 'test_behavior'):
+            self.behavior.accept(self.version)
+        self.teaching['results'][0].update(records=[{'op': 'explanation', 'reason': 'teaching'}],
+                                          jev_receipts=[{'receipt_id': 'semantic-1', 'decision': 'NO'}])
+        result = self.teaching_test()
+        self.assertEqual(self.calls[-1][1], '/api/v1/behavior-programs/test')
+        self.assertEqual(result['results'][0]['jev_receipts'][0]['receipt_id'], 'semantic-1')
+        self.assertEqual(json.loads(Path(result['receipt_file']).read_text()), self.teaching['receipt'])
+        with self.assertRaisesRegex(ValueError, 'source differs'):
+            self.behavior.test(self.version, ['e' * 32], 'service', 'start', 'end', udf_source='changed')
+        self.responses.append(dict(self.teaching, host_runtime_sha256='0' * 64))
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            self.behavior.test(self.version, ['e' * 32], 'service', 'start', 'end')
+
+    def test_acceptance_binds_teaching_receipt_and_expected_verdicts(self):
+        self.compile()
+        self.teaching['results'][0].pop('expected_verdict')
+        self.teaching_test(expected=False)
+        with self.assertRaisesRegex(ValueError, 'expected verdict'):
+            self.behavior.accept(self.version)
+        self.teaching['results'][0]['expected_verdict'] = 'NON_MATCH'
+        self.teaching_test()
+        self.responses.append(dict(self.acceptance, test_receipt='0' * 64))
+        with self.assertRaisesRegex(ValueError, 'teaching receipt identity'):
+            self.behavior.accept(self.version)
+        self.responses.append(self.acceptance)
+        self.behavior.accept(self.version)
+        self.assertEqual(self.calls[-1][2]['test_receipt'], self.teaching['test_receipt'])
+        self.assertEqual(self.calls[-1][2]['sdk_runtime_sha256'], self.sdk['sdk_runtime_sha256'])
+        persisted = json.loads(self.behavior.program_path(self.version).read_text())
+        self.assertEqual(persisted['acceptance_receipt'], self.acceptance)
+        self.assertEqual(persisted['teaching_receipt'], self.teaching)
+
+    def test_teaching_receipt_hash_and_immutable_cache_are_verified(self):
+        self.compile()
+        result = self.teaching_test()
+        changed = copy.deepcopy(self.teaching)
+        changed['receipt']['results'][0]['records'] = [{'op': 'fabricated'}]
+        self.responses.append(changed)
+        with self.assertRaisesRegex(ValueError, 'integrity'):
+            self.behavior.test(self.version, ['e' * 32], 'service', 'start', 'end', {'e' * 32: 'NON_MATCH'})
+        path = Path(result['receipt_file'])
+        path.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'cached teaching'):
+            self.teaching_test()
+        self.assertEqual(path.read_text(), '{}')
+
+    def test_acceptance_rejects_teaching_miss_or_execution_failure(self):
+        self.compile()
+        self.teaching['results'][0]['verdict'] = 'MATCH'
+        self.teaching_test()
+        with self.assertRaisesRegex(ValueError, 'do not match'):
+            self.behavior.accept(self.version)
+        program = json.loads(self.behavior.program_path(self.version).read_text())
+        program['teaching_receipt']['results'][0].update(verdict='ERROR', expected_verdict='ERROR')
+        self.behavior.program_path(self.version).write_text(json.dumps(program))
+        with self.assertRaisesRegex(ValueError, 'do not match'):
+            self.behavior.accept(self.version)
