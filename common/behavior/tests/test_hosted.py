@@ -123,6 +123,6 @@ class HostedBehaviorTests(unittest.TestCase):
             ('POST', '/api/v1/behavior-executions', 60),
         ]:
             with self.subTest(path=path), patch.dict('os.environ', {'CARDINAL_MCP_API_KEY': 'test-key'}), \
-                    patch('urllib.request.urlopen', return_value=io.BytesIO(b'{}')) as opened:
+                    patch('urllib.request.OpenerDirector.open', return_value=io.BytesIO(b'{}')) as opened:
                 Behavior.request(self.behavior, method, path)
                 self.assertEqual(opened.call_args.kwargs['timeout'], expected)
