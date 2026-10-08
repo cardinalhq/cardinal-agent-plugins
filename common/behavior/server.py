@@ -288,8 +288,8 @@ class Behavior:
             raise ValueError('provide 1 to 8 distinct real trace IDs (32 lowercase hex characters)')
         expected_verdicts = {} if expected_verdicts is None else expected_verdicts
         if (not isinstance(expected_verdicts, dict) or set(expected_verdicts) - set(trace_ids)
-                or any(v not in VERDICTS for v in expected_verdicts.values())):
-            raise ValueError('expected_verdicts must map selected trace IDs to supported verdicts')
+                or any(v not in ('MATCH', 'NON_MATCH', 'UNKNOWN') for v in expected_verdicts.values())):
+            raise ValueError('expected_verdicts must map selected trace IDs to MATCH, NON_MATCH, or UNKNOWN')
         result = self.request('POST', '/api/v1/behavior-programs/test', {
             'diagnostic_version': diagnostic_version, 'trace_ids': trace_ids,
             'service_name': service_name, 'start': start, 'end': end,
@@ -549,7 +549,7 @@ def tools_list(behavior: Behavior):
               'service_name': population, 'start': {'type': 'string', 'format': 'date-time'},
               'end': {'type': 'string', 'format': 'date-time'},
               'udf_source': {'type': 'string', 'description': 'Optional source must exactly match the compiled version.'},
-              'expected_verdicts': {'type': 'object', 'additionalProperties': {'type': 'string', 'enum': list(VERDICTS)}}},
+              'expected_verdicts': {'type': 'object', 'additionalProperties': {'type': 'string', 'enum': ['MATCH', 'NON_MATCH', 'UNKNOWN']}}},
              ['diagnostic_version', 'trace_ids', 'service_name', 'start', 'end']),
         tool('inspect_behavior', 'Read an immutable compiled Behavior Contract, Python source and compile receipt before acceptance.',
              {'diagnostic_version': version}, ['diagnostic_version']),

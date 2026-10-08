@@ -25,7 +25,7 @@ The normal Claude workflow is:
 3. Call `test_behavior` with the compiled `diagnostic_version`, real `trace_ids`,
    their `service_name`, and an RFC3339 `start`/`end` window of at most one hour.
    Supply `expected_verdicts`, a map from every teaching trace ID to its expected
-   MATCH, NON_MATCH, UNKNOWN, or ERROR verdict. The deployed API reads those
+   MATCH, NON_MATCH, or UNKNOWN verdict. Execution failures return ERROR. The deployed API reads those
    traces through the production catalog and runs the candidate with the same
    production SDK, sandbox, and authorized JEV backend used for population runs.
    Results include actual verdicts, witnesses, Recorder output, and JEV receipts.
