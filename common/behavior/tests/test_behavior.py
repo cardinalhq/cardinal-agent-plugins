@@ -14,7 +14,7 @@ class BehaviorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.behavior = Behavior({'output_dir': self.temp.name, 'base_url': 'https://cardinal.example',
+        self.behavior = Behavior({'diagnostic_version': VERSION, 'output_dir': self.temp.name, 'base_url': 'https://cardinal.example',
                                   'org': 'org', 'start': '2026-10-01T05:00:00Z', 'end': '2026-10-02T00:45:00Z'})
         self.calls = []
         self.responses = [{'execution_id': ID, 'status': 'PENDING'}]
@@ -197,6 +197,16 @@ class BehaviorTests(unittest.TestCase):
         result = self.result()
         result['jev_receipts'][0]['decision_evidence_refs'] = ['unrelated']
         self.assertEqual(compact(result)['reason'], 'Claim before submission')
+
+    def test_error_reason_prioritizes_failure_over_earlier_success(self):
+        result = self.result(verdict='ERROR')
+        result['error'] = 'JudgeExecutionError: backend timed out'
+        result['jev_receipts'].append({'decision': 'ERROR', 'reason': 'judge response unavailable: TimeoutError'})
+        self.assertEqual(compact(result)['reason'], result['error'])
+        result.pop('error')
+        self.assertEqual(compact(result)['reason'], 'judge response unavailable: TimeoutError')
+        result['jev_receipts'].pop()
+        self.assertEqual(compact(result)['reason'], 'Trace evaluation failed.')
 
     def test_receipt_inspection_keeps_evidence_private_and_does_not_advance_cursor(self):
         raw = self.result(verdict='ERROR')

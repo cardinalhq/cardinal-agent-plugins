@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 from storyboard import render_storyboard
 
 ROOT = Path(__file__).resolve().parent
@@ -48,7 +49,11 @@ def compact(raw: dict) -> dict:
     # Preserve the model's compact explanation of actual evidence, without its packet.
     judged = next((r.get('reason') for r in raw.get('jev_receipts', [])
                    if r.get('reason') and (raw['verdict'] != 'MATCH' or r.get('decision') == 'YES' and set(r.get('decision_evidence_refs', [])) & set(raw.get('witness_refs', [])))), None)
-    if judged:
+    if raw['verdict'] == 'ERROR':
+        # An earlier successful decision does not explain a later runtime failure.
+        reason = raw.get('error') or next((r.get('reason') for r in raw.get('jev_receipts', [])
+                    if r.get('decision') == 'ERROR' and r.get('reason')), None) or raw.get('reason') or 'Trace evaluation failed.'
+    elif judged:
         reason = f'{reason} {judged}' if reason else judged
     if not reason and gaps:
         reason = '; '.join(str(g.get('reason', '')) for g in gaps)
@@ -66,7 +71,13 @@ def compact(raw: dict) -> dict:
 class Behavior:
     def __init__(self, config: dict):
         self.config = config
-        self.version = config.get('diagnostic_version', VERSION)
+        self.output = Path(config['output_dir']).expanduser().resolve()
+        self.output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.legacy = bool(config.get('diagnostic_version') or config.get('artifacts'))
+        self.version = config.get('diagnostic_version', VERSION) if self.legacy else None
+        if not self.legacy:
+            self.population = self.description = None
+            return
         self.population = config.get('population', POPULATION)
         self.description = config.get('description', DESCRIPTION)
         if not isinstance(self.version, str) or not re.fullmatch('[a-f0-9]{64}', self.version):
@@ -77,8 +88,6 @@ class Behavior:
             raise ValueError('population must be a nonempty service name')
         if not isinstance(self.description, str) or not self.description.strip():
             raise ValueError('description must be nonempty')
-        self.output = Path(config['output_dir']).expanduser().resolve()
-        self.output.mkdir(parents=True, exist_ok=True, mode=0o700)
         artifacts = Path(config.get('artifacts', ROOT / 'artifacts')).expanduser()
         self.definition = json.loads((artifacts / 'versions' / f'{self.version}.json').read_text())
         payload = {k: v for k, v in self.definition.items() if k != 'version'}
@@ -95,6 +104,8 @@ class Behavior:
             raise ValueError('accepted contract preview integrity check failed')
 
     def request(self, method: str, path: str, payload=None) -> dict:
+        if not self.config.get('base_url'):
+            raise ValueError('Set CARDINAL_BEHAVIOR_API_URL to the deployed Cardinal Query API URL')
         headers = {'Content-Type': 'application/json'}
         if self.config.get('headers_file'):
             headers_path = Path(self.config['headers_file']).expanduser()
@@ -128,7 +139,7 @@ class Behavior:
 
     def read(self, execution_id):
         state = json.loads(self.state_path(execution_id).read_text())
-        if state['execution_id'] != execution_id or state['diagnostic_version'] != self.version:
+        if state['execution_id'] != execution_id or (self.legacy and state['diagnostic_version'] != self.version):
             raise ValueError('receipt identity mismatch')
         return state
 
@@ -142,25 +153,114 @@ class Behavior:
             selection['compile_receipt_ref'] = str(self.config['compile_receipt_ref'])
         return selection
 
-    def start(self, accepted_behavior, population):
-        if accepted_behavior != self.version or population != self.population:
+    def program_path(self, version):
+        if not isinstance(version, str) or not re.fullmatch('[a-f0-9]{64}', version):
+            raise ValueError('diagnostic_version must be a SHA-256 content address')
+        return self.output / 'programs' / f'{version}.json'
+
+    def retain_program(self, result, expected_version=None):
+        version = result['diagnostic_version']
+        path = self.program_path(version)
+        if expected_version is not None and version != expected_version:
+            raise ValueError('API returned a different DiagnosticVersion')
+        for field in ('profile_sha256', 'source_sha256', 'adapter_sha256'):
+            if not re.fullmatch('[a-f0-9]{64}', result[field]):
+                raise ValueError('API returned an invalid program identity')
+        if hashlib.sha256(result['source'].encode()).hexdigest() != result['source_sha256']:
+            raise ValueError('compiled source integrity check failed')
+        if not isinstance(result['behavior_contract'].get('clauses'), list):
+            raise ValueError('API returned an invalid Behavior Contract')
+        if path.exists():
+            previous = json.loads(path.read_text())
+            for field in ('source_sha256', 'profile_sha256', 'adapter_sha256', 'behavior_contract'):
+                if previous[field] != result[field]:
+                    raise ValueError('immutable program identity changed')
+            if previous.get('acceptance_id'):
+                result = dict(result, acceptance_id=previous['acceptance_id'])
+        private_json(path, result)
+        return result
+
+    def sdk(self):
+        return self.request('GET', '/api/v1/behavior-programs/sdk')
+
+    def compile(self, description, service_name, udf_source, compile_plan, teaching_examples):
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError('description must be nonempty')
+        if not isinstance(service_name, str) or not service_name.strip():
+            raise ValueError('service_name must be nonempty')
+        if not isinstance(udf_source, str) or not udf_source.strip() or not isinstance(compile_plan, dict):
+            raise ValueError('udf_source and compile_plan must contain the authored candidate')
+        if not isinstance(teaching_examples, list) or not 1 <= len(teaching_examples) <= 8:
+            raise ValueError('provide 1 to 8 authored teaching examples')
+        result = self.request('POST', '/api/v1/behavior-programs/compile', {
+            'description': description, 'service_name': service_name,
+            'udf_source': udf_source, 'compile_plan': compile_plan,
+            'teaching_examples': teaching_examples})
+        if result.get('error') and not result.get('diagnostic_version'):
+            return result
+        return self.retain_program(result)
+
+    def inspect_program(self, diagnostic_version):
+        self.program_path(diagnostic_version)
+        result = self.request('GET', f'/api/v1/behavior-programs/{diagnostic_version}')
+        return self.retain_program(result, diagnostic_version)
+
+    def accept(self, diagnostic_version):
+        path = self.program_path(diagnostic_version)
+        if not path.exists():
+            raise ValueError('Inspect the Behavior Contract and source before accepting this version')
+        program = json.loads(path.read_text())
+        result = self.request('POST', f'/api/v1/behavior-programs/{diagnostic_version}/accept', {})
+        if result.get('diagnostic_version') != diagnostic_version or not result.get('acceptance_id'):
+            raise ValueError('acceptance identity mismatch')
+        program['acceptance_id'] = result['acceptance_id']
+        private_json(path, program)
+        return result
+
+    def context(self, version):
+        if self.legacy:
+            if version != self.version:
+                raise ValueError('unsupported accepted behavior')
+            return self.definition, self.preview, self.adapter_sha256
+        path = self.program_path(version)
+        if not path.exists():
+            raise ValueError('Inspect and accept this version before executing it')
+        program = json.loads(path.read_text())
+        definition = {'version': version, 'diagnostic_id': program.get('diagnostic_id', version),
+                      'profile_sha256': program['profile_sha256'], 'source_sha256': program['source_sha256']}
+        return definition, program['behavior_contract'], program['adapter_sha256']
+
+    def start(self, accepted_behavior, population, start=None, end=None):
+        self.context(accepted_behavior)
+        if self.legacy and population != self.population:
             raise ValueError('unsupported accepted behavior or population')
-        payload = {'diagnostic_version': self.version, 'org': self.config['org'],
-                   'service_name': self.population, 'start': self.config['start'], 'end': self.config['end']}
+        if not self.legacy:
+            program = json.loads(self.program_path(accepted_behavior).read_text())
+            if not program.get('acceptance_id'):
+                raise ValueError('Accept this immutable DiagnosticVersion before executing it')
+        start = start or self.config.get('start')
+        end = end or self.config.get('end')
+        if not start or not end:
+            raise ValueError('start and end are required for the execution population')
+        payload = {'diagnostic_version': accepted_behavior,
+                   'service_name': population, 'start': start, 'end': end}
+        if self.config.get('org'):
+            payload['org'] = self.config['org']
         response = self.request('POST', '/api/v1/behavior-executions', payload)
         execution_id = response['execution_id']
-        state = {'execution_id': execution_id, 'diagnostic_version': self.version,
+        state = {'execution_id': execution_id, 'diagnostic_version': accepted_behavior,
                  'population_specification': payload, 'status': response['status'],
                  'cursor': 0, 'results': [], 'counts': {}, 'receipt': None,
                  'submission': {'method': 'POST', 'url': self.config['base_url'].rstrip('/') + '/api/v1/behavior-executions',
                                 'submitted_at': time.time(), 'response': response}}
         private_json(self.state_path(execution_id), state)
         return {'execution_id': execution_id, 'execution_status': state['status'],
-                'diagnostic_version': self.version, 'population': self.population,
+                'diagnostic_version': accepted_behavior, 'population': population,
                 'submission': {'method': 'POST', 'endpoint': state['submission']['url'], 'accepted': True}}
 
     def poll(self, execution_id, wait_seconds=20):
         state = self.read(execution_id)
+        definition, _, adapter_sha256 = self.context(state['diagnostic_version'])
         deadline = time.monotonic() + max(0, min(30, float(wait_seconds)))
         fresh = []
         while True:
@@ -176,9 +276,9 @@ class Behavior:
                 if item['verdict'] not in VERDICTS:
                     raise ValueError('API returned an invalid verdict')
                 identity = item.get('execution_identity', {})
-                expected = {'diagnostic_version': self.version, 'profile_sha256': self.definition['profile_sha256'],
-                            'udf_sha256': self.definition['source_sha256'],
-                            'adapter_sha256': self.adapter_sha256}
+                expected = {'diagnostic_version': state['diagnostic_version'], 'profile_sha256': definition['profile_sha256'],
+                            'udf_sha256': definition['source_sha256'],
+                            'adapter_sha256': adapter_sha256}
                 if any(identity.get(k) != v for k, v in expected.items()):
                     raise ValueError('result does not belong to the accepted DiagnosticVersion')
                 seen.add(item['trace_id'])
@@ -212,19 +312,38 @@ class Behavior:
             response['next_action'] = 'Call next_behavior_result again until a receipt appears.'
         return response
 
+    def hydrate(self, state, trace_id):
+        prior = next((item for item in state['results'] if item['trace_id'] == trace_id), None)
+        if prior is None:
+            raise ValueError('trace is not present in this execution receipt')
+        if self.legacy:
+            return prior
+        query = urllib.parse.urlencode({'trace_id': trace_id})
+        result = self.request('GET', f'/api/v1/behavior-executions/{state["execution_id"]}/receipt?{query}')
+        if any(result.get(key) != prior.get(key) for key in ('trace_id', 'verdict', 'execution_identity')):
+            raise ValueError('durable trace receipt identity mismatch')
+        state['results'][state['results'].index(prior)] = result
+        private_json(self.state_path(state['execution_id']), state)
+        return result
+
     def render(self, receipt, accepted_behavior):
-        if accepted_behavior != self.version:
-            raise ValueError('accepted behavior does not match this execution')
         state = self.read(receipt)
+        if accepted_behavior != state['diagnostic_version']:
+            raise ValueError('accepted behavior does not match this execution')
+        definition, preview, _ = self.context(accepted_behavior)
+        if state['status'] != 'COMPLETED' or state.get('receipt') != receipt:
+            raise ValueError('Storyboard requires a completed execution receipt')
+        for trace_id in [item['trace_id'] for item in state['results']]:
+            self.hydrate(state, trace_id)
         output = self.state_path(receipt).parent / f'storyboard-{receipt}.html'
-        return render_storyboard(state, self.definition, self.preview, output)
+        return render_storyboard(state, definition, preview, output)
 
     def inspect(self, execution_id, trace_id=None, after_jev=0):
         """Inspect observed receipt metadata without returning model input packets."""
         if type(after_jev) is not int or after_jev < 0:
             raise ValueError('after_jev must be a nonnegative integer')
         state = self.read(execution_id)
-        response = {'execution_id': execution_id, 'diagnostic_version': self.version,
+        response = {'execution_id': execution_id, 'diagnostic_version': state['diagnostic_version'],
                     'execution_status': state['status'], 'receipt': state.get('receipt'),
                     'received': len(state['results']), 'counts': state['counts'],
                     'receipt_file': str(self.state_path(execution_id)),
@@ -233,9 +352,7 @@ class Behavior:
                                 if k in shard}
                                for shard in state.get('last_response', {}).get('shards', [])[:4]]}
         if trace_id is not None:
-            result = next((r for r in state['results'] if r['trace_id'] == trace_id), None)
-            if result is None:
-                raise ValueError('trace is not present in this execution receipt')
+            result = self.hydrate(state, trace_id)
             response['finding'] = compact(result)
             receipts = result.get('jev_receipts', [])
             summaries = []
@@ -268,12 +385,33 @@ def tools_list(behavior: Behavior):
     def tool(name, description, properties, required):
         return {'name': name, 'description': description,
                 'inputSchema': {'type': 'object', 'properties': properties, 'required': required, 'additionalProperties': False}}
-    version = {'type': 'string', 'enum': [behavior.version]}
+    version = {'type': 'string', 'pattern': '^[a-f0-9]{64}$'}
+    if behavior.legacy:
+        version['enum'] = [behavior.version]
+    population = {'type': 'string', 'minLength': 1}
+    if behavior.legacy:
+        population['enum'] = [behavior.population]
+    execution_properties = {'accepted_behavior': version, 'population': population,
+                            'start': {'type': 'string', 'format': 'date-time'},
+                            'end': {'type': 'string', 'format': 'date-time'}}
     execution = {'type': 'string', 'description': 'Reference returned by execute_behavior'}
-    return {'tools': [
-        tool('select_behavior', 'Inspect the configured accepted behavior. Read its contract and select it only if it matches the user request. ' + behavior.description, {}, []),
-        tool('execute_behavior', 'Submit the selected accepted behavior to the deployed Cardinal API. First inspect select_behavior. The production investigation runs independently of polling.',
-             {'accepted_behavior': version, 'population': {'type': 'string', 'enum': [behavior.population]}}, ['accepted_behavior', 'population']),
+    authoring = [
+        tool('get_behavior_sdk', 'Read the exact deployed SDK contract, example UDF and CompilePlan schema before authoring a candidate.', {}, []),
+        tool('compile_behavior', 'Submit a candidate authored in this Claude session to the deployed canonical compiler for mechanical validation and teaching checks. First read get_behavior_sdk. Inspect the returned Behavior Contract and source before accepting. Teaching examples are checks, not production proof.',
+             {'description': {'type': 'string', 'minLength': 1}, 'service_name': population,
+              'udf_source': {'type': 'string', 'minLength': 1}, 'compile_plan': {'type': 'object'},
+              'teaching_examples': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': {'type': 'object', 'properties': {'trace': {'type': 'object'}, 'expected_verdict': {'type': 'string', 'enum': ['MATCH', 'NON_MATCH', 'UNKNOWN', 'NOT_APPLICABLE']}}, 'required': ['trace'], 'additionalProperties': False},
+                                    'description': 'Authored normalized traces with trace_id and optional expected_verdict; see get_behavior_sdk.'}},
+             ['description', 'service_name', 'udf_source', 'compile_plan', 'teaching_examples']),
+        tool('inspect_behavior', 'Read an immutable compiled Behavior Contract, Python source and compile receipt before acceptance.',
+             {'diagnostic_version': version}, ['diagnostic_version']),
+        tool('accept_behavior', 'Accept the inspected immutable DiagnosticVersion for deployed execution. Call only after reviewing its contract and source against the user request.',
+             {'diagnostic_version': version}, ['diagnostic_version'])]
+    if behavior.legacy:
+        authoring = [tool('select_behavior', 'Inspect the configured accepted behavior. Read its contract and select it only if it matches the user request. ' + behavior.description, {}, [])]
+    return {'tools': authoring + [
+        tool('execute_behavior', 'Submit an explicitly accepted DiagnosticVersion against a service population and time window. Deployed execution runs independently of polling.',
+             execution_properties, ['accepted_behavior', 'population'] + ([] if behavior.legacy else ['start', 'end'])),
         tool('next_behavior_result', 'Observe newly committed compact findings while Cardinal investigates. Repeat until receipt appears. Empty results mean the execution is still running; do not fabricate findings. The total population is unknown until COMPLETED: evaluated_so_far is progress, never a total denominator.',
              {'execution_id': execution, 'wait_seconds': {'type': 'number', 'minimum': 0, 'maximum': 30, 'default': 20}}, ['execution_id']),
         tool('get_behavior_execution', 'Inspect the retained execution receipt and durable shard references. Optionally inspect bounded JEV receipt metadata for one trace; model input text stays in the receipt artifact. This does not advance result polling.',
@@ -287,9 +425,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default=os.environ.get('CARDINAL_BEHAVIOR_CONFIG'))
     args = parser.parse_args()
-    if not args.config:
-        raise ValueError('configure CARDINAL_BEHAVIOR_CONFIG or --config')
-    behavior = Behavior(json.loads(Path(args.config).expanduser().read_text()))
+    config = json.loads(Path(args.config).expanduser().read_text()) if args.config else {
+        'base_url': os.environ.get('CARDINAL_BEHAVIOR_API_URL', 'https://lakerunner-query-api.global.aws.cardinalhq.io'),
+        'org': os.environ.get('CARDINAL_ORG_ID'),
+        'output_dir': os.environ.get('CARDINAL_BEHAVIOR_OUTPUT_DIR', str(Path.home() / '.cardinal' / 'behavior-executions'))}
+    behavior = Behavior(config)
     for line in sys.stdin:
         request = json.loads(line)
         if 'id' not in request:
@@ -298,14 +438,16 @@ def main():
         try:
             if method == 'initialize':
                 value = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}},
-                         'serverInfo': {'name': 'cardinal-behavior', 'version': '0.1.0'}}
+                         'serverInfo': {'name': 'cardinal-behavior', 'version': '0.2.0'}}
             elif method == 'tools/list':
                 value = tools_list(behavior)
             elif method == 'ping':
                 value = {}
             elif method == 'tools/call':
                 params = request['params']
-                functions = {'select_behavior': behavior.select, 'execute_behavior': behavior.start,
+                functions = {'get_behavior_sdk': behavior.sdk, 'compile_behavior': behavior.compile, 'inspect_behavior': behavior.inspect_program,
+                             'accept_behavior': behavior.accept,
+                             'select_behavior': behavior.select, 'execute_behavior': behavior.start,
                              'next_behavior_result': behavior.poll, 'render_storyboard': behavior.render,
                              'get_behavior_execution': behavior.inspect}
                 result = functions[params['name']](**params.get('arguments', {}))

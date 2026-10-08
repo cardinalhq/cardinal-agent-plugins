@@ -1,8 +1,5 @@
 {
-  "base_url": "http://127.0.0.1:18092",
-  "org": "c4375e34-dfcf-498a-8ba3-a02d119baf82",
-  "start": "2026-10-01T05:00:00Z",
-  "end": "2026-10-02T00:45:00Z",
-  "output_dir": "/absolute/private/path/behavior-executions",
-  "headers_file": "/absolute/private/path/api-headers.json"
+  "base_url": "https://lakerunner-query-api.global.aws.cardinalhq.io",
+  "output_dir": "~/.cardinal/behavior-executions",
+  "api_key_env": "CARDINAL_MCP_API_KEY"
 }

@@ -41,7 +41,7 @@ MIRRORS = {
 EXCLUDE = {"tests", "REPORT.md", "CORE_GAPS.md", "__pycache__"}
 
 REQUIRED_ARTIFACTS = {
-    "claude": (".claude-plugin/plugin.json",),
+    "claude": (".claude-plugin/plugin.json", "lib/behavior/server.py", "lib/behavior/storyboard.py"),
     "codex": (".codex-plugin/plugin.json",),
 }
 
@@ -81,6 +81,11 @@ def build_artifact(adapter: str, dest: Path) -> None:
     if vendor_dest.exists():
         shutil.rmtree(vendor_dest)
     shutil.copytree(CORE_PKG, vendor_dest, ignore=shutil.ignore_patterns("__pycache__"))
+    # The shared behavior source is canonical; install a self-contained copy
+    # alongside the Claude launcher instead of depending on the monorepo layout.
+    if adapter == "claude":
+        shutil.copytree(ROOT / "common" / "behavior", dest / "lib" / "behavior",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"))
     # Plugin-level LICENSE and .gitignore ship in every artifact even when
     # the adapter dir doesn't carry them (marketplaces expect LICENSE; the
     # ignore file keeps user checkouts from committing pyc noise).

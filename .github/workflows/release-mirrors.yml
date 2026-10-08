@@ -64,6 +64,9 @@ jobs:
           cd adapters/${{ matrix.adapter }} && python3 -m unittest discover tests
       - name: Contract suite
         run: python3 -m unittest discover tests
+      - name: Behavior bridge suite
+        if: matrix.adapter == 'claude'
+        run: python3 -m unittest discover -s common/behavior/tests -v
 
   release:
     needs: [matrix, test]
