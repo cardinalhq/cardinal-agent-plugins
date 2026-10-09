@@ -913,13 +913,14 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual({ln["scene_id"] for ln in lines if "scene_id" in ln}, {"rhythm", "ghost"})
         self.assertEqual(len(self.maestro.requests), 1)
 
-    def test_no_chromium_exits_3_and_says_keep_authoring(self):
+    def test_no_chromium_exits_3_and_keeps_storyboard_unpublished(self):
         result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
         env = hermetic_env(self.home, CARDINAL_CHROMIUM=str(self.home / "no-such-chrome"))
         res, lines = run_renderer([], env, stdin=json.dumps(result))
         self.assertEqual(res.returncode, 3)
         msg = lines[-1]["summary"]["message"]
-        self.assertIn("not a publish requirement", msg)
+        self.assertIn("Leave the storyboard unpublished", msg)
+        self.assertNotIn("not a publish requirement", msg)
         self.assertIn("no-such-chrome", msg)
         self.assertEqual(self.maestro.requests, [], "no fetch without a renderer")
 
@@ -1450,7 +1451,8 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         env = hermetic_env(self.home, CARDINAL_CHROMIUM=str(self.home / "no-such-chrome"))
         ctx = self._context(self._run(env=env))
         self.assertIn("not rendered locally", ctx)
-        self.assertIn("not a publish requirement", ctx)
+        self.assertIn("Leave the storyboard unpublished", ctx)
+        self.assertNotIn("not a publish requirement", ctx)
         self.assertEqual(self._run(env=env).stdout, "", "second preview in the session stays quiet")
         # Chromium present but its sandbox cannot start: the same notice, once,
         # for a new session; the sandbox is never turned off.
@@ -1499,6 +1501,8 @@ class StoryboardPreviewHookTests(unittest.TestCase):
                   "KeyError: 'Authorization: Bearer ck_live_secret'\n")
         ctx = hook.crash_context(1, stderr)
         self.assertIn("local renderer failed (exit 1, KeyError)", ctx)
+        self.assertIn("Leave the storyboard unpublished", ctx)
+        self.assertNotIn("not a publish requirement", ctx)
         self.assertIn("render_preview.py", ctx)
         self.assertNotIn("ck_live_secret", ctx)
         self.assertIsNone(hook.crash_context(0, ""))
