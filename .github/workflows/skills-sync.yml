@@ -8,6 +8,8 @@ on:
   pull_request:
     paths:
       - "common/migrate-from-grafana/**"
+      - "common/storyboard/**"
+      - "adapters/*/skills/storyboard/**"
       - "adapters/*/skills/migrate-from-grafana/**"
       - "tests/migrate_grafana/**"
       - "tests/test_migrate_connect_scopes.py"
@@ -17,6 +19,8 @@ on:
     branches: [main]
     paths:
       - "common/migrate-from-grafana/**"
+      - "common/storyboard/**"
+      - "adapters/*/skills/storyboard/**"
       - "adapters/*/skills/migrate-from-grafana/**"
       - "tests/migrate_grafana/**"
       - "tests/test_migrate_connect_scopes.py"
