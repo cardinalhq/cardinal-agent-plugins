@@ -44,14 +44,36 @@ class SessionVisualizationTests(unittest.TestCase):
         finally:
             case.tearDown()
 
-    def test_only_authors_receive_the_offer_even_with_old_server_capabilities(self):
+    def test_packaged_renderers_keep_draft_when_chromium_is_missing(self):
+        fixture_path = REPO / "adapters/claude/tests/test_storyboard_preview.py"
+        spec = importlib.util.spec_from_file_location("preview_fixture", fixture_path)
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = fixture.hermetic_env(home, CARDINAL_CHROMIUM=str(home / "missing-chromium"))
+            preview = fixture.preview_result([
+                {"id": "rhythm", "preview_bundle": fixture.bundle_ref("rhythm", b"{}")}
+            ])
+            for runtime in ("claude", "codex", "cursor", "gemini"):
+                with self.subTest(runtime=runtime):
+                    script = REPO / "adapters" / runtime / "skills/storyboard/scripts/render_preview.py"
+                    result = subprocess.run([sys.executable, "-I", str(script), "--runtime", runtime],
+                                            input=json.dumps(preview), env=env, capture_output=True,
+                                            text=True, timeout=30)
+                    self.assertEqual(result.returncode, 3, result.stderr)
+                    message = json.loads(result.stdout.splitlines()[-1])["summary"]["message"]
+                    self.assertIn("Leave the storyboard unpublished", message)
+                    self.assertNotIn("not a publish requirement", message)
+
+    def test_session_guidance_never_prompts_for_visualization(self):
         wiring = SimpleNamespace(cli="/installed/cardinal-storyboard")
         for enabled in (True, False):
             binding = {"investigation_id": "inv_" + "1" * 24, "storyboard_id": "sb_" + "2" * 24,
                        "is_author": True, "capabilities": {"projection": {"enabled": enabled}}}
             text = describe(wiring, "session-1", binding)
-            self.assertIn("Wait for an affirmative reply", text)
-            self.assertIn("Do not offer again", text)
+            self.assertNotIn("Wait for an affirmative reply", text)
+            self.assertNotIn("Would you like", text)
             self.assertNotIn("automatically projects", text)
             binding["is_author"] = False
             text = describe(wiring, "session-1", binding)
