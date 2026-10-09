@@ -1,0 +1,21 @@
+{
+  "original_qualification_files_unchanged_since_controller_fix": 1169,
+  "prior_sealed_files_unchanged": 2995,
+  "sdk_host_files_unchanged": 13,
+  "sandbox_files_unchanged": 2,
+  "new_experiment_run_files": [],
+  "behavior_tests_passed": 82,
+  "packaged_release_tests_passed": 1,
+  "retained_mechanical_sdk_executions": {
+    "B03_id": 21,
+    "B07_parent_id": 21,
+    "B13_TraceView_attrs": 27
+  },
+  "retained_replay_model_calls": 0,
+  "new_qualification_experiment": false,
+  "production_deployment": false,
+  "source_ownership": "cardinal-agent-plugins/common/behavior/compilation",
+  "plugin_integration": "hosted compile/test/accept and complete regression replay",
+  "offline_qualification": "plugin library workflow with injected pinned SDK and independent role providers",
+  "preserved_boundaries": "Production method AST hashes and semantic instruction hashes checked by tests"
+}

@@ -45,11 +45,26 @@ class BehaviorReleaseTests(unittest.TestCase):
             self.assertIn("get_behavior_execution", [tool["name"] for tool in responses[1]["result"]["tools"]])
             names = {tool['name'] for tool in responses[1]['result']['tools']}
             self.assertTrue({'get_behavior_sdk', 'compile_behavior', 'inspect_behavior', 'test_behavior', 'accept_behavior',
+                             'get_behavior_compilation', 'run_behavior_regressions',
                              'execute_behavior', 'next_behavior_result', 'render_storyboard'} <= names)
             self.assertNotIn('select_behavior', names)
             self.assertEqual((package / ".mcp.json").read_bytes(),
                              (ROOT / "adapters" / "claude" / ".mcp.json").read_bytes())
             self.assertFalse((package / "lib" / "behavior" / "tests").exists())
+            # Offline components must import from a built artifact with no source
+            # checkout or external experiment on sys.path. SDK imports are lazy.
+            probe = subprocess.run([sys.executable, '-c',
+                'import sys; sys.path.insert(0, sys.argv[1]); '
+                'from compilation.workflow import compile_and_qualify; '
+                'from compilation.sdk_adapter import SDK; '
+                'from compilation.lifecycle import requalify, collect_sample; '
+                'from compilation.identity import identity_from_files; '
+                'from compilation.llm import Model; '
+                'from compilation.engine import promotion_gate; '
+                'print("offline compilation package available")', str(package / 'lib/behavior')],
+                cwd=root, capture_output=True, text=True, timeout=10)
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+            self.assertIn('offline compilation package available', probe.stdout)
 
 
 if __name__ == "__main__":

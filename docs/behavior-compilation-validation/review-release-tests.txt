@@ -1,0 +1,6 @@
+test_packaged_launcher_exposes_authoring_without_source_checkout_or_config (test_behavior_release.BehaviorReleaseTests.test_packaged_launcher_exposes_authoring_without_source_checkout_or_config) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.307s
+
+OK
