@@ -142,7 +142,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
             # PostToolUse preview hook (hooks/storyboard-preview.py)
             "a plugin hook renders each scene with your local Chromium and reports the PNG paths",
             "Read every PNG",
-            "never a publish blocker",
+            "leave the storyboard in draft",
         ):
             self.assertIn(needle, text)
 
@@ -323,9 +323,8 @@ class StoryboardSkillTextTests(unittest.TestCase):
         # the skill at the end". The frontmatter description is in Claude's
         # context in every session, so the answer has to be there too.
         description = re.search(r"^description: (.*)$", STORYBOARD_SKILL.read_text(), re.M).group(1)
-        for needle in ("Cardinal creates every connected session's Investigation and private live Storyboard",
-                       "the user never starts one", "they work normally",
-                       "may ask for the storyboard link any time", "no skill needed"):
+        for needle in ("Publish a Cardinal storyboard", "updating its evidence-bound scenes",
+                       "reviewing previews", "changing the draft status to published"):
             self.assertIn(needle, description)
         for phrase in ("finished", "stalled", "at the end", "after using", "write"):
             self.assertNotIn(phrase, description.lower())
@@ -353,7 +352,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "Read every PNG the hook reported",
             'python3 -I "$RENDER" --from-json <preview.json> [--scene <id>]… [--theme dark]',
             "Keep the `-I`",
-            "**Skip the preview, tell the user once, keep authoring.**",
+            "**Tell the user visual review is unavailable and keep authoring the draft.**",
         ):
             self.assertIn(needle, text)
         self.assertTrue((CANVAS_SKILL.parent / "scripts" / "render_preview.py").is_file())

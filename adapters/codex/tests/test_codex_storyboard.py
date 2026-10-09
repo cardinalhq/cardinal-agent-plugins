@@ -187,9 +187,9 @@ class CodexStoryboardTests(unittest.TestCase):
         out = json.loads(self.run_hook("SessionStart", SESSION_START).stdout)["hookSpecificOutput"]
         self.assertEqual(out["hookEventName"], "SessionStart")
         ctx = out["additionalContext"]
-        self.assertIn("Would you like me to update the storyboard visualization?", ctx)
-        self.assertIn("Wait for an affirmative reply", ctx)
-        self.assertIn("Do not offer again", ctx)
+        self.assertNotIn("Would you like me to update the storyboard visualization?", ctx)
+        self.assertNotIn("Wait for an affirmative reply", ctx)
+        self.assertNotIn("Do not offer again", ctx)
         self.assertIn("one branch = one initiative", ctx)  # the convention prompt is kept
         self.assertIn(f"Cardinal session id for this session: {SESSION}.", ctx)
         self.assertIn(f'`python3 "{CLI}" context --bare --session-id {SESSION}`', ctx)

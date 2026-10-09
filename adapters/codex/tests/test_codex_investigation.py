@@ -43,8 +43,8 @@ class InvestigationTests(unittest.TestCase):
         first = self.start()
         second = self.start()
         self.assertIn(f"/storyboards/{SB}", first)
-        self.assertIn("Wait for an affirmative reply", first)
-        self.assertIn("Would you like me to update the storyboard visualization?", second)
+        self.assertNotIn("Wait for an affirmative reply", first)
+        self.assertNotIn("Would you like me to update the storyboard visualization?", second)
         self.assertIn("first progress update", first)
         self.assertIn("written from branch fix/checkout", first)
         self.assertNotIn("pass it as session_id", first)
@@ -63,8 +63,8 @@ class InvestigationTests(unittest.TestCase):
     def test_legacy_projection_flag_does_not_change_session_authoring(self):
         self.setup_live(enabled=False)
         ctx = self.start()
-        self.assertIn("Wait for an affirmative reply", ctx)
-        self.assertIn("Do not offer again", ctx)
+        self.assertNotIn("Wait for an affirmative reply", ctx)
+        self.assertNotIn("Do not offer again", ctx)
         self.assertNotIn("automatically projects", ctx)
 
     def test_joined_non_author_cannot_checkpoint(self):

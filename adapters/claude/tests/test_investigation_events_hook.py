@@ -654,7 +654,7 @@ class SessionStartBootstrap(Base):
         # Discoverability: the id, the private live URL, how to answer, and that nobody starts anything.
         self.assertNotIn("\n", ctx)
         for needle in (f"Cardinal session id for this session: {SID}.", INV, SB, b["view_url"], b["investigation_url"],
-                       "private to org members (not published, not shared)",
+                       "private to its author while draft (not published, not shared)",
                        "The user never needs to start a storyboard or invoke a skill for it: they work normally",
                        "When they ask for the storyboard, its link or the investigation, give these URLs",
                        "`cardinal-storyboard investigation link`",
@@ -664,7 +664,7 @@ class SessionStartBootstrap(Base):
             self.assertIn(needle, ctx)
         self.assertNotIn("Pass it as session_id to storyboard__create", ctx)
         self.assertIn("after the user's consent", ctx)
-        self.assertIn("Would you like me to update the storyboard visualization?", ctx)
+        self.assertNotIn("Would you like me to update the storyboard visualization?", ctx)
         self.assertNotIn("no storyboard step is needed", ctx)
         self.assertEqual(b["capabilities"], {})
 
@@ -674,13 +674,13 @@ class SessionStartBootstrap(Base):
             with contextlib.suppress(FileNotFoundError):
                 self.binding_file().unlink()
             ctx = self.start()
-            self.assertIn("Would you like me to update the storyboard visualization?", ctx)
-            self.assertIn("Wait for an affirmative reply", ctx)
-            self.assertIn("Do not offer again", ctx)
+            self.assertNotIn("Would you like me to update the storyboard visualization?", ctx)
+            self.assertNotIn("Wait for an affirmative reply", ctx)
+            self.assertNotIn("Do not offer again", ctx)
             self.assertIn("Updating visuals does not authorize publishing or sharing", ctx)
             self.assertNotIn("Cardinal keeps this storyboard", ctx)
             n = len(self.ensures())
-            self.assertIn("Wait for an affirmative reply", self.start(source="resume"))
+            self.assertNotIn("Wait for an affirmative reply", self.start(source="resume"))
             self.assertEqual(len(self.ensures()), n)
 
     def test_restart_and_resume_reuse_the_binding_with_no_request(self):
@@ -986,7 +986,7 @@ class Cli(Base):
         res = self.cli("link", CLAUDE_CODE_SESSION_ID=SID)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(res.stdout.splitlines()[0],
-                         f"Storyboard (live, private to org members): https://app.example.test/storyboards/{SB}?org=o1")
+                         f"Storyboard (live, private to its author while draft): https://app.example.test/storyboards/{SB}?org=o1")
         self.assertIn(f"investigation {INV} · storyboard {SB}", res.stdout)
         self.assertEqual(len(self.fake.requests), n)
         got = json.loads(self.cli("link", "--session", SID, "--json").stdout)

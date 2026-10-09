@@ -44,14 +44,14 @@ class SessionVisualizationTests(unittest.TestCase):
         finally:
             case.tearDown()
 
-    def test_only_authors_receive_the_offer_even_with_old_server_capabilities(self):
+    def test_session_guidance_never_prompts_for_visualization(self):
         wiring = SimpleNamespace(cli="/installed/cardinal-storyboard")
         for enabled in (True, False):
             binding = {"investigation_id": "inv_" + "1" * 24, "storyboard_id": "sb_" + "2" * 24,
                        "is_author": True, "capabilities": {"projection": {"enabled": enabled}}}
             text = describe(wiring, "session-1", binding)
-            self.assertIn("Wait for an affirmative reply", text)
-            self.assertIn("Do not offer again", text)
+            self.assertNotIn("Wait for an affirmative reply", text)
+            self.assertNotIn("Would you like", text)
             self.assertNotIn("automatically projects", text)
             binding["is_author"] = False
             text = describe(wiring, "session-1", binding)
