@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-from .files import private_json, private_text
+from .files import private_json, private_text, program_lock
 from .storage import digest
 from .regression import RegressionHistory
 
@@ -18,6 +18,10 @@ class Authoring:
         return self.output / 'programs' / f'{version}.json'
 
     def retain_program(self, result, expected_version=None):
+        with program_lock(self.program_path(result['diagnostic_version'])):
+            return self._retain_program_checked(result, expected_version)
+
+    def _retain_program_checked(self, result, expected_version=None):
         version = result['diagnostic_version']
         path = self.program_path(version)
         if expected_version is not None and version != expected_version:
@@ -32,6 +36,9 @@ class Authoring:
             raise ValueError('API returned an invalid Behavior Contract')
         if path.exists():
             previous = json.loads(path.read_text())
+            if (result.get('compilation_context') and previous.get('compilation_context')
+                    and result['compilation_context'] != previous['compilation_context']):
+                raise ValueError('immutable program compilation context changed')
             for field in ('source_sha256', 'adapter_sha256', 'behavior_contract', 'sdk_source') + SDK_IDENTITIES:
                 if previous[field] != result[field]:
                     raise ValueError('immutable program identity changed')
@@ -163,6 +170,10 @@ class Authoring:
         if (not isinstance(expected_verdicts, dict) or set(expected_verdicts) - set(trace_ids)
                 or any(v not in ('MATCH', 'NON_MATCH', 'UNKNOWN') for v in expected_verdicts.values())):
             raise ValueError('expected_verdicts must map selected trace IDs to MATCH, NON_MATCH, or UNKNOWN')
+        history = (RegressionHistory(self.output, program['compilation_scope'])
+                   if program.get('compilation_scope') else None)
+        token = (history.reserve(diagnostic_version, service_name, start, end, trace_ids, expected_verdicts)
+                 if history else None)
         result = self.request('POST', '/api/v1/behavior-programs/test', {
             'diagnostic_version': diagnostic_version, 'trace_ids': trace_ids,
             'service_name': service_name, 'start': start, 'end': end,
@@ -203,11 +214,15 @@ class Authoring:
                 raise ValueError('cached teaching test receipt integrity check failed')
         else:
             private_json(receipt_path, receipt)
-        if program.get('compilation_scope'):
-            RegressionHistory(self.output, program['compilation_scope']).record(
-                diagnostic_version, service_name, start, end, result)
-        program.update(test_receipt=result['test_receipt'], teaching_receipt=result)
-        private_json(path, program)
+        def persist_program():
+            with program_lock(path):
+                current = json.loads(path.read_text())
+                current.update(test_receipt=result['test_receipt'], teaching_receipt=result)
+                private_json(path, current)
+        if history:
+            history.record(diagnostic_version, service_name, start, end, result, token, persist_program)
+        else:
+            persist_program()
         return dict(receipt_file=str(receipt_path), **result)
 
     def inspect_program(self, diagnostic_version):
@@ -220,23 +235,24 @@ class Authoring:
         if not path.exists():
             raise ValueError('Inspect the Behavior Contract and source before accepting this version')
         program = json.loads(path.read_text())
-        if not program.get('test_receipt'):
-            raise ValueError('Run test_behavior on real teaching traces before accepting this version')
-        teaching = program['teaching_receipt']['results']
-        if any(not item.get('expected_verdict') for item in teaching):
-            raise ValueError('Run test_behavior with an expected verdict for every teaching trace before acceptance')
-        if any(item['expected_verdict'] != item['verdict'] or item['verdict'] == 'ERROR' for item in teaching):
-            raise ValueError('Teaching actual verdicts do not match expectations; inspect evidence and revise before acceptance')
         if not program.get('compilation_scope'):
             raise ValueError('Recompile through compile_behavior to register the development regression suite')
         history = RegressionHistory(self.output, program['compilation_scope'])
-        with history.locked():
+        with history.locked(), program_lock(path):
+            program = json.loads(path.read_text())
+            if not program.get('test_receipt'):
+                raise ValueError('Run test_behavior on real teaching traces before accepting this version')
+            teaching = program['teaching_receipt']['results']
+            if any(not item.get('expected_verdict') for item in teaching):
+                raise ValueError('Run test_behavior with an expected verdict for every teaching trace before acceptance')
+            if any(item['expected_verdict'] != item['verdict'] or item['verdict'] == 'ERROR' for item in teaching):
+                raise ValueError('Teaching actual verdicts do not match expectations; inspect evidence and revise before acceptance')
             state = history.read()
             report = history.check(diagnostic_version, state)
             result = self._accept_checked(diagnostic_version, program)
-            history.accepted(diagnostic_version, report, state)
             program['regression_report'] = report
             private_json(path, program)
+            history.accepted(diagnostic_version, report, state)
             return result
 
     def compilation_status(self, diagnostic_version):

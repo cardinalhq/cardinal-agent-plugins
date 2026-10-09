@@ -17,11 +17,12 @@ class CompilationBoundaryTests(unittest.TestCase):
         self.provenance = json.loads((PACKAGE / 'provenance.json').read_text())
 
     def test_production_execution_methods_are_unchanged(self):
-        tree = ast.parse((ROOT / 'server.py').read_text())
+        source = (ROOT / 'server.py').read_text()
+        tree = ast.parse(source)
         behavior = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Behavior')
         methods = {n.name: n for n in behavior.body if isinstance(n, ast.FunctionDef)}
-        for name, expected in self.provenance['production_methods_ast_sha256'].items():
-            self.assertEqual(sha(ast.dump(methods[name], include_attributes=False)), expected, name)
+        for name, expected in self.provenance['production_methods_source_sha256'].items():
+            self.assertEqual(sha(ast.get_source_segment(source, methods[name])), expected, name)
 
     def test_semantic_discovery_review_and_repair_instructions_are_unchanged(self):
         tree = ast.parse((PACKAGE / 'corpus.py').read_text())

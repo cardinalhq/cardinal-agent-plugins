@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import fcntl
 import json
 import re
+import uuid
 from pathlib import Path
 from .engine import gate
 from .files import private_json
@@ -35,20 +36,40 @@ class RegressionHistory:
         return json.loads(path.read_text()) if path.exists() else {
             'cases': {}, 'results': {}, 'incumbent': None, 'accepted': {}}
 
-    def record(self, version, service, start, end, result):
+    def reserve(self, version, service, start, end, trace_ids, expected_verdicts):
+        """Invalidate old observations before a test can fail or be interrupted."""
         with self.locked():
             state = self.read()
-            for row in result['results']:
+            token = uuid.uuid4().hex
+            for trace_id in trace_ids:
                 locator = {'service_name': service, 'start': start, 'end': end,
-                           'trace_id': row['trace_id']}
+                           'trace_id': trace_id}
                 key = digest(locator)
-                expected = row.get('expected_verdict')
+                expected = expected_verdicts.get(trace_id)
                 previous = state['cases'].get(key, {})
                 if previous.get('expected') and expected and previous['expected'] != expected:
                     raise ValueError('regression gold changed; start explicit requalification with a new contract')
                 state['cases'][key] = {'locator': locator, 'expected': previous.get('expected') or expected}
+                state['results'].setdefault(version, {}).pop(key, None)
+                state.setdefault('pending', {}).setdefault(version, {})[key] = token
+            private_json(self.root / 'regression.json', state)
+            return token
+
+    def record(self, version, service, start, end, result, token, persist_program):
+        with self.locked():
+            state = self.read()
+            pending = state.get('pending', {}).get(version, {})
+            for row in result['results']:
+                key = digest({'service_name': service, 'start': start, 'end': end,
+                              'trace_id': row['trace_id']})
+                if pending.get(key) != token:
+                    raise ValueError('test result superseded by a newer regression attempt')
                 state['results'].setdefault(version, {})[key] = {
                     'receipt': result['test_receipt'], 'trace_id': row['trace_id']}
+                del pending[key]
+            # Keep the latest teaching receipt and acceptance metadata consistent
+            # with the regression ledger while excluding concurrent acceptance.
+            persist_program()
             private_json(self.root / 'regression.json', state)
 
     def check(self, version, state=None):
@@ -93,6 +114,7 @@ class RegressionHistory:
             if not state['cases'] or any(not c['expected'] for c in state['cases'].values()):
                 raise ValueError('Register expected verdicts for the development suite before replay')
             state['results'][version] = {}
+            state.setdefault('pending', {})[version] = {}
             private_json(self.root / 'regression.json', state)
             return list(state['cases'].values())
 

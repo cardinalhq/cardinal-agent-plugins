@@ -145,6 +145,92 @@ class CompilationHistoryTests(unittest.TestCase):
         names = {tool['name'] for tool in tools_list(self.behavior)['tools']}
         self.assertTrue({'get_behavior_compilation', 'run_behavior_regressions'} <= names)
 
+    def test_failed_ordinary_test_invalidates_old_pass_and_registers_new_case(self):
+        self.compile()
+        specs = [('e' * 32, 'NON_MATCH', 'NON_MATCH', '')]
+        self.teach(self.version, specs)
+        self.accept(self.version)
+        candidate = self.candidate()['diagnostic_version']
+        self.teach(candidate, specs)
+        original_request = self.behavior.request
+        def failed_request(*args):
+            raise RuntimeError('test transport failed')
+        for trace_id in ('e' * 32, 'f' * 32):
+            with self.subTest(trace_id=trace_id):
+                self.behavior.request = failed_request
+                with self.assertRaisesRegex(RuntimeError, 'test transport failed'):
+                    self.behavior.test(candidate, [trace_id], 'service',
+                        '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z', {trace_id: 'NON_MATCH'})
+                self.behavior.request = original_request
+                with self.assertRaisesRegex(ValueError, 'complete accumulated'):
+                    self.behavior.accept(candidate)
+                self.assertEqual(self.behavior.compilation_status(candidate)['incumbent'], self.version)
+        self.assertEqual(self.behavior.compilation_status(candidate)['required_cases'], 2)
+
+    def test_older_success_cannot_overwrite_newer_failed_test_reservation(self):
+        self.compile()
+        specs = [('e' * 32, 'NON_MATCH', 'NON_MATCH', '')]
+        self.teach(self.version, specs)
+        self.accept(self.version)
+        response = self.receipt(self.version, specs)
+        interleaved = False
+        def request(method, path, payload=None):
+            nonlocal interleaved
+            if interleaved:
+                raise RuntimeError('newer attempt failed')
+            interleaved = True
+            with self.assertRaisesRegex(RuntimeError, 'newer attempt failed'):
+                self.behavior.test(self.version, ['e' * 32], 'service',
+                    '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z', {'e' * 32: 'NON_MATCH'})
+            return response
+        self.behavior.request = request
+        with self.assertRaisesRegex(ValueError, 'superseded'):
+            self.behavior.test(self.version, ['e' * 32], 'service',
+                '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z', {'e' * 32: 'NON_MATCH'})
+        state = self.behavior.compilation_status(self.version)
+        self.assertEqual(state['tested_cases'], 0)
+        self.assertEqual(state['incumbent'], self.version)
+        with self.assertRaisesRegex(ValueError, 'complete accumulated'):
+            self.behavior.accept(self.version)
+
+    def test_same_version_cannot_silently_change_compilation_scope(self):
+        self.compile()
+        self.responses.append(self.program)
+        with self.assertRaisesRegex(ValueError, 'compilation context changed'):
+            self.behavior.compile('Different contract', 'service', self.source, {})
+
+    def test_failed_receipt_validation_also_invalidates_previous_pass(self):
+        self.compile()
+        specs = [('e' * 32, 'NON_MATCH', 'NON_MATCH', '')]
+        self.teach(self.version, specs)
+        bad = self.receipt(self.version, specs)
+        bad['results'][0]['execution_identity']['sdk_runtime_sha256'] = '0' * 64
+        self.responses.append(bad)
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            self.behavior.test(self.version, ['e' * 32], 'service',
+                '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z', {'e' * 32: 'NON_MATCH'})
+        with self.assertRaisesRegex(ValueError, 'complete accumulated'):
+            self.behavior.accept(self.version)
+
+    def test_concurrent_atomic_receipt_writes_never_share_a_temporary_file(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import os
+        from threading import Barrier
+        from unittest.mock import patch
+        from compilation.files import private_json
+        path = Path(self.temp.name) / 'concurrent.json'
+        barrier = Barrier(8)
+        replace = os.replace
+        def simultaneous_replace(source, target):
+            barrier.wait(timeout=5)
+            replace(source, target)
+        values = [{'writer': i, 'payload': str(i) * 1000} for i in range(8)]
+        with patch('os.replace', side_effect=simultaneous_replace), ThreadPoolExecutor(8) as pool:
+            list(pool.map(lambda value: private_json(path, value), values))
+        self.assertIn(json.loads(path.read_text()), values)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(path.parent.glob('.concurrent.json-*')), [])
+
 
 if __name__ == '__main__':
     unittest.main()

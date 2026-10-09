@@ -48,6 +48,10 @@ The normal Claude workflow is:
    at most eight real traces. The replay continues after an ERROR or failed batch.
    A new replay invalidates previous observations for that candidate, preventing
    an interrupted run from silently using earlier passing results.
+   Ordinary test batches also reserve their cases before contacting the backend.
+   Failed requests and invalid receipts leave missing coverage; an older response
+   cannot replace a newer test attempt. Receipt and acceptance updates are
+   serialized so concurrent plugin processes preserve the incumbent metadata.
 5. `accept_behavior` explicitly accepts the inspected immutable DiagnosticVersion.
    Acceptance requires a real teaching receipt with expected verdicts and binds
    its trace IDs, expected/actual results, compile/JEV receipts, and SDK/profile/
