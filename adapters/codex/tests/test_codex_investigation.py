@@ -43,7 +43,8 @@ class InvestigationTests(unittest.TestCase):
         first = self.start()
         second = self.start()
         self.assertIn(f"/storyboards/{SB}", first)
-        self.assertIn("automatically projects", first)
+        self.assertIn("Wait for an affirmative reply", first)
+        self.assertIn("Would you like me to update the storyboard visualization?", second)
         self.assertIn("first progress update", first)
         self.assertIn("written from branch fix/checkout", first)
         self.assertNotIn("pass it as session_id", first)
@@ -59,10 +60,11 @@ class InvestigationTests(unittest.TestCase):
         self.assertEqual(linked.returncode, 0, linked.stderr)
         self.assertEqual(json.loads(linked.stdout)["storyboard_id"], SB)
 
-    def test_disabled_projection_is_honest(self):
+    def test_legacy_projection_flag_does_not_change_session_authoring(self):
         self.setup_live(enabled=False)
         ctx = self.start()
-        self.assertIn("projection is unavailable", ctx)
+        self.assertIn("Wait for an affirmative reply", ctx)
+        self.assertIn("Do not offer again", ctx)
         self.assertNotIn("automatically projects", ctx)
 
     def test_joined_non_author_cannot_checkpoint(self):
