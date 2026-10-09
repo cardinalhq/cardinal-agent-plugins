@@ -41,7 +41,11 @@ MIRRORS = {
 EXCLUDE = {"tests", "REPORT.md", "CORE_GAPS.md", "__pycache__"}
 
 REQUIRED_ARTIFACTS = {
-    "claude": (".claude-plugin/plugin.json", "lib/behavior/server.py", "lib/behavior/storyboard.py"),
+    "claude": (".claude-plugin/plugin.json", "lib/behavior/server.py", "lib/behavior/storyboard.py",
+               "lib/behavior/compilation/hosted.py", "lib/behavior/compilation/regression.py",
+               "lib/behavior/compilation/engine.py", "lib/behavior/compilation/workflow.py",
+               "lib/behavior/compilation/sdk_adapter.py", "lib/behavior/compilation/corpus.py",
+               "lib/behavior/compilation/llm.py", "lib/behavior/compilation/lifecycle.py"),
     "codex": (".codex-plugin/plugin.json",),
 }
 

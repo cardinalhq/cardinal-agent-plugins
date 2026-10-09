@@ -1,0 +1,28 @@
+{
+  "origin": "behavioral-program-qualification; sealed experiment retained as historical evidence, not a product dependency",
+  "upstream_plugin_commit": "48c1df812cd567dc64f7d1e01191139ed65ac099",
+  "migrated_sources": {
+    "bpq/engine.py": "aa5cfa321b7c8b16a830504d122d74015ad9367374c6f2a3fe182cc51a5f517c",
+    "bpq/storage.py": "b41716800345ca13b9223d472d190d733280619d181269733bd44a3821e022ec",
+    "bpq/identity.py": "7558e669eb393305d9a277ae376c69f22458cee39a71ea965b8729ace8056471",
+    "bpq/lifecycle.py": "afcd76b55876383523376eecd7deb2c141fec7fdb32be9e798ddac3a2dd5a342",
+    "bpq/runtime.py": "76d07ec26db3d098d367109a16d118444a312df90a727c2ce14cecef839e834c",
+    "bpq/llm.py": "b5e9e819db7bbf5c06c805cf29a30ed7595f2fa464bfd1d94c1780b7c290805d",
+    "bpq/corpus.py": "0f54c0da993285ad505d02bbbadf2c00172f2c33cd5cb6dad7f934c3d017592c",
+    "bpq/sdk_adapter.py": "09b6c6bdd55123f607f1dea98f185ed3232463fb128dc912e5ec58bc59140985"
+  },
+  "repair_instruction_sha256": "72b3258e8df9c01f873d6a62c76f1c30027224604cc3462ed374e5b9092fe90c",
+  "review_instruction_sha256": "c5c2bb1ef7ad986c013e3f180915aeda9ebbe4e6c67cd51de7f6685050689cbc",
+  "corpus_instruction_ast_sha256": "ab8a93caf282102f243d87bfa62fd6b45f67508769ea93164dacf4869361b64a",
+  "production_methods_ast_sha256": {
+    "request": "7f72063aeed23a8a1ef7f429b21ded718db591609fb8c9fcce6c49a6d38a816d",
+    "state_path": "841bb75eaaf5a7234e72e5d26fba3f4779af5521a5051ec52e91d8680fbbc824",
+    "read": "20cef34dce0e4b7fc2564e8c90d3203d3355150785d3e93456bbaaf670aadbb6",
+    "select": "1df85c9c9df8a550bd15c21876763a4bffb1da31672e76aab011c80a346edf76",
+    "context": "f2ef16adc96cbdf66ba673de6aa959a8665b61c66c4f292e21811340bd67be4b",
+    "start": "eeead83b04564f95c282673229cc8c570cced621726256574d98c48aa015b054",
+    "poll": "ae6157a048a4488a675ac5bc10f7018b2b4444f989fcd5fa789a8d685bcd91c0",
+    "render": "32f82a8a26e353cfa2025e916f87e676614783c14a8c3b613560e19a29673a71",
+    "inspect": "c2adaa6563f2477bf3ca4a904aa38dbe7deb5f321049f0b5cd356409fdbc4d19"
+  }
+}
