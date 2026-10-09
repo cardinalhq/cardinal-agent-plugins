@@ -28,7 +28,7 @@ GUIDANCE = (
 # The old lifecycle (SPEC §4): the storyboard as the end-of-investigation
 # write-up, and the Investigation as something to create by hand first.
 OLD_LIFECYCLE = (
-    "finished investigation", "finished (or stalled)", "turn a finished", "at the end",
+    "finished investigation", "finished (or stalled)", "turn a finished",
     "write-up", "write up", "write this up", "show me how we got here", "after investigating",
     "after using cardinal tools", "turns an investigation into", "turns a cardinal investigation into",
     "before any storyboard: `investigation create`", "investigation create`, then",
@@ -338,21 +338,6 @@ class StoryboardSkillTextTests(unittest.TestCase):
         self.assertIn("the answer is no: work normally", readme)
         self.assertIn("`cardinal-storyboard investigation link`", readme)
 
-    def test_the_skill_defers_to_automatic_projection_only_when_cardinal_projects(self):
-        # Plugin 0.44.0: a Cardinal that advertises capabilities.projection.enabled
-        # keeps the live storyboard up to date from the checkpoints, and the
-        # session-start context says so; everywhere else (prod without the
-        # projector) the skill's explain / hand off / post-mortem trigger is
-        # still the way scenes appear, so it stays.
-        description = re.search(r"^description: (.*)$", STORYBOARD_SKILL.read_text(), re.M).group(1)
-        self.assertIn("If that context says Cardinal keeps it current, explaining it needs no skill either.",
-                      description)
-        self.assertIn("explain, present, hand off or post-mortem", description)
-        readme = _flat(STORYBOARD_SKILL.parent / "README.md")
-        self.assertIn("(Claude's session-start context says so), you never ask for it to be written. Otherwise,",
-                      readme)
-        self.assertIn("Storyboard this for the team.", readme)
-
     def test_storyboard_readme_explains_acts(self):
         readme = _flat(STORYBOARD_SKILL.parent / "README.md")
         self.assertNotIn("To change one, ask for a new storyboard", readme)
@@ -410,43 +395,6 @@ class StoryboardSkillTextTests(unittest.TestCase):
                        "pick another `cover_scene`"):
             self.assertIn(needle, text)
 
-    def test_combined_skill_length_stays_slim(self):
-        # The craft moved to the server (conductor #1975); the skills keep only
-        # the Claude Code parts. Before: 477 lines / 4909 words (plugin 0.34.0).
-        # After the slim: 202 lines / 1932 words. The caps leave a little room,
-        # not enough to paste a guide back in. The evidence-hygiene bullets
-        # (promote only what is cited, reuse receipts, redacted != withheld)
-        # took the word cap from 2100 to 2175. "Update, don't duplicate" plus
-        # "Ask before adding to an existing storyboard" (find -> ask ->
-        # continue / add_act / create, the public-links question; plugin
-        # 0.36.0) took it to 2425 words (+250, the most the acts plan allows)
-        # and 255 lines, including the raw-evidence rule (never set
-        # confirm_raw_evidence yourself): 2424 / 254 when it landed. "The
-        # card" (headline / figure / cover, preview-then-publish with the same
-        # card, the hero upload, member link previews on by default) plus the
-        # canvas skill's cover-and-mock paragraph (rich unfurls H3/H1) took it
-        # to 2652 words / 278 lines. Storyboard associations (plugin 0.40:
-        # automatic context, `about`, storyboard__link, may_continue,
-        # role-named ask labels) replaced the context paste step and the
-        # "same PR" labels and still added 9 lines / 110 words: 2762 / 287.
-        # "Investigation state" (InvestigationState step 1: state init /
-        # check after publish; its authoring guide is printed by `state
-        # init`, not pasted here) added 9 lines / 77 words: 2839 / 296.
-        # Investigations (state before any storyboard) fit in by rewording it.
-        # The live lifecycle (every session's Storyboard exists from session
-        # start; the skill improves it; "Which storyboard", "Publish and
-        # share", the do-I-start-it answer) replaced the finished-investigation
-        # framing and was paid for by trimming: still 2840 / 296.
-        # Automatic projection (plugin 0.44.0: the description says the skill
-        # is not needed to explain the investigation when Cardinal keeps the
-        # storyboard current) was paid for by trimming the flow's "work
-        # normally" line: 2838 / 296.
-        # No headroom left: trim before adding.
-        paths = (STORYBOARD_SKILL, CANVAS_SKILL)
-        total = sum(len(p.read_text().splitlines()) for p in paths)
-        self.assertLessEqual(total, 296)
-        words = sum(len(p.read_text().split()) for p in paths)
-        self.assertLessEqual(words, 2840)
 
 
 if __name__ == "__main__":

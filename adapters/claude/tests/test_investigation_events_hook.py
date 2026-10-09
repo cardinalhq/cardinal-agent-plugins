@@ -663,79 +663,25 @@ class SessionStartBootstrap(Base):
                        "authority: ADVISORY"):
             self.assertIn(needle, ctx)
         self.assertNotIn("Pass it as session_id to storyboard__create", ctx)
-        # No capabilities in the answer (an older Cardinal): 0.43.0's sentence, unchanged.
-        self.assertIn(f"The storyboard skill improves this storyboard ({SB}); never storyboard__create another for "
-                      "this session. Pass the session id as session_id to storyboard__find and storyboard__add_act.",
-                      ctx)
+        self.assertIn("after the user's consent", ctx)
+        self.assertIn("Would you like me to update the storyboard visualization?", ctx)
         self.assertNotIn("no storyboard step is needed", ctx)
         self.assertEqual(b["capabilities"], {})
-        self.assertNotIn("storyboard_projection", b)
 
-    def test_only_a_cardinal_that_advertises_projection_drops_the_storyboard_step(self):
-        old = (f"The storyboard skill improves this storyboard ({SB}); never storyboard__create another for this "
-               "session. Pass the session id as session_id to storyboard__find and storyboard__add_act.")
-        new = (f"Cardinal keeps this storyboard ({SB}) up to date from the investigation record (your checkpoints), "
-               "so no storyboard step is needed; never storyboard__create another for this session. Edit, publish "
-               "or share it only when the user asks (the storyboard skill). Pass the session id as session_id to "
-               "storyboard__find and storyboard__add_act.")
-        on = {"projection": {"enabled": True}}
-        for answer, projected in ((on, True), ({"projection": {"enabled": True, "x": 1}, "owner_input": {}}, True),
-                                  ({"projection": {"enabled": False}}, False),
-                                  ({"projection": {"enabled": "yes"}}, False), ({"projection": True}, False),
-                                  ({"owner_input": {"enabled": True}}, False), ({}, False), ([], False),
-                                  ("projection", False)):
+    def test_session_authors_visuals_regardless_of_legacy_generation_capability(self):
+        for answer in ({"projection": {"enabled": True}}, {"projection": {"enabled": False}}, {}, None):
             self.fake.capabilities = answer
             with contextlib.suppress(FileNotFoundError):
                 self.binding_file().unlink()
             ctx = self.start()
-            caps = self.binding()["capabilities"]
-            self.assertIsInstance(caps, dict, answer)
-            self.assertIs(caps.get("projection", {}).get("enabled") is True, projected, answer)
-            self.assertIn(new if projected else old, ctx, answer)
-            self.assertNotIn(old if projected else new, ctx, answer)
-        # #172's ad hoc flag means nothing: only the capabilities block counts.
-        self.fake.capabilities = None
-        self.binding_file().unlink()
-        orig = self.fake.ensure
-        self.fake.ensure = lambda body: (lambda r: (r[0], {**r[1], "storyboard_projection": {"enabled": True}}))(
-            orig(body))
-        try:
-            self.assertIn(old, self.start())
-        finally:
-            self.fake.ensure = orig
-        # Resume reuses the binding with no request, and keeps its answer.
-        self.fake.capabilities = on
-        self.binding_file().unlink()
-        self.start()
-        n = len(self.ensures())
-        self.assertIn(new, self.start(source="resume"))
-        self.assertEqual(len(self.ensures()), n)
-        # Turned off later: the resumed start still answers from the binding with no request (no added
-        # latency); the poller then refreshes it once, and the next start reads the current answer.
-        self.fake.capabilities = {"projection": {"enabled": False}}
-        self.assertIn(new, self.start(source="resume"))
-        self.assertEqual(len(self.ensures()), n)
-        self.poll()
-        self.assertEqual(len(self.ensures()), n + 1)
-        self.assertEqual(self.binding()["capabilities"], {"projection": {"enabled": False}})
-        self.assertIn(old, self.start(source="resume"))
-        self.poll()
-        self.assertEqual(len(self.ensures()), n + 2, "once per session start")
-        self.poll()
-        self.assertEqual(len(self.ensures()), n + 2)
-        self.fake.capabilities = on
-        n = len(self.ensures())
-        # A 0.43.0 binding (no capabilities) reused on resume: off.
-        b = self.binding()
-        del b["capabilities"]
-        self.binding_file().write_text(json.dumps(b))
-        self.assertIn(old, self.start(source="resume"))
-        self.assertEqual(len(self.ensures()), n)
-        # A later answer without the block (a rolled-back Cardinal) goes back to 0.43.0's text.
-        self.fake.capabilities = None
-        self.binding_file().unlink()
-        self.assertIn(old, self.start())
-        self.assertEqual(self.binding()["capabilities"], {})
+            self.assertIn("Would you like me to update the storyboard visualization?", ctx)
+            self.assertIn("Wait for an affirmative reply", ctx)
+            self.assertIn("Do not offer again", ctx)
+            self.assertIn("Updating visuals does not authorize publishing or sharing", ctx)
+            self.assertNotIn("Cardinal keeps this storyboard", ctx)
+            n = len(self.ensures())
+            self.assertIn("Wait for an affirmative reply", self.start(source="resume"))
+            self.assertEqual(len(self.ensures()), n)
 
     def test_restart_and_resume_reuse_the_binding_with_no_request(self):
         self.start()

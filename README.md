@@ -66,6 +66,8 @@ capture starts; `CARDINAL_OWNER_INPUT=0` in `~/.claude/settings.json` `env`
 turns it off on this machine). `cardinal-storyboard investigation grant`
 gives someone else scoped, revocable access to the Investigation through
 `CARDINAL_INVESTIGATION_TOKEN`, never this machine's key.
+At the completion of investigation work, connected agents offer to update the storyboard visualization. With the user's consent, the same session authors and previews it. Codex, Cursor and Gemini include the `cardinal-storyboard` skill and a local preview renderer; Claude uses its storyboard and canvas skills. Declining or completing an update does not trigger another offer. Publishing and sharing remain separate explicit requests. Deploy the companion Conductor change to remove UI/server visualization generation.
+
 Claude also ships two model-invocable skills for Cardinal's Investigation
 Storyboards: [`/cardinal:storyboard`](adapters/claude/skills/storyboard/README.md)
 improves, frames and publishes that live storyboard (evidence-bound, scene by

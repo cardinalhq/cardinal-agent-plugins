@@ -33,6 +33,7 @@ COMMON_DIR = ROOT / "common"
 
 # skill name -> files/dirs (relative to common/<skill>/) copied into each adapter.
 SKILLS = {
+    "storyboard": ["CORE.md", "scripts"],
     "migrate-from-grafana": ["CORE.md", "scripts", "references"],
 }
 
