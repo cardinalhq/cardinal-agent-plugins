@@ -14,6 +14,11 @@ original recorded trace path/hash, source receipt path/hash, source identity,
 recorder identity and ordered transforms. The operator enrolls these identities
 in a frozen recorded-base catalog before corpus construction. A case cannot
 enroll its own base. Attested companion files must still match the receipt.
+The catalog also pins the independently verified original admission bundle.
+The case's `provenance_bundle` (or explicit per-ID bundle argument) must equal
+the entire replayed admission payload: source capture/loss/scope/closure,
+source inventory, retained observations and normalized trace. Synthetic bundles
+are rejected. The runner must submit exactly that checked bundle to admission.
 Canonical UTF-8 JSON bytes of replayed and submitted trace objects must agree.
 String bodies, including provider request JSON, remain exact captured text.
 
@@ -21,6 +26,11 @@ The allowlist permits final response text edits, span removal with explicit loss
 root/other output redaction or truncation with forced flags, and undeclared scope.
 It forbids provider request edits and protocol-field deletion. These transforms
 are declared synthetic derivations, never represented as new real executions.
+Final-text edits are rejected if another span input/output repeats the original
+final text. Original native reads and preflight coverage receipts belong to the
+base and are removed from the derived admission payload, avoiding stale alternate
+inputs. Missing/redacted source occurrences remain in the independent source
+inventory and prevent a negative conclusion through the ordinary verifier.
 
 Anthropic adapter reference: installed `@anthropic-ai/sdk` **0.110.0**, file
 `src/resources/messages/messages.ts`, interfaces `ToolResultBlockParam`,

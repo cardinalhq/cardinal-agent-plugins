@@ -46,11 +46,17 @@ def replay(base, transforms):
             texts = [b for b in output['content'] if b['type'] == 'text']
             if len(texts) != 1:
                 raise ValueError('final_text requires exactly one text block')
-            texts[0]['text'] = text; final['output'] = json.dumps(output, separators=(',', ':'), ensure_ascii=False)
-            final['attrs']['output_value'] = final['output']
             roots = [e for e in trace['events'] if e['parent_id'] is None]
             if len(roots) != 1:
                 raise ValueError('one root required')
+            old_text = texts[0]['text']
+            for other in trace['events']:
+                if other['id'] in (final['id'], roots[0]['id']):
+                    continue
+                if old_text and any(old_text in (other.get(field) or '') for field in ('input','output')):
+                    raise ValueError('final_text repeated in another span')
+            texts[0]['text'] = text; final['output'] = json.dumps(output, separators=(',', ':'), ensure_ascii=False)
+            final['attrs']['output_value'] = final['output']
             roots[0]['output'] = text; roots[0]['attrs']['output_value'] = text
         elif op == 'undeclare_scope':
             capture['scope_declared'] = False
@@ -77,9 +83,59 @@ def replay(base, transforms):
     return trace, capture
 
 
-def verify_derivation(case, trusted_bases=None):
-    checks = ['recorded_base_hash', 'source_attestation', 'transform_allowlist', 'byte_equal_replay', 'honest_capture']
+def body_hash(value):
+    return None if value is None else hashlib.sha256(value.encode()).hexdigest()
+
+
+def check_observations(rows, trace):
+    expected = {e['id']: e for e in trace['events']}
+    if len(rows) != len(expected) or {r['spanId'] for r in rows} != set(expected):
+        raise ValueError('base bundle occurrence inventory differs from recorded base')
+    for row in rows:
+        event = expected[row['spanId']]
+        if row['inputSha256'] != body_hash(event['input']) or row['outputSha256'] != body_hash(event['output']):
+            raise ValueError('base bundle content hashes differ from recorded base')
+
+
+def replay_bundle(base_bundle, base_trace, trace, capture):
+    """Derive the exact admission payload from an enrolled original bundle.
+
+    Source inventory retains genuinely observed missing/redacted occurrences;
+    retained inventory loses them. A declared hypothetical final-text edit is
+    reflected in both inventories. No new real source receipt is issued.
+    """
+    bundle = copy.deepcopy(base_bundle)
+    source, retained = bundle['source'], bundle['retained']
+    source['capture'].update({k:capture[k] for k in ('content_captured','redacted','truncated')})
+    if not capture['scope_declared']:
+        source['capture']['scope_id'] = None
+    for target in (source, retained):
+        target['loss'].update(copy.deepcopy(capture['loss']))
+        target['loss'].update(redacted=capture['redacted'], truncated=capture['truncated'])
+    current = {e['id']:e for e in trace['events']}
+    retained['observations'] = [r for r in retained['observations'] if r['spanId'] in current]
+    for rows in (source['ended'], retained['observations']):
+        for row in rows:
+            event = current.get(row['spanId'])
+            # Redaction/truncation does not rewrite independent source bytes.
+            if event is not None and (rows is retained['observations'] or not (capture['redacted'] or capture['truncated'])):
+                row['inputSha256'] = body_hash(event['input'])
+                row['outputSha256'] = body_hash(event['output'])
+    source['closure']['inventory_sha256'] = digest({'started':source['started'],'ended':source['ended']})
+    bundle['trace'] = copy.deepcopy(trace)
+    retained['trace'] = copy.deepcopy(trace)
+    # Original typed storage is provenance of the base, not a fabricated read of
+    # the derived case. It is not submitted as a second mutable admission input.
+    bundle.pop('native_read', None)
+    bundle.pop('coverage_preflight', None)
+    return bundle
+
+
+def verify_derivation(case, trusted_bases=None, bundle=None):
+    checks = ['recorded_base_hash', 'source_attestation', 'transform_allowlist', 'byte_equal_replay', 'honest_capture', 'admission_bundle_replay']
     result = {'pass': False, 'checks_run': checks, 'errors': []}
+    if bundle is None:
+        bundle = case.get('provenance_bundle')
     try:
         derivation = case['derivation']; result['derivation_sha256'] = digest(derivation)
         base_path = Path(derivation['base_path']); raw = base_path.read_bytes()
@@ -111,6 +167,28 @@ def verify_derivation(case, trusted_bases=None):
             raise ValueError('case differs from replayed base')
         if capture != case['capture']:
             raise ValueError('capture claims stronger than or inconsistent with derivation')
+        if not bundle or bundle.get('synthetic'):
+            raise ValueError('missing or synthetic admission bundle')
+        bp = Path(trusted['bundle_path']); bundle_raw = bp.read_bytes()
+        if hashlib.sha256(bundle_raw).hexdigest() != trusted['bundle_sha256']:
+            raise ValueError('enrolled base bundle drift')
+        base_bundle = json.loads(bundle_raw); base_trace = json.loads(raw)
+        if base_bundle.get('synthetic') or canonical(base_bundle['trace']) != canonical(base_trace) or canonical(base_bundle['retained']['trace']) != canonical(base_trace):
+            raise ValueError('base bundle is synthetic or differs from recorded trace')
+        identities = base_bundle['source']['identities']
+        if identities['source'] != derivation['source_identity'] or identities['recorder'] != derivation['recorder_identity']:
+            raise ValueError('base bundle source/recorder mismatch')
+        bc = base_bundle['source']['capture']
+        if bc.get('content_captured') is not True or bc.get('redacted') is not False or bc.get('truncated') is not False or not bc.get('scope_id'):
+            raise ValueError('base bundle capture not verified')
+        for evidence in (base_bundle['source'],base_bundle['retained']):
+            if evidence['loss'] != {'gaps':[],'dropped_records':0,'redacted':False,'truncated':False}:
+                raise ValueError('base bundle loss not verified')
+        check_observations(base_bundle['source']['ended'], base_trace)
+        check_observations(base_bundle['retained']['observations'], base_trace)
+        expected_bundle = replay_bundle(base_bundle, base_trace, trace, capture)
+        if canonical(bundle) != canonical(expected_bundle):
+            raise ValueError('admission bundle differs from replayed derivation')
         result['pass'] = True
     except (KeyError, TypeError, ValueError, OSError) as exc:
         result['errors'].append(str(exc))

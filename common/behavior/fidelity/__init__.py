@@ -23,9 +23,9 @@ def validate_protocol(trace):
     return {'pass': not errors, 'checks_run': anthropic_messages.CHECKS if llms else [], 'errors': errors}
 
 
-def check_case(case, trusted_bases=None):
+def check_case(case, trusted_bases=None, bundle=None):
     protocol = validate_protocol(case['trace'])
-    derivation = verify_derivation(case, trusted_bases)
+    derivation = verify_derivation(case, trusted_bases, bundle if bundle is not None else case.get('provenance_bundle'))
     return {'id': case['id'], 'pass': protocol['pass'] and derivation['pass'],
             'protocol': protocol, 'derivation': derivation,
             'checks_run': protocol['checks_run'] + derivation['checks_run'],
@@ -33,11 +33,11 @@ def check_case(case, trusted_bases=None):
             'derivation_sha256': derivation.get('derivation_sha256')}
 
 
-def require_cases(cases, receipt_path, trusted_bases=None):
+def require_cases(cases, receipt_path, trusted_bases=None, bundles=None):
     """Persist every receipt, then fail closed before gold or prediction calls."""
     import json
     from pathlib import Path
-    rows = [check_case(case, trusted_bases) for case in cases]
+    rows = [check_case(case, trusted_bases, (bundles or {}).get(case['id'])) for case in cases]
     p = Path(receipt_path); p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(rows, indent=2) + '\n')
     if not rows or not all(row['pass'] for row in rows):
