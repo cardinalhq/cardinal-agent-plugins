@@ -92,6 +92,40 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(costs['qualification_amortized_per_execution']['cost_usd'], .02)
         self.assertIsNone(costs['steady_state_per_execution']['cost_usd'])
 
+    def test_semantic_repair_must_preserve_real_execution_fixture(self):
+        original = self.sdk.evaluate
+        def evaluate(candidate, trace):
+            return {**original(candidate, trace), 'trace_sha256':digest(trace),
+                    'audit':{'mechanical_status':'PASS','errors':[]}}
+        self.sdk.evaluate = evaluate
+        trace = {'trace_id':'fixture','signal':'MATCH'}
+        result = self.run_cycle(execution_regression={'trace':trace,'trace_sha256':digest(trace),
+                                                      'expected_verdict':'UNKNOWN'})
+        self.assertEqual(result['status'],'CANNOT_QUALIFY')
+        self.assertEqual(result['reason'],'repair_compile_budget_exhausted')
+        self.assertTrue((self.root/'cycle/regression-execution-1.json').exists())
+        self.assertNotIn('audit', self.splits)
+        self.assertEqual(Path(result['candidate']['source']).read_text(),'initial')
+
+    def test_disputed_fixed_gold_returns_executions_without_qualification_or_repair(self):
+        from compilation.retained_corpus import RetainedCorpusRejected
+        self.corpus.root = self.root/'corpus'
+        fixed = cases('retained')
+        for c in fixed:
+            c.update(review={'label':'UNKNOWN','reason':'open scope'},review_pass=False)
+        write(self.corpus.root/'retained-discovery-review.json', {'cases':fixed,
+            'failures':[{'id':fixed[0]['id'],'code':'FIXED_GOLD_DISAGREEMENT'}]})
+        def reject(*args,**kwargs):
+            raise RetainedCorpusRejected('disputed gold')
+        self.corpus.make = reject
+        result = self.run_cycle()
+        self.assertEqual(result['reason'],'retained_development_oracle_rejected')
+        observed = read(self.root/'cycle/rejected-development-executions.json')
+        self.assertEqual(len(observed),3)
+        self.assertTrue(all(not c['eligible_for_qualification'] for c in observed))
+        self.assertFalse((self.root/'cycle/qualification').exists())
+        self.assertEqual(self.role_calls,[])
+
     def test_failed_repair_keeps_previous_source_and_never_freezes(self):
         self.repair_source = 'broken'
         result = self.run_cycle()

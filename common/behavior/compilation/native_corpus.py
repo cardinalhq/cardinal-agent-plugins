@@ -10,7 +10,65 @@ import json
 from pathlib import Path
 
 from .diagnosis import citations
+from .llm import ModelProtocolError
 from .storage import digest, write
+
+
+class ReviewProtocolError(ValueError):
+    """The blind response cannot be interpreted as one judgment per case."""
+
+
+def validate_review_protocol(response, packet):
+    """Validate syntax and case identity without examining gold or evidence truth."""
+    if not isinstance(response, dict) or set(response) != {'reviews'} or not isinstance(response['reviews'], list):
+        raise ReviewProtocolError('response must contain only a reviews array')
+    fields = {'id', 'label', 'fidelity_pass', 'oracle_status', 'reason', 'citations'}
+    ids = []
+    for review in response['reviews']:
+        if not isinstance(review, dict) or set(review) != fields:
+            raise ReviewProtocolError('review fields do not match the required schema')
+        if not isinstance(review['id'], str):
+            raise ReviewProtocolError('case ID must be a string')
+        ids.append(review['id'])
+        if (review['label'] not in ('MATCH', 'NON_MATCH', 'UNKNOWN')
+                or type(review['fidelity_pass']) is not bool
+                or review['oracle_status'] not in ('JUSTIFIED', 'AMBIGUOUS')
+                or not isinstance(review['reason'], str)
+                or not isinstance(review['citations'], list)):
+            raise ReviewProtocolError('invalid review field type or enum')
+        for citation in review['citations']:
+            if (not isinstance(citation, dict) or set(citation) != {'ref', 'quote'}
+                    or not all(isinstance(citation[k], str) for k in ('ref', 'quote'))):
+                raise ReviewProtocolError('citation must contain string ref and quote')
+    expected = [c['id'] for c in packet['cases']]
+    if Counter(ids) != Counter(expected) or len(set(ids)) != len(ids):
+        raise ReviewProtocolError('case IDs must cover the exact input IDs once each; '
+                                  f'expected={expected!r}, received={ids!r}')
+
+
+def blind_review(model, name, instruction, packet, root, max_protocol_retries=2):
+    """Retry only wire failures; every call sees the identical, gold-free packet.
+
+    A valid adverse judgment returns immediately to the existing semantic
+    correction/quarantine path. Failed review text is retained locally, never
+    included in the retry request, so an invalid response cannot prime retries.
+    """
+    for retry in range(max_protocol_retries + 1):
+        call_name = name if retry == 0 else f'{name}-protocol-retry-{retry}'
+        record = {'call_name': call_name, 'protocol_attempt': retry,
+                  'packet_sha256': digest(packet), 'max_protocol_retries': max_protocol_retries}
+        try:
+            response = model.call(call_name, 'independent-native-corpus-review', instruction, deepcopy(packet))
+            record['response'] = response
+            validate_review_protocol(response, packet)
+        except (ModelProtocolError, ReviewProtocolError, json.JSONDecodeError) as exc:
+            write(Path(root) / f'{call_name}.json', {**record, 'status': 'PROTOCOL_FAILURE',
+                'error_type': type(exc).__name__, 'error': str(exc)})
+            if retry == max_protocol_retries:
+                raise ReviewProtocolError('blind review protocol retries exhausted; corpus quarantined') from exc
+        else:
+            write(Path(root) / f'{call_name}.json', {**record, 'status': 'SCHEMA_VALID'})
+            return response
 
 
 def validate_review(review, packet, index):
@@ -132,20 +190,21 @@ class NativeCorpus:
                 self.native_validate(c['trace'])
             review_packet = {'contract': self.contract, 'sources': self.snapshot['sources'],
                              'cases': [{'id': c['id'], 'trace': c['trace']} for c in cases]}
-            review = self.model.call(self.behavior + '-' + split + '-review-' + str(attempt),
-                'independent-native-corpus-review',
+            review = blind_review(self.model, self.behavior + '-' + split + '-review-' + str(attempt),
                 'Independently label each exact raw trace against the agent source and question contract. '
                 'You cannot see author gold/rationale, programs or predictions. Verify source fidelity, '
                 'actual tool schema/output possibilities, instructions, entity/temporal binding and '
                 'coverage. Quarantine ambiguous cases instead of forcing gold. Return {reviews:[{id,label,'
                 'fidelity_pass,oracle_status:"JUSTIFIED|AMBIGUOUS",reason,citations:[{ref,quote}]}]}. '
-                'Labels MATCH/NON_MATCH/UNKNOWN; exact nonempty quotes and JSON pointers into /cases/i/trace '
+                'Copy the exact case IDs from the input, each exactly once; do not invent, shorten, '
+                'renumber, omit or duplicate IDs. Labels MATCH/NON_MATCH/UNKNOWN; exact nonempty '
+                'quotes and JSON pointers into /cases/i/trace '
                 'are required for each case. Additional /sources/ citations are allowed for policy and '
                 'fidelity checks; never cite another case. JUSTIFIED means the selected label is justified, '
                 'including UNKNOWN when a material premise is demonstrably missing. AMBIGUOUS means '
                 'the correct label itself is uncertain, not merely that the underlying behavior is '
                 'unresolved. Missing support in an incomplete trace is not established lack of support.',
-                review_packet)
+                review_packet, self.root)
             reviews = {r['id']: r for r in review['reviews']}
             for i, c in enumerate(cases):
                 r = reviews.get(c['id'], {})

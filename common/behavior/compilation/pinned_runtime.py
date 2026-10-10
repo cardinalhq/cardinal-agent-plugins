@@ -5,6 +5,7 @@ generated program. No SDK declarations or semantic APIs are duplicated here.
 """
 from pathlib import Path
 import importlib
+import inspect
 import json
 import sys
 
@@ -46,7 +47,18 @@ class PinnedRuntime:
     def documentation(self):
         self.verify()
         from behavior_runtime.programs import sdk_contract
-        return sdk_contract()
+        import behavior_sdk
+        # Signatures come from the verified installed artifact, never an API mirror.
+        names = ('TraceView.select', 'EventSelection.available_before', 'EvidenceSet.from_events',
+                 'Judge.preflight', 'Judge.decide', 'Recorder.unknown', 'record_decision', 'evidence')
+        signatures = {}
+        for name in names:
+            target = behavior_sdk
+            for part in name.split('.'):
+                target = getattr(target, part, None)
+            if target is not None:
+                signatures[name] = str(inspect.signature(target))
+        return {**sdk_contract(), 'installed_signatures': signatures}
 
     def documentation_text(self):
         return self.documentation()['documentation']

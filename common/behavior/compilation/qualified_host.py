@@ -5,7 +5,7 @@ instance. There is deliberately no certificate-upload or caller-identity route.
 """
 import secrets
 import threading
-from .storage import read, write
+from .storage import read, write, digest
 from .files import private_json
 
 
@@ -40,6 +40,50 @@ class QualifiedHost:
             with self._work_lock:
                 return self._dispatch(principal, operation, payload)
         return self._dispatch(principal, operation, payload)
+
+    def poll_completeness(self, qualified_ids):
+        """Ordinary operator-owned polling through existing qualified execution.
+
+        Enrollment IDs are private host configuration. Every trace still passes
+        active qualification, immutable identity and mechanical provenance gates.
+        One incomplete transport cannot prevent other pending sources running.
+        """
+        store = self.completeness_store
+        admission = self.completeness_admission
+        results = []
+        for source_id in store.enumerate_pending():
+            source = None
+            try:
+                source = store.load_source(source_id)
+                qualified_id = qualified_ids.get(source['agent_id'])
+                if qualified_id is None:
+                    continue
+                with self._work_lock:
+                    record = self.registry.inspect(qualified_id)
+                    if record['agent_id'] != source['agent_id']:
+                        raise ValueError('configured qualification agent mismatch')
+                    retained = admission.load_retained(source_id, source)
+                    population = dict(traces=[retained['trace']], synthetic=False, exclusions=[],
+                        selection=dict(purpose='population', execution_ids=[source_id],
+                            native_receipts=[retained['transport']], source_sha256=digest(source)))
+                    results.append(self.registry.execute(qualified_id, population))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                row = dict(execution_id=source_id, status='UNRECONCILED', actual='UNKNOWN',
+                    verdict='UNKNOWN', sdk_executed=False, coverage_current=False,
+                    reason=type(exc).__name__ + ': ' + str(exc))
+                # Record incomplete/crashed executions durably even when no
+                # native event exists yet. This is a coverage-unavailable
+                # UNKNOWN, never a claimed SDK/JEV execution receipt.
+                private_json(self.registry.root / 'unreconciled' / (digest(source_id) + '.json'), row)
+                if source is not None:
+                    try:
+                        contract = store.load_contract(source['agent_id'])
+                        row['published'] = store.publish_result(source_id,
+                            dict(source_sha256=digest(source), contract_sha256=digest(contract)), row)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        row['published'] = False
+                results.append(row)
+        return results
 
     def _dispatch(self, principal, operation, payload):
         self.authorize(principal, operation)

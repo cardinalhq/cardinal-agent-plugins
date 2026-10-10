@@ -8,14 +8,15 @@ from pathlib import Path
 import time
 from .corpus import compact_trace
 from .diagnosis import Diagnoser
-from .engine import Policy, Qualifier, freeze, cost_summary
+from .engine import Policy, Qualifier, RepairFailure, freeze, cost_summary
 from .storage import read, write, digest
 
 
 def compile_and_qualify(root, *, source, plan, description, context, sdk,
                         corpus, model, sdk_documentation, jev_config, identity,
                         dependencies, policy=Policy(), discovery_per_label=3,
-                        challenge_per_label=2, usage_rows=lambda: []):
+                        challenge_per_label=2, usage_rows=lambda: [], initial_candidate=None,
+                        execution_regression=None):
     """One explicit offline cycle; only a passing final version gets a bundle.
 
     sdk.compile must preserve SDK source/version binding and raise RepairFailure
@@ -36,7 +37,7 @@ def compile_and_qualify(root, *, source, plan, description, context, sdk,
     started=time.monotonic()
     initial=None
     try:
-        initial=sdk.compile(b+'-initial',source,plan,description,context)
+        initial=initial_candidate or sdk.compile(b+'-initial',source,plan,description,context)
         write(root/'initial.json',initial)
         discovery=corpus.make('discovery',discovery_per_label)
         families=[c['family'] for c in discovery]
@@ -81,7 +82,16 @@ def compile_and_qualify(root, *, source, plan, description, context, sdk,
                  'sdk_documentation':sdk_documentation,'jev_config':jev_config,
                  'actual_system_prompt':corpus.system,'counterexamples':feedback,'compilation_failures':compilation_feedback,
                  'rejected_proposals':[c['rejected_proposal'] for c in counterexamples if 'rejected_proposal' in c]})
-            return sdk.compile(f'{b}-repair-{revision}',response['udf_source'],response['compile_plan'],description,context)
+            proposal = sdk.compile(f'{b}-repair-{revision}',response['udf_source'],response['compile_plan'],description,context)
+            if execution_regression:
+                from .execution_authoring import execution_regression_errors
+                observation = sdk.evaluate(proposal, execution_regression['trace'])
+                write(root/f'regression-execution-{revision}.json', observation)
+                errors = execution_regression_errors(observation, execution_regression)
+                if errors:
+                    raise RepairFailure({'stage':'execution-regression','errors':errors,
+                        'receipt':str(root/f'regression-execution-{revision}.json')})
+            return proposal
         def audit():
             return corpus.make('audit',policy.audit_per_label,excluded_families=families)
         result=Qualifier(root/'qualification',policy,sdk.evaluate,challenge,repair,audit,diagnose=diagnose).run(initial,discovery)
@@ -93,6 +103,27 @@ def compile_and_qualify(root, *, source, plan, description, context, sdk,
                           key=lambda p:int(p.stem.split('-')[-1]))
         current=read(candidates[-1]) if candidates else initial
         result={'status':'CANNOT_QUALIFY','reason':f'{type(exc).__name__}: {exc}','candidate':current}
+        # A disputed oracle cannot authorize code repair. Still return actual
+        # executions on the unchanged development traces as concrete diagnostic
+        # counterexamples; these rows never enter qualification or promotion.
+        from .retained_corpus import RetainedCorpusRejected
+        reviewed_path = Path(getattr(corpus, 'root', root))/'retained-discovery-review.json'
+        if isinstance(exc, RetainedCorpusRejected) and current and reviewed_path.exists():
+            reviewed = read(reviewed_path)
+            if all(c.get('review') for c in reviewed.get('cases', [])):
+                diagnostics = []
+                for case in reviewed['cases']:
+                    observation = sdk.evaluate(current, case['trace'])
+                    diagnostics.append({'id':case['id'],'family':case['family'],
+                        'retained_expected':case['expected'],'independent_review':case['review'],
+                        'review_pass':case['review_pass'],'execution':observation,
+                        'eligible_for_qualification':False})
+                write(root/'rejected-development-executions.json',diagnostics)
+                result.update(reason='retained_development_oracle_rejected',
+                    semantic_counterexamples=reviewed['failures'],
+                    development_execution_receipt=str(root/'rejected-development-executions.json'),
+                    repair_blocked='Fixed development gold or fidelity was not independently justified. '
+                    'No code repair may optimize toward disputed gold; hidden qualification was not invoked.')
     result['wall_latency_ms']=(time.monotonic()-started)*1000
     write(root/'outcome.json',result)
     costs=usage_rows()

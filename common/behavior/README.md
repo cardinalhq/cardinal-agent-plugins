@@ -252,7 +252,12 @@ least one correction across all accumulated development cases. Rejected repairs
 consume budget and preserve the incumbent. The hidden audit is generated only
 after selection and must meet the unchanged gate before freezing. SDK versions
 are not interchangeable: prompts use the supplied SDK's actual CompilePlan
-schema (0.1.1 uses version 1); compile, qualify, freeze and execution use one pin.
+schema (0.2.0 provides version 2 and retains version 1 compatibility); compile,
+qualify, freeze and execution use one pin.
+Set `sdk_version` in the operator configuration (for example, `"0.2.0"`) to
+require a particular release. A mismatched runtime fails before any model call.
+Install the release's canonical artifact and a compatible host, then regenerate
+the runtime manifest; changing the version label alone does not upgrade the SDK.
 
 `DEVELOPMENT_ACCEPTED` is the existing teaching/regression acceptance result.
 It is never a qualification. `QualifiedRegistry.issue` is an internal host-worker
@@ -313,3 +318,155 @@ same request, policy, source, telemetry and SDK/JEV identities. Only local expor
 read-latency metadata may differ; its new measurement is retained separately.
 Recovery refuses any prior job whose development/qualification directory exists,
 so this mechanism cannot reset repair budgets or rerun a failed hidden audit.
+
+Authoring admission rejects statically unconditional exception/assertion paths,
+aborting helpers, unconditional loops and empty entrypoint placeholders before
+the SDK compiler can issue a candidate. Conditional runtime errors still
+propagate under the unchanged SDK semantics. The author receives concrete
+compiler errors, canonical SDK examples and signatures inspected from the
+verified installed SDK. At most two authoring repairs are permitted before any
+corpus or qualification work. These attempts are distinct from, and do not
+increase, the existing qualification repair budget.
+
+For an explicitly requested fresh authoring experiment, operator configuration
+may set `retained_authoring` to `{job, files}` with exact SHA-256 hashes for
+`request.json`, `discovery-input.json`, `discovery.json`, `contract.json`,
+`generated.json`, `identity.json` and `outcome.json`. Source, telemetry, question,
+scope, policy and SDK/JEV identity must match, and the old job must have failed
+before qualification began. Only discovery, contract and program inputs are
+reused. Original files remain untouched and prior cases, reviews and scores
+never enter the authoring loop.
+
+Contracts remain frozen unless the retained non-executable placeholder reaches
+the narrow SDK implementability check. For the recognized exact semantic
+decision-count obligation, verified SDK evidence must establish the missing
+extraction interface. One model-authored replacement and one independent review
+may disclose unavailable exact counts/rates; every other contract field and the
+original question must remain unchanged. Span counts cannot substitute for
+semantic decision counts. Population enumeration and source applicability remain
+host prerequisites, and convenience samples cannot establish population rates.
+
+Native corpus review uses a strict JSON schema and exact case-ID bijection.
+Transport, malformed JSON and schema failures receive at most two retries on
+identical blind packets; raw responses and failures are retained. Valid adverse
+reviews use the existing semantic correction/quarantine path. Neither protocol
+retries nor authoring feedback change gold labels or disclose held-out cases to
+program authors.
+
+Recovery from a retained failed authoring attempt can use
+`retained_authoring.mode = "failed_attempt"` with hashed inputs and
+`freeze_contract = true`. Literal proposition and frame bounds are checked before
+the SDK compiler. Bounds-only feedback requests replacements for precisely the
+invalid constants; the host preserves all other Python AST and compile-plan
+content. The authoring budget remains two repairs. Every accepted authoring
+candidate must then return a real SDK verdict with valid provenance before
+development starts.
+
+An operator-owned `execution_fixture` binds a successful SDK/JEV receipt to its
+source, contract, trace and runtime identity. The controller verifies the fixture
+and executes new candidates against that trace; the fixture source is not a
+replacement candidate or exposed to the repair model. Semantic repairs must also
+pass this execution regression before entering the unchanged promotion gate.
+
+`retained_development` binds a fixed discovery corpus by path and SHA-256. A fresh
+blind reviewer receives only raw cases, source and contract. Any gold disagreement,
+source-fidelity failure or ambiguous oracle quarantines the whole retained corpus.
+The controller returns real SDK executions and specific review counterexamples,
+without relabeling cases or repairing code toward disputed gold. Challenges and
+hidden qualification retain their existing generation, review and gate policy;
+only a qualified, frozen executable can reach population execution.
+
+For an explicitly exposed development restoration, `development_teaching` accepts
+an operator-pinned `{path, sha256}` packet with the frozen contract identity,
+independently reviewed cases, a pinned prior development baseline and at most
+eight teaching IDs. The lifecycle reuses the canonical `TeachingExample`,
+`Compiler.compile` and its existing `max_revisions` feedback loop with a fresh
+model backend; it saves the compiler's final source and plan. This opt-in mode
+returns after the exposed development cases and cannot issue a qualification or
+run the hidden audit or population. It does not change qualification thresholds.
+
+Keep observed-decision labels separate from execution verdicts. Supported actions
+are explicit NON_MATCH teaching annotations, but an incomplete execution still
+expects UNKNOWN. Never mark telemetry complete to obtain a negative teaching
+label. Positive-witness questions may use SDK `Evidence(ref, field, text)` with
+exact original-field substrings selected at structural boundaries. Preserve
+material dynamic context, provenance and time/entity bindings; disclose omitted
+context and never silently truncate or reserialize evidence. A bounded NO does
+not certify whole-execution support. The restoration gate requires an actual
+JEV-backed recovered MATCH, provenance PASS and no regression of a previously
+correct development case; it remains distinct from qualification admission.
+
+Generic execution completeness is a host evidence-admission concern in
+`compilation/completeness.py`, beside the existing runtime and qualification
+registry. It does not infer behavioral eligibility, authorization or support.
+`native_completeness.normalize_native` reuses the installed SDK native decoder;
+missing sidecars preserve the original trace for positive detection.
+
+An enrolled `otel-execution-contract-v1` pins organization/service/source/build
+and recorder identities, an opaque versioned `scope_id`, all
+`OBSERVATION_FIELDS`, OTel-to-profile `kind_mapping`, `sequence_policy`
+(`dense_zero_based` or `unique_nonnegative`), and approved closure modes. An
+external root parent requires `root_parent_policy=external_boundary`. A
+reviewed `guard_identity` is required for `enforced_seal`; `process_exit`
+instead requires its custody receipt. Source adapters must authenticate these
+facts from recorder/deployment custody, never request attributes.
+
+The `otel-execution-source-v1` envelope carries execution attempt identity
+(distinct from request/group identity), positive monotonic `generation`, opaque
+immutable `revision`, declared capture/loss accounting, every original start
+and ended observation, and a seal binding the inventory digest and revision.
+An enforced seal requires scope exhaustion and rejection of late public work.
+Source mutation/invalidation increments its generation; a signed independent
+high-water mark prevents rollback even after a failed loader or verifier.
+
+The `otel-execution-native-v1` envelope retains the original SDK trace and exact
+decoded observations, immutable content-addressed catalogs, and an exhaustive
+execution census bound to those catalogs and its half-open nanosecond interval.
+Status, parentage, sequence, timestamps, body/event/link digests and explicit
+loss/redaction/truncation must reconcile. Missing proof stays UNVERIFIED; empty
+gaps, finality flags and elapsed quiet time do not establish a source seal.
+
+`CompletenessAdmission` uses an existing `QualifiedRegistry` private HMAC
+issuer and atomic private receipt files. Configured trusted source/native/
+contract loaders are mandatory. Admission strips caller `execution_completeness`
+attributes, reloads current source/contract, and requires an atomic
+`publish_if_current(execution_id, source, receipt)` callback before attaching
+host-regenerated evidence through the unchanged SDK attribute path. `inspect`
+is historical only. `evaluate` rechecks source and contract after the SDK run;
+its result publisher must atomically bind both SHA-256 identities. Invalid
+coverage blocks negative execution admission while retaining independent MATCH.
+`run_pending` is a single poll for the existing host worker; its enumerator
+supplies opaque execution IDs from trusted durable storage.
+
+`QualifiedRegistry(..., coverage_execute=...)` is the existing qualified
+execution hook for this boundary. It is host configuration, never an API
+argument. Enrollment of live loaders and automatic source collection remains
+deployment work; merely calling the pure verifier does not establish ordinary
+production ingestion or qualification.
+
+The original retained `attrs.name` binds the source span name. The SDK event
+name follows the existing native profile projection (`tool_name`, then `name`,
+then `span_name`, then empty text), independently of behavioral eligibility.
+Source occurrence sequence binds `attrs.cardinal_execution_sequence`; SDK
+`event.seq` instead binds the sorted `(chq_tsns, span_id)` native chronology.
+Source recorder order need not equal retained chronological event order.
+
+The optional `build` configuration `execution_completeness` wires this boundary
+into the existing qualified execution host. Configure `dsn_env`, `table`, optional
+`schema`/`key_column`/`value_column`, `native_command` and `native_archive`.
+`PostgresCompletenessStore` reads producer source records under
+`cardinal.execution-source.v1/<encoded execution ID>/source` and operator-enrolled
+contracts under `cardinal.execution-contract.v1/<encoded agent ID>/contract`.
+Source/deployment/recorder enrollment requires immutable digest identities;
+sentinel defaults cannot enroll. The database role and table permissions are
+operator trust configuration. Receipt/result publication locks both source and
+contract records in one transaction, compares their canonical digests, and stores
+its durable JSON publication before releasing those locks.
+
+The returned host exposes `completeness_admission` and `completeness_store` for
+its existing worker to call `run_pending(store.enumerate_pending, run_sdk,
+store.publish_result)`. Scheduling and per-agent candidate selection remain host
+integration responsibilities. Enumeration uses a durable transaction-locked round-robin key cursor and a
+bounded SQL batch, resuming across host restarts and wrapping at the end.
+Operators must still configure source retention and polling intervals. No database migration or background
+thread is started by importing the generic adapter.

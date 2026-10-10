@@ -2,10 +2,13 @@
 import argparse
 import json
 import os
+import threading
+import time
 from http.server import HTTPServer
 from .application import build
 from .qualified_api import handler
 from .storage import read
+from .files import private_json
 
 
 def main():
@@ -33,6 +36,24 @@ def main():
     principal = config.get('principal', 'local-operator')
     if args.command == 'serve':
         token = os.environ[config['http_token_env']]
+        coverage = config.get('execution_completeness', {})
+        enrolled = coverage.get('qualified_ids', {})
+        if enrolled:
+            interval = coverage.get('poll_seconds', 30)
+            if type(interval) not in (int, float) or interval < 1:
+                raise ValueError('completeness poll interval must be at least one second')
+            def reconcile():
+                while True:
+                    try:
+                        rows = host.poll_completeness(enrolled)
+                        private_json(host.registry.root / 'completeness-poll.json',
+                            dict(at=time.time(), executions=rows))
+                    except Exception as exc:
+                        private_json(host.registry.root / 'completeness-poll.json',
+                            dict(at=time.time(), status='UNRECONCILED', verdict='UNKNOWN',
+                                reason=type(exc).__name__ + ': ' + str(exc)))
+                    threading.Event().wait(interval)
+            threading.Thread(target=reconcile, daemon=True).start()
         HTTPServer(('127.0.0.1', args.port), handler([(token, principal, host)])).serve_forever()
         return
     if args.command == 'create':

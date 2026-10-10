@@ -28,7 +28,7 @@ class AutonomousTests(unittest.TestCase):
             if role=='source-linked-contract':return {'description':'action evidence','evidence_requirements':['authorization'],'clauses':[{'kind':k,'statement':k,'citations':[citation]} for k in ['MATCH','NON_MATCH','UNKNOWN','candidate_selection','entity_binding','temporal_scope','evidence_requirements']]}
             return {'udf_source':'model generated source','compile_plan':{'schema_version':2}}
         self.model=SimpleNamespace(call=call)
-        self.runtime=SimpleNamespace(verify=lambda:None,documentation=lambda:{'canonical':'sdk'},documentation_text=lambda:'exact SDK',context=lambda c,s:json.dumps(c),sdk=lambda *a:object(),identity=lambda:digest('sdk'),jev_config={'model':'pinned'},dependencies=lambda c:{},usage_rows=lambda *a:[],executions=[])
+        self.runtime=SimpleNamespace(verify=lambda:None,documentation=lambda:{'canonical':'sdk'},documentation_text=lambda:'exact SDK',context=lambda c,s:json.dumps(c),sdk=lambda *a:SimpleNamespace(compile=lambda *a:{'version':'v'},evaluate=lambda candidate,trace:{'actual':'UNKNOWN','trace_sha256':digest(trace),'mechanical_pass':True,'audit':{'mechanical_status':'PASS'}}),identity=lambda:digest('sdk'),jev_config={'model':'pinned'},dependencies=lambda c:{},usage_rows=lambda *a:[],executions=[])
         self.lifecycle=AutonomousLifecycle(self.root/'jobs',self.catalog,self.model,self.runtime,lambda *a:object())
 
     def test_two_argument_entry_generates_all_inputs_and_invokes_existing_workflow(self):
@@ -51,6 +51,24 @@ class AutonomousTests(unittest.TestCase):
         from compilation.pinned_runtime import PinnedRuntime
         metrics=PinnedRuntime.metrics({'verdict':'ERROR','jev_receipts':[]},15)
         self.assertIsNone(metrics['input_tokens']);self.assertIsNone(metrics['provider_attempts'])
+
+    def test_required_sdk_version_rejects_wrong_runtime_before_model_setup(self):
+        from compilation.application import build
+        config={'output_dir':str(self.root/'host'),'runtime':'installed','sdk_version':'0.2.0'}
+        runtime=SimpleNamespace(documentation=lambda:{'sdk_version':'0.1.1'})
+        with patch('compilation.application.PinnedRuntime',return_value=runtime), patch('compilation.application.Model') as model:
+            with self.assertRaisesRegex(ValueError,'required behavior-sdk 0.2.0; pinned runtime uses 0.1.1'):
+                build(config)
+            model.assert_not_called()
+
+    def test_required_sdk_version_accepts_matching_runtime(self):
+        from compilation.application import build
+        config={'output_dir':str(self.root/'host'),'runtime':'installed','sdk_version':'0.2.0','agents':{}}
+        runtime=SimpleNamespace(documentation=lambda:{'sdk_version':'0.2.0'},run_frozen=lambda *a:None)
+        with patch('compilation.application.PinnedRuntime',return_value=runtime), patch('compilation.application.Model') as model:
+            host=build(config)
+            self.assertIs(host.lifecycle.runtime,runtime)
+            model.assert_called_once()
 
     def test_blind_review_allows_source_citations_but_requires_own_trace(self):
         packet={'cases':[{'trace':{'text':'observed'}},{'trace':{'text':'another'}}],

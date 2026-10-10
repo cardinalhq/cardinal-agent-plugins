@@ -55,15 +55,31 @@ def build(config):
     output = Path(config['output_dir'])
     runtime = PinnedRuntime(config['runtime'], output / 'model-calls',
                             config.get('runner_module', 'sandbox_runner'))
+    expected_sdk = config.get('sdk_version')
+    if expected_sdk is not None:
+        actual_sdk = runtime.documentation()['sdk_version']
+        if expected_sdk != actual_sdk:
+            raise ValueError(f'required behavior-sdk {expected_sdk}; pinned runtime uses {actual_sdk}')
     model = Model(output / 'model-calls', config.get('model', 'gpt-6-astra'),
                   config.get('model_timeout_seconds', 600), config.get('model_reuse_from'))
     telemetry = RetainedTelemetry(config['agents'])
     catalog = AgentCatalog(config['agents'], telemetry)
     policy = Policy(**config.get('policy', {}))
+    execution_regression = None
+    if config.get('execution_fixture'):
+        from .execution_fixture import load_execution_fixture
+        execution_regression = load_execution_fixture(config['execution_fixture'], runtime)
+    def corpus_factory(root, behavior, contract, snapshot, model):
+        if config.get('retained_development'):
+            from .retained_corpus import RetainedCorpus
+            return RetainedCorpus(root, behavior, contract, snapshot, model, runtime.validate_trace,
+                                  retained_discovery=config['retained_development'])
+        return NativeCorpus(root, behavior, contract, snapshot, model, runtime.validate_trace)
     lifecycle = AutonomousLifecycle(output / 'jobs', catalog, model, runtime,
-        lambda root, behavior, contract, snapshot, model: NativeCorpus(
-            root, behavior, contract, snapshot, model, runtime.validate_trace), policy=policy,
-        discovery_reuse_job=config.get('discovery_reuse_job'))
+        corpus_factory, policy=policy,
+        discovery_reuse_job=config.get('discovery_reuse_job'),
+        retained_authoring=config.get('retained_authoring'), execution_regression=execution_regression,
+        development_teaching=config.get('development_teaching'))
     def observe(agent_id, expected):
         # Artifact identities are checked against private frozen bytes by registry;
         # environmental identities are freshly computed from actual host inputs.
@@ -72,8 +88,25 @@ def build(config):
                     'max_repairs': policy.max_repairs, 'audit_per_label': policy.audit_per_label,
                     'lifetime_executions': policy.lifetime_executions})}
     registry = QualifiedRegistry(output / 'qualified', output / 'jobs', observe, runtime.run_frozen)
+    coverage = config.get('execution_completeness')
+    if coverage:
+        import os
+        import psycopg
+        from .completeness_postgres import PostgresCompletenessStore
+        # Configured transport callable is operator-owned, never question input.
+        store = PostgresCompletenessStore(lambda: psycopg.connect(os.environ[coverage['dsn_env']]),
+            table=coverage['table'], schema=coverage.get('schema', 'public'),
+            key_column=coverage.get('key_column', 'key'), value_column=coverage.get('value_column', 'value'))
+        from .native_completeness import NativePopulationLoader
+        load_retained = coverage.get('load_retained') or NativePopulationLoader(
+            coverage['native_command'], coverage['native_archive'], timeout=coverage.get('native_timeout', 180))
+        completeness_admission = store.bind(registry, load_retained)
     principal = config.get('principal', 'local-operator')
     def authorize(actual, operation):
         if actual != principal:
             raise PermissionError('qualified host principal mismatch')
-    return QualifiedHost(lifecycle, registry, catalog, authorize)
+    host = QualifiedHost(lifecycle, registry, catalog, authorize)
+    if coverage:
+        host.completeness_store = store
+        host.completeness_admission = completeness_admission
+    return host

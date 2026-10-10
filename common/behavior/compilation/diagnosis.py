@@ -169,7 +169,15 @@ rewrite Python automatically. ORACLE_AMBIGUITY rejects the fixture; insufficient
 evidence abstains. You may always conclude NO_CODE_REPAIR_JUSTIFIED. Explain a
 narrow source change only when evidence warrants it; do not optimize for agreement.
 If independent oracle is ambiguous or disagrees with retained gold, classify
-ORACLE_AMBIGUITY (or INSUFFICIENT_EVIDENCE) and authorize no code repair.'''
+ORACLE_AMBIGUITY (or INSUFFICIENT_EVIDENCE) and authorize no code repair.
+Packet overflow is not itself proof that bounded original evidence is unavailable.
+The supplied SDK accepts Evidence(ref, field, text) when text is a verbatim substring
+of that original field. Inspect structural message/argument/result boundaries and
+source-linked rules before concluding no repair is possible. A positive witness
+can prove an existential MATCH without execution-wide coverage. Require sufficient
+entity/time/authority context for that witness; never blindly truncate, reconstruct
+or reserialize evidence, infer absence from omitted context, or weaken NON_MATCH
+coverage. Distinguish supported observed actions from a fully covered execution.'''
 
 
 class Diagnoser:

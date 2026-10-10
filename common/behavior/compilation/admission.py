@@ -21,11 +21,15 @@ from .storage import canonical, digest, filehash, read, write
 
 
 class QualifiedRegistry:
-    def __init__(self, root, jobs, observe, run_sdk):
+    def __init__(self, root, jobs, observe, run_sdk, *, coverage_execute=None):
         self.root, self.jobs = Path(root).resolve(), Path(jobs).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
         self.observe, self.run_sdk = observe, run_sdk
+        # Optional trusted host integration; never a request-supplied callback.
+        # The configured adapter resolves the source execution from original
+        # telemetry and invokes generic completeness admission + result CAS.
+        self.coverage_execute = coverage_execute
         key = self.root / 'issuer.key'
         with program_lock(self.root / 'registry'):
             if not key.exists():
@@ -194,7 +198,8 @@ class QualifiedRegistry:
                 if trace['trace_id'] in seen:
                     raise ValueError('duplicate population trace')
                 seen.add(trace['trace_id'])
-                row = self.run_sdk(bundle, cert, source, trace)
+                sdk_run = lambda prepared: self.run_sdk(bundle, cert, source, prepared)
+                row = self.coverage_execute(trace, sdk_run) if self.coverage_execute else sdk_run(trace)
                 if row.get('actual', row.get('verdict')) not in ('MATCH', 'NON_MATCH', 'UNKNOWN', 'ERROR'):
                     raise ValueError('unsupported SDK verdict')
                 if row.get('mechanical_pass') is not True:
