@@ -23,7 +23,7 @@ def collect_sample(queue, trace, certificate_sha256, reason):
 
 
 def requalify(root, parent_bundle, observed, reason, initial, discovery, policy,
-              evaluate, challenge, repair, audit, dependencies):
+              evaluate, challenge, repair, audit, dependencies, *, diagnose=None):
     """Run a fresh bounded loop, export only on pass, retain immutable parent lineage.
 
     observed fingerprints must be independently computed from current inputs. All role
@@ -43,7 +43,7 @@ def requalify(root, parent_bundle, observed, reason, initial, discovery, policy,
              'changed_fields':requalification_reasons(parent,observed),
              'requested_at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
     write(root/'request.json',request)
-    result=Qualifier(root/'qualification',policy,evaluate,challenge,repair,audit).run(initial,discovery)
+    result=Qualifier(root/'qualification',policy,evaluate,challenge,repair,audit,diagnose=diagnose).run(initial,discovery)
     write(root/'outcome.json',result)
     if result['status']=='QUALIFIED':
         current={k:v for k,v in observed.items() if k!='program'}

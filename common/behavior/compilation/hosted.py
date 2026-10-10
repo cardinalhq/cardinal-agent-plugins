@@ -250,6 +250,7 @@ class Authoring:
             state = history.read()
             report = history.check(diagnostic_version, state)
             result = self._accept_checked(diagnostic_version, program)
+            result['qualification_status'] = 'DEVELOPMENT_ACCEPTED'
             program['regression_report'] = report
             private_json(path, program)
             history.accepted(diagnostic_version, report, state)

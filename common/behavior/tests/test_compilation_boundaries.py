@@ -24,14 +24,13 @@ class CompilationBoundaryTests(unittest.TestCase):
         for name, expected in self.provenance['production_methods_source_sha256'].items():
             self.assertEqual(sha(ast.get_source_segment(source, methods[name])), expected, name)
 
-    def test_semantic_discovery_review_and_repair_instructions_are_unchanged(self):
+    def test_semantic_discovery_and_review_instructions_are_unchanged(self):
         tree = ast.parse((PACKAGE / 'corpus.py').read_text())
         instruction = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
             and any(isinstance(t, ast.Name) and t.id == 'instruction' for t in n.targets))
         self.assertEqual(sha(ast.dump(instruction, include_attributes=False)),
                          self.provenance['corpus_instruction_ast_sha256'])
-        for filename, role, key in [('corpus.py', 'blind-fidelity-and-gold-reviewer', 'review'),
-                                     ('workflow.py', 'program-repair', 'repair')]:
+        for filename, role, key in [('corpus.py', 'blind-fidelity-and-gold-reviewer', 'review')]:
             tree = ast.parse((PACKAGE / filename).read_text())
             text = next(n.args[2].value for n in ast.walk(tree)
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'call'

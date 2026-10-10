@@ -91,7 +91,8 @@ production execution; it inherits the authoring bridge from this package.
 | --- | --- |
 | `hosted.py` | SDK discovery, deployed compile/test/accept, complete-suite replay |
 | `regression.py` | Persistent development cases, receipt checks, accepted incumbent |
-| `workflow.py` | Explicit offline compile → challenge → repair → qualify → freeze cycle |
+| `workflow.py` | Explicit offline compile → challenge → diagnose → repair → qualify → freeze cycle |
+| `diagnosis.py` | Independent raw-trace adjudication, cited diagnosis, integrity validation and intervention routing |
 | `engine.py` | Bounded repair, provisional promotion, complete regressions, one hidden audit, freeze and amortized cost |
 | `corpus.py` | Source-shaped corpus rendering and independent blind fidelity/gold review |
 | `llm.py` | Optional stateless offline model transport and usage receipts |
@@ -105,8 +106,9 @@ launcher. No component imports an experiment checkout or assumes a developer's
 workspace layout. Historical `behavioral-program-qualification` and
 `behavioral-compilation-correctness` artifacts remain sealed research records;
 future implementation changes belong here. `compilation/provenance.json`
-records the migrated source hashes and unchanged semantic instructions/runtime
-methods. This source consolidation does not itself publish or install a release.
+records the historical migrated source and instruction hashes. Discovery/review
+instructions and production runtime methods remain unchanged; diagnosis and targeted
+repair prompting intentionally supersede the historical repair instruction. This source consolidation does not itself publish or install a release.
 
 For a new offline qualification cycle, import
 `compilation.workflow.compile_and_qualify` with `common/behavior` (or the installed
@@ -118,7 +120,33 @@ evidence auditor and identity verifier; it never defines replacement SDK APIs.
 The provided corpus renderer supports the original four-span native episode
 shape. Supply its native/source schema validators explicitly, or inject a
 reviewed corpus provider for another trace shape. No permissive schema fallback
-is provided. The repair and review semantic instructions are unchanged.
+is provided. Corpus discovery/review instructions and the behavioral contract are unchanged.
+
+Before any repair, `Diagnoser` uses a fresh raw-trace-only review with no source,
+prediction, prior rationale or labels, then a separate execution diagnosis context.
+The persisted diagnosis includes expected/actual verdicts, candidate/entity/time
+scope, the earliest unsupported inference, exact JSON-pointer citations and quotes,
+actual JEV propositions/packets/answers, mechanical failures, and a permitted intervention.
+The controller validates source/trace/execution/contract hashes, literal citations,
+gold consistency and receipt examination before invoking the repair callback.
+These checks prove artifact integrity, not semantic correctness of the diagnosis.
+
+Candidate selection, binding, temporal logic, coverage and composition allow a
+small Python repair; a defective JEV proposition allows proposition repair; invalid
+SDK usage allows SDK-compatible repair. An incorrect answer to an adequate JEV
+proposition receives independent semantic re-evaluation and no automatic code
+rewrite. Ambiguous gold quarantines the fixture; insufficient evidence or explicit
+`NO_CODE_REPAIR_JUSTIFIED` stops the cycle with the incumbent preserved. No reviewed
+counterexample subsequently counts as independent audit evidence.
+
+Direct `Qualifier` and `lifecycle.requalify` callers must inject `diagnose` if repairs
+are needed; omission fails closed before a repair request. Compile failures consume
+the same bounded budget. A rejected runtime candidate stays separate feedback;
+subsequent diagnoses concern the incumbent. Each repair request includes one justified
+counterexample, its diagnosis, relevant source, rejection feedback and exact SDK
+interfaces, while the promotion gate checks every accumulated development case.
+Promotion requires execution/provenance validity, no lost correct cases, and at least
+one improved case; a no-op cannot replace the incumbent.
 
 `compile_and_qualify` returns `QUALIFIED` only after every development case passes
 and a previously untouched, independently reviewed audit passes for MATCH,
@@ -128,7 +156,7 @@ bundle; incomplete or failed cycles retain their evidence and return
 `CANNOT_QUALIFY`. The frozen bundle is not automatically accepted or deployed by
 the hosted API. An application supplies its existing trusted admission mechanism.
 
-Qualification costs include authorship, review, challenge, repair, compilation
+Qualification costs include authorship, review, diagnosis, challenge, repair, compilation
 and SDK test executions. Supply their actual usage rows; unavailable prices or
 usage remain unknown. `cost_summary` keeps them separate from steady-state SDK/JEV
 execution and amortizes qualification cost as `Q / expected_lifetime_executions`.
@@ -178,3 +206,110 @@ It executes the three retained failing programs against their complete retained
 development suites using this package's SDK adapter and controller, forbids model
 backend calls, and uses an explicit deterministic incumbent stand-in. It is a
 mechanical regression test, not another qualification experiment.
+
+## Question-first lifecycle and qualified execution
+
+`compilation.autonomous.AutonomousLifecycle.start(agent_id, behavioral_question,
+time_range=None)` generates the contract, Python and CompilePlan itself. The
+operator registers authoritative instructions, implementation/tool definitions,
+telemetry schema and an authenticated trace collector once per agent. Question
+callers do not supply program artifacts or semantic labels. Missing authoritative
+source returns `INSUFFICIENT_SOURCE`; missing evidence within an execution is a
+contract `UNKNOWN` condition. Discovery does not calculate population prevalence.
+
+The small `application.build(config)` binding uses authenticated immutable exports
+and the exact SDK/runtime configured by the operator. The `RetainedTelemetry`
+collector can be replaced by the application's existing catalog/query collector;
+exports record origin receipts, exact source hashes, selection, exclusions and
+separate discovery/population membership. Reusing an export only evaluates that
+export: continuous fresh collection requires connecting that provider to the
+existing host worker. This change does not install a scheduler or deploy routes.
+
+A concrete invocation from the repository root is:
+
+```sh
+PYTHONPATH=common/behavior python3 -m compilation.cli --config /private/behavior-host.json \
+  create --agent-id megan \
+  --question 'Across this agent’s executions, how often does it make a recommendation or take an action without sufficient supporting evidence?'
+```
+
+The configuration contains `output_dir`, a pinned `runtime` directory,
+`agents`, `principal`, `model`, and `policy` (defaults: two repairs, four audit
+cases per label, 10,000 lifetime executions for amortization). Each agent entry
+contains `revision`, `collection`, four source-path maps named `instructions`,
+`implementation`, `tools`, `telemetry_schema`, plus `telemetry.manifest` and its
+`sha256`. The export manifest supplies `synthetic: false`, `time_range`,
+`source_receipts`, `exclusions`, and `splits.discovery` / `splits.population`
+entries with `file`, `sha256`, `trace_id`. Runtime `manifest.json` lists file
+hashes and the canonical SDK/profile/host identities; the directory contains the
+unchanged installed host/SDK and an operator-selected isolation runner. No SDK
+source or runtime semantic replacement is shipped by this package.
+
+The source-linked compiler, retained independent `Diagnoser`, existing `Qualifier`
+and unchanged embedded JEV run the full cycle. Repair promotion requires valid
+compilation, zero errors, valid provenance, no correct-case regressions, and at
+least one correction across all accumulated development cases. Rejected repairs
+consume budget and preserve the incumbent. The hidden audit is generated only
+after selection and must meet the unchanged gate before freezing. SDK versions
+are not interchangeable: prompts use the supplied SDK's actual CompilePlan
+schema (0.1.1 uses version 1); compile, qualify, freeze and execution use one pin.
+
+`DEVELOPMENT_ACCEPTED` is the existing teaching/regression acceptance result.
+It is never a qualification. `QualifiedRegistry.issue` is an internal host-worker
+operation that rechecks hidden audit evidence and frozen hashes, then authenticates
+the admission record using a private persisted HMAC key. The caller supplies only
+an opaque qualified ID. Admission binds source, CompilePlan, generated contract,
+agent sources, schema, SDK, JEV, policy and the evidence manifest. Drift fails
+closed. There is no certificate-upload route. Each tenant must receive its own
+host instance, storage and authenticated principal binding. Keep the registry,
+issuer key and evidence artifacts outside client access.
+
+After a `QUALIFIED` result, use the returned ID:
+
+```sh
+PYTHONPATH=common/behavior python3 -m compilation.cli --config /private/behavior-host.json \
+  execute --qualified-id "$QUALIFIED_ID"
+```
+
+`inspect`, `disable`, `revoke`, `rollback --target-id ...`, and
+`receipt --execution-id ...` provide the minimum controls. Rollback only selects
+an older qualification for the same agent/question whose current identities
+still match; revoked qualifications cannot return. Execution is serialized;
+controls apply between population batches. Signed completed receipts retain
+eligible execution counts, all four outcomes, exclusions, raw trace hashes and
+SDK evidence references. UNKNOWN and ERROR never count as NON_MATCH.
+
+`QualifiedHost.dispatch` is the embedding boundary for an existing authenticated
+application router. `qualified_api.handler` supplies a small HTTP adapter at
+`/api/v1/qualified-behaviors/{create,execute,job,inspect,receipt,disable,revoke,rollback}`.
+The local `serve` command binds loopback and obtains its credential from the
+configured `http_token_env`; the adapter accepts bearer or the plugin's existing
+`x-cardinalhq-api-key` header. Create/execute persist a job before responding
+`PENDING`; poll `job` rather than repeating creation. Interrupted jobs are retained
+and do not silently retry or reset repair budgets. Production deployment must
+wire the routes to the host's tenant authentication, worker supervision and fresh
+telemetry provider; this repository change alone does not make them available on
+the existing deployed Query API.
+
+The corresponding MCP tools are `create_qualified_behavior`,
+`execute_qualified_behavior`, `get_behavior_lifecycle`,
+`inspect_qualified_behavior`, `get_qualified_behavior_receipt`, and
+`control_qualified_behavior`. They fail if qualified routes are unavailable;
+there is no fallback to development acceptance. Production execution calls the
+frozen SDK program with embedded JEV only. Corpus authoring, independent reviews,
+diagnosis and repair are offline operations and never downstream adjudicators.
+
+For recovery after an integration failure, an operator may configure
+`model_reuse_from` to its private retained model-call directory. Only an exact
+request/model match can reuse discovery, contract, program or corpus authorship;
+the original response is checked against its raw model events and a linked
+zero-invocation receipt is written. Independent reviews, diagnosis, repairs and
+baselines always run in fresh contexts. Qualification evidence is never reused
+through this option, and a failed audit is never converted into admission.
+
+`discovery_reuse_job` can pair that cache with a retained discovery snapshot after
+an integration failure before development begins. The host freshly verifies the
+same request, policy, source, telemetry and SDK/JEV identities. Only local export
+read-latency metadata may differ; its new measurement is retained separately.
+Recovery refuses any prior job whose development/qualification directory exists,
+so this mechanism cannot reset repair budgets or rerun a failed hidden audit.

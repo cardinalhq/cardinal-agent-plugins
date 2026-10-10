@@ -86,6 +86,36 @@ def compact(raw: dict) -> dict:
 
 
 class Behavior(Authoring):
+    def create_qualified(self, agent_id, behavioral_question, time_range=None):
+        payload = {'agent_id': agent_id, 'behavioral_question': behavioral_question}
+        if time_range is not None:
+            payload['time_range'] = time_range
+        return self.request('POST', '/api/v1/qualified-behaviors/create', payload)
+
+    def execute_qualified(self, qualified_id, time_range=None):
+        payload = {'qualified_id': qualified_id}
+        if time_range is not None:
+            payload['time_range'] = time_range
+        return self.request('POST', '/api/v1/qualified-behaviors/execute', payload)
+
+    def inspect_qualified(self, qualified_id):
+        return self.request('POST', '/api/v1/qualified-behaviors/inspect', {'qualified_id': qualified_id})
+
+    def qualified_receipt(self, qualified_id, execution_id):
+        return self.request('POST', '/api/v1/qualified-behaviors/receipt',
+                            {'qualified_id': qualified_id, 'execution_id': execution_id})
+
+    def lifecycle_status(self, job_id):
+        return self.request('POST', '/api/v1/qualified-behaviors/job', {'job_id': job_id})
+
+    def control_qualified(self, qualified_id, action, target_id=None):
+        if action not in ('disable', 'revoke', 'rollback'):
+            raise ValueError('unsupported qualification control')
+        payload = {'qualified_id': qualified_id}
+        if target_id is not None:
+            payload['target_id'] = target_id
+        return self.request('POST', '/api/v1/qualified-behaviors/' + action, payload)
+
     def __init__(self, config: dict):
         self.config = config
         self.output = Path(config['output_dir']).expanduser().resolve()
@@ -381,11 +411,25 @@ def tools_list(behavior: Behavior):
              {'diagnostic_version': version}, ['diagnostic_version']),
         tool('run_behavior_regressions', 'Execute a repaired candidate on the complete accumulated real-trace development suite, including earlier failed batches. ERROR, missing cases and verdict regressions block acceptance and preserve the incumbent. This is development testing, not independent qualification.',
              {'diagnostic_version': version}, ['diagnostic_version']),
-        tool('accept_behavior', 'Accept the inspected immutable DiagnosticVersion for deployed execution. Call only after reviewing its contract and source against the user request.',
+        tool('accept_behavior', 'Mark the inspected immutable DiagnosticVersion DEVELOPMENT_ACCEPTED for the existing development workflow. This is not independent qualification and cannot admit a program to execute_qualified_behavior. Call only after reviewing its contract and source against the user request.',
              {'diagnostic_version': version}, ['diagnostic_version'])]
     if behavior.legacy:
         authoring = [tool('select_behavior', 'Inspect the configured accepted behavior. Read its contract and select it only if it matches the user request. ' + behavior.description, {}, [])]
     return {'tools': authoring + [
+        tool('create_qualified_behavior', 'Autonomously discover an agent, generate a source-linked contract and SDK program, independently qualify and freeze it. Returns QUALIFIED only after hidden audit and authenticated host admission. Requires the qualified host routes; never falls back to teaching acceptance.',
+             {'agent_id': {'type': 'string'}, 'behavioral_question': {'type': 'string'},
+              'time_range': {'type': 'object'}}, ['agent_id', 'behavioral_question']),
+        tool('execute_qualified_behavior', 'Execute only an active host-issued qualified identity against authentic telemetry. Agent/schema/SDK/JEV drift, revocation or disable fail closed. No downstream frontier adjudication.',
+             {'qualified_id': version, 'time_range': {'type': 'object'}}, ['qualified_id']),
+        tool('inspect_qualified_behavior', 'Inspect authenticated qualification identity, evidence manifest, lifecycle job and operational status.',
+             {'qualified_id': version}, ['qualified_id']),
+        tool('get_qualified_behavior_receipt', 'Read a signed completed execution receipt belonging to this qualified diagnostic, including counts, evidence references and SDK/JEV results.',
+             {'qualified_id': version, 'execution_id': {'type': 'string', 'pattern': '^[a-f0-9]{32}$'}}, ['qualified_id', 'execution_id']),
+        tool('get_behavior_lifecycle', 'Inspect a pending autonomous lifecycle or population job until it reaches its retained terminal outcome. Never repeat create to poll an existing job.',
+             {'job_id': {'type': 'string', 'pattern': '^[a-f0-9]{32}$'}}, ['job_id']),
+        tool('control_qualified_behavior', 'Disable or revoke a qualified diagnostic, or roll back to a prior still-valid qualified version of the same diagnostic. Rollback rechecks current source and runtime identities.',
+             {'qualified_id': version, 'action': {'type': 'string', 'enum': ['disable', 'revoke', 'rollback']},
+              'target_id': version}, ['qualified_id', 'action']),
         tool('execute_behavior', 'Submit an explicitly accepted DiagnosticVersion against a service population and a window of at most one hour (maximum 256 selected objects / 256 MiB). Narrow the window if the API rejects its size. Deployed execution runs independently of polling.',
              execution_properties, ['accepted_behavior', 'population'] + ([] if behavior.legacy else ['start', 'end'])),
         tool('next_behavior_result', 'Observe newly committed compact findings while Cardinal investigates. Repeat until receipt appears. Empty results mean the execution is still running; do not fabricate findings. The total population is unknown until COMPLETED: evaluated_so_far is progress, never a total denominator.',
@@ -418,7 +462,13 @@ def main():
                 value = {}
             elif method == 'tools/call':
                 params = request['params']
-                functions = {'get_behavior_sdk': behavior.sdk, 'compile_behavior': behavior.compile, 'inspect_behavior': behavior.inspect_program,
+                functions = {'create_qualified_behavior': behavior.create_qualified,
+                             'get_behavior_lifecycle': behavior.lifecycle_status,
+                             'execute_qualified_behavior': behavior.execute_qualified,
+                             'inspect_qualified_behavior': behavior.inspect_qualified,
+                             'get_qualified_behavior_receipt': behavior.qualified_receipt,
+                             'control_qualified_behavior': behavior.control_qualified,
+                             'get_behavior_sdk': behavior.sdk, 'compile_behavior': behavior.compile, 'inspect_behavior': behavior.inspect_program,
                              'test_behavior': behavior.test, 'accept_behavior': behavior.accept,
                              'get_behavior_compilation': behavior.compilation_status,
                              'run_behavior_regressions': behavior.run_regressions,

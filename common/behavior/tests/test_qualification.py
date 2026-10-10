@@ -5,6 +5,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from diagnosis_helpers import mechanical_diagnosis
 from compilation.engine import Policy, Qualifier, freeze, gate, check_cases, cost_summary
 from compilation.storage import read, write, digest, Journal
 from compilation.runtime import execute, load_frozen, requalification_reasons, IDENTITY_KEYS
@@ -26,7 +27,7 @@ class QualificationTests(unittest.TestCase):
 
     def controller(self, evaluate, repair, audit=lambda:cases('audit'), max_repairs=2):
         return Qualifier(self.root/'q',Policy(max_repairs=max_repairs,audit_per_label=1),
-                         evaluate,lambda c,r:cases('challenge'+str(r)),repair,audit)
+                         evaluate,lambda c,r:cases('challenge'+str(r)),repair,audit,diagnose=mechanical_diagnosis)
 
     def test_repair_changes_frozen_program_not_verdict(self):
         calls=[]

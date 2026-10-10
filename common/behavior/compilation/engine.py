@@ -55,7 +55,11 @@ def promotion_gate(incumbent_rows, proposal_rows):
     regressions = [old['id'] for old, new in zip(incumbent_rows, proposal_rows)
                    if old['actual'] == old['expected'] and old['mechanical_pass']
                    and (new['actual'] != new['expected'] or not new['mechanical_pass'])]
-    return {'passed': same_suite and not failures and not regressions,
+    improvements = [old['id'] for old, new in zip(incumbent_rows, proposal_rows)
+                    if (old['actual'] != old['expected'] or not old['mechanical_pass'])
+                    and new['actual'] == new['expected'] and new['mechanical_pass']]
+    return {'passed': same_suite and not failures and not regressions and bool(improvements),
+            'improvements': improvements,
             'same_suite': same_suite, 'cases': len(proposal_rows),
             'execution_failures': failures, 'regressions': regressions,
             'incumbent_versions': sorted({r['version'] for r in incumbent_rows}),
@@ -84,6 +88,8 @@ def check_cases(cases, used_ids=(), used_hashes=()):
         key = case_fingerprint(case)
         if case['id'] in ids or key in hashes:
             raise ValueError('case overlap/duplicate')
+        if case.get('oracle_status', 'JUSTIFIED') != 'JUSTIFIED':
+            raise ValueError('ambiguous oracle cannot enter regression suite')
         if not case.get('review_pass'):
             raise ValueError('case lacks independent blind review')
         ids.add(case['id']); hashes.add(key)
@@ -98,10 +104,11 @@ class Qualifier:
     evaluate(candidate, trace) -> unmodified SDK output + mechanical/usage fields
     audit() -> previously hidden, independently reviewed cases
     """
-    def __init__(self, root, policy, evaluate, challenge, repair, audit):
+    def __init__(self, root, policy, evaluate, challenge, repair, audit, *, diagnose=None):
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=False)
         self.policy, self.evaluate = policy, evaluate
         self.challenge, self.repair, self.audit = challenge, repair, audit
+        self.diagnose = diagnose
         self.journal = Journal(self.root / 'executions')
         write(self.root / 'policy.json', asdict(policy))
 
@@ -128,6 +135,32 @@ class Qualifier:
         write(self.root / (phase + '.json'), rows)
         return rows
 
+    def diagnose_counterexamples(self, candidate, counterexamples, revision):
+        from .diagnosis import validate
+        if self.diagnose is None:
+            return None, 'diagnosis_required'
+        diagnosed = []
+        for item in counterexamples:
+            if 'case' not in item:
+                diagnosed.append(item)
+                continue
+            try:
+                diagnosis = validate(self.diagnose(deepcopy(candidate), deepcopy(item), revision), candidate, item)
+            except (ValueError, KeyError, TypeError, IndexError) as exc:
+                write(self.root / f'diagnosis-failure-{revision}.json', {'reason': str(exc)})
+                return None, 'invalid_diagnosis'
+            diagnosed.append({**item, 'diagnosis': diagnosis})
+        write(self.root / f'diagnoses-{revision}.json', diagnosed)
+        rejected = [x['case']['id'] for x in diagnosed if 'diagnosis' in x
+                    and x['diagnosis']['route'] == 'REJECT_FIXTURE']
+        if rejected:
+            write(self.root / 'quarantined-fixtures.json', rejected)
+            return None, 'oracle_ambiguity'
+        # Do not quietly ignore an unexplained failure while repairing another.
+        if any(not x['diagnosis']['repair_allowed'] for x in diagnosed if 'diagnosis' in x):
+            return None, 'no_code_repair_justified'
+        return diagnosed, None
+
     def run(self, initial, discovery):
         candidate = deepcopy(initial)
         cases = list(discovery)
@@ -138,6 +171,9 @@ class Qualifier:
         for revision in range(self.policy.max_repairs + 1):
             proposal = candidate
             if revision:
+                counterexamples, blocked = self.diagnose_counterexamples(candidate, counterexamples, revision)
+                if blocked:
+                    return self.finish(candidate, 'CANNOT_QUALIFY', blocked, revision - 1)
                 try:
                     proposal=self.repair(deepcopy(candidate),counterexamples,revision)
                 except RepairFailure as exc:
@@ -189,8 +225,11 @@ class Qualifier:
             if revision == self.policy.max_repairs:
                 return self.finish(candidate, 'CANNOT_QUALIFY', 'repair_budget_exhausted', revision)
             by_id = {c['id']: c for c in cases}
-            counterexamples = [{'case': by_id[row['id']], 'execution': row} for row in rows
+            counterexamples = [{'case': by_id[row['id']], 'execution': row} for row in incumbent_rows
                                if row['actual'] != row['expected'] or not row['mechanical_pass']]
+            if revision and not promoted:
+                counterexamples.append({'rejected_proposal': {'candidate': proposal, 'promotion': promotion,
+                    'failures': [r for r in rows if r['actual'] != r['expected'] or not r['mechanical_pass']]}})
             write(self.root / f'counterexamples-{revision}.json', counterexamples)
         raise AssertionError('unreachable')
 

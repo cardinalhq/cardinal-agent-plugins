@@ -229,7 +229,8 @@ class HostedBehaviorTests(unittest.TestCase):
         self.assertEqual(self.calls[-1][2]['test_receipt'], self.teaching['test_receipt'])
         self.assertEqual(self.calls[-1][2]['sdk_runtime_sha256'], self.sdk['sdk_runtime_sha256'])
         persisted = json.loads(self.behavior.program_path(self.version).read_text())
-        self.assertEqual(persisted['acceptance_receipt'], self.acceptance)
+        self.assertEqual(persisted['acceptance_receipt'],
+                         {**self.acceptance, 'qualification_status': 'DEVELOPMENT_ACCEPTED'})
         self.assertEqual(persisted['teaching_receipt'], self.teaching)
 
     def test_teaching_receipt_hash_and_immutable_cache_are_verified(self):

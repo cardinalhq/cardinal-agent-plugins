@@ -44,6 +44,22 @@ class WorkflowTests(unittest.TestCase):
             return result
         def call(name, role, instruction, packet):
             self.role_calls.append((name, role, instruction, packet))
+            if role == 'independent-diagnosis-gold':
+                return {'verdict': packet['trace']['signal'], 'basis': 'POSITIVE_EVIDENCE',
+                        'explanation': 'Synthetic test oracle', 'oracle_status': 'JUSTIFIED',
+                        'citations': [{'ref': '/trace/signal', 'quote': packet['trace']['signal']}]}
+            if role == 'counterexample-diagnosis':
+                expected = {k:v for k,v in packet['independent_review'].items() if k != 'oracle_status'}
+                cited = expected['citations']
+                return {'expected': expected,
+                    'observed': {'actual': packet['execution']['actual'],
+                        'citations': [{'ref': '/execution/actual', 'quote': packet['execution']['actual']}]},
+                    'scope': {'candidate': 'test', 'entity': 'test', 'temporal': 'test', 'citations': cited},
+                    'earliest': {'classification': 'VERDICT_COMPOSITION', 'explanation': 'test',
+                        'citations': cited, 'source_citations': [{'ref': '/source', 'quote': packet['source']}]},
+                    'jev_review': [], 'intervention': 'TARGETED_PYTHON_REPAIR', 'intervention_reason': 'test'}
+            self.assertIn('diagnosis', packet['counterexamples'][0])
+            self.assertEqual(len(packet['counterexamples']), 1)
             return {'udf_source': self.repair_source, 'compile_plan': {}}
         self.sdk = SimpleNamespace(compile=compile, evaluate=evaluate)
         self.corpus = SimpleNamespace(make=make, behavior='test', system='system', contract={}, common={})
@@ -62,8 +78,8 @@ class WorkflowTests(unittest.TestCase):
             'provider_attempts': 1, 'latency_ms': 50, 'cost_usd': 2}])
         self.assertEqual(result['status'], 'QUALIFIED')
         self.assertEqual(self.splits, ['discovery', 'challenge-0', 'challenge-1', 'audit'])
-        self.assertEqual(len(self.role_calls), 1)
-        self.assertEqual(self.role_calls[0][1], 'program-repair')
+        self.assertEqual(len(self.role_calls), 9)
+        self.assertEqual(self.role_calls[-1][1], 'program-repair')
         frozen = self.root / 'cycle/bundle'
         cert = read(frozen / 'certificate.json')
         self.assertEqual(cert['version'], digest('fixed'))

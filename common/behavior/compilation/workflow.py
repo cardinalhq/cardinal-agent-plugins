@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 import time
 from .corpus import compact_trace
+from .diagnosis import Diagnoser
 from .engine import Policy, Qualifier, freeze, cost_summary
 from .storage import read, write, digest
 
@@ -44,22 +45,32 @@ def compile_and_qualify(root, *, source, plan, description, context, sdk,
                              Path(candidate['source']).read_text(),families)
             families.extend(c['family'] for c in cases)
             return cases
+        diagnose = Diagnoser(root/'diagnoses', model,
+            {'description':description, 'context':context, 'contract':corpus.contract, 'common':corpus.common},
+            sdk_documentation)
         def repair(candidate,counterexamples,revision):
-            feedback=[{'id':c['case']['id'],'expected':c['case']['expected'],
-                       'review':c['case']['review'],'trace':compact_trace(c['case']['trace'],corpus.system),
+            # One justified counterexample per attempt; the gate still executes every case.
+            selected = next(c for c in counterexamples if 'diagnosis' in c)
+            feedback=[{'diagnosis':c['diagnosis'], 'id':c['case']['id'],'expected':c['case']['expected'],
+                       'review':c['case']['review'],'trace':(corpus.compact(c['case']['trace']) if hasattr(corpus,'compact')
+                                                           else compact_trace(c['case']['trace'],corpus.system)),
                        'actual':c['execution']['actual'],'reason':c['execution']['reason'],
                        'mechanical_audit_errors':c['execution']['audit']['errors'],
                        'jev_answers':[{'proposition':r['proposition'],'decision':r['decision'],'reason':r['reason']}
-                                      for r in c['execution'].get('jev_receipts',[])]} for c in counterexamples if 'case' in c]
+                                      for r in c['execution'].get('jev_receipts',[])]} for c in [selected]]
             compilation_feedback=[c['compilation_failure'] for c in counterexamples if 'compilation_failure' in c]
             response=model.call(f'{b}-repair-{revision}','program-repair',
-                'Repair this ordinary Python Behavioral Program against independently discovered counterexamples. '
+                'Apply only the smallest source change justified by the supplied diagnosis and its permitted intervention. '
+                'Preserve unrelated functions and propositions; do not rewrite the program wholesale. '
+                'SDK_COMPATIBLE_REPAIR must use the supplied SDK interfaces, never invented attributes. '
+                'TARGETED_PROPOSITION_REPAIR changes only the defective proposition and necessary compile anchors. '
                 'Do not special-case case ids, entities, exact text, or expected labels; implement the behavioral '
                 'contract generically. Use only existing SDK runtime with embedded JEV calls, never an external '
                 'adjudicator. Preserve source-faithful raw evidence and UNKNOWN on insufficient material evidence. '
                 'Do not omit static instructions unless exact known static constants and all dynamic context are '
                 'accounted for. All requirements in the contract remain binding. Return only '
-                '{"udf_source":"complete Python source","compile_plan":{"schema_version":2,"clauses":[],"judge_sites":[]}}. '
+                '{"udf_source":"complete Python source","compile_plan":{"clauses":[],"judge_sites":[]}}. '
+                'Use the exact supplied SDK CompilePlan schema; do not add version-specific fields. '
                 'Preserve valid clause quotes from description/context/sdk and adjust implementation anchors and '
                 'judge sites to real functions. The allowed source_ref for description is "behavior", NOT '
                 '"description"; other source_ref values are "context" and "sdk". Every literal JEV proposition '
@@ -68,11 +79,12 @@ def compile_and_qualify(root, *, source, plan, description, context, sdk,
                 {'source':Path(candidate['source']).read_text(),'compile_plan':read(candidate['plan']),
                  'description':description,'context':context,'contract':corpus.contract,'common':corpus.common,
                  'sdk_documentation':sdk_documentation,'jev_config':jev_config,
-                 'actual_system_prompt':corpus.system,'counterexamples':feedback,'compilation_failures':compilation_feedback})
+                 'actual_system_prompt':corpus.system,'counterexamples':feedback,'compilation_failures':compilation_feedback,
+                 'rejected_proposals':[c['rejected_proposal'] for c in counterexamples if 'rejected_proposal' in c]})
             return sdk.compile(f'{b}-repair-{revision}',response['udf_source'],response['compile_plan'],description,context)
         def audit():
             return corpus.make('audit',policy.audit_per_label,excluded_families=families)
-        result=Qualifier(root/'qualification',policy,sdk.evaluate,challenge,repair,audit).run(initial,discovery)
+        result=Qualifier(root/'qualification',policy,sdk.evaluate,challenge,repair,audit,diagnose=diagnose).run(initial,discovery)
         if result['status']=='QUALIFIED':
             freeze(root/'bundle',result,identity,root/'qualification/qualification.json',
                    dependencies(result['candidate']))

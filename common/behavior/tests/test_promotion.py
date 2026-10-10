@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from diagnosis_helpers import mechanical_diagnosis
 from compilation.engine import Policy, Qualifier, RepairFailure, promotion_gate
 from compilation.storage import digest, read
 
@@ -29,18 +30,21 @@ class PromotionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'q'
-        self.initial = {'version': 'incumbent'}
+        source = Path(self.temp.name) / 'program.py'
+        source.write_text('synthetic controller source')
+        self.initial = {'version': 'incumbent', 'source': str(source)}
         self.calls = []
 
     def controller(self, proposed, repair=None, max_repairs=1, challenge=None):
         def evaluate(candidate, trace):
             self.calls.append((candidate['version'], trace['trace_id']))
+            candidate.setdefault('source', self.initial['source'])
             return (output('UNKNOWN') if candidate['version'] == 'incumbent'
                     else proposed(candidate, trace))
         return Qualifier(self.root, Policy(max_repairs=max_repairs, audit_per_label=1),
                          evaluate, challenge or (lambda c, r: cases('challenge' + str(r))),
                          repair or (lambda c, f, r: {'version': 'proposal'}),
-                         lambda: cases('audit'))
+                         lambda: cases('audit'), diagnose=mechanical_diagnosis)
 
     def assert_preserved(self, result, revision=1):
         self.assertEqual(result['candidate'], self.initial)
@@ -119,7 +123,8 @@ class PromotionTests(unittest.TestCase):
         def repair(candidate, feedback, revision):
             parents.append(copy.deepcopy(candidate))
             if revision == 2:
-                self.assertTrue(all(x['execution']['actual'] == 'ERROR' for x in feedback))
+                self.assertTrue(any('rejected_proposal' in x for x in feedback))
+                self.assertTrue(all(x['execution']['actual'] == 'UNKNOWN' for x in feedback if 'case' in x))
             candidate['version'] = 'bad' if revision == 1 else 'fixed'
             return candidate  # In-place mutation must not modify the incumbent descriptor.
         q = self.controller(lambda c, t: output('ERROR' if c['version'] == 'bad' else t['signal']),
@@ -178,7 +183,7 @@ class PromotionTests(unittest.TestCase):
         variants = [rows[:-1], rows + [rows[0]], list(reversed(rows)),
                     [{**rows[0], 'trace_sha256': 'other'}, *rows[1:]],
                     [{**rows[0], 'expected': 'UNKNOWN'}, *rows[1:]]]
-        self.assertTrue(promotion_gate(rows, rows)['passed'])
+        self.assertFalse(promotion_gate(rows, rows)['passed'])
         for altered in variants:
             self.assertFalse(promotion_gate(rows, altered)['passed'])
         self.assertFalse(promotion_gate([], [])['passed'])

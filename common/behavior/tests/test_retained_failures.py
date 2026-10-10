@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from diagnosis_helpers import mechanical_diagnosis
 from compilation.engine import Policy, Qualifier
 from compilation.storage import read, digest, filehash
 
@@ -78,7 +79,7 @@ class RetainedSDKFailureTests(unittest.TestCase):
             q = Qualifier(qroot, Policy(max_repairs=1, audit_per_label=1), evaluate,
                           lambda c, r: challenge0 if r == 0 else later,
                           lambda c, f, r: broken,
-                          lambda: self.fail('Rejected SDK failure must never reach audit'))
+                          lambda: self.fail('Rejected SDK failure must never reach audit'), diagnose=mechanical_diagnosis)
             result = q.run(initial, discovery)
             self.assertEqual(len(executions), expected_count)
             self.assertEqual(backend_calls, [])
