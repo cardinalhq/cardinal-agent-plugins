@@ -5,6 +5,7 @@ JEV factory, sandbox runner and evidence auditor. No SDK or prompts are vendored
 """
 import dataclasses
 import functools
+import json
 import time
 from pathlib import Path
 from .engine import RepairFailure
@@ -71,6 +72,9 @@ class SDK:
             row = dataclasses.asdict(store.evaluate(version.version, trace, profile=self.profile_factory(),
                 judge_factory=self.judge_factory, finalized=True,
                 _program_runner=functools.partial(self.program_runner, source)))
+            # SDK dataclasses retain tuples. Model packets serialize those as
+            # JSON arrays, so validate citations against that same representation.
+            row = json.loads(json.dumps(row, ensure_ascii=False, allow_nan=False))
         except Exception as exc:
             row = {'verdict': 'ERROR', 'reason': f'{type(exc).__name__}: {exc}', 'jev_receipts': [],
                    'records': [], 'witness_refs': []}
