@@ -78,6 +78,53 @@ class Base(unittest.TestCase):
 
 
 class BootstrapTests(Base):
+    def test_context_survives_failed_bootstrap_and_preserves_the_first_repo_on_resume(self):
+        context = {"repo": "acme/widgets", "branch": "fix/one", "client": "codex/0.26.5"}
+        self.fake.ensure_answer = (503, {"error": "unavailable"})
+        self.assertEqual(boot.ensure(self.home, SID, self.fake.conn, "c", context=context)["status"], "failed")
+        self.fake.ensure_answer = None
+        self.assertEqual(boot.ensure(self.home, SID, self.fake.conn, "c", force=True)["status"], "ok")
+        self.assertEqual(self.ensures()[-1][1]["context"], context)
+        # The poller must never infer the repo from its own working directory.
+        boot.ensure(self.home, SID, self.fake.conn, "c", context={"repo": "acme/other"})
+        boot.refresh_capabilities(self.home, SID, self.fake.conn, "c")
+        self.assertEqual(self.ensures()[-1][1]["context"], context)
+        self.assertEqual(boot.context_path(self.home, SID).stat().st_mode & 0o777, 0o600)
+
+    def test_older_session_acquires_context_on_resume_and_refreshes_without_creating_again(self):
+        boot.ensure(self.home, SID, self.fake.conn, "c")
+        context = {"repo": "acme/widgets", "repo_path": "."}
+        boot.ensure(self.home, SID, self.fake.conn, "c", context=context)
+        self.assertEqual(len(self.ensures()), 1, "resume remains local")
+        self.assertEqual(boot.refresh_capabilities(self.home, SID, self.fake.conn, "c"), "ok")
+        self.assertEqual(self.ensures()[-1][1], {"session_id": SID, "investigation_id": INV, "context": context})
+
+    def test_context_optout_clears_snapshot_and_context_does_not_cross_orgs(self):
+        boot.ensure(self.home, SID, self.fake.conn, "c", context={"repo": "acme/widgets"})
+        boot.ensure(self.home, SID, self.fake.conn, "c", context={})
+        boot.refresh_capabilities(self.home, SID, self.fake.conn, "c")
+        self.assertNotIn("context", self.ensures()[-1][1])
+        boot.ensure(self.home, SID, self.fake.conn, "c", context={"repo": "acme/widgets"})
+        boot.ensure(self.home, SID, dict(self.fake.conn, org="o2"), "c")
+        self.assertNotIn("context", self.ensures()[-1][1])
+
+    def test_context_retries_only_an_older_servers_exact_unknown_key_refusal(self):
+        original = self.fake.answer
+        def older(tool, body):
+            if tool == "ensure-session-investigation" and "context" in body:
+                return 400, {"error": "invalid_body", "issues": [{"path": "", "message": 'Unrecognized key: "context"'}]}
+            return original(tool, body)
+        self.fake.answer = older
+        r = boot.ensure(self.home, SID, self.fake.conn, "c", context={"repo": "acme/widgets"})
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(len(self.ensures()), 2)
+        self.assertNotIn("context", self.ensures()[-1][1])
+        self.fake.ensure_answer = (400, {"error": "invalid_body", "issues": [{"path": "context", "message": "bad repo"}]})
+        self.fake.answer = original
+        r = boot.ensure(self.home, SID2, self.fake.conn, "c", context={"repo": "acme/widgets"})
+        self.assertEqual(r["status"], "failed")
+        self.assertEqual(len(self.ensures()), 3, "real context errors are not silently retried")
+
     def test_creates_once_then_reuses_without_a_request(self):
         r = boot.ensure(self.home, SID, self.fake.conn, "c", started_at="2026-10-06T12:00:00Z")
         self.assertEqual(r["status"], "ok")
