@@ -379,6 +379,11 @@ class ConnectTests(unittest.TestCase):
         entry = config["mcp_servers"]["cardinal"]
         self.assertTrue(entry["url"].endswith("/api/orgs/org-uuid-1/mcp"))
         self.assertTrue(entry["http_headers"]["X-CardinalHQ-API-Key"].startswith("MCPPLAINTEXT"))
+        # Every MCP request names this agent (the producing client Cardinal
+        # records on investigation events posted through its MCP tools).
+        version = read_json(ROOT / ".codex-plugin" / "plugin.json")["version"]
+        self.assertEqual(entry["http_headers"]["X-Cardinal-Client"], f"codex/{version}")
+        self.assertEqual(set(entry["http_headers"]), {"X-CardinalHQ-API-Key", "X-Cardinal-Client"})
         raw_config = self.config.read_text()
         self.assertIn("# BEGIN cardinal-codex-plugin managed MCP server", raw_config)
 
