@@ -194,6 +194,17 @@ class CompilationHistoryTests(unittest.TestCase):
         self.teach(self.version, specs)
         self.assertEqual(self.accept(self.version)['diagnostic_version'], self.version)
 
+    def test_teaching_accepts_not_applicable_expected_and_actual(self):
+        self.compile()
+        specs = [('e' * 32, 'MATCH', 'MATCH', ''), ('f' * 32, 'NOT_APPLICABLE', 'NOT_APPLICABLE', 'outside population')]
+        result = self.teach(self.version, specs)
+        self.assertEqual([r['verdict'] for r in result['results']], ['MATCH', 'NOT_APPLICABLE'])
+        self.assertEqual(self.accept(self.version)['diagnostic_version'], self.version)
+        mismatch = self.candidate()['diagnostic_version']
+        self.teach(mismatch, [('e' * 32, 'MATCH', 'MATCH', ''), ('f' * 32, 'NOT_APPLICABLE', 'ERROR', 'boom')])
+        with self.assertRaisesRegex(ValueError, 'do not match'):
+            self.accept(mismatch)
+
     def test_older_success_cannot_overwrite_newer_failed_test_reservation(self):
         self.compile()
         specs = [('e' * 32, 'NON_MATCH', 'NON_MATCH', '')]
