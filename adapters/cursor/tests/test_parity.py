@@ -410,6 +410,11 @@ class JsonManagedBlockTests(unittest.TestCase):
         data = json.loads(path.read_text())
         self.assertIn("other", data["mcpServers"])
         self.assertTrue(data["mcpServers"]["cardinal"]["cardinalManaged"])
+        # Every MCP request names this agent (the producing client Cardinal
+        # records on investigation events posted through its MCP tools).
+        version = json.loads((ADAPTER_DIR / ".cursor-plugin" / "plugin.json").read_text())["version"]
+        self.assertEqual(data["mcpServers"]["cardinal"]["headers"],
+                         {"X-CardinalHQ-API-Key": "key", "X-Cardinal-Client": f"cursor/{version}"})
 
         self.disconnect.remove_mcp_entry(path)
         data = json.loads(path.read_text())
