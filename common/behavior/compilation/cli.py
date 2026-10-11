@@ -18,6 +18,10 @@ def main():
     create = commands.add_parser('create')
     create.add_argument('--agent-id', required=True)
     create.add_argument('--question', required=True)
+    admit = commands.add_parser('admit', help='operator-only import of a completed canonical job')
+    admit.add_argument('--job-dir', required=True)
+    admit.add_argument('--agent-id', required=True)
+    admit.add_argument('--bundle-digest', required=True)
     for name in ('execute', 'inspect', 'disable', 'revoke'):
         commands.add_parser(name).add_argument('--qualified-id', required=True)
     rollback = commands.add_parser('rollback')
@@ -34,6 +38,11 @@ def main():
     config = read(args.config)
     host = build(config)
     principal = config.get('principal', 'local-operator')
+    if args.command == 'admit':
+        from .admission_import import admit_completed_job
+        result = admit_completed_job(host, config, args.job_dir, args.agent_id, args.bundle_digest)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     if args.command == 'serve':
         token = os.environ[config['http_token_env']]
         coverage = config.get('execution_completeness', {})
