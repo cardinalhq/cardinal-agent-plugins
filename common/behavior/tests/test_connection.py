@@ -91,3 +91,41 @@ class ConnectionTests(unittest.TestCase):
             httpd.shutdown()
             worker.join(timeout=5)
             httpd.server_close()
+
+    def test_rejected_request_relays_bounded_api_message_but_not_auth_or_server_detail(self):
+        responses = {
+            '/422': (422, b'{"status":422,"code":"VALIDATION_FAILED","message":"request service differs from accepted version: accepted for service \\"a\\", requested \\"b\\"\\u0007"}'),
+            '/400': (400, b'selected trace objects exceed 256; narrow the window\n' + b'x' * 4000),
+            '/401': (401, b'{"message":"token abc123 is invalid"}'),
+            '/500': (500, b'Traceback (most recent call last): secret'),
+        }
+        class Reject(BaseHTTPRequestHandler):
+            def do_GET(self):
+                status, body = responses['/' + self.path.split('/')[1]]
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args):
+                pass
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), Reject)
+        worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory() as output, patch.dict('os.environ', {'CARDINAL_MCP_API_KEY': 'scoped-test-key'}):
+                def error(prefix):
+                    behavior = Behavior({'base_url': f'http://127.0.0.1:{httpd.server_port}{prefix}', 'output_dir': output})
+                    with self.assertRaises(RuntimeError) as raised:
+                        behavior.request('GET', '/api/v1/behavior-programs/sdk')
+                    return str(raised.exception)
+                self.assertEqual(error('/422'), 'Cardinal API rejected the request (HTTP 422): request service differs '
+                                 'from accepted version: accepted for service "a", requested "b"')
+                too_long = error('/400')
+                self.assertIn('narrow the window', too_long)
+                self.assertLess(len(too_long), 1200)
+                self.assertNotIn('abc123', error('/401'))
+                self.assertIn('check the configured service and credentials', error('/401'))
+                self.assertNotIn('Traceback', error('/500'))
+        finally:
+            httpd.shutdown()
+            worker.join(timeout=5)
+            httpd.server_close()
