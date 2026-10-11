@@ -167,6 +167,33 @@ class CompilationHistoryTests(unittest.TestCase):
                 self.assertEqual(self.behavior.compilation_status(candidate)['incumbent'], self.version)
         self.assertEqual(self.behavior.compilation_status(candidate)['required_cases'], 2)
 
+    def test_request_rejected_by_api_registers_no_unrunnable_case(self):
+        from compilation.hosted import APIRejected
+        self.compile()
+        specs = [('e' * 32, 'NON_MATCH', 'NON_MATCH', '')]
+        self.teach(self.version, specs)
+        original_request = self.behavior.request
+        def rejected(*args):
+            raise APIRejected('Cardinal API rejected the request (HTTP 400): teaching selection exceeds 256 MiB')
+        self.behavior.request = rejected
+        try:
+            # A new locator the API refuses is not a development case.
+            with self.assertRaisesRegex(APIRejected, '256 MiB'):
+                self.behavior.test(self.version, ['f' * 32], 'service',
+                    '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z', {'f' * 32: 'NON_MATCH'})
+            self.assertEqual(self.behavior.compilation_status(self.version)['required_cases'], 1)
+            # An existing case stays registered and its old pass stays invalidated.
+            with self.assertRaisesRegex(APIRejected, '256 MiB'):
+                self.behavior.test(self.version, ['e' * 32], 'service',
+                    '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z', {'e' * 32: 'NON_MATCH'})
+        finally:
+            self.behavior.request = original_request
+        self.assertEqual(self.behavior.compilation_status(self.version)['required_cases'], 1)
+        with self.assertRaisesRegex(ValueError, 'complete accumulated'):
+            self.behavior.accept(self.version)
+        self.teach(self.version, specs)
+        self.assertEqual(self.accept(self.version)['diagnostic_version'], self.version)
+
     def test_older_success_cannot_overwrite_newer_failed_test_reservation(self):
         self.compile()
         specs = [('e' * 32, 'NON_MATCH', 'NON_MATCH', '')]

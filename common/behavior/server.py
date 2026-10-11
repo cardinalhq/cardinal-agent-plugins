@@ -16,7 +16,7 @@ import urllib.request
 import urllib.parse
 from storyboard import render_storyboard
 from compilation.files import private_json, private_text
-from compilation.hosted import Authoring, SDK_IDENTITIES
+from compilation.hosted import APIRejected, Authoring, SDK_IDENTITIES
 
 ROOT = Path(__file__).resolve().parent
 VERSION = '87dde6be3a806f1c9a0346f82d6e861a6ab9bba7aad9d9a70ab884e6427d35f0'
@@ -218,7 +218,7 @@ class Behavior(Authoring):
             exc.close()
             if detail:
                 # Request and validation errors explain how to fix the call; relay them bounded.
-                raise RuntimeError(f'Cardinal API rejected the request (HTTP {status}): {detail}') from None
+                raise APIRejected(f'Cardinal API rejected the request (HTTP {status}): {detail}') from None
             raise RuntimeError(f'Cardinal API returned HTTP {status}; check the configured service and credentials') from None
         except urllib.error.URLError:
             raise RuntimeError('Cardinal API is unreachable; check the configured service') from None
