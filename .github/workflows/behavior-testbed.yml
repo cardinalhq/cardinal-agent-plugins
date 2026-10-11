@@ -1,0 +1,43 @@
+name: Behavior testbed
+
+on:
+  pull_request:
+    paths:
+      - 'testbeds/behavior/**'
+      - '.github/workflows/behavior-testbed.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'testbeds/behavior/**'
+      - '.github/workflows/behavior-testbed.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  testbed:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pinned runtime
+        run: python3 -m pip install --no-deps -r testbeds/behavior/requirements.txt
+      - name: Unit tests
+        run: python3 -m unittest discover -s testbeds/behavior -p 'test_*.py' -v
+      - name: Dry-run smoke (one trace per variant)
+        run: |
+          python3 testbeds/behavior/generate.py --dry-run --per-variant 1 --batch ci > gt.jsonl 2>/dev/null
+          python3 - <<'PY'
+          import json
+          lines = [json.loads(l) for l in open("gt.jsonl")]
+          summary = lines[-1]
+          assert summary["type"] == "summary", summary
+          assert summary["traces"] == 36 and summary["spans_failed"] == 0, summary
+          assert summary["by_verdict"] == {"MATCH": 12, "NON_MATCH": 12, "UNKNOWN": 12}, summary
+          print(json.dumps(summary))
+          PY
