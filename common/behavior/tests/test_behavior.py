@@ -95,6 +95,27 @@ class BehaviorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'counts'):
             self.behavior.poll(ID, 0)
 
+    def test_not_applicable_is_a_deployed_verdict_counted_separately(self):
+        outside = self.result('t2', 'NOT_APPLICABLE')
+        outside.pop('records'); outside.pop('jev_receipts'); outside.pop('witness_refs')
+        outside['reason'] = 'no denied or failed shell call issued by the agent'
+        page = self.page([self.result(), outside], 'COMPLETED', population=2, match=1)
+        page['counts']['NOT_APPLICABLE'] = 1
+        self.responses.append(page)
+        got = self.behavior.poll(ID, 0)
+        self.assertEqual(got['receipt'], ID)
+        self.assertEqual(got['verdicts']['NOT_APPLICABLE'], 1)
+        self.assertEqual(got['verdicts']['ERROR'], 0)
+        self.assertEqual(got['results'][1]['verdict'], 'NOT_APPLICABLE')
+        self.assertIn('no denied or failed', got['results'][1]['reason'])
+
+    def test_counts_without_not_applicable_key_are_read_as_zero(self):
+        # Deployments that predate the NOT_APPLICABLE count omit the key.
+        self.responses.append(self.page([self.result(), self.result('t2', 'MATCH')], 'COMPLETED', population=2, match=2))
+        got = self.behavior.poll(ID, 0)
+        self.assertEqual(got['receipt'], ID)
+        self.assertEqual(got['verdicts']['NOT_APPLICABLE'], 0)
+
     def test_rejects_result_from_another_diagnostic(self):
         result = self.result()
         result['execution_identity']['diagnostic_version'] = 'other'
