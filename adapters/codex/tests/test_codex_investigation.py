@@ -52,6 +52,10 @@ class InvestigationTests(unittest.TestCase):
         ensures = [r for r in self.fake.requests if r["path"].endswith("/ensure-session-investigation")]
         self.assertEqual(len(ensures), 1)
         self.assertEqual(ensures[0]["body"]["session_id"], SESSION)
+        self.assertEqual(ensures[0]["body"]["context"]["repo"], "acme/widgets")
+        self.assertEqual(ensures[0]["body"]["context"]["branch"], "fix/checkout")
+        self.assertEqual(ensures[0]["body"]["context"]["client"], f"codex/{VERSION}")
+        self.assertNotIn(str(self.repo), json.dumps(ensures[0]["body"]))
         self.assertEqual(ensures[0]["headers"]["x-cardinal-client"], f"codex/{VERSION}")
         self.assertNotIn("prompt", ensures[0]["body"])
         self.assertNotIn("transcript", ensures[0]["body"])
@@ -59,6 +63,21 @@ class InvestigationTests(unittest.TestCase):
         linked = self.cli("link", "--json")
         self.assertEqual(linked.returncode, 0, linked.stderr)
         self.assertEqual(json.loads(linked.stdout)["storyboard_id"], SB)
+
+    def test_bootstrap_uses_payload_cwd_and_honors_context_optout(self):
+        self.setup_live()
+        # The hook process runs inside self.repo; the payload names a directory
+        # outside Git, and must not accidentally label it as acme/widgets.
+        self.session_context({**SESSION_START, "cwd": str(self.repo.parent)}, CARDINAL_INVESTIGATION_POLLER="0")
+        ensures = [r for r in self.fake.requests if r["path"].endswith("/ensure-session-investigation")]
+        self.assertNotIn("repo", ensures[0]["body"]["context"])
+        self.assertNotIn(str(self.repo.parent), json.dumps(ensures[0]["body"]))
+
+    def test_bootstrap_context_optout(self):
+        self.setup_live()
+        self.start(CARDINAL_STORYBOARD_CONTEXT="0")
+        ensure = next(r for r in self.fake.requests if r["path"].endswith("/ensure-session-investigation"))
+        self.assertNotIn("context", ensure["body"])
 
     def test_legacy_projection_flag_does_not_change_session_authoring(self):
         self.setup_live(enabled=False)
