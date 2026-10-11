@@ -32,23 +32,25 @@ def verify(conn, inv, target, *, root=None, client):
     )
     if not matches:
         raise ValueError("no event with that seq or semantic_id")
-    # A semantic id identifies its most recent revision.
-    artifacts = (matches[-1].get("payload") or {}).get("artifacts", [])
-    artifacts = ie.validate_structured("artifacts", artifacts, "verify")
-    failed = False
-    for artifact in artifacts:
-        path = root / artifact["path"]
-        try:
-            path.resolve().relative_to(root)  # symlinks cannot escape the requested root
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1 << 20), b""):
-                    digest.update(chunk)
-            status = "match" if digest.hexdigest() == artifact["sha256"] else "MISMATCH"
-        except (OSError, ValueError):
-            status = "missing"
-        failed |= status != "match"
-        print(f"{status} {artifact['path']}")
-    if not artifacts:
+    # Audit every artifact-bearing revision, newest first, including past gates.
+    failed, found = False, False
+    for event in sorted(matches, key=lambda e: e.get("seq", 0), reverse=True):
+        artifacts = (event.get("payload") or {}).get("artifacts", [])
+        artifacts = ie.validate_structured("artifacts", artifacts, "verify")
+        for artifact in artifacts:
+            found = True
+            path = root / artifact["path"]
+            try:
+                path.resolve().relative_to(root)  # symlinks cannot escape the requested root
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1 << 20), b""):
+                        digest.update(chunk)
+                status = "match" if digest.hexdigest() == artifact["sha256"] else "MISMATCH"
+            except (OSError, ValueError):
+                status = "missing"
+            failed |= status != "match"
+            print(f"#{event['seq']} {status} {artifact['path']}")
+    if not found:
         print("no artifacts recorded")
     return int(failed)

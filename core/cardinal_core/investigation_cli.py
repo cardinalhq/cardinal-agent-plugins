@@ -326,10 +326,13 @@ class CLI:
             return EXIT_USAGE
         home = self._home()
         b = ie.read_binding(home, sid)
+        conn, client = self.connection()
+        wanted = None if self.legacy else self.wiring.environ.get("CARDINAL_INVESTIGATION_ID") or None
+        if wanted and not ie.valid_investigation(wanted):
+            raise ValueError("invalid CARDINAL_INVESTIGATION_ID")
         ok = b is not None and isinstance(b.get("bootstrap"), dict) and (b["bootstrap"].get("status") == "ok")
-        if not ok or (b.get("storyboard_id") and (not b.get("view_url"))):
-            conn, client = self.connection()
-            res = boot.ensure(home, sid, conn, client, timeout=15.0, force=True)
+        if not self.legacy or not ok or (b.get("storyboard_id") and (not b.get("view_url"))):
+            res = boot.ensure(home, sid, conn, client, wanted=wanted, timeout=15.0, force=True)
             b = res.get("binding") or b
             if res["status"] == "invalid":
                 sys.stderr.write("not connected to Cardinal (run /cardinal:connect)\n")
@@ -352,8 +355,10 @@ class CLI:
                     import subprocess
                     from cardinal_core import investigation_poller as ip
 
-                    if os.environ.get("CARDINAL_INVESTIGATION_POLLER", "").strip() != "0" and (
-                        not ip.running(home, sid)
+                    if (
+                        (self.plugin_root / "hooks" / "investigation-poller.py").is_file()
+                        and self.wiring.environ.get("CARDINAL_INVESTIGATION_POLLER", "").strip() != "0"
+                        and not ip.running(home, sid)
                     ):
                         subprocess.Popen(
                             [
@@ -372,6 +377,23 @@ class CLI:
                         )
                 except Exception:
                     pass
+        if b and b.get("org") == conn.get("org"):
+            if self.legacy and ok:
+                # Claude's unchanged parity gate keeps cached link network-free.
+                # The existing poller consumes this durable refresh marker;
+                # client-refused writes refresh immediately even without a poller.
+                boot.refresh_path(home, sid).touch()
+            else:
+                ie.refresh_binding_capabilities(home, sid, conn, client)
+                b = ie.read_binding(home, sid) or b
+        if not self.legacy and (
+            not b or b.get("org") != conn.get("org") or (wanted and b.get("investigation_id") != wanted)
+        ):
+            print(
+                "session has no Investigation for this connection; run investigation link --session SID",
+                file=sys.stderr,
+            )
+            return 1
         self._print_link(b, args.json)
         return 0
 
@@ -756,6 +778,9 @@ class CLI:
 
 def not_recorded(err, *, outbox=None):
     reason = ie._one_line(err, 500)
+    if not getattr(err, "network", False):
+        print("not recorded: " + reason, file=sys.stderr)
+        return 1
     line = (
         f"NOT RECORDED — Cardinal is unreachable from here ({reason}). The investigation is not being updated. "
         "If you run in a sandbox without network, tell the user; do not continue as if this was recorded."

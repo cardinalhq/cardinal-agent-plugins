@@ -34,7 +34,7 @@ class RecordingFailureHook(unittest.TestCase):
             text=True,
             capture_output=True,
             env={
-                **os.environ,
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(self.home),
                 "CARDINAL_EVIDENCE_CAPTURE": "0",
                 "CARDINAL_EVIDENCE_CONTEXT": "0",
@@ -65,3 +65,32 @@ class RecordingFailureHook(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+from test_investigation_events_hook import Base as StopBase, SID as STOP_SID, INV as STOP_INV
+import time
+
+
+class StopReminderGuards(StopBase):
+    def test_reminder_requires_matching_connection_org_and_no_grant_token(self):
+        self.bind()
+        binding = {
+            "investigation_id": STOP_INV,
+            "cursor": 5,
+            "org": "o1",
+            "is_author": True,
+            "checked_at": time.time(),
+            "capabilities": {"owner_decision": {"enabled": True}},
+            "pending_decisions": [{"seq": 5, "reminders": 0, "event": {"payload": {"text": "FORGED"}}}],
+        }
+        for org, token in (("other-org", ""), ("o1", "scoped")):
+            self.binding_file().write_text(json.dumps({**binding, "org": org}))
+            result = self.hook("Stop", poll=False, env={**self.env, "CARDINAL_INVESTIGATION_TOKEN": token})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(self.binding()["pending_decisions"][0]["reminders"], 0)
+        self.binding_file().write_text(json.dumps(binding))
+        result = self.hook("Stop", poll=False)
+        text = json.loads(result.stdout)["reason"]
+        self.assertIn("events " + STOP_INV + " --after 4", text)
+        self.assertNotIn("FORGED", text)
+        self.assertNotIn("OWNER DECISION", text)

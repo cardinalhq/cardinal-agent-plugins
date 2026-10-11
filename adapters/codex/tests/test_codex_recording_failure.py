@@ -71,6 +71,41 @@ class FailureHook(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             self.assertEqual(json.loads(file.read_text())["pending_decisions"][0]["reminders"], 0)
 
+    def test_stop_rewrites_both_delivery_and_sequence_reminders(self):
+        fixtures.CodexStoryboardTests.connect(self)
+        directory = self.home / ".cardinal" / "investigations" / "sessions"
+        directory.mkdir(parents=True)
+        inv = "inv_" + "a" * 24
+        decision = {
+            "investigation_id": inv,
+            "seq": 5,
+            "class": "owner",
+            "type": "owner.decided",
+            "authority": "owner_decision",
+            "payload": {"text": "Proceed"},
+            "producer": {"principal": {"kind": "user", "id": "owner"}, "is_investigation_author": True},
+        }
+        binding = {
+            "investigation_id": inv,
+            "org": "org-1",
+            "cursor": 0,
+            "is_author": True,
+            "capabilities": {"owner_decision": {"enabled": True}},
+        }
+        (directory / f"{SESSION}.json").write_text(json.dumps(binding))
+        (directory / f"{SESSION}.inbox.json").write_text(
+            json.dumps({"investigation_id": inv, "after": 0, "through": 5, "events": [decision]})
+        )
+        result = self.run_hook("Stop", SESSION_START)
+        text = json.loads(result.stdout)["reason"]
+        self.assertIn(str(CLI) + " investigation ack", text)
+        self.assertIn("OWNER DECISION", text)
+        result = self.run_hook("Stop", SESSION_START)
+        text = json.loads(result.stdout)["reason"]
+        self.assertIn(str(CLI) + " investigation events " + inv + " --after 4", text)
+        self.assertNotIn("Proceed", text)
+        self.assertNotIn("OWNER DECISION", text)
+
 
 class MissingCore(unittest.TestCase):
     def test_only_context_fails_open(self):
@@ -79,31 +114,36 @@ class MissingCore(unittest.TestCase):
             (root / "scripts").mkdir()
             (root / "hooks").mkdir()
             script = root / "scripts" / "cardinal-storyboard"
-            shutil.copyfile(CLI, script)
-            for args in [
-                ("context",),
-                ("discover",),
-                ("investigation", "checkpoint"),
-                ("receipt", "rcpt_" + "a" * 24),
-            ]:
-                result = subprocess.run(
-                    [sys.executable, "-I", str(script), *args],
-                    capture_output=True,
-                    text=True,
-                    cwd=tmp,
-                    env={**os.environ, "HOME": tmp},
-                    timeout=5,
+            for adapter in ("codex", "cursor", "gemini"):
+                source = CLI.parents[2] / adapter / "scripts" / "cardinal-storyboard"
+                shutil.copyfile(source, script)
+                self.assert_missing_core(script, tmp)
+
+    def assert_missing_core(self, script, tmp):
+        for args in [
+            ("context",),
+            ("discover",),
+            ("investigation", "checkpoint"),
+            ("receipt", "rcpt_" + "a" * 24),
+        ]:
+            result = subprocess.run(
+                [sys.executable, "-I", str(script), *args],
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp},
+                timeout=5,
+            )
+            if args == ("context",):
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr), (0, '{"context":{}}\n', "")
                 )
-                if args == ("context",):
-                    self.assertEqual(
-                        (result.returncode, result.stdout, result.stderr), (0, '{"context":{}}\n', "")
-                    )
-                else:
-                    self.assertEqual(result.returncode, 3)
-                    self.assertEqual(result.stdout, "")
-                    self.assertTrue(
-                        result.stderr.startswith("NOT RECORDED — the Cardinal plugin core is missing")
-                    )
+            else:
+                self.assertEqual(result.returncode, 3)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(
+                    result.stderr.startswith("NOT RECORDED — the Cardinal plugin core is missing")
+                )
 
 
 if __name__ == "__main__":

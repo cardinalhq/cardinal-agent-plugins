@@ -126,7 +126,9 @@ def cli_main(argv, wiring):
                 inv = args.investigation or (binding or {}).get("investigation_id")
                 if args.investigation and (not binding or binding.get("investigation_id") != inv):
                     binding = sync.get_investigation(conn, inv, client=wiring.client)
-            if not ie.capability(binding or {}, "receipt_read"):
+            if not binding:
+                raise ValueError("no investigation binding for this session; pass --org/--session or run link")
+            if not ie.capability(binding, "receipt_read"):
                 raise ValueError(
                     "receipt reads aren't enabled on this Cardinal server; it needs a newer Maestro"
                 )

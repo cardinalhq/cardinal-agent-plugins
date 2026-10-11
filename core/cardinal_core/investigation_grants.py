@@ -123,7 +123,7 @@ def grant(conn: dict, investigation_id: str, scopes: list, *, ttl_seconds: Optio
     tok = out.get("token")
     if out.get("investigation_id") != investigation_id or not valid_grant_id(out.get("grant_id")) \
             or not isinstance(tok, str) or not _TOKEN_RE.fullmatch(tok):
-        raise ist.FetchError("grant-investigation-access answered for another investigation or without a token")
+        raise ist.FetchError("grant-investigation-access answered for another investigation or without a token", ambiguous=True)
     return out
 
 

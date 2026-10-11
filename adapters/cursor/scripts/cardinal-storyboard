@@ -38,7 +38,9 @@ if __name__ == "__main__":
     except Exception:  # fail open: an install without its vendored core
         if sys.argv[1:2] == ["context"]:
             sys.stdout.write('{"context":{}}\n')
-        sys.exit(0)
+            sys.exit(0)
+        sys.stderr.write("NOT RECORDED — the Cardinal plugin core is missing (reinstall the plugin)\n")
+        sys.exit(3)
 
     if sys.argv[1:2] in (["investigation"], ["receipt"]):
         from cardinal_core import investigation_agent, investigation_receipts

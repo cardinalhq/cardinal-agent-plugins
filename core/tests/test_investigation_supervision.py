@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import socket
 import ssl
 import tempfile
@@ -44,6 +45,7 @@ def event(seq=1, type_="owner.decided", session=None, author=True, principal=Non
         "seq": seq,
         "class": "owner" if type_ == "owner.decided" else "control",
         "type": type_,
+        "authority": "owner_decision" if type_ == "owner.decided" else "producer_claim",
         "created_at": "2026-10-10T12:34:00Z",
         "payload": {"text": "Proceed"},
         "producer": {
@@ -60,6 +62,11 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
+        isolated = {k: v for k, v in os.environ.items() if not k.startswith("CARDINAL_")}
+        isolated["HOME"] = str(self.home)
+        env_patch = patch.dict(os.environ, isolated, clear=True)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
         self.binding = {
             "investigation_id": INV,
             "cursor": 0,
@@ -174,7 +181,7 @@ class CLIForms(Base):
             ("checkpoint", "--session", SID),
         ]
         for args in cases:
-            with patch.object(sync, "_post", side_effect=state.FetchError("DNS failed")):
+            with patch.object(sync, "_post", side_effect=state.FetchError("DNS failed", network=True)):
                 code, out, err = self.run_cli(
                     *args, data='[{"type":"finding.proposed","id":"x","statement":"s"}]'
                 )
@@ -196,7 +203,9 @@ class CLIForms(Base):
             post.assert_not_called()
 
     def test_post_failed_outbox_retry_hint(self):
-        with patch.object(ie, "append_event", side_effect=state.FetchError("lost", ambiguous=True)):
+        with patch.object(
+            ie, "append_event", side_effect=state.FetchError("lost", ambiguous=True, network=True)
+        ):
             code, _, err = self.run_cli(
                 "post", "cue", "Proceed", "--session", SID, "--outbox-file", str(self.home / "intent")
             )
@@ -375,7 +384,7 @@ class DecisionDelivery(Base):
     def test_author_vs_joined_rendering_and_principal_name(self):
         decision = event()
         ie.resolve_grantee(decision, {"user:owner": {"name": "Pat"}})
-        rendered = ie.render_event(decision, SID)
+        rendered = ie.render_event(decision, SID, binding=self.binding)
         self.assertIn("authority: OWNER DECISION", rendered)
         self.assertIn('"Pat"\'s signed-in Cardinal web session', rendered)
         self.assertIn("your owner's own words", rendered)
@@ -415,30 +424,33 @@ class DecisionDelivery(Base):
 class FailureDetection(Base):
     command = {"command": "python /plugin/cardinal-storyboard investigation checkpoint --session session-one"}
 
+    def observe(self, *args, **kwargs):
+        return failures.observe(*args, runtime="claude", tool_name="Bash", **kwargs)
+
     def test_marker_exit_three_throttle_clear_and_never_usage(self):
         for response in (
             {"exit_code": 2, "stderr": "not checkpointed: invalid"},
             "Process exited with code 1",
         ):
-            self.assertIsNone(failures.observe(self.home, SID, self.command, response, now=1000))
-        msg = failures.observe(self.home, SID, self.command, "Process exited with code 3", now=1000)
+            self.assertIsNone(self.observe(self.home, SID, self.command, response, now=1000))
+        msg = self.observe(self.home, SID, self.command, "Process exited with code 3", now=1000)
         self.assertIn("could not record 1", msg)
-        self.assertIsNone(failures.observe(self.home, SID, self.command, failures.MARKER + " DNS", now=1001))
-        msg = failures.observe(self.home, SID, self.command, failures.MARKER + " DNS", now=1600)
+        self.assertIsNone(self.observe(self.home, SID, self.command, failures.MARKER + " DNS", now=1001))
+        msg = self.observe(self.home, SID, self.command, failures.MARKER + " DNS", now=1600)
         self.assertIn("could not record 3", msg)
         self.assertEqual(json.loads(failures.path(self.home, SID).read_text())["count"], 3)
         self.assertEqual(failures.path(self.home, SID).stat().st_mode & 0o777, 0o600)
         self.assertIsNone(
-            failures.observe(
+            self.observe(
                 self.home, SID, self.command, {"exit_code": 0, "stdout": "checkpointed #1"}, now=1601
             )
         )
         self.assertFalse(failures.path(self.home, SID).exists())
 
     def test_other_tools_and_read_commands_never_count_or_clear(self):
-        self.assertIsNone(failures.observe(self.home, SID, {"command": "false"}, failures.MARKER + " bad"))
+        self.assertIsNone(self.observe(self.home, SID, {"command": "false"}, failures.MARKER + " bad"))
         self.assertIsNone(
-            failures.observe(
+            self.observe(
                 self.home, SID, {"command": "cardinal-storyboard investigation events"}, {"exit_code": 3}
             )
         )

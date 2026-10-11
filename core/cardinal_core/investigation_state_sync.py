@@ -232,13 +232,17 @@ def _post(conn: dict, tool: str, payload: dict, *, client: str, opener=None, tim
                           f"{tool} answered {e.code}: {text[:300]}", retry_after=_retry_after(e.headers))
     except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
         ambiguous = req._cardinal_write_started if tracked_grant else ambiguous_transport(e)
-        raise ist.FetchError(f"{tool} failed: {e}", ambiguous=ambiguous)
+        network = (not isinstance(e, http.client.HTTPException)
+                   or isinstance(e, (http.client.RemoteDisconnected, http.client.IncompleteRead)))
+        raise ist.FetchError(f"{tool} failed: {e}", ambiguous=ambiguous, network=network)
     try:
         body = json.loads(raw)
     except ValueError:
-        raise ist.FetchError(f"{tool} answered with something that is not JSON")
+        raise ist.FetchError(f"{tool} answered with something that is not JSON",
+                             ambiguous=tool == "grant-investigation-access")
     if not isinstance(body, dict):
-        raise ist.FetchError(f"{tool} answered with something that is not an object")
+        raise ist.FetchError(f"{tool} answered with something that is not an object",
+                             ambiguous=tool == "grant-investigation-access")
     return body
 
 

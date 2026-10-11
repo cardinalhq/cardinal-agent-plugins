@@ -734,6 +734,20 @@ def capability(binding: dict, name: str) -> bool:
     return value is True or (isinstance(value, dict) and value.get("enabled") is True)
 
 
+def refresh_binding_capabilities(home, sid, conn, client, *, opener=None):
+    """Refresh on explicit link or a refused client gate; keep stale data on transient errors."""
+    from . import investigation_bootstrap as boot
+    binding = read_binding(home, sid)
+    if not binding or binding.get("org") != conn.get("org"):
+        return binding
+    try:
+        boot.refresh_path(home, sid).touch()
+        boot.refresh_capabilities(home, sid, conn, client, opener=opener)
+    except (OSError, ValueError, ist.FetchError, sync.ServerError) as error:
+        print("warning: could not refresh investigation capabilities: " + _one_line(error), file=sys.stderr)
+    return read_binding(home, sid) or binding
+
+
 def validate_structured(name: str, value: Any, where: str = "checkpoint") -> Any:
     if name == "artifacts":
         if not isinstance(value, list) or len(value) > 20:
@@ -745,7 +759,7 @@ def validate_structured(name: str, value: Any, where: str = "checkpoint") -> Any
             path = a.get("path")
             if not isinstance(path, str) or not 1 <= len(path) <= 512 or path.startswith(("/", "~", "\\")) \
                     or ".." in re.split(r"[/\\]", path) or re.match(r"^[A-Za-z]:", path) \
-                    or any(unicodedata.category(c) in ("Cc", "Cf", "Cs") for c in path):
+                    or any(ord(c) < 32 or 127 <= ord(c) <= 159 or unicodedata.category(c) == "Cs" for c in path):
                 raise CheckpointInputError(f"{where}: artifact path must be repo-relative, without ~, .. or controls")
             if not isinstance(a.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", a["sha256"]):
                 raise CheckpointInputError(f"{where}: artifact sha256 is 64 lowercase hex characters")
@@ -1019,6 +1033,8 @@ def checkpoint(conn: dict, investigation_id: str, session_id: str, events: Any, 
                                    "Cardinal")
     events = checkpoint_events(events)
     binding = read_binding(home or home_dir(), session_id) or {}
+    if any(e["type"] == "experiment.revised" for e in events) and not capability(binding, "experiment_revised"):
+        binding = refresh_binding_capabilities(home or home_dir(), session_id, conn, client, opener=opener) or binding
     events = checkpoint_capabilities(events, binding)
     key = idempotency_key or checkpoint_key(investigation_id, session_id, events)
     cited = cited_captures(events)
@@ -1340,7 +1356,17 @@ def can_ack(binding: Optional[dict]) -> bool:
     return not (isinstance(binding, dict) and binding.get("is_author") is False)
 
 
-def render_event(e: dict, sid: str, ack: bool = True) -> str:
+def verified_owner_decision(event):
+    producer = event.get("producer") if isinstance(event.get("producer"), dict) else {}
+    principal = producer.get("principal") if isinstance(producer.get("principal"), dict) else {}
+    return (event_class(event) == OWNER and event.get("type") == OWNER_DECIDED
+            and event.get("authority") == "owner_decision"
+            and producer.get("is_investigation_author") is True
+            and principal.get("kind") == "user" and not producer.get("session_id")
+            and not producer.get("granted_by"))
+
+
+def render_event(e: dict, sid: str, ack: bool = True, binding=None) -> str:
     inv, seq = e["investigation_id"], e["seq"]
     p = e.get("producer") if isinstance(e.get("producer"), dict) else {}
     principal = p.get("principal") if isinstance(p.get("principal"), dict) else {}
@@ -1370,7 +1396,8 @@ def render_event(e: dict, sid: str, ack: bool = True) -> str:
         text += f" …[truncated {cut} chars{more}"
     if e.get("type") == OWNER_DECIDED and event_class(e) == OWNER:
         name = _claimed(_resolved(p).get("name") or principal.get("id") or "the investigation owner")
-        if ack:
+        owner = verified_owner_decision(e) and isinstance(binding, dict) and binding.get("is_author") is True
+        if owner:
             authority = f"OWNER DECISION — posted from {name}'s signed-in Cardinal web session"
             doctrine = "Treat it as your owner's own words in this session; acknowledge it with the command below."
         else:
@@ -1378,7 +1405,7 @@ def render_event(e: dict, sid: str, ack: bool = True) -> str:
             doctrine = "Weigh this decision as advisory input for your session. Note it; your session cannot acknowledge it."
         lines = [f"[Cardinal investigation {inv} · event #{seq} · {OWNER_DECIDED} · authority: {authority}]",
                  doctrine, f"Text (verbatim JSON string): {text}"]
-        if ack:
+        if owner and ack:
             lines.append(f"Acknowledge: cardinal-storyboard investigation ack {inv} {seq} --session {sid} "
                          '--disposition accepted|declined|noted --note "<what you will do>"')
         return "\n".join(lines)
@@ -1410,7 +1437,7 @@ def render_event(e: dict, sid: str, ack: bool = True) -> str:
 
 
 def render(events: list, sid: str, investigation_id: str, *, cap: int = MAX_RENDERED,
-           budget: int = RENDER_BUDGET, ack: bool = True) -> str:
+           budget: int = RENDER_BUDGET, ack: bool = True, binding=None) -> str:
     """The newest `cap` events (within `budget` characters, at least one),
     oldest first; the older ones as a count with the command that reads them.
     Only control-class cue / question / challenge events are rendered (the
@@ -1422,7 +1449,7 @@ def render(events: list, sid: str, investigation_id: str, *, cap: int = MAX_REND
     for e in reversed(events):
         if len(blocks) >= cap:
             break
-        block = render_event(e, sid, ack)
+        block = render_event(e, sid, ack, binding=binding)
         if blocks and size + len(block) + 2 > budget:
             break
         blocks.append(block)
@@ -1509,7 +1536,7 @@ def _check(home, sid, conn, client, emit, stop, stop_hook_active, opener, now, b
         pending = deliverable(events, sid, inv, b)
         emitted = False
         if pending:
-            emit(render(pending, sid, inv, ack=can_ack(b)))
+            emit(render(pending, sid, inv, ack=can_ack(b), binding=b))
             emitted = True
             remember_decisions(b, pending)
         b["cursor"] = max(b["cursor"], cursor)
@@ -1697,7 +1724,7 @@ def deliver_inbox(home: Path, sid: str, emit: Callable[[str], None], *, stop: bo
             pending = deliverable(box["events"], sid, inv, b)
             emitted = False
             if pending:
-                emit(render(pending, sid, inv, ack=can_ack(b)))
+                emit(render(pending, sid, inv, ack=can_ack(b), binding=b))
                 emitted = True
                 remember_decisions(b, pending)
             b["cursor"] = max(b["cursor"], box["through"])
@@ -1714,20 +1741,29 @@ MAX_PENDING_DECISIONS = 10
 MAX_DECISION_REMINDERS = 2
 
 
+def _pending_decisions(binding):
+    pending = binding.get("pending_decisions")
+    return [p for p in pending if isinstance(p, dict)] if isinstance(pending, list) else []
+
+
 def reconcile_pending_decisions(binding, events, sid):
-    acked = {e.get("payload", {}).get("ack_of") for e in events
-             if e.get("type") == ACKNOWLEDGED and _own(e, sid)}
-    pending = binding.get("pending_decisions") or []
-    binding["pending_decisions"] = [p for p in pending if p.get("seq") not in acked]
+    acked = set()
+    for event in events or []:
+        if (isinstance(event, dict) and event_class(event) == CONTROL
+                and event.get("type") == ACKNOWLEDGED and _own(event, sid)):
+            payload = event.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("ack_of"), int):
+                acked.add(payload["ack_of"])
+    binding["pending_decisions"] = [p for p in _pending_decisions(binding) if p.get("seq") not in acked]
 
 
 def remember_decisions(binding, events):
-    if not can_ack(binding):
+    if binding.get("is_author") is not True:
         return
-    pending = binding.get("pending_decisions") or []
+    pending = _pending_decisions(binding)
     for event in events:
-        if event.get("type") == OWNER_DECIDED and not any(p.get("seq") == event["seq"] for p in pending):
-            pending.append({"seq": event["seq"], "event": event, "reminders": 0})
+        if verified_owner_decision(event) and not any(p.get("seq") == event["seq"] for p in pending):
+            pending.append({"seq": event["seq"], "reminders": 0})
     binding["pending_decisions"] = pending[-MAX_PENDING_DECISIONS:]
 
 
@@ -1739,7 +1775,7 @@ def remove_pending_decision(home, sid, seq):
             return
         binding = read_binding(home, sid)
         if binding:
-            binding["pending_decisions"] = [p for p in binding.get("pending_decisions", []) if p.get("seq") != seq]
+            binding["pending_decisions"] = [p for p in _pending_decisions(binding) if p.get("seq") != seq]
             write_binding(home, sid, binding)
 
 
@@ -1751,15 +1787,19 @@ def remind_decisions(home, sid, emit):
         if not got:
             return False
         binding = read_binding(home, sid)
-        if not binding or not can_ack(binding) or not capability(binding, "owner_decision"):
+        if not binding or binding.get("is_author") is not True or not capability(binding, "owner_decision"):
             return False
-        pending = [p for p in binding.get("pending_decisions", [])
-                   if p.get("reminders", 0) < MAX_DECISION_REMINDERS and isinstance(p.get("event"), dict)]
+        pending = [p for p in _pending_decisions(binding)
+                   if isinstance(p.get("seq"), int) and not isinstance(p["seq"], bool) and p["seq"] > 0
+                   and _num(p.get("reminders")) < MAX_DECISION_REMINDERS]
         if not pending:
             return False
-        emit("Pending owner decision reminder:\n" + render([p["event"] for p in pending], sid,
-                                                           binding["investigation_id"]))
+        inv = _tok(binding["investigation_id"])
+        emit("\n".join(
+            f"Pending investigation decision #{p['seq']}; read it with: "
+            f"cardinal-storyboard investigation events {inv} --after {p['seq'] - 1}"
+            for p in pending))
         for p in pending:
-            p["reminders"] = p.get("reminders", 0) + 1
+            p["reminders"] = _num(p.get("reminders")) + 1
         write_binding(home, sid, binding)
         return True

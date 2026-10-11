@@ -90,7 +90,12 @@ def main() -> None:
     try:
         deliver(home, sid, ie, tracked_emit, event, payload)
         if stop and not emitted:
-            ie.remind_decisions(home, sid, tracked_emit)
+            from cardinal_core import investigation_grants
+            import _storyboard_discovery
+            binding = ie.read_binding(home, sid)
+            if (binding and not investigation_grants.token_set(os.environ)
+                    and binding.get("org") == _storyboard_discovery.connection().get("org")):
+                ie.remind_decisions(home, sid, tracked_emit)
     finally:
         if stop:
             flush_owner_input(home, sid, payload.get("cwd"))

@@ -193,7 +193,7 @@ def capture(payload: dict, spill_root: str, home: Path) -> None:
     )
     from cardinal_core import investigation_failures
     failure = investigation_failures.observe(home, call.session_id, call.tool_input,
-                                              response, error)
+                                              response, error, runtime=call.runtime, tool_name=call.tool_name)
     budget = max(0.2, cap.TIME_BUDGET_S - (time.monotonic() - START))
     got = cap.capture_call_guarded(call, home, budget_s=budget, promote_cmd="cardinal-evidence")
     lines = [line for line in (failure, got.line if got is not None else None) if line]

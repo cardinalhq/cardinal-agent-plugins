@@ -1288,9 +1288,10 @@ def _downgrade(state: dict, sessions: Optional[dict]) -> tuple:
 # ---------------------------------------------------------------------------
 
 class FetchError(Exception):
-    def __init__(self, message, *, ambiguous=False):
+    def __init__(self, message, *, ambiguous=False, network=False):
         super().__init__(message)
         self.ambiguous = ambiguous
+        self.network = network
 
 
 

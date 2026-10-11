@@ -67,6 +67,14 @@ In-memory reads send single-class and type filters to the server.
 
 ## Capabilities and authority
 
+Shared CLI `link` refreshes binding capabilities synchronously. Claude cached
+links preserve the unchanged CLI parity gate's network-free behavior by
+queuing the existing poller refresh marker; new/recovered links fetch fresh
+capabilities. With the poller disabled, the marker waits, and a client-refused
+`experiment.revised` write refreshes once and reevaluates the gate, so a
+server upgrade does not leave a session stuck on old capability data.
+Transient refresh failures retain the cache and fail the gate closed.
+
 The binding's capability block gates `owner_decision`, `checkpoint_artifacts`,
 `experiment_revised`, and `receipt_read`. Against an older Maestro:
 
@@ -85,17 +93,25 @@ pressed a button.
 Decision delivery uses the existing per-session cursor. Only an author ack
 claiming this session suppresses a decision inside a fetched page. The binding
 retains at most ten pending decisions, with up to two Stop reminders per
-entry, without moving the cursor. A successful CLI ack or a polled ack from
+entry, without moving the cursor. Reminders contain only the sequence and a
+command to read that event; local cache/binding files are same-user, mutable
+state and must never mint owner authority by replaying stored decision text. A successful CLI ack or a polled ack from
 this session removes the entry.
 
 ## Recording and recovery
 
+Failure detection inspects only shell-execution tools and executable CLI
+command words. Status comes from structured runtime fields or leading runtime
+prefixes; success clearing requires exit 0, never success-looking stdout.
+
 Checkpoint/question/post/ack reachability failures exit 3 and start stderr with
-`NOT RECORDED —`; refusals exit 1 and usage errors exit 2. Hook detection runs
+`NOT RECORDED —`; refusals, missing connections and protocol/shape errors exit 1; usage errors
+exit 2. Missing connections use `not recorded: not connected to Cardinal
+(run /cardinal:connect)` without the reachability marker. Hook detection runs
 before capture opt-out/control-plane returns, even when evidence context is
 off. Hooks keep a private `<sid>.failures.json`, warn at most every ten minutes,
 and clear it on the next successful write. Claude also emits a user-visible
-`systemMessage`. The Codex launcher fails open only for context when its core
+`systemMessage`. The Codex/Cursor/Gemini launchers fail open only for context when its core
 is missing; other commands exit 3.
 
 Grant `--out` reserves a new 0600 file. Definite failures remove it. Timeouts or
@@ -105,7 +121,8 @@ The grant transport tracks whether its POST write started after TCP/TLS
 connection. Connect/handshake timeouts delete the reservation; a timeout/reset
 after a POST write may have sent bytes and preserves it. Proxy CONNECT traffic
 is not counted as a grant write. HTTP refusal responses are definite, including
-5xx. Injected/custom openers without phase tracking classify conservatively. A disk
+5xx. A malformed 2xx grant response is ambiguous: the server may have minted
+the grant even though its credentials cannot be recovered. Injected/custom openers without phase tracking classify conservatively. A disk
 failure after a successful grant preserves the reservation too.
 
 Checkpoint evidence uploads add ev-to-receipt mappings to the session's
@@ -122,3 +139,8 @@ receipt access. A grantee requires the new evidence scope and may read only
 receipts cited by semantic events in its pinned investigation; that boundary
 is enforced by Maestro. Grant files and local evidence remain same-user
 filesystem artifacts, as in #190, and do not establish OS isolation.
+
+`verify <semantic_id>` verifies every artifact-bearing revision, newest first,
+with each result labeled by event sequence. Path validation matches Maestro
+(including format characters); traversal, absolute paths, controls and lone
+surrogates remain refused.
