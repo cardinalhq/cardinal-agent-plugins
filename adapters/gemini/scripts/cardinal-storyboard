@@ -40,5 +40,14 @@ if __name__ == "__main__":
             sys.stdout.write('{"context":{}}\n')
         sys.exit(0)
 
+    if sys.argv[1:2] in (["investigation"], ["receipt"]):
+        from cardinal_core import investigation_agent, investigation_receipts
+        from cardinal_core.paths import AgentPaths
+        wiring = storyboard_agent.Wiring("gemini", AgentPaths(home=Path.home() / ".gemini"),
+                                          plugin_version(), cli=str(Path(__file__).resolve()))
+        if sys.argv[1] == "receipt":
+            sys.exit(investigation_receipts.cli_main(sys.argv[2:], wiring))
+        sys.exit(investigation_agent.cli_main(sys.argv[2:], wiring, SESSION_ENV))
+
     storyboard_agent.launcher_main("gemini", "Gemini CLI", ".gemini", plugin_version,
                                    str(Path(__file__).resolve()), SESSION_ENV)

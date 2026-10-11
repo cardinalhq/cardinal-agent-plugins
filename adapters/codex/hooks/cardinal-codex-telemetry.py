@@ -434,19 +434,23 @@ def handle_tool_evidence(payload: dict[str, Any]) -> None:
     the agent its `[evidence:ev_...]` id as PostToolUse
     hookSpecificOutput.additionalContext. Local file work only."""
     dump_debug_payload("PostToolUse", payload)
+    failure = None
     try:
         from cardinal_core import evidence_capture as cap
 
         call = evidence_call(payload)
         if call is None:
             return
+        from cardinal_core import investigation_failures
+        failure = investigation_failures.observe(Path.home(), call.session_id, call.tool_input,
+                                                  call.response, call.error)
         # Never silent: a call the pipeline cannot finish in time is kept as a
         # withheld stub (capture_call_guarded).
         got = cap.capture_call_guarded(call, Path.home(), promote_cmd=shlex.quote(str(EVIDENCE_CLI)))
     except BaseException:
         got = None
     record_patch_edits(payload)
-    lines = [got.line] if got is not None and got.line else []
+    lines = [line for line in (failure, got.line if got is not None else None) if line]
     try:
         from cardinal_core import investigation_agent
         wiring = storyboard_wiring()
@@ -1012,6 +1016,21 @@ def append_tool_result_event(
 
 def handle_stop(payload: dict[str, Any]) -> None:
     session_id = session_id_from_payload(payload)
+    try:
+        from cardinal_core import investigation_agent, investigation_events as ie
+        wiring = storyboard_wiring()
+        binding = ie.read_binding(Path.home(), session_id)
+        if investigation_agent.enabled(wiring) and binding and binding.get("org") == wiring.connection().get("org"):
+            lines = []
+            ie.deliver_inbox(Path.home(), session_id, lines.append, stop=True,
+                             stop_hook_active=payload.get("stop_hook_active") is True)
+            if not lines:
+                ie.remind_decisions(Path.home(), session_id, lines.append)
+            if lines:
+                sys.stdout.write(json.dumps({"decision": "block", "reason": "\n\n".join(lines)}))
+                sys.stdout.flush()
+    except Exception:
+        pass
     if not session_id:
         return
     transcript_path = transcript_path_from_payload(payload, session_id)

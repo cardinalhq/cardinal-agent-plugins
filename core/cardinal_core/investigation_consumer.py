@@ -117,7 +117,7 @@ def reviewed(conn: dict, path: Path, batch: str) -> dict:
         return {"investigation_id": conn["investigation_id"], "after": state["after"]}
 
 
-def post(conn: dict, type_: str, text: str, target: str, refs: list, *, client: str, outbox: Path) -> dict:
+def post(conn: dict, type_: str, text: str, target: str, refs: list, *, client: str, outbox: Path, session_id=None) -> dict:
     payload = ie.text_payload(text, refs or None)
     # Content-addressed key survives a lost HTTP response and process restart.
     material = [identity(conn), type_, payload, target]
@@ -132,9 +132,10 @@ def post(conn: dict, type_: str, text: str, target: str, refs: list, *, client: 
         if saved.get("intent") != intent:
             raise ValueError("outbox contains another advisory; retry its exact content or use a new file")
         # Always retry through the server: it checks revocation/expiry and deduplicates.
+        producer = {"session_id": session_id} if not conn.get("token") and session_id else {}
         result = ie.append_event(conn, conn["investigation_id"], type_, payload,
                                  idempotency_key=key, to_session_id=target, client=client,
-                                 producer_client=client)
+                                 producer_client=client, **producer)
         saved["result"] = result
         private_write(outbox, saved)
         return result

@@ -83,8 +83,14 @@ def main() -> None:
         sys.stdout.flush()
 
     stop = event == "Stop"
+    emitted = []
+    def tracked_emit(text):
+        emitted.append(True)
+        emit(text)
     try:
-        deliver(home, sid, ie, emit, event, payload)
+        deliver(home, sid, ie, tracked_emit, event, payload)
+        if stop and not emitted:
+            ie.remind_decisions(home, sid, tracked_emit)
     finally:
         if stop:
             flush_owner_input(home, sid, payload.get("cwd"))
