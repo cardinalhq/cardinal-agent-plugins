@@ -56,7 +56,7 @@ advertises `capabilities: {projection: {enabled: true}}` keeps the live
 storyboard up to date from those checkpoints itself, and the session is told no
 storyboard step is needed; any other keeps the skill-driven flow below. Events
 are delivered and listed by the `class` Cardinal stamps on each one (`control`,
-`semantic` or `owner_input`; an older Cardinal without it: by type); an event
+`semantic`, `owner_input` or `owner`; an older Cardinal without it: by type); an event
 of a class this plugin does not know, and owner input, is never delivered to
 the model. Only when Cardinal advertises `capabilities: {owner_input:
 {enabled: true}}` does the author session record the owner's prompts as owner
@@ -66,6 +66,13 @@ capture starts; `CARDINAL_OWNER_INPUT=0` in `~/.claude/settings.json` `env`
 turns it off on this machine). `cardinal-storyboard investigation grant`
 gives someone else scoped, revocable access to the Investigation through
 `CARDINAL_INVESTIGATION_TOKEN`, never this machine's key.
+The shared CLI also supports supervisor follow reads, compact output, structured
+checkpoint artifacts and local hash verification, and receipt lookup. With the
+`owner_decision` capability, decisions posted from the investigation author's
+signed-in Cardinal web session reach each author's session as the owner's own
+words; in another human's joined session they remain advisory. See
+[the supervision CLI contract](docs/specs/supervision-cli.md) for cursor, grant,
+capability, compatibility and recording-failure behavior.
 At the completion of investigation work, connected agents offer to update the storyboard visualization. With the user's consent, the same session authors and previews it. Codex, Cursor and Gemini include the `cardinal-storyboard` skill and a local preview renderer; Claude uses its storyboard and canvas skills. Declining or completing an update does not trigger another offer. Publishing and sharing remain separate explicit requests. Deploy the companion Conductor change to remove UI/server visualization generation.
 
 Claude also ships two model-invocable skills for Cardinal's Investigation

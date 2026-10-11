@@ -119,10 +119,12 @@ FLAT_ALL = [
 
 class Mapping(unittest.TestCase):
     def test_every_type_maps_flat_fields_to_its_payload(self):
-        got = ie.checkpoint_events(FLAT_ALL)
+        revised = {"type": "experiment.revised", "id": "exp_phases", "outcome": "Correction: GET dominates."}
+        got = ie.checkpoint_events(FLAT_ALL + [revised])
         self.assertEqual([e["type"] for e in got], list(ie.SEMANTIC_TYPES[:1]) + [
             "experiment.started", "experiment.completed", "finding.proposed", "finding.revised", "finding.retracted",
-            "hypothesis.resolved", "decision.proposed", "decision.revised", "question.opened", "question.resolved"])
+            "hypothesis.resolved", "decision.proposed", "decision.revised", "question.opened", "question.resolved",
+            "experiment.revised"])
         self.assertEqual(sorted({e["type"] for e in got}), sorted(ie.SEMANTIC_TYPES))
         self.assertEqual(got[0], {"type": "hypothesis.proposed", "payload": {
             "semantic_id": "hyp_s3", "statement": "S3 GET latency may dominate cold latency.", "evidence": [RCPT]}})
