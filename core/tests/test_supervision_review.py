@@ -17,9 +17,10 @@ from cardinal_core import investigation_receipts as receipts
 class Detection(Base):
     command = {"command": 'cardinal-storyboard investigation question "why exit 3?"'}
 
-    def observe(self, response, tool="Bash", runtime="claude", command=None):
+    def observe(self, response, tool="Bash", runtime="claude", command=None, succeeded=None):
         return failures.observe(
-            self.home, SID, command or self.command, response, runtime=runtime, tool_name=tool, now=1000
+            self.home, SID, command or self.command, response, runtime=runtime, tool_name=tool, now=1000,
+            succeeded=succeeded,
         )
 
     def test_question_and_stdout_status_are_not_runtime_status(self):
@@ -43,6 +44,15 @@ class Detection(Base):
             self.observe("Process exited with code 3\nDNS", runtime="codex", tool="exec_command")
         )
         self.assertIsNone(self.observe({"exit_code": 0}))
+        self.assertFalse(failures.path(self.home, SID).exists())
+
+    def test_claude_success_shape_clears_with_runtime_signal(self):
+        # Claude's real Bash result: no exit code; success is the hook event.
+        self.assertIn("could not record 1", self.observe({"exit_code": 3, "stderr": "DNS failed"}))
+        shape = {"stdout": "checkpointed #4", "stderr": "", "interrupted": False, "isImage": False}
+        self.assertIsNone(self.observe(shape))
+        self.assertTrue(failures.path(self.home, SID).exists())
+        self.assertIsNone(self.observe(shape, succeeded=True))
         self.assertFalse(failures.path(self.home, SID).exists())
 
     def test_write_edit_payloads_never_alarm_or_clear(self):

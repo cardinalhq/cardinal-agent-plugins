@@ -192,8 +192,16 @@ def capture(payload: dict, spill_root: str, home: Path) -> None:
         client=client(),
     )
     from cardinal_core import investigation_failures
+    # Claude's Bash result carries no exit code: a non-zero exit arrives as
+    # PostToolUseFailure, so a non-interrupted PostToolUse is a success.
+    succeeded = (
+        event == "PostToolUse"
+        and error is None
+        and not (isinstance(response, dict) and response.get("interrupted"))
+    )
     failure = investigation_failures.observe(home, call.session_id, call.tool_input,
-                                              response, error, runtime=call.runtime, tool_name=call.tool_name)
+                                              response, error, runtime=call.runtime, tool_name=call.tool_name,
+                                              succeeded=succeeded)
     budget = max(0.2, cap.TIME_BUDGET_S - (time.monotonic() - START))
     got = cap.capture_call_guarded(call, home, budget_s=budget, promote_cmd="cardinal-evidence")
     lines = [line for line in (failure, got.line if got is not None else None) if line]

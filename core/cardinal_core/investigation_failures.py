@@ -127,11 +127,14 @@ def path(home: Path, sid: str) -> Path:
     return ie.sessions_dir(home) / f"{sid}.failures.json"
 
 
-def observe(home, sid, tool_input, response=None, error=None, *, runtime=None, tool_name=None, now=None):
+def observe(home, sid, tool_input, response=None, error=None, *, runtime=None, tool_name=None, now=None, succeeded=None):
     """Detect before capture's opt-out/control-plane early returns. No network.
 
     Only reachability failures (3 or the fixed marker) count; usage/refusal
-    errors do not. A successful write clears the state. Returns a throttled
+    errors do not. A successful write clears the state. `succeeded`: the
+    runtime's own success signal when its result carries no exit code (Claude
+    reports a non-zero Bash exit as PostToolUseFailure, so a non-interrupted
+    PostToolUse means exit 0). Returns a throttled
     additionalContext message, independent of evidence context settings.
     """
     runtime = "claude" if runtime == "claude-code" else runtime
@@ -151,6 +154,8 @@ def observe(home, sid, tool_input, response=None, error=None, *, runtime=None, t
     code = exit_code(response)
     if code is None:
         code = exit_code(error)
+    if code is None and succeeded is True and not error:
+        code = 0
     marker = next((line for line in text.splitlines() if line.startswith(MARKER)), None)
     failed = code == 3 or marker is not None
     success = not failed and not error and code == 0

@@ -25,7 +25,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Core unittest suite
         run: cd core && python3 -m unittest discover tests
+      # Adapter suites need 3.11+ (tomllib, runtime `X | None`); core stays on 3.9 + 3.12.
       - name: Claude adapter unittest suite
+        if: matrix.python-version != '3.9'
         run: python3 build/vendor.py claude && (cd adapters/claude && python3 -m unittest discover tests)
       - name: Codex adapter unittest suite
+        if: matrix.python-version != '3.9'
         run: python3 build/vendor.py codex && (cd adapters/codex && python3 -m unittest discover tests)
