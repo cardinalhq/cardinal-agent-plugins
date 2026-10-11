@@ -1,0 +1,20 @@
+# Pinned runtime for generate.py (scripted mode). Installed with --no-deps, so
+# every transitive dependency is listed. Model mode additionally needs the
+# `anthropic` package and credentials; it is not installed by default.
+opentelemetry-api==1.36.0
+opentelemetry-sdk==1.36.0
+opentelemetry-semantic-conventions==0.57b0
+opentelemetry-exporter-otlp-proto-http==1.36.0
+opentelemetry-exporter-otlp-proto-common==1.36.0
+opentelemetry-proto==1.36.0
+protobuf==5.29.5
+googleapis-common-protos==1.70.0
+requests==2.32.4
+urllib3==2.5.0
+certifi==2025.8.3
+idna==3.10
+charset-normalizer==3.4.3
+typing_extensions==4.14.1
+importlib_metadata==8.7.0
+zipp==3.23.0
+PyYAML==6.0.2
