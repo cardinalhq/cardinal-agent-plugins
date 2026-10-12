@@ -81,12 +81,32 @@ def read_draft(draft: str, state: Path) -> dict:
     return data
 
 
+def private_write(path: Path, text: str, private_dirs=()) -> None:
+    """Write text atomically as a 0600 file (compilation.files.private_json's
+    discipline, standard library only: the CLI loads this file on its own).
+    `private_dirs` (the file's own directories, e.g. the checks state dir and
+    drafts/) are created or tightened to 0700."""
+    import tempfile
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for directory in private_dirs:
+        Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def write_draft(data: dict, state: Path) -> None:
     path = draft_path(data['draft'], state)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
-    os.replace(tmp, path)
+    private_write(path, json.dumps(data, indent=2, sort_keys=True) + '\n', (Path(state), path.parent))
 
 
 def _check_trace(trace) -> None:

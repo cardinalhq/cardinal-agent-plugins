@@ -88,17 +88,26 @@ def default_config(environ=None, runtime=None, home=None):
 
     Precedence: CARDINAL_BEHAVIOR_API_URL (+ CARDINAL_QUERY_API_KEY), then
     CARDINAL_MCP_URL (+ CARDINAL_MCP_API_KEY) in the environment (Claude Code
-    passes its settings env; an override everywhere), then, for codex, cursor
-    and gemini, the runtime's own connect files (cardinal.json mcp_url +
-    cardinal-secrets.json mcp_api_key). The key read from a file stays in
-    memory: the range worker reads the same files itself."""
+    passes its settings env), then, for codex, cursor and gemini, the
+    runtime's own connect files (cardinal.json mcp_url + cardinal-secrets.json
+    mcp_api_key). On codex, cursor and gemini an environment URL is taken only
+    with its key next to it: a URL alone (a shell that exports
+    CARDINAL_MCP_URL for something else) would pair it with no key, or with
+    the files' key for another host, so the connect files win. Claude has no
+    connect files: its environment URL is taken as it is. The key read from a
+    file stays in memory: the range worker reads the same files itself."""
     env = os.environ if environ is None else environ
     runtime = resolve_runtime(runtime, env)
-    base_url = env.get('CARDINAL_BEHAVIOR_API_URL')
+    claude = runtime == 'claude'
+    base_url = None
     api_key = None
-    if not base_url and env.get('CARDINAL_MCP_URL'):
+    api_key_env = 'CARDINAL_MCP_API_KEY'
+    if env.get('CARDINAL_BEHAVIOR_API_URL') and (claude or env.get('CARDINAL_QUERY_API_KEY')):
+        base_url = env['CARDINAL_BEHAVIOR_API_URL']
+        api_key_env = 'CARDINAL_QUERY_API_KEY'
+    elif env.get('CARDINAL_MCP_URL') and (claude or env.get('CARDINAL_MCP_API_KEY')):
         base_url = behavior_url(env['CARDINAL_MCP_URL'])
-    elif not base_url and runtime != 'claude':
+    elif not claude:
         # Claude keeps its key in settings.json env, never in these files.
         url, key = agent_paths_connection(runtime, home)
         try:
@@ -109,7 +118,7 @@ def default_config(environ=None, runtime=None, home=None):
             base_url = None
         api_key = key if base_url else None
     config = {'base_url': base_url, 'org': env.get('CARDINAL_ORG_ID'), 'runtime': runtime,
-              'api_key_env': 'CARDINAL_QUERY_API_KEY' if env.get('CARDINAL_BEHAVIOR_API_URL') else 'CARDINAL_MCP_API_KEY',
+              'api_key_env': api_key_env,
               'output_dir': env.get('CARDINAL_BEHAVIOR_OUTPUT_DIR', str(Path.home() / '.cardinal' / 'behavior-executions'))}
     if api_key:
         config['api_key'] = api_key

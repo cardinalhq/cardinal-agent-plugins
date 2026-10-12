@@ -207,8 +207,10 @@ python3 scripts/cardinal-checks status   # the setting, the installed skill, acc
   starts outside its sandbox, so it can write the Checks ledger and read
   range runs that a sandboxed agent cannot. It reads this runtime's
   connection (`~/.gemini/cardinal.json` `mcp_url` + `cardinal-secrets.json`
-  `mcp_api_key`); `CARDINAL_MCP_URL` / `CARDINAL_MCP_API_KEY` in its
-  environment override them. No key is written into the MCP registration.
+  `mcp_api_key`); `CARDINAL_MCP_URL` with `CARDINAL_MCP_API_KEY` in its
+  environment overrides them (a URL without its key does not). No key is
+  written into the MCP registration. Its draft ledger and `enabled.json` are
+  private (0600 files in 0700 directories).
 - **The skill** (`cardinal-checks`, from `checks/skill/`: this plugin's
   SKILL.md over the shared `common/checks/CORE.md`) is installed into
   Cardinal's extension, `~/.gemini/extensions/cardinal/skills/checks/` (a rebuilt extension keeps it; with `--no-extension` there is no extension to load it from, so `on` refuses) by `on` and removed by `off`. The SessionStart hook

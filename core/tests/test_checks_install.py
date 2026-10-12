@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import sys
 import unittest
@@ -58,6 +59,16 @@ class InstallTests(Base):
         self.assertTrue((self.home / ".codex" / "cardinal" / "checks" / "enabled.json").is_file())
         with self.assertRaises(ValueError):
             checks_install.state_dir("vim", self.home)
+
+    def test_enabled_json_is_private(self):
+        state = checks_install.state_dir("cursor", self.home)
+        state.mkdir(parents=True, mode=0o755)
+        os.chmod(state, 0o755)
+        checks_install.set_enabled("cursor", True, self.home)
+        self.assertEqual((state / "enabled.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+        self.assertEqual([p.name for p in state.iterdir()], ["enabled.json"])
+        self.assertTrue(checks_install.is_enabled("cursor", self.home))
 
     def test_skills_dir_per_runtime(self):
         for runtime in ("claude", "codex", "cursor"):

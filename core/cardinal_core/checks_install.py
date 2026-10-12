@@ -45,6 +45,7 @@ import os
 import re
 import shlex
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -167,11 +168,22 @@ def is_enabled(runtime: str, home: Optional[Path] = None) -> bool:
 
 
 def set_enabled(runtime: str, enabled: bool, home: Optional[Path] = None) -> None:
-    path = state_dir(runtime, home) / "enabled.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"enabled": bool(enabled), "updated_at": time.time()}) + "\n")
-    os.replace(tmp, path)
+    """Write enabled.json atomically, 0600 in a 0700 checks state dir (the
+    same discipline as the draft ledger, lib/behavior/checks_ledger.py)."""
+    state = state_dir(runtime, home)
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(state, 0o700)
+    path = state / "enabled.json"
+    fd, tmp = tempfile.mkstemp(prefix=".enabled.json-", dir=str(state))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps({"enabled": bool(enabled), "updated_at": time.time()}) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 # --- where the skill goes -----------------------------------------------------

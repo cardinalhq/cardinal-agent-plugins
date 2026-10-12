@@ -59,13 +59,32 @@ class ConnectionByRuntimeTests(unittest.TestCase):
         self.assertEqual(opened.call_args.args[0].get_header('X-cardinalhq-api-key'), 'file-key')
         self.assertNotIn('file-key', json.dumps({k: v for k, v in config.items() if k != 'api_key'}))
 
-    def test_environment_connection_overrides_the_files(self):
+    def test_environment_connection_with_its_key_overrides_the_files(self):
         connect_files(self.home, 'gemini', url='https://files.example/api/orgs/%s/mcp' % ORG)
-        config = default_config({'CARDINAL_MCP_URL': f'https://env.example/api/orgs/{ORG}/mcp'},
+        config = default_config({'CARDINAL_MCP_URL': f'https://env.example/api/orgs/{ORG}/mcp',
+                                 'CARDINAL_MCP_API_KEY': 'env-key'},
                                 runtime='gemini', home=self.home)
         self.assertEqual(config['base_url'], f'https://env.example/api/orgs/{ORG}/behavior')
         self.assertNotIn('api_key', config)
         self.assertEqual(config['api_key_env'], 'CARDINAL_MCP_API_KEY')
+        query = default_config({'CARDINAL_BEHAVIOR_API_URL': 'https://query.example/behavior',
+                                'CARDINAL_QUERY_API_KEY': 'q'}, runtime='codex', home=self.home)
+        self.assertEqual((query['base_url'], query['api_key_env']),
+                         ('https://query.example/behavior', 'CARDINAL_QUERY_API_KEY'))
+
+    def test_an_environment_url_without_its_key_falls_back_to_the_files(self):
+        for runtime in ('codex', 'cursor', 'gemini'):
+            with self.subTest(runtime=runtime):
+                connect_files(self.home, runtime, url='https://files.example/api/orgs/%s/mcp' % ORG)
+                for env in ({'CARDINAL_MCP_URL': f'https://env.example/api/orgs/{ORG}/mcp'},
+                            {'CARDINAL_MCP_URL': f'https://env.example/api/orgs/{ORG}/mcp', 'CARDINAL_MCP_API_KEY': ''},
+                            {'CARDINAL_BEHAVIOR_API_URL': 'https://query.example/behavior'}):
+                    config = default_config(env, runtime=runtime, home=self.home)
+                    self.assertEqual(config['base_url'], f'https://files.example/api/orgs/{ORG}/behavior')
+                    self.assertEqual(config['api_key'], 'file-key')
+        # Claude has no connect files: its environment URL stands alone.
+        claude = default_config({'CARDINAL_MCP_URL': f'https://env.example/api/orgs/{ORG}/mcp'}, runtime='claude')
+        self.assertEqual(claude['base_url'], f'https://env.example/api/orgs/{ORG}/behavior')
 
     def test_claude_keeps_its_environment_only_connection(self):
         connect_files(self.home, 'claude')
@@ -232,6 +251,17 @@ class LedgerToolTests(unittest.TestCase):
         schema = server.tools_list(Behavior({'output_dir': str(self.output)}))
         approve = next(t for t in schema['tools'] if t['name'] == 'approve_check_example')
         self.assertIn('user_reply', approve['inputSchema']['properties'])
+
+    def test_the_ledger_is_private(self):
+        state = self.home / '.codex' / 'cardinal' / 'checks'
+        (state / 'drafts').mkdir(parents=True, mode=0o755)
+        os.chmod(state, 0o755)
+        os.chmod(state / 'drafts', 0o755)   # a ledger written before this fix
+        checks_ledger.set_example('d4', TRACE, True, 'MATCH', 'r', state=state)
+        self.assertEqual((state / 'drafts' / 'd4.json').stat().st_mode & 0o777, 0o600)
+        self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((state / 'drafts').stat().st_mode & 0o777, 0o700)
+        self.assertEqual(sorted(p.name for p in (state / 'drafts').iterdir()), ['d4.json'])
 
     def test_remove_and_insufficient_rules(self):
         results = self.rpc('gemini',
