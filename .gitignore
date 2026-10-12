@@ -10,6 +10,8 @@ dist/
 # vendored copies are build outputs, not source
 adapters/*/hooks/cardinal_core/
 adapters/devin/cardinal_core/
+# the Checks preview's opt-in install (cardinal-checks on) in a source checkout
+adapters/claude/skills/checks/
 # Session-local working notes and tool state — never source. Plans and
 # handoffs here reference absolute local paths and live prod runbooks;
 # anything meant to be shared belongs in docs/ proper.

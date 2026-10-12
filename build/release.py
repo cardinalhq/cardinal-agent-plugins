@@ -39,9 +39,13 @@ MIRRORS = {
 
 # Monorepo-only files never shipped to mirrors.
 EXCLUDE = {"tests", "REPORT.md", "CORE_GAPS.md", "__pycache__"}
+# Opt-in skills installed into skills/ at runtime from a shipped template.
+OPT_IN_SKILLS = {"checks"}
 
 REQUIRED_ARTIFACTS = {
     "claude": (".claude-plugin/plugin.json", "lib/behavior/server.py", "lib/behavior/storyboard.py",
+               "lib/behavior/range_run.py", "lib/behavior/range_runner.py", "checks/skill/SKILL.md", "checks/skill/CORE.md",
+               "bin/cardinal-checks", "hooks/checks-gate.py", "hooks/_checks.py",
                "lib/behavior/compilation/hosted.py", "lib/behavior/compilation/regression.py",
                "lib/behavior/compilation/engine.py", "lib/behavior/compilation/workflow.py",
                "lib/behavior/compilation/sdk_adapter.py", "lib/behavior/compilation/corpus.py",
@@ -76,7 +80,12 @@ def build_artifact(adapter: str, dest: Path) -> None:
         shutil.rmtree(dest)
 
     def _ignore(directory: str, names: list[str]) -> set[str]:
-        return {n for n in names if n in EXCLUDE}
+        ignored = {n for n in names if n in EXCLUDE}
+        # skills/checks/ is the Checks preview's opt-in install (cardinal-checks
+        # on), never product source: only its template checks/skill/ ships.
+        if Path(directory).name == "skills" and Path(directory).parent == src:
+            ignored |= {n for n in names if n in OPT_IN_SKILLS}
+        return ignored
 
     shutil.copytree(src, dest, ignore=_ignore)
     # Vendored core goes next to hooks/ (bin/ for claude has its own

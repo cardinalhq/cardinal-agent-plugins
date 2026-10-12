@@ -51,7 +51,9 @@ STORYBOARD_HOOKS = ("storyboard-session.py", "storyboard-preview.py", "storyboar
                     "storyboard-context.py", "storyboard-hero.py")
 # Not gated: never touches the network or Cardinal (a local Invariant
 # checkout's check-pr.ts, or nothing).
-LOCAL_ONLY_HOOKS = ("invariant-check.py",)
+# checks-gate.py enforces the Checks opt-in (skill install / Skill deny) with
+# or without a connection; its routing text alone needs one.
+LOCAL_ONLY_HOOKS = ("invariant-check.py", "checks-gate.py")
 # A POSIX sh fast path (no Python, no network) in front of a gated Python
 # hook: the sh only checks for a local binding file.
 FAST_PATH_HOOKS = {"investigation-events.sh": "investigation-events.py"}
