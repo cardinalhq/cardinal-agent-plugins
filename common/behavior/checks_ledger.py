@@ -30,6 +30,7 @@ correction needs a revised contract, i.e. a new draft.
 """
 from __future__ import annotations
 
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -290,6 +291,10 @@ RANGE_ID_RE = re.compile(r'^[a-f0-9]{32}$')
 # A worker that holds no lock and wrote nothing for this long has stopped.
 RANGE_IDLE_S = 30.0
 MAX_WAIT_S = 30
+# get_behavior_range returns at most this many events per call: a first poll
+# (after_event 0) of a long segment returns its LAST ones, a later one the
+# next ones from after_event, so one MCP result stays small.
+RANGE_POLL_MAX_EVENTS = 50
 
 
 def range_dir(range_id: str, output=None) -> Path:
@@ -482,7 +487,8 @@ def _idle_for(directory: Path, events: list, now: float) -> float:
 
 
 def range_poll(range_id: str, after_event: int = 0, wait_seconds: float = 0, output=None,
-               idle_s: float = RANGE_IDLE_S, sleep=None, clock=None) -> dict:
+               idle_s: float = RANGE_IDLE_S, sleep=None, clock=None,
+               max_events: int = RANGE_POLL_MAX_EVENTS) -> dict:
     """The polling twin of watch_range, for the get_behavior_range MCP tool.
 
     Returns the events after `after_event` (an index from an earlier call's
@@ -490,7 +496,10 @@ def range_poll(range_id: str, after_event: int = 0, wait_seconds: float = 0, out
     wait_seconds (at most MAX_WAIT_S) for at least one new event. `done` is
     true while the latest event is needs_extents, completed, failed or
     stalled (a worker with no lock that wrote nothing for idle_s): the caller
-    acts on it (next_action) instead of polling again. Read-only."""
+    acts on it (next_action) instead of polling again. At most max_events
+    events per call: the latest ones of a long segment on a first poll
+    (omitted_events, segment_counts and a note on paging), else the next
+    ones from after_event (more_events; next_event pages on). Read-only."""
     sleep = sleep or time.sleep
     clock = clock or time.time
     if type(after_event) is not int or after_event < 0:
@@ -516,17 +525,37 @@ def range_poll(range_id: str, after_event: int = 0, wait_seconds: float = 0, out
         if start < len(events) or done or clock() >= deadline:
             break
         sleep(min(1.0, max(0.0, deadline - clock())))
-    lines = [line for line in (format_range_event(e, events_file) for e in events[start:] if e) if line]
-    if stalled:
+    end = len(events)
+    page = None
+    if end - start > max_events:
+        if after_event == 0:
+            # The first look at a long segment: its latest events, with counts.
+            page = {'omitted_events': end - max_events - start,
+                    'segment_counts': dict(Counter(e.get('event') for e in events[start:] if e))}
+            page['note'] = (f"Showing the last {max_events} of {end - start} events in this segment; the "
+                            f"{page['omitted_events']} earlier ones are counted by kind in segment_counts. To read "
+                            f"them, call get_behavior_range with after_event {max(start, 1)} (after_event 0 always "
+                            f"returns the latest {max_events}) and follow next_event, {max_events} per call; "
+                            f"{events_file} holds every event, one JSON object per line.")
+            start = end - max_events
+        else:
+            end = start + max_events
+            page = {'more_events': len(events) - end,
+                    'note': f'{len(events) - end} more events after these: call again with after_event {end}.'}
+    lines = [line for line in (format_range_event(e, events_file) for e in events[start:end] if e) if line]
+    if stalled and end == len(events):
         lines.append('stalled: the range worker is not running and wrote nothing for '
                      f'{int(idle_s)}s. Call continue_behavior_range to restart it.')
+    if stalled:
         latest_kind = 'stalled'
-    out = {'range_id': range_id, 'events': lines, 'next_event': len(events), 'latest_event': latest_kind,
+    out = {'range_id': range_id, 'events': lines, 'next_event': end, 'latest_event': latest_kind,
            'done': done, 'status': range_status(range_id, output)}
+    if page:
+        out.update(page)
     if done:
         out['next_action'] = NEXT_ACTIONS.get(latest_kind, NEXT_ACTIONS['stalled'])
     else:
-        out['next_action'] = (f'The run continues. Call get_behavior_range again with after_event {len(events)} '
+        out['next_action'] = (f'The run continues. Call get_behavior_range again with after_event {end} '
                               'and wait_seconds 20; keep the user posted in a line or two as windows finish.')
     if latest_kind == 'needs_extents' and latest:
         out['needs_extents'] = {k: latest.get(k) for k in ('multi_window_traces', 'multi_window_trace_count',

@@ -649,7 +649,7 @@ def tools_list(behavior: Behavior):
                                 'additionalProperties': {'type': 'object', 'properties': {'start': {'type': 'string'}, 'end': {'type': 'string'}},
                                                          'required': ['start', 'end'], 'additionalProperties': False}}},
              ['range_id']),
-        tool('get_behavior_range', 'Read a background range run: the events after after_event as one line each (0 = from the current segment; then pass the previous next_event), waiting up to wait_seconds for one. done is true at needs_extents, completed, failed or stalled; next_action says what to do; a completed run includes its summary. Read-only.',
+        tool('get_behavior_range', 'Read a background range run: the events after after_event as one line each, at most 50 per call (0 = the current segment, its latest 50 when longer, with counts and how to page; then pass the previous next_event), waiting up to wait_seconds for one. done is true at needs_extents, completed, failed or stalled; next_action says what to do; a completed run includes its summary. Read-only.',
              {'range_id': range_id, 'after_event': {'type': 'integer', 'minimum': 0, 'default': 0},
               'wait_seconds': {'type': 'number', 'minimum': 0, 'maximum': 30, 'default': 20}}, ['range_id']),
         tool('list_accepted_checks', 'Checks accepted earlier (newest first): contract description, service, accepted diagnostic_version. Reuse one whose contract matches the request.',

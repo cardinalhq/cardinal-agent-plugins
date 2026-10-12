@@ -330,6 +330,35 @@ class RangePollTests(unittest.TestCase):
         self.assertEqual(done['summary'], {'counts': {'MATCH': 1}, 'flagged_count': 1})
         self.assertEqual(done['status']['phase'], 'windows')
 
+    def test_a_first_poll_of_a_long_segment_returns_its_latest_events_with_counts(self):
+        window = {'event': 'window_done', 'window': ['a', 'b'], 'status': 'COMPLETED', 'verdicts': {'MATCH': 1},
+                  'progress': {'windows_done': 1, 'windows_left': 1}}
+        self.write({'event': 'started', 'population': 'svc', 'start': 'S', 'end': 'E', 'windows': 120},
+                   *[window] * 120)
+        first = self.poll()
+        self.assertEqual(len(first['events']), checks_ledger.RANGE_POLL_MAX_EVENTS)
+        self.assertEqual(first['next_event'], 121)
+        self.assertEqual(first['omitted_events'], 71)
+        self.assertEqual(first['segment_counts'], {'started': 1, 'window_done': 120})
+        self.assertIn('after_event 1', first['note'])
+        self.assertIn('after_event 121', first['next_action'])
+        self.assertLess(len(json.dumps(first)), 16000)
+        # Paging from after_event: the next 50, then the rest.
+        page = self.poll(after_event=1)
+        self.assertEqual((len(page['events']), page['next_event'], page['more_events']), (50, 51, 70))
+        self.assertIn('after_event 51', page['next_action'])
+        last = self.poll(after_event=101)
+        self.assertEqual((len(last['events']), last['next_event']), (20, 121))
+        self.assertNotIn('more_events', last)
+        # A long segment that ended: done, with the terminal event among the shown ones.
+        (self.dir / 'summary.json').write_text(json.dumps({'counts': {'MATCH': 120}}))
+        self.write({'event': 'completed', 'population': 120, 'counts': {'MATCH': 120}, 'flagged': 120,
+                    'edge_traces': 0, 'conflicts': 0, 'coverage_holes': 0, 'judge_calls': 0, 'summary_file': '/s'})
+        done = self.poll()
+        self.assertTrue(done['done'])
+        self.assertTrue(done['events'][-1].startswith('completed:'))
+        self.assertEqual(done['summary'], {'counts': {'MATCH': 120}})
+
     def test_a_first_poll_after_continue_starts_at_the_new_segment(self):
         self.write({'event': 'started', 'population': 'p', 'start': 'S', 'end': 'E', 'windows': 1},
                    {'event': 'needs_extents', 'multi_window_trace_count': 1, 'multi_window_traces': [TRACE],
