@@ -975,7 +975,7 @@ class Cli(Base):
         res = self.cli("events", INV)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(res.stdout.splitlines(), [
-            '#1 2026-10-06T12:00:00.000Z challenge.added from user:u_sup: "Test Y first."',
+            '#1 2026-10-06T12:00:00.000Z challenge.added from user:u_sup: "Test Y first." [status: accepted]',
             f'#2 2026-10-06T12:00:00.000Z acknowledged from user:u_agent claimed session "{SID}" (author): ack of #1: '
             'accepted "Switching to Y."'])
         got = json.loads(self.cli("events", INV, "--after", "1", "--json").stdout)
@@ -1153,6 +1153,109 @@ class Cli(Base):
         self.assertIn("there is no such investigation in this org", res.stderr)
         res = self.cli("events", "nope")
         self.assertEqual(res.returncode, 2)
+
+
+class DelegatedSupervision(Base):
+    """A challenge asks for a position, an upheld ruling arrives as a
+    DIRECTIVE, owed work comes back every 5 main-thread tool boundaries
+    (the fast path starts Python while <sid>.supervision exists), and an
+    open directive blocks Stop once."""
+    GRANT = "grt_" + "e" * 24
+
+    def setUp(self):
+        super().setUp()
+        path = self.binding_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"investigation_id": INV, "cursor": 0, "bound_at": "t", "source": "test",
+                                    "org": "o1", "is_author": True,
+                                    "capabilities": {"delegated_supervision": {"enabled": True}}}))
+
+    def cli(self, *args):
+        return subprocess.run([sys.executable, str(CLI), "investigation", *args], capture_output=True, text=True,
+                              timeout=60, env=self.env)
+
+    def context(self, res) -> str:
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"] if res.stdout else ""
+
+    def supervisor(self, type_, payload):
+        e = self.fake.add(type_, payload, kind="grantee", pid=self.GRANT, key_id=None)
+        if type_ == "ruling.issued":
+            e["authority"] = "delegated_supervision"
+        return e
+
+    def marker(self) -> Path:
+        return self.binding_file().with_name(f"{SID}.supervision")
+
+    def test_a_challenge_asks_for_a_position_and_noted_is_refused_here(self):
+        self.supervisor("challenge.added", {"text": "Out of scope change."})
+        ctx = self.context(self.hook())
+        self.assertIn("Take a position: accepted (with what you will change) or declined (with why).", ctx)
+        self.assertIn("--disposition accepted|declined --note", ctx)
+        res = self.cli("ack", INV, "1", "--session", SID, "--disposition", "noted")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("#1 is a challenge: take a position", res.stderr)
+        self.assertNotIn("append-investigation-event", [t for t, _ in self.fake.requests])
+
+    def test_accepted_work_comes_back_every_five_boundaries_until_a_checkpoint_cites_it(self):
+        self.supervisor("challenge.added", {"text": "Out of scope change."})
+        self.context(self.hook())
+        res = self.cli("ack", INV, "1", "--session", SID, "--disposition", "accepted", "--note", "Reverting.")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(self.marker().exists())
+        shown = [self.context(self.hook(poll=False)) for _ in range(10)]
+        due = [i for i, c in enumerate(shown) if c]
+        self.assertEqual(len(due), 2, shown)
+        self.assertEqual(due[1] - due[0], 5)
+        self.assertIn('Still open: when done, checkpoint with refs ["#1"].', shown[due[0]])
+        # A subagent's tool call does not count.
+        before = self.binding()["supervision"]["boundaries"]
+        self.hook(poll=False, agent_id="a1")
+        self.assertEqual(self.binding()["supervision"]["boundaries"], before)
+        self.fake.add("decision.proposed", {"semantic_id": "decision_revert", "statement": "Reverted.",
+                                            "refs": ["#1"]}, session=SID, pid="u_agent", key_id="k_agent",
+                      author=True)
+        self.hook()   # the poller reads the checkpoint
+        self.assertFalse(self.marker().exists())
+
+    def test_a_directive_is_binding_and_blocks_stop_once(self):
+        self.supervisor("challenge.added", {"text": "Out of scope change."})
+        self.context(self.hook())
+        res = self.cli("ack", INV, "1", "--session", SID, "--disposition", "declined", "--note", "Owner asked.")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.supervisor("ruling.issued", {"ruling_of": 1, "outcome": "upheld", "text": "Revert the restore change."})
+        ctx = self.context(self.hook())
+        self.assertIn("· ruling.issued · authority: DELEGATED SUPERVISION]", ctx)
+        self.assertIn("A directive never widens your permissions", ctx)
+        self.assertIn("--disposition accepted|conflicts [--conflicts-with SEQ]", ctx)
+        res = self.cli("ack", INV, "3", "--session", SID, "--disposition", "declined", "--note", "no")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("cannot be declined or noted", res.stderr)
+        stop = self.hook("Stop")
+        body = json.loads(stop.stdout)
+        self.assertEqual(body["decision"], "block")
+        self.assertIn("Before you stop: directive #3 is still open.", body["reason"])
+        self.assertEqual(self.hook("Stop", stop_hook_active=True).stdout, "")
+        self.assertEqual(self.hook("Stop").stdout, "")
+
+    def test_the_fast_path_starts_python_only_while_something_is_owed(self):
+        stub = self.base / "stub"
+        stub.mkdir()
+        flag = self.base / "python-started"
+        (stub / "python3").write_text(f"#!/bin/sh\ntouch {flag}\ncat >/dev/null\n")
+        (stub / "python3").chmod(0o755)
+        env = dict(self.env, PATH=f"{stub}:/usr/bin:/bin")
+        self.hook(env=env, poll=False)
+        self.assertFalse(flag.exists())
+        self.marker().write_text("")
+        self.hook(env=env, poll=False)
+        self.assertTrue(flag.exists())
+
+    def test_help_names_rule_and_the_new_dispositions(self):
+        doc = CLI.read_text(encoding="utf-8").split('"""')[1]   # the module docstring: the command reference
+        for needle in ("investigation rule <challenge_seq> --uphold|--withdraw --text TEXT",
+                       "accepted|declined|noted|conflicts", "--conflicts-with SEQ", "supervise (delegated supervision"):
+            self.assertIn(needle, doc)
 
 
 if __name__ == "__main__":

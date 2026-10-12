@@ -91,3 +91,40 @@ class SupervisionTests(fixtures.CodexStoryboardTests):
         out = self.scoped_cli('grant', '--session', SESSION, '--out', str(dest))
         self.assertNotEqual(out.returncode, 0)
         self.assertEqual(len(self.fake.requests), before)
+
+    def supervise_credential(self):
+        gid = 'grt_' + 'c' * 24
+        token = encoded({'typ': 'CardinalInvestigation'}) + '.' + encoded(
+            {'org': 'test-org', 'inv': INV, 'gid': gid, 'scopes': ['read', 'advise', 'supervise']}) + '.signature'
+        path = self.repo / 'supervise.json'
+        path.write_text(json.dumps({'token': token, 'origin': self.fake.origin}))
+        path.chmod(0o600)
+        return path, token
+
+    def test_rule_sends_issue_ruling_with_the_grant_only(self):
+        path, token = self.supervise_credential()
+        self.fake.routes['issue-ruling'] = (201, {'event': {
+            'investigation_id': INV, 'seq': 5, 'type': 'ruling.issued', 'authority': 'delegated_supervision',
+            'payload': {'ruling_of': 3, 'outcome': 'upheld', 'text': 'Revert it.'}}})
+        out = self.scoped_cli('rule', '3', '--uphold', '--text', 'Revert it.', '--credential-file', str(path))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn('ruled on challenge #3 as event #5', out.stdout)
+        request = self.fake.requests[-1]
+        self.assertTrue(request['path'].endswith('/issue-ruling'))
+        self.assertEqual(request['headers']['authorization'], 'CardinalInvestigation ' + token)
+        self.assertNotIn('x-cardinalhq-api-key', request['headers'])
+        self.assertEqual(request['body']['payload'], {'ruling_of': 3, 'outcome': 'upheld', 'text': 'Revert it.'})
+        self.assertEqual(request['body']['idempotency_key'], 'rule:3')
+
+    def test_an_older_cardinal_says_it_has_no_rulings(self):
+        path, _ = self.supervise_credential()
+        out = self.scoped_cli('rule', '3', '--withdraw', '--text', 'ok', '--credential-file', str(path))
+        self.assertEqual(out.returncode, 1)
+        self.assertIn('does not support rulings yet', out.stderr)
+
+    def test_rule_without_a_grant_is_refused_locally(self):
+        before = len(self.fake.requests)
+        out = self.scoped_cli('rule', '3', '--uphold', '--text', 'x')
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("supervise grant's token", out.stderr)
+        self.assertEqual(len(self.fake.requests), before)
