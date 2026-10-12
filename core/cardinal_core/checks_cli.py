@@ -227,7 +227,8 @@ class Cli:
             elif args.action == "approve":
                 if args.trace is None:
                     raise ValueError("approve needs --trace")
-                self._print(ledger.approve(args.draft, args.trace, args.label, state=state))
+                self._print(ledger.approve(args.draft, args.trace, args.label, state=state, approved_via="cli",
+                                           user_reply=args.user_reply))
             elif args.action == "remove":
                 if args.trace is None:
                     raise ValueError("remove needs --trace")
@@ -272,6 +273,7 @@ def build_parser(cli: Cli) -> argparse.ArgumentParser:
     example.add_argument("--proposed", choices=VERDICTS, help="the proposed label")
     example.add_argument("--reason", help="why, under the approved contract")
     example.add_argument("--label", choices=VERDICTS, help="the user's correction (approve)")
+    example.add_argument("--user-reply", help="the user's reply, quoted (approve)")
     example.set_defaults(func=cli.cmd_example)
     return parser
 

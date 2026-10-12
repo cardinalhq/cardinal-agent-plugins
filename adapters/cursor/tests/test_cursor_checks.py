@@ -231,6 +231,8 @@ class ChecksSkillTests(PluginCopy):
         self.assertIn("`cardinal-behavior` server", skill)
         self.assertIn("get_behavior_range", skill)
         self.assertIn("next Cursor session", skill)
+        self.assertIn("the user's label approval\n  (step 7) is still required", skill)
+        self.assertNotIn("without any shell command or approval", skill)
         self.assertNotIn("Monitor", skill)
 
 

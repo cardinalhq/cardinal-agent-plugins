@@ -292,6 +292,8 @@ class SkillTemplateTests(unittest.TestCase):
         self.assertIn("mcp__cardinal-behavior__", skill)
         self.assertIn("get_behavior_range", skill)
         self.assertIn("next Codex session", skill)
+        self.assertIn("the user's label approval\n  (step 7) is still required", skill)
+        self.assertNotIn("without any shell command or approval", skill)
         self.assertNotIn("Monitor", skill)
         self.assertNotIn("mcp__plugin_cardinal", skill)
         tracked = subprocess.run(["git", "ls-files", "adapters/codex/skills/checks"], cwd=REPO,

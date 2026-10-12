@@ -130,8 +130,10 @@ the approved contract, and the reason. Then ask the user to approve or correct e
 
 - The contract approval (step 3) settled *what counts*. This approval settles *how the
   contract applies to this trace*.
-- Record each decision with
-  `approve_check_example {draft, trace_id[, label: <correction>]}`.
+- Record each decision only after the user gave it, with
+  `approve_check_example {draft, trace_id[, label: <correction>][, user_reply: <their words>]}`;
+  `user_reply` quotes the user's approving or correcting reply verbatim. The ledger records
+  how and when each label was approved.
   The ledger **refuses** a correction that conflicts with the sufficiency result, such as
   MATCH on a trace whose deciding span wasn't retained. Tell the user the refusal reason
   as it was given.

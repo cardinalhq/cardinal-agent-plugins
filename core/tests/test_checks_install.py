@@ -150,6 +150,11 @@ class CliTests(Base):
         code, _, err = self.cli("cursor", "example", "approve", "--draft", "d1", "--trace", TRACE, "--label", "MATCH")
         self.assertEqual(code, checks_cli.EXIT_REFUSED)
         self.assertIn("no span", err)
+        code, out, _ = self.cli("cursor", "example", "approve", "--draft", "d1", "--trace", TRACE,
+                                "--user-reply", "fine, keep it UNKNOWN")
+        self.assertEqual(code, 0)
+        self.assertEqual((json.loads(out)["approved_via"], json.loads(out)["user_reply"]),
+                         ("cli", "fine, keep it UNKNOWN"))
         code, out, _ = self.cli("cursor", "example", "expected", "--draft", "d1")
         self.assertEqual(json.loads(out), {TRACE: "UNKNOWN"})
         self.assertEqual(self.cli("cursor", "example", "show", "--draft", "../x")[0], checks_cli.EXIT_USAGE)

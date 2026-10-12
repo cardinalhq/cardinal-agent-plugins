@@ -136,12 +136,26 @@ def set_example(draft: str, trace: str, sufficient: bool, proposed: str, reason:
     return example
 
 
-def approve(draft: str, trace: str, label=None, *, state: Path) -> dict:
+APPROVED_VIA = ('mcp', 'cli')
+MAX_USER_REPLY = 2000
+
+
+def approve(draft: str, trace: str, label=None, *, state: Path, approved_via: str = 'cli',
+            user_reply=None) -> dict:
     """Approve the proposed label, or record the user's correction.
+
+    Records provenance with the label: approved_via (`mcp`: the
+    approve_check_example tool; `cli`: cardinal-checks example approve),
+    approved_at (epoch seconds) and, when given, user_reply (the user's own
+    words, quoted; at most MAX_USER_REPLY characters).
 
     Refused: a correction away from UNKNOWN on an insufficient example (the
     label cannot create evidence), and any change once the labels were used in
     a test."""
+    if approved_via not in APPROVED_VIA:
+        raise ValueError('approved_via must be one of ' + ', '.join(APPROVED_VIA))
+    if user_reply is not None and not isinstance(user_reply, str):
+        raise ValueError('user_reply must be a string')
     _check_trace(trace)
     data = read_draft(draft, state)
     _check_unlocked(data)
@@ -154,7 +168,13 @@ def approve(draft: str, trace: str, label=None, *, state: Path) -> dict:
         raise LabelRefused(
             f"refused: {final} needs evidence this trace does not have ({example['missing']}); "
             'it stays UNKNOWN, or swap in another candidate')
-    example.update(label=final, approved=True, corrected=final != example['proposed'])
+    example.update(label=final, approved=True, corrected=final != example['proposed'],
+                   approved_via=approved_via, approved_at=time.time())
+    reply = (user_reply or '').strip()[:MAX_USER_REPLY]
+    if reply:
+        example['user_reply'] = reply
+    else:
+        example.pop('user_reply', None)
     write_draft(data, state)
     return example
 

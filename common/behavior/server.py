@@ -557,8 +557,9 @@ class Checks:
         return checks_ledger.set_example(draft, trace_id, evidence == 'sufficient', proposed, reason, missing,
                                          state=self.state)
 
-    def approve(self, draft, trace_id, label=None):
-        return checks_ledger.approve(draft, trace_id, label, state=self.state)
+    def approve(self, draft, trace_id, label=None, user_reply=None):
+        return checks_ledger.approve(draft, trace_id, label, state=self.state, approved_via='mcp',
+                                     user_reply=user_reply)
 
     def remove(self, draft, trace_id):
         return {'removed': checks_ledger.remove_example(draft, trace_id, state=self.state)}
@@ -649,8 +650,11 @@ def tools_list(behavior: Behavior):
               'proposed': label, 'reason': {'type': 'string', 'minLength': 1},
               'missing': {'type': 'string', 'description': 'The evidence that is not there (insufficient only).'}},
              ['draft', 'trace_id', 'evidence', 'proposed', 'reason']),
-        tool('approve_check_example', "Record the user's approval of a proposed label, or their correction (label). Refused, with the reason to tell the user, when the correction contradicts insufficient evidence or the labels are locked.",
-             {'draft': draft, 'trace_id': trace, 'label': label}, ['draft', 'trace_id']),
+        tool('approve_check_example', "Record the user's approval of a proposed label, or their correction (label), only after the user gave it. Pass user_reply: the user's reply, quoted verbatim. The ledger records how (mcp) and when it was approved. Refused, with the reason to tell the user, when the correction contradicts insufficient evidence or the labels are locked.",
+             {'draft': draft, 'trace_id': trace, 'label': label,
+              'user_reply': {'type': 'string', 'maxLength': checks_ledger.MAX_USER_REPLY,
+                             'description': "The user's approving or correcting reply, quoted verbatim."}},
+             ['draft', 'trace_id']),
         tool('remove_check_example', 'Drop a candidate example (a mistyped trace id, a swapped-out example) until the labels are locked.',
              {'draft': draft, 'trace_id': trace}, ['draft', 'trace_id']),
         tool('get_check_draft', 'Show a draft\'s recorded examples, their labels and whether they are locked.',

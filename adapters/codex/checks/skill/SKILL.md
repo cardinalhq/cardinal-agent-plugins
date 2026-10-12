@@ -30,7 +30,8 @@ prefix; the full names on Codex are below.
 - The teaching-label ledger and reuse, on the same server: `set_check_example`,
   `approve_check_example`, `remove_check_example`, `get_check_draft`,
   `lock_check_examples`, `list_accepted_checks`. The server runs outside the Codex sandbox, so
-  these record labels without any shell command or approval.
+  these record labels without a shell command or a sandbox prompt; the user's label approval
+  (step 7) is still required.
 
 Check executions only reach the organization's production LakeRunner. A service that only
 exists on another instance (for example `otel-demo`) cannot be checked: say so and stop.

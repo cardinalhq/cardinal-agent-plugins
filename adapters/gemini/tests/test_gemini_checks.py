@@ -243,6 +243,8 @@ class ChecksSkillTests(PluginCopy):
         self.assertIn("mcp_cardinal-behavior_", skill)
         self.assertIn("get_behavior_range", skill)
         self.assertIn("next Gemini CLI session", skill)
+        self.assertIn("the user's label approval\n  (step 7) is still required", skill)
+        self.assertNotIn("without any shell command or approval", skill)
         self.assertNotIn("Monitor", skill)
         self.assertNotIn("__CARDINAL_PLUGIN_ROOT__", skill)
 

@@ -203,6 +203,36 @@ class LedgerToolTests(unittest.TestCase):
         self.assertTrue(draft.is_file())
         self.assertFalse((self.home / '.claude').exists())
 
+    def test_approval_records_its_provenance(self):
+        before = time.time()
+        results = self.rpc('cursor',
+            ('set_check_example', {'draft': 'd3', 'trace_id': TRACE, 'evidence': 'sufficient', 'proposed': 'MATCH',
+                                   'reason': 'r'}),
+            ('approve_check_example', {'draft': 'd3', 'trace_id': TRACE,
+                                       'user_reply': '  yes, that one is a match  '}),
+            ('set_check_example', {'draft': 'd3', 'trace_id': OTHER, 'evidence': 'sufficient', 'proposed': 'MATCH',
+                                   'reason': 'r'}),
+            ('approve_check_example', {'draft': 'd3', 'trace_id': OTHER, 'label': 'NON_MATCH'}),
+            ('approve_check_example', {'draft': 'd3', 'trace_id': OTHER, 'user_reply': 7}))
+        self.assertEqual([r[0] for r in results], [False, False, False, False, True])
+        approved, corrected = results[1][1], results[3][1]
+        self.assertEqual((approved['approved_via'], approved['user_reply']), ('mcp', 'yes, that one is a match'))
+        self.assertGreaterEqual(approved['approved_at'], before)
+        self.assertEqual(corrected['approved_via'], 'mcp')
+        self.assertNotIn('user_reply', corrected)
+        stored = json.loads((self.home / '.cursor' / 'cardinal' / 'checks' / 'drafts' / 'd3.json').read_text())
+        self.assertEqual(stored['examples'][TRACE]['user_reply'], 'yes, that one is a match')
+        # The CLI front end records cli; the reply is capped.
+        state = self.home / '.cursor' / 'cardinal' / 'checks'
+        via_cli = checks_ledger.approve('d3', OTHER, 'NON_MATCH', state=state, user_reply='x' * 5000)
+        self.assertEqual(via_cli['approved_via'], 'cli')
+        self.assertEqual(len(via_cli['user_reply']), checks_ledger.MAX_USER_REPLY)
+        with self.assertRaises(ValueError):
+            checks_ledger.approve('d3', OTHER, state=state, approved_via='agent')
+        schema = server.tools_list(Behavior({'output_dir': str(self.output)}))
+        approve = next(t for t in schema['tools'] if t['name'] == 'approve_check_example')
+        self.assertIn('user_reply', approve['inputSchema']['properties'])
+
     def test_remove_and_insufficient_rules(self):
         results = self.rpc('gemini',
             ('set_check_example', {'draft': 'd2', 'trace_id': TRACE, 'evidence': 'insufficient', 'proposed': 'NON_MATCH',
