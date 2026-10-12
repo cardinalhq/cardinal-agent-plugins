@@ -410,7 +410,7 @@ python3 scripts/cardinal-checks status   # the setting, the installed skill, acc
   environment override them. No key is written into the MCP registration.
 - **The skill** (`cardinal-checks`, from `checks/skill/`: this plugin's
   SKILL.md over the shared `common/checks/CORE.md`) is installed into
-  this plugin's `skills/checks/` (`plugin.json` `"skills": "./skills/"`) by `on` and removed by `off`. The SessionStart hook
+  this plugin's `skills/checks/` (`plugin.json` `"skills": "./skills/"`) by `on` and removed by `off` (and by `cardinal-disconnect`). The SessionStart hook
   reconciles that copy with the setting and, while the preview is on and
   Cardinal is connected, adds the routing rule (answer with the query tools
   first; a check only for per-trace judgments). Off: no text at all.

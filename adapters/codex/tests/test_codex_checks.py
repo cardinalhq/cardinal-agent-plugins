@@ -232,6 +232,26 @@ class LaunchersAndSessionStartTests(unittest.TestCase):
         self.assertIn("not registered for Codex", on.stdout)
         self.assertIn(f"python3 {self.plugin.resolve() / 'scripts' / 'cardinal-connect'} --repair-hooks", on.stdout)
 
+    def test_disconnect_removes_the_installed_skill_and_the_setting(self):
+        self.connect_files()
+        self.assertEqual(self.checks("on").returncode, 0)
+        self.assertTrue((self.installed / "SKILL.md").is_file())
+        result = subprocess.run([sys.executable, str(self.plugin / "scripts" / "cardinal-disconnect")],
+                                capture_output=True, text=True, env=self.env(), timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Removed the Checks preview skill", result.stdout)
+        self.assertFalse(self.installed.exists())
+        self.assertFalse((self.home / ".codex" / "cardinal" / "checks").exists())
+
+    def test_disconnect_keeps_a_skills_checks_it_did_not_install(self):
+        self.connect_files()
+        (self.installed).mkdir()
+        (self.installed / "SKILL.md").write_text("mine\n")
+        result = subprocess.run([sys.executable, str(self.plugin / "scripts" / "cardinal-disconnect")],
+                                capture_output=True, text=True, env=self.env(), timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((self.installed / "SKILL.md").read_text(), "mine\n")
+
     def test_session_start_reconciles_and_adds_the_rule_only_when_on_and_connected(self):
         self.connect_files()
         self.assertNotIn(ROUTING, self.session_start())

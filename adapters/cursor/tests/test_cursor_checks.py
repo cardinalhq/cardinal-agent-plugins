@@ -213,6 +213,18 @@ class ChecksSkillTests(PluginCopy):
         self.assertNotIn(ROUTING, self.session_start())
         self.assertFalse(installed.exists())
 
+    def test_disconnect_removes_the_installed_skill_and_the_setting(self):
+        installed = self.plugin / "skills" / "checks"
+        self.connect_files()
+        self.assertEqual(self.checks("on").returncode, 0)
+        self.assertTrue((installed / "SKILL.md").is_file())
+        result = subprocess.run([sys.executable, str(self.plugin / "scripts" / "cardinal-disconnect")],
+                                capture_output=True, text=True, env=self.env(), timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Removed the Checks preview skill", result.stdout)
+        self.assertFalse(installed.exists())
+        self.assertFalse((self.home / ".cursor" / "cardinal" / "checks").exists())
+
     def test_skill_names_the_behavior_server_and_polling(self):
         skill = (ADAPTER / "checks" / "skill" / "SKILL.md").read_text()
         self.assertTrue(skill.startswith("---\nname: cardinal-checks\n"))

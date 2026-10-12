@@ -18,6 +18,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
 
 CURSOR_DIR = Path.home() / ".cursor"
 USER_MCP_PATH = CURSOR_DIR / "mcp.json"
@@ -175,6 +177,23 @@ def revoke_key(host: str, key_id: str, plaintext: str | None) -> tuple[bool, str
         return False, f"network error: {exc}"
 
 
+
+def remove_checks_skill(runtime: str) -> None:
+    """The Checks preview's skill copy in this plugin's skills/checks/
+    (cardinal-checks on): removed with the connection, before the runtime
+    dir (and its enabled.json) goes, so no session keeps a skill whose
+    setting is gone. Best-effort: a disconnect never fails on it."""
+    try:
+        sys.path.insert(0, str(PLUGIN_ROOT / "hooks"))
+        from cardinal_core import checks_install
+
+        dest = checks_install.install_dir(runtime, PLUGIN_ROOT)
+        if checks_install.uninstall(dest):
+            print(f"Removed the Checks preview skill {dest}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not remove the Checks preview skill: {exc}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="cardinal-disconnect",
@@ -259,6 +278,8 @@ def main() -> int:
     if STATE_PATH.exists():
         STATE_PATH.unlink()
         print(f"Removed {STATE_PATH}")
+
+    remove_checks_skill("cursor")
 
     if RUNTIME_DIR.exists():
         # Includes the owner-input consent (cardinal-connect --owner-input):
