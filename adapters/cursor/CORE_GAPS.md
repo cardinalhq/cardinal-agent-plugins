@@ -159,3 +159,25 @@ concern in the adapter.
   D — so `cost_usd` is never computed). Dropping it removed ~40 lines;
   when Cursor exposes usage, `cardinal_core.pricing` is the right home
   and no adapter table should return.
+
+## 6. `investigation_failures.SHELL_TOOLS` has no Cursor entry (cross-agent parity, Lane D)
+
+**Open (core frozen during Phase 2).** The postToolUse / postToolUseFailure
+hooks call `investigation_failures.observe(..., runtime="cursor",
+tool_name=<Cursor's tool name>)`, but `SHELL_TOOLS` lists only `claude` and
+`codex`, so the call returns None for every Cursor tool and the "your
+investigation write could not reach Cardinal" notice never fires. Suggested
+core change: `SHELL_TOOLS["cursor"] = {"Shell", "run_terminal_cmd",
+"run_shell_command"}` (Cursor's docs name the shell tool `Shell` in matchers;
+the other two are the names this adapter already normalizes). The command
+key is already right for non-Claude runtimes (`cmd`, then `command`).
+
+## 7. `storyboard_authoring.mcp_tool("cursor", "MCP:<tool>")` needs `server=`
+
+**Handled adapter-side.** Cursor's postToolUse payload names no MCP server
+(github.com/cursor/cookbook/issues/50), and which spelling `tool_name` has
+(`mcp__<server>__<tool>`, `MCP:<tool>`, or bare) is undocumented. The
+adapter records Cardinal's own calls on `afterMCPExecution` (which documents
+`mcp_server_name`) and passes `server="cardinal"` with an `MCP:<tool>` name
+only for a call recorded there (same tool, same input). No core change is
+needed unless a live capture shows a bare name, which this already covers.

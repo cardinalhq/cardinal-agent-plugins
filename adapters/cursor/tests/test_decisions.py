@@ -771,14 +771,17 @@ class RecordingHookInstallTest(unittest.TestCase):
             project = Path(tmp) / "repo" / ".cursor" / "hooks.json"
             for path in (user, project):
                 connect.write_hooks_config(path)
-                [entry] = json.loads(path.read_text())["hooks"]["postToolUse"]
+                # The recorder is the main entry; the second one is the
+                # matcher-scoped storyboard authoring entry (--role authoring).
+                entries = json.loads(path.read_text())["hooks"]["postToolUse"]
+                [entry] = [e for e in entries if "--role" not in e["command"]]
                 self.assertIn(str(HOOK), entry["command"])
                 self.assertIn("--event postToolUse", entry["command"])
                 self.assertIn("cardinal-cursor-plugin", entry["command"])
                 self.assertGreaterEqual(entry["timeout"], 10)
                 # Re-running connect replaces, never duplicates, the recorder.
                 connect.write_hooks_config(path)
-                self.assertEqual(len(json.loads(path.read_text())["hooks"]["postToolUse"]), 1)
+                self.assertEqual(len(json.loads(path.read_text())["hooks"]["postToolUse"]), 2)
 
 
 if __name__ == "__main__":

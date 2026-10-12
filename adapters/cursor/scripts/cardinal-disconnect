@@ -253,8 +253,13 @@ def main() -> int:
         print(f"Removed {STATE_PATH}")
 
     if RUNTIME_DIR.exists():
+        # Includes the owner-input consent (cardinal-connect --owner-input):
+        # a later connect starts with owner input off again.
+        consented = (RUNTIME_DIR / "owner-input-consent.json").exists()
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
         print(f"Removed {RUNTIME_DIR}")
+        if consented:
+            print("Cleared the owner-input consent (cardinal-connect --owner-input on asks again).")
 
     print()
     print("Restart Cursor so it reloads MCP and hook configuration.")
