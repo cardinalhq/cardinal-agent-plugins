@@ -155,6 +155,23 @@ class Render(Base):
         self.assertIn("--disposition accepted|declined|noted", out)
         self.assertNotIn("Take a position", out)
 
+    def test_a_periodic_reminder_is_a_compact_pointer_and_stop_keeps_the_full_form(self):
+        # Token budget: a re-surfacing repeats every RESURFACE_EVERY boundaries,
+        # so it must not re-deliver the event (already delivered in full once).
+        long = {"text": "y" * 4000, "ruling_of": 1, "outcome": "upheld"}
+        d = dict(ruling(3, 1), payload=long)
+        c = dict(challenge(1), payload={"text": "x" * 4000})
+        for e, st in ((c, sv.ACCEPTED), (d, sv.DIRECTIVE), (d, sv.DIRECTIVE_ACCEPTED)):
+            out = ie.render_reminder(e, {"status": st}, SID)
+            self.assertLess(len(out), 1000, out)
+            self.assertNotIn(ie.PRECEDENCE, out)
+            self.assertIn("…[truncated; read it with: cardinal-storyboard investigation events", out)
+            self.assertIn(f'Still open: when done, checkpoint with refs ["#{e["seq"]}"].', out)
+        self.assertIn("the only refusal is `conflicts`", ie.render_reminder(d, {"status": sv.DIRECTIVE}, SID))
+        stop = ie.render_reminder(d, {"status": sv.DIRECTIVE}, SID, stop=True)
+        self.assertIn(ie.PRECEDENCE, stop)
+        self.assertIn("y" * ie.REMINDER_TEXT, stop)
+
     def test_an_upheld_ruling_is_a_directive_with_the_precedence(self):
         out = ie.render([challenge(1), ack(2, 1, "declined"), ruling(3, 1)], SID, INV, binding=self.binding)
         block = out.split("\n\n")[-1]

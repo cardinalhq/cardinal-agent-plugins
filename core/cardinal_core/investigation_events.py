@@ -2040,7 +2040,9 @@ RESURFACE_BACKOFF_EVERY = 20   # ... this many boundaries (a directive still blo
 MAX_SUPERVISION_EVENTS = 100   # kept in the binding (rewritten at every poll): the newest
 MAX_KEPT_TEXT = 2000           # characters of a kept challenge / ruling text (a note: MAX_KEPT_NOTE)
 MAX_KEPT_NOTE = 300
-REMINDER_TEXT = 1500           # escaped characters of a re-surfaced event's text
+REMINDER_TEXT = 1500           # escaped characters of an event's text in its one Stop block
+REMINDER_EXCERPT = 160         # ... and in a periodic re-surfacing: a pointer, not a re-delivery
+                               # (the agent already received the full text; each repeat costs context)
 
 
 def supervision_marker(home: Path, sid: str) -> Path:
@@ -2351,14 +2353,16 @@ def _status_words(info: dict) -> str:
 
 
 def render_reminder(e: dict, info: dict, sid: str, *, stop: bool = False) -> str:
-    """A re-surfaced event: what it is, its status, its text (shorter than at
-    delivery) and how to close it."""
+    """A re-surfaced event. Periodic (every RESURFACE_EVERY boundaries): a
+    compact pointer — header, a short excerpt, how to close it, how to read it
+    in full — since the full text was delivered once already and every repeat
+    costs the agent context. At Stop (once per directive): the full form."""
     inv, seq = e.get("investigation_id"), e["seq"]
     payload = e.get("payload") if isinstance(e.get("payload"), dict) else {}
-    text, cut = clipped_json_text(str(payload.get("text", "")), REMINDER_TEXT)
+    read = f"cardinal-storyboard investigation events {_tok(inv)} --after {seq - 1}"
+    text, cut = clipped_json_text(str(payload.get("text", "")), REMINDER_TEXT if stop else REMINDER_EXCERPT)
     if cut or payload.get("_cut") is True:
-        text += (f" …[truncated; read it with: cardinal-storyboard investigation events {_tok(inv)} --after "
-                 f"{seq - 1}]")
+        text += f" …[truncated; read it with: {read}]"
     is_directive = directive(e)
     authority = "DELEGATED SUPERVISION" if is_directive else "ADVISORY"
     lines = [f"[Cardinal investigation {_tok(inv)} · event #{seq} · {_tok(e.get('type'))} · authority: {authority} · "
@@ -2367,7 +2371,8 @@ def render_reminder(e: dict, info: dict, sid: str, *, stop: bool = False) -> str
         lines.append(f"Before you stop: directive #{seq} is still open.")
     lines.append(("Directive" if is_directive else "Text") + f" (verbatim JSON string): {text}")
     if is_directive:
-        lines.append(PRECEDENCE)
+        lines.append(PRECEDENCE if stop else
+                     "Binding; the only refusal is `conflicts` citing an owner decision (owner.decided) by seq.")
     if info.get("status") == sv.DIRECTIVE:
         lines.append(f"Acknowledge: cardinal-storyboard investigation ack {_tok(inv)} {seq} --session {sid} "
                      "--disposition accepted|conflicts [--conflicts-with SEQ] --note \"<what you will do>\"")
