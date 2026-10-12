@@ -2545,5 +2545,146 @@
         }
       ]
     }
+  },
+  "storyboard_continuation": {
+    "title": "Continue an earlier session's storyboard (find, add_act before promote, no duplicate)",
+    "group": "authoring",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "present",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "grep",
+          "path": "skills/storyboard/CORE.md",
+          "pattern": "^## Continue an earlier session's storyboard$"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "grep",
+          "path": "skills/storyboard/CORE.md",
+          "pattern": "^## Continue an earlier session's storyboard$"
+        }
+      ],
+      "cursor": [
+        {
+          "kind": "grep",
+          "path": "skills/storyboard/CORE.md",
+          "pattern": "^## Continue an earlier session's storyboard$"
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "grep",
+          "path": "skills/storyboard/CORE.md",
+          "pattern": "^## Continue an earlier session's storyboard$"
+        }
+      ]
+    }
+  },
+  "evidence_hold": {
+    "title": "Best-effort evidence hold (checkpoint via CLI or MCP, cardinal-evidence hold / status)",
+    "group": "evidence",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "present",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "grep",
+          "path": "hooks/storyboard-token.py",
+          "pattern": "\"storyboard__checkpoint\""
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/hooks.json",
+          "pattern": "add_act\\|checkpoint\\)"
+        },
+        {
+          "kind": "script",
+          "path": "bin/cardinal-evidence"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/investigation_events.py",
+          "pattern": "evidence\\.hold_after_checkpoint\\("
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/evidence_promote.py",
+          "pattern": "\"hold\": cmd_hold"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-codex-telemetry.py",
+          "pattern": "startswith\\(\"mcp__cardinal__storyboard__\"\\)"
+        },
+        {
+          "kind": "script",
+          "path": "scripts/cardinal-evidence"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/investigation_events.py",
+          "pattern": "evidence\\.hold_after_checkpoint\\("
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/evidence_promote.py",
+          "pattern": "\"hold\": cmd_hold"
+        }
+      ],
+      "cursor": [
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-cursor-telemetry.py",
+          "pattern": "in sa\\.OBSERVED_TOOLS"
+        },
+        {
+          "kind": "script",
+          "path": "scripts/cardinal-evidence"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/investigation_events.py",
+          "pattern": "evidence\\.hold_after_checkpoint\\("
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/evidence_promote.py",
+          "pattern": "\"hold\": cmd_hold"
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-gemini-telemetry.py",
+          "pattern": "sa\\.observe_cardinal_result\\(PATHS, \"gemini\""
+        },
+        {
+          "kind": "script",
+          "path": "scripts/cardinal-evidence"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/investigation_events.py",
+          "pattern": "evidence\\.hold_after_checkpoint\\("
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/evidence_promote.py",
+          "pattern": "\"hold\": cmd_hold"
+        }
+      ]
+    }
   }
 }

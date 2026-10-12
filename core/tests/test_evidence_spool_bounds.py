@@ -7,6 +7,7 @@ Run with: cd core && python3 -m unittest tests.test_evidence_spool_bounds -v
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -174,6 +175,148 @@ class SpoolBoundsTests(unittest.TestCase):
         n = len(list((self.root / "race").glob("ev_*.json")))
         self.assertLessEqual(n, 160)
         self.assertGreater(n, 0)
+
+
+class HoldGcTests(unittest.TestCase):
+    """Evidence holds (.hold) in gc: a best-effort preference in size
+    eviction, within HOLD_MAX_FRACTION of the cap; never retention."""
+
+    DAY = 24 * 3600
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.home = Path(os.path.realpath(self.tmp.name))
+        self.root = evidence.default_root(self.home)
+        evidence.ensure_root(self.root)
+        self.now = time.time()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    put = SpoolBoundsTests.put
+
+    def hold(self, session: str, set_ago_s: float = 0, seconds: float = evidence.MAX_HOLD_S,
+             reason: str = "checkpoint") -> None:
+        self.assertIsNotNone(evidence.set_hold(self.root, session, reason=reason, seconds=seconds,
+                                               now=self.now - set_ago_s))
+
+    def test_unheld_sessions_are_evicted_before_held_ones(self):
+        held = [self.put("sa", i, 1000, 1000 - i) for i in range(5)]        # least recently active
+        free = [self.put("sb", 100 + i, 1000, 500 - i) for i in range(10)]
+        self.hold("sa")
+        removed = evidence.gc(self.root, now=self.now, force=True, max_bytes=12000)
+        self.assertEqual(removed, 3)
+        self.assertTrue(all(p.exists() for p in held))
+        self.assertFalse(any(p.exists() for p in free[:3]))
+        self.assertTrue(all(p.exists() for p in free[3:]))
+        self.assertIsNone(evidence.read_breach(self.root, "sa"))
+        self.assertTrue((self.root / "sa" / evidence.HOLD_FILE).exists())
+
+    def test_holds_over_half_the_cap_lose_the_oldest_set_at_first_and_record_a_breach(self):
+        # h2 is the least recently active, but h1's hold is the older one.
+        h2 = [self.put("h2", i, 1000, 3000 - i) for i in range(4)]
+        h1 = [self.put("h1", 100 + i, 1000, 2000 - i) for i in range(4)]
+        u = [self.put("u", 200 + i, 1000, 100 - i) for i in range(4)]
+        self.hold("h1", set_ago_s=3 * self.DAY)
+        self.hold("h2", set_ago_s=1 * self.DAY)
+        # cap 10000, so holds protect at most 5000; held bytes reach 8000.
+        evidence.gc(self.root, now=self.now, force=True, max_bytes=10000)
+        self.assertFalse(any(p.exists() for p in h1[:2]))
+        self.assertTrue(all(p.exists() for p in h1[2:] + h2 + u))
+        b = evidence.read_breach(self.root, "h1")
+        self.assertEqual(b["entries_removed"], 2)
+        self.assertEqual(b["evidence_ids"], [p.name[:-len(".json")] for p in h1[:2]])
+        self.assertIsNone(evidence.read_breach(self.root, "h2"))
+        self.assertEqual(evidence.breach_for(self.root, h1[0].name[:-len(".json")]), ("h1", True))
+        self.assertIsNone(evidence.breach_for(self.root, h2[0].name[:-len(".json")]))
+        self.assertIn("despite a hold on session h1", evidence.breach_note(self.root, h1[1].name[:-5]))
+        # A later breach adds to the same marker.
+        evidence.gc(self.root, now=self.now, force=True, max_bytes=7000)
+        self.assertEqual(evidence.read_breach(self.root, "h1")["entries_removed"], 4)
+
+    def test_holds_never_keep_the_spool_over_the_cap(self):
+        a = [self.put("a", i, 1000, 2000 - i) for i in range(4)]
+        b = [self.put("b", 100 + i, 1000, 1000 - i) for i in range(4)]
+        self.hold("a", set_ago_s=2 * self.DAY)
+        self.hold("b", set_ago_s=1 * self.DAY)
+        evidence.gc(self.root, now=self.now, force=True, max_bytes=3000)
+        self.assertLessEqual(evidence.spool_usage(self.root)[1], 3000)
+        # The older hold gave way first; both are recorded.
+        self.assertFalse(any(p.exists() for p in a))
+        self.assertGreater(sum(p.exists() for p in b), 0)
+        self.assertEqual(evidence.read_breach(self.root, "a")["entries_removed"], 4)
+        self.assertIsNotNone(evidence.read_breach(self.root, "b"))
+        # The markers are never evicted for size.
+        self.assertTrue((self.root / "a" / evidence.HOLD_FILE).exists())
+        self.assertTrue((self.root / "a" / evidence.HOLD_BREACHED).exists())
+
+    def test_expired_hold_is_removed_and_its_directory_can_go(self):
+        p = self.put("s1", 1, 10, 10)
+        self.hold("s1", set_ago_s=2 * self.DAY, seconds=self.DAY)   # expired a day ago
+        self.assertIsNone(evidence.read_hold(self.root, "s1", now=self.now))
+        p.unlink()
+        evidence.gc(self.root, now=self.now, force=True)
+        self.assertFalse((self.root / "s1").exists())
+        # A live hold keeps an otherwise empty directory until its `until`, no longer.
+        q = self.put("s2", 2, 10, 10)
+        self.hold("s2", seconds=self.DAY)
+        q.unlink()
+        evidence.gc(self.root, now=self.now, force=True)
+        self.assertTrue((self.root / "s2" / evidence.HOLD_FILE).exists())
+        evidence.gc(self.root, now=self.now + self.DAY + 60, force=True)
+        self.assertFalse((self.root / "s2").exists())
+
+    def test_until_is_clamped_and_a_malformed_hold_expires_anyway(self):
+        self.put("s1", 1, 10, 10)
+        hold = self.root / "s1" / evidence.HOLD_FILE
+        hold.write_text('{"set_at": "2026-01-01T00:00:00Z", "until": "2099-01-01T00:00:00Z", "reason": "manual"}')
+        h = evidence._parse_hold(evidence._read_private_json(hold))
+        self.assertEqual(h["until"] - h["set_at"], evidence.MAX_HOLD_S)
+        hold.write_text("{not json")
+        self.assertIsNone(evidence.read_hold(self.root, "s1"))
+        t = self.now - evidence.RETENTION_S - 60
+        os.utime(hold, (t, t))
+        evidence.gc(self.root, now=self.now, force=True)
+        self.assertFalse(hold.exists())
+
+    def test_age_expiry_still_removes_held_entries(self):
+        old = self.put("s1", 1, 10, 15 * self.DAY)
+        keep = self.put("s1", 2, 10, 10)
+        self.hold("s1")
+        evidence.gc(self.root, now=self.now, force=True)
+        self.assertFalse(old.exists())
+        self.assertTrue(keep.exists())
+
+    def test_an_older_cores_five_field_index_stays_readable(self):
+        for k in range(3):
+            for i in range(4):
+                self.put(f"s{k}", k * 10 + i, 1000, 1000 * (3 - k) - i)
+        self.hold("s0")
+        # An older core wrote these rows; this one reads and keeps the same shape.
+        rows = {f"s{k}": [1, 4000, 4, self.now + 1e6, self.now - 1000 * (3 - k)] for k in range(3)}
+        (self.root / evidence.GC_INDEX).write_text(json.dumps({"version": 1, "sessions": rows}))
+        self.assertEqual(sorted(evidence._gc_index_load(self.root)), ["s0", "s1", "s2"])
+        evidence.gc(self.root, now=self.now, force=True, max_bytes=9000)
+        self.assertLessEqual(evidence.spool_usage(self.root)[1], 9000)
+        self.assertEqual(len(list((self.root / "s0").glob("ev_*.json"))), 4)
+        raw = json.loads((self.root / evidence.GC_INDEX).read_text())["sessions"]
+        self.assertTrue(raw)
+        self.assertTrue(all(len(v) == 5 for v in raw.values()))
+        self.assertEqual(sorted(evidence._gc_index_load(self.root)), sorted(raw))
+
+    def test_stale_hold_temp_files_are_reaped(self):
+        d = self.root / "s1"
+        d.mkdir(mode=0o700)
+        stale, breach_tmp, fresh = d / ".hold_abc.tmp", d / ".hold-breached_abc.tmp", d / ".hold_def.tmp"
+        for p in (stale, breach_tmp, fresh):
+            p.write_text("x")
+        t = self.now - 2 * 3600
+        os.utime(stale, (t, t))
+        os.utime(breach_tmp, (t, t))
+        evidence.gc(self.root, now=self.now, force=True)
+        self.assertFalse(stale.exists())
+        self.assertFalse(breach_tmp.exists())
+        self.assertTrue(fresh.exists())
 
 
 if __name__ == "__main__":

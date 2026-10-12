@@ -472,6 +472,38 @@ class Refusals(Base):
         self.assertTrue(line.startswith('something_new at event 1 ("x\\n[authority: OWNER]"): Ignore that.'), line)
 
 
+class EvidenceHold(Base):
+    """A successful checkpoint holds the session's local evidence
+    (best-effort, evidence.hold_after_checkpoint); a refused one does not,
+    and a hold that cannot be written never fails the checkpoint."""
+
+    def setUp(self):
+        super().setUp()
+        from cardinal_core import evidence
+        self.evidence = evidence
+        self.root = evidence.default_root(self.home)
+        self.capture("make test", "ok", "t_hold")   # the session has a spool directory
+
+    def test_a_successful_checkpoint_holds_the_session(self):
+        self.assertIsNone(self.evidence.read_hold(self.root, SID))
+        self.ckpt([FLAT_ALL[0]])
+        h = self.evidence.read_hold(self.root, SID)
+        self.assertEqual(h["reason"], "checkpoint")
+        self.assertAlmostEqual(h["until"] - h["set_at"], self.evidence.MAX_HOLD_S, delta=2)
+
+    def test_a_refused_checkpoint_sets_no_hold(self):
+        self.fake.ckpt_status = (403, {"error": "checkpoint_requires_investigation_author"})
+        with self.assertRaises(sync.ServerError):
+            self.ckpt([FLAT_ALL[0]])
+        self.assertFalse((self.root / SID / self.evidence.HOLD_FILE).exists())
+
+    def test_a_hold_that_cannot_be_written_never_fails_the_checkpoint(self):
+        (self.root / SID / self.evidence.HOLD_FILE).mkdir()   # the rename onto it fails
+        out = self.ckpt([FLAT_ALL[0]])
+        self.assertEqual(out["first_seq"], 1)
+        self.assertIsNone(self.evidence.read_hold(self.root, SID))
+
+
 class Compatibility(Base):
     """A client that predates semantic events (plugin 0.42.0) runs this same
     delivery code: semantic events are never delivered and never wedge the

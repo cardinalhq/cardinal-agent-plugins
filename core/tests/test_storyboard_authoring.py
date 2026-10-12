@@ -407,6 +407,44 @@ class TokenTests(Base):
                                    environ={})
         self.assertEqual(evidence.read_tokens(evidence.default_root(self.home), "other-session"), {})
 
+    def test_a_successful_mcp_checkpoint_holds_the_sessions_evidence(self):
+        root = evidence.default_root(self.home)
+        answer = {"investigation_id": "inv_" + "a" * 24, "events": [{"seq": 4, "type": "finding.proposed"}],
+                  "first_seq": 4, "last_seq": 4}
+        names = {"claude": "mcp__plugin_cardinal_cardinal__storyboard__checkpoint",
+                 "codex": "mcp__cardinal__storyboard__checkpoint",
+                 "cursor": "mcp__cardinal__storyboard__checkpoint",
+                 "gemini": "mcp_cardinal_storyboard__checkpoint"}
+        hold = root / SID / evidence.HOLD_FILE
+        for runtime, name in names.items():
+            with self.subTest(runtime=runtime):
+                (root / SID).mkdir(parents=True, exist_ok=True)
+                # Another server's tool, an error answer, capture off: no hold.
+                bad = name.replace("cardinal__storyboard", "evil__storyboard").replace("mcp_cardinal_", "mcp_evil_")
+                sa.observe_cardinal_result(self.paths(runtime), runtime, bad, mcp_shape(answer), session_id=SID,
+                                           home=self.home, environ=self.environ)
+                sa.observe_cardinal_result(self.paths(runtime), runtime, name,
+                                           mcp_shape({"error": "checkpoint_requires_investigation_author"}),
+                                           session_id=SID, home=self.home, environ=self.environ)
+                sa.observe_cardinal_result(self.paths(runtime), runtime, name, mcp_shape(answer), session_id=SID,
+                                           home=self.home, environ={**self.environ, "CARDINAL_EVIDENCE_CAPTURE": "0"})
+                self.assertFalse(hold.exists())
+                sa.observe_cardinal_result(self.paths(runtime), runtime, name, mcp_shape(answer), session_id=SID,
+                                           home=self.home, environ=self.environ)
+                self.assertEqual(evidence.read_hold(root, SID)["reason"], "checkpoint")
+                self.assertEqual(oct(hold.stat().st_mode & 0o777), "0o600")
+                hold.unlink()
+        # No spool directory: nothing to protect, nothing written; a hold that
+        # cannot be written never raises.
+        sa.observe_cardinal_result(self.paths("codex"), "codex", names["codex"], mcp_shape(answer),
+                                   session_id="no-such-session", home=self.home, environ=self.environ)
+        self.assertFalse((root / "no-such-session").exists())
+        hold.mkdir()   # the rename onto it fails
+        sa.observe_cardinal_result(self.paths("codex"), "codex", names["codex"], mcp_shape(answer),
+                                   session_id=SID, home=self.home, environ=self.environ)
+        self.assertTrue(hold.is_dir())
+        self.assertEqual([p.name for p in (root / SID).iterdir()], [evidence.HOLD_FILE])
+
 
 class EditLookupTests(Base):
     def test_unconnected_marks_the_runtimes_session_ineligible_without_network(self):
