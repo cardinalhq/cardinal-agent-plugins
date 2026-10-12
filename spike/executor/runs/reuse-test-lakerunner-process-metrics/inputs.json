@@ -1,9 +1,0 @@
-{
-  "instance": "prod",
-  "serviceQuery": "lakerunner-process-metrics",
-  "window": "6h",
-  "cpuLimitPeakThreshold": 0.80,
-  "memoryLimitPeakThreshold": 0.80,
-  "minAvailableReplicas": 1,
-  "aggregationBucket": "1h"
-}

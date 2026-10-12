@@ -11,7 +11,6 @@ adapter ships as a self-contained plugin, so the core is copied — byte-identic
         -> adapters/<a>/skills/migrate-from-grafana/
 
 An adapter opts in by having the skill directory (with its own SKILL.md).
-Mechanize predates this and still syncs via build/sync_mechanize.py.
 
 Usage:
     python3 build/sync_skills.py               # sync every shared skill into every opted-in adapter

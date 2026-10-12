@@ -10,19 +10,6 @@ dist/
 # vendored copies are build outputs, not source
 adapters/*/hooks/cardinal_core/
 adapters/devin/cardinal_core/
-# Stage 8/9 outputs are regenerated on every /mechanize compile — never commit.
-mechanize-out/*/preview.html
-mechanize-out/*/rubric.md
-mechanize-out/*/review.md
-# Stage 10 trial artifacts (run dirs, sqlite state, report.json). Regenerated
-# by every trial run; a committed report claiming PASSED would go stale the
-# moment the Sentinel changed. The durable record is metadata.trial in
-# sentinel.yaml, stamped by Stage 12.
-mechanize-out/*/trial/
-# k8s controller test caches — pyc + pytest cache aren't source.
-k8s/controller/__pycache__/
-k8s/controller/tests/__pycache__/
-k8s/controller/.pytest_cache/
 # Session-local working notes and tool state — never source. Plans and
 # handoffs here reference absolute local paths and live prod runbooks;
 # anything meant to be shared belongs in docs/ proper.
