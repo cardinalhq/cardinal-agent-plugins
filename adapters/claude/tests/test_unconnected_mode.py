@@ -507,8 +507,18 @@ class StoryboardHooksUnconnectedTests(_GuardedCase):
         proc = self.guarded_run(HOOKS / "storyboard-session.py", payload, self.env,
                                 raw_env=dict(raw_env or {}, CARDINAL_INVESTIGATION_POLLER="0"))
         self.assertEqual((proc.returncode, proc.stderr), (0, ""))
-        self.assertEqual(self.guard_lines(), ["net"] if bootstrap else [])
+        lines = self.guard_lines()
         self.guard_log.unlink(missing_ok=True)
+        if bootstrap:
+            # Connected startup gathers local repository context before its
+            # single bootstrap request. The guard still rejects the network;
+            # no other executable (including a poller) may start.
+            self.assertGreater(lines.count("exec git"), 0)
+            self.assertEqual([line for line in lines if line != "exec git"], ["net"])
+        else:
+            # Keyless and resumed sessions must remain entirely local and
+            # must not invoke even Git.
+            self.assertEqual(lines, [])
         return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"] if proc.stdout else ""
 
     def _settings(self, env: dict) -> None:
