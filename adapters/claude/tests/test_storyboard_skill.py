@@ -19,10 +19,14 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 REPO = PLUGIN_ROOT.parent.parent
 STORYBOARD_SKILL = PLUGIN_ROOT / "skills" / "storyboard" / "SKILL.md"
 CANVAS_SKILL = PLUGIN_ROOT / "skills" / "canvas" / "SKILL.md"
+# The canvas skill is Claude's SKILL.md over the shared CORE.md (common/canvas,
+# synced next to it); its text is both.
+CANVAS_CORE = CANVAS_SKILL.parent / "CORE.md"
+RENDERER = PLUGIN_ROOT / "skills" / "storyboard" / "scripts" / "render_preview.py"
 
 # Everything that tells Claude or the user how Storyboards come about.
 GUIDANCE = (
-    STORYBOARD_SKILL, CANVAS_SKILL, STORYBOARD_SKILL.parent / "README.md", PLUGIN_ROOT / "README.md",
+    STORYBOARD_SKILL, CANVAS_SKILL, CANVAS_CORE, STORYBOARD_SKILL.parent / "README.md", PLUGIN_ROOT / "README.md",
     REPO / "README.md", PLUGIN_ROOT / "bin" / "cardinal-storyboard", PLUGIN_ROOT / "hooks" / "storyboard-session.py",
 )
 # The old lifecycle (SPEC §4): the storyboard as the end-of-investigation
@@ -82,6 +86,14 @@ def _flat(path: Path) -> str:
     return " ".join(path.read_text().split())
 
 
+def _canvas_text() -> str:
+    return CANVAS_SKILL.read_text() + "\n" + CANVAS_CORE.read_text()
+
+
+def _canvas_flat() -> str:
+    return " ".join(_canvas_text().split())
+
+
 class StoryboardSkillTextTests(unittest.TestCase):
     def test_storyboard_skill_carries_the_evidence_contract_verbatim(self):
         lines = STORYBOARD_SKILL.read_text().splitlines()
@@ -100,27 +112,26 @@ class StoryboardSkillTextTests(unittest.TestCase):
     def test_canvas_skill_points_at_the_canvas_guide(self):
         # Replaces the verbatim design-doctrine pin: the doctrine is served by
         # the grammar's canvas section as canvas.design.
-        text = _flat(CANVAS_SKILL)
+        text = _canvas_flat()
         self.assertIn('call `storyboard__describe_grammar {section: "canvas"}`', text)
         self.assertIn("`canvas.design`", text)
         self.assertIn("Follow them; do not work from memory.", text)
 
     def test_skills_name_only_sections_the_server_serves(self):
         reference = {"overview", "schema", "bindings", "canvas", "prefabs", "libraries", "rules"}
-        for path in (STORYBOARD_SKILL, CANVAS_SKILL):
-            named = set(re.findall(r'section:? "([a-z_]+)"', _flat(path)))
-            self.assertTrue(named, path.name)
-            self.assertLessEqual(named, reference | set(GUIDE_SECTIONS), path.name)
+        for name, text in (("storyboard", _flat(STORYBOARD_SKILL)), ("canvas", _canvas_flat())):
+            named = set(re.findall(r'section:? "([a-z_]+)"', text))
+            self.assertTrue(named, name)
+            self.assertLessEqual(named, reference | set(GUIDE_SECTIONS), name)
 
     def test_skills_do_not_restate_what_the_server_guides_own(self):
-        for path in (STORYBOARD_SKILL, CANVAS_SKILL):
-            text = _flat(path)
+        for name, text in (("storyboard", _flat(STORYBOARD_SKILL)), ("canvas", _canvas_flat())):
             for needle in SERVER_OWNED:
-                self.assertNotIn(needle, text, f"{path.parent.name}/SKILL.md restates {needle!r}")
+                self.assertNotIn(needle, text, f"the {name} skill restates {needle!r}")
 
     def test_canvas_skill_lists_every_binding_shape(self):
         # conductor mcp-gateway storyboard/tools/authoring.go describe_grammar description.
-        self.assertIn("source · select · ref · derive · reduce · extract", CANVAS_SKILL.read_text())
+        self.assertIn("source · select · ref · derive · reduce · extract", _canvas_text())
 
     def test_skills_pin_the_maestro_version_that_serves_the_guides(self):
         # The guides (conductor #1975) are in no tag up to maestro v1.97.16;
@@ -346,7 +357,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
             self.assertIn(needle, readme)
 
     def test_canvas_skill_keeps_the_local_preview_loop(self):
-        text = _flat(CANVAS_SKILL)
+        text = _canvas_flat()
         for needle in (
             "`~/.claude/cardinal/storyboards/<storyboard_id>/r<revision>/`",
             "Read every PNG the hook reported",
@@ -355,10 +366,11 @@ class StoryboardSkillTextTests(unittest.TestCase):
             "**Tell the user visual review is unavailable and keep authoring the draft.**",
         ):
             self.assertIn(needle, text)
-        self.assertTrue((CANVAS_SKILL.parent / "scripts" / "render_preview.py").is_file())
+        self.assertTrue(RENDERER.is_file())
+        self.assertIn("--runtime claude", text)
 
     def test_canvas_skill_exemplars_exist(self):
-        named = set(re.findall(r"`exemplars/([a-z0-9-]+\.js)`", CANVAS_SKILL.read_text()))
+        named = set(re.findall(r"`exemplars/([a-z0-9-]+\.js)`", _canvas_text()))
         self.assertEqual(named, {"scalar-and-series.js", "roof-and-timeline.js", "cohort-rows.js"})
         for name in named:
             self.assertTrue((CANVAS_SKILL.parent / "exemplars" / name).is_file(), name)
@@ -389,7 +401,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
         self.assertNotIn("Slack app", text)
 
     def test_canvas_skill_judges_the_cover_and_the_thumbnail(self):
-        text = _flat(CANVAS_SKILL)
+        text = _canvas_flat()
         for needle in ("`<scene>-cover.png`", "1200x630", "`unfurl-mock.png`", "240 px thumbnail",
                        "pick another `cover_scene`"):
             self.assertIn(needle, text)

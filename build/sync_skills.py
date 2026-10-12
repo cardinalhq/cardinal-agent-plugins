@@ -9,6 +9,8 @@ adapter ships as a self-contained plugin, so the core is copied — byte-identic
 
     common/migrate-from-grafana/{CORE.md, scripts/, references/}
         -> adapters/<a>/skills/migrate-from-grafana/
+    common/canvas/{CORE.md, exemplars/}
+        -> adapters/<a>/skills/canvas/   (the renderer it uses ships with storyboard)
 
 An adapter opts in by having the skill directory (with its own SKILL.md).
 
@@ -33,6 +35,7 @@ COMMON_DIR = ROOT / "common"
 # skill name -> files/dirs (relative to common/<skill>/) copied into each adapter.
 SKILLS = {
     "storyboard": ["CORE.md", "scripts"],
+    "canvas": ["CORE.md", "exemplars"],
     "migrate-from-grafana": ["CORE.md", "scripts", "references"],
 }
 

@@ -1086,6 +1086,11 @@ class RealChromeSmokeTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 CANVAS_SKILL = PLUGIN_ROOT / "skills" / "canvas" / "SKILL.md"
+CANVAS_CORE = CANVAS_SKILL.parent / "CORE.md"  # shared (common/canvas), synced next to SKILL.md
+
+
+def _canvas_text() -> str:
+    return CANVAS_SKILL.read_text() + "\n" + CANVAS_CORE.read_text()
 
 
 class CanvasSkillTests(unittest.TestCase):
@@ -1093,7 +1098,7 @@ class CanvasSkillTests(unittest.TestCase):
         text = CANVAS_SKILL.read_text()
         self.assertNotRegex(text, r"find [^\n]*\s\.\s", "the renderer is never looked up under the cwd")
         self.assertNotIn("ls -t", text, "never pick the renderer by mtime")
-        self.assertIn("<this skill's base directory>/scripts/render_preview.py", text)
+        self.assertIn("<this skill's base directory>/../storyboard/scripts/render_preview.py", text)
 
     def test_locator_fallback_picks_the_newest_plugin_version_not_a_planted_copy(self):
         m = re.search(r"^(RENDER=\$\(python3 -I -c .*?'\))$", CANVAS_SKILL.read_text(), re.S | re.M)
@@ -1102,11 +1107,11 @@ class CanvasSkillTests(unittest.TestCase):
             root = Path(tmp)
             home = root / "home"
             for v in ("0.9.0", "0.32.0", "0.10.1"):
-                d = home / ".claude/plugins/cache/mkt place/cardinal" / v / "skills/canvas/scripts"
+                d = home / ".claude/plugins/cache/mkt place/cardinal" / v / "skills/storyboard/scripts"
                 d.mkdir(parents=True)
                 (d / "render_preview.py").write_text("")
             # The oldest version is the most recently touched: mtime must not win.
-            old = home / ".claude/plugins/cache/mkt place/cardinal/0.9.0/skills/canvas/scripts/render_preview.py"
+            old = home / ".claude/plugins/cache/mkt place/cardinal/0.9.0/skills/storyboard/scripts/render_preview.py"
             os.utime(old, (2_000_000_000, 2_000_000_000))
             planted = root / "repo/tools/canvas/scripts"
             planted.mkdir(parents=True)
@@ -1120,13 +1125,13 @@ class CanvasSkillTests(unittest.TestCase):
                                  capture_output=True, text=True, timeout=30)
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertNotIn("PLANTED", res.stdout + res.stderr)
-            self.assertEqual(res.stdout, str(home / ".claude/plugins/cache/mkt place/cardinal/0.32.0/skills/canvas/"
+            self.assertEqual(res.stdout, str(home / ".claude/plugins/cache/mkt place/cardinal/0.32.0/skills/storyboard/"
                                                     "scripts/render_preview.py"))
 
     def test_every_python_invocation_in_the_skill_is_isolated(self):
         # A bare `python3 -c` / `python3 <script>` imports from the cwd or
         # honours PYTHONPATH; the skill runs inside the user's repo.
-        text = CANVAS_SKILL.read_text()
+        text = _canvas_text()
         calls = re.findall(r"python3\b[^\n]*", text)
         self.assertTrue(calls)
         for call in calls:
@@ -1136,11 +1141,11 @@ class CanvasSkillTests(unittest.TestCase):
         # The full rule ("Past a few thousand marks draw on a <canvas>") is
         # served by describe_grammar canvas.design.rules_that_bite (conductor
         # #1975); the skill keeps the pointer where it names the row exemplar.
-        text = " ".join(CANVAS_SKILL.read_text().split())
+        text = " ".join(_canvas_text().split())
         self.assertIn("For thousands of rows, draw on a `<canvas>` instead.", text)
 
     def test_exemplars_ship_with_the_skill_and_follow_the_frame_rules(self):
-        text = CANVAS_SKILL.read_text()
+        text = _canvas_text()
         names = re.findall(r"`exemplars/([a-z-]+\.js)`", text)
         self.assertGreaterEqual(len(set(names)), 2)
         for name in set(names):
