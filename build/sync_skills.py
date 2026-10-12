@@ -11,6 +11,9 @@ adapter ships as a self-contained plugin, so the core is copied — byte-identic
         -> adapters/<a>/skills/migrate-from-grafana/
     common/canvas/{CORE.md, exemplars/}
         -> adapters/<a>/skills/canvas/   (the renderer it uses ships with storyboard)
+    common/checks/CORE.md
+        -> adapters/<a>/checks/skill/    (an opt-in template: `cardinal-checks on`
+                                          installs it into the skills directory)
 
 An adapter opts in by having the skill directory (with its own SKILL.md).
 
@@ -37,15 +40,24 @@ SKILLS = {
     "storyboard": ["CORE.md", "scripts"],
     "canvas": ["CORE.md", "exemplars"],
     "migrate-from-grafana": ["CORE.md", "scripts", "references"],
+    "checks": ["CORE.md"],
+}
+# Where a skill lives in an adapter, when not skills/<skill>/ (relative to the adapter).
+DEST = {
+    "checks": Path("checks") / "skill",
 }
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
 
 
+def skill_dir(adapter: str, skill: str) -> Path:
+    return ADAPTERS_DIR / adapter / DEST.get(skill, Path("skills") / skill)
+
+
 def skill_adapters(skill: str) -> list[str]:
     return sorted(
         p.name for p in ADAPTERS_DIR.iterdir()
-        if p.is_dir() and (p / "skills" / skill).is_dir()
+        if p.is_dir() and skill_dir(p.name, skill).is_dir()
     )
 
 
@@ -68,7 +80,7 @@ def shared_files(skill: str) -> dict[str, Path]:
 
 def drift(skill: str, adapter: str) -> list[str]:
     """Shared paths that are missing, different, or stale in this adapter (empty = clean)."""
-    dest = ADAPTERS_DIR / adapter / "skills" / skill
+    dest = skill_dir(adapter, skill)
     expected = shared_files(skill)
     out = [rel for rel, src in expected.items()
            if not (dest / rel).is_file() or not filecmp.cmp(src, dest / rel, shallow=False)]
@@ -82,7 +94,7 @@ def drift(skill: str, adapter: str) -> list[str]:
 
 
 def sync_into(skill: str, adapter: str) -> None:
-    dest = ADAPTERS_DIR / adapter / "skills" / skill
+    dest = skill_dir(adapter, skill)
     for entry in SKILLS[skill]:
         src, dst = COMMON_DIR / skill / entry, dest / entry
         if src.is_dir():
@@ -106,10 +118,10 @@ def main() -> int:
     exit_code = 0
     for skill in SKILLS:
         targets = [a for a in (args.adapters or skill_adapters(skill))
-                   if (ADAPTERS_DIR / a / "skills" / skill).is_dir()]
+                   if skill_dir(a, skill).is_dir()]
         for adapter in targets:
-            where = f"{adapter}/skills/{skill}/"
-            if not (ADAPTERS_DIR / adapter / "skills" / skill / "SKILL.md").is_file():
+            where = f"{skill_dir(adapter, skill).relative_to(ADAPTERS_DIR)}/"
+            if not (skill_dir(adapter, skill) / "SKILL.md").is_file():
                 print(f"MISSING SKILL.md: {where}")
                 exit_code = 1
             d = drift(skill, adapter)

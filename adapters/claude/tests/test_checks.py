@@ -42,9 +42,15 @@ class ChecksTestBase(unittest.TestCase):
         self.home = root / "home"
         (self.home / ".claude").mkdir(parents=True)
         self.plugin = root / "plugin"
+        # The vendored core and the behavior runtime (lib/behavior, as the
+        # release lays it out) come along: the CLI and the gate are thin
+        # wrappers over cardinal_core.checks_install / checks_cli and
+        # lib/behavior/checks_ledger.py.
         for part in ("bin", "hooks", "checks"):
             shutil.copytree(ADAPTER / part, self.plugin / part,
-                            ignore=shutil.ignore_patterns("__pycache__", "cardinal_core"))
+                            ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(ADAPTER.parent.parent / "common" / "behavior", self.plugin / "lib" / "behavior",
+                        ignore=shutil.ignore_patterns("__pycache__", "tests"))
         (self.plugin / "skills").mkdir()
         self.installed = self.plugin / "skills" / "checks"
 
@@ -194,7 +200,18 @@ class SkillTemplateTests(unittest.TestCase):
         self.assertIn("Missing evidence means UNKNOWN, never NON_MATCH", core)
         self.assertIn("run.trace.trace_id", core)
         self.assertIn("execute_behavior_range", core)
-        self.assertIn("cardinal-checks example expected", core)
+        # The label ledger moved behind cardinal-behavior MCP tools (every
+        # runtime, sandboxed or not); the CLI keeps the same commands for people.
+        self.assertIn("lock_check_examples", core)
+        self.assertIn("set_check_example", core)
+        self.assertNotIn("cardinal-checks example", core)
+        # The core is shared: Claude's copy is common/checks/CORE.md, byte for byte.
+        self.assertEqual(core, (ADAPTER.parent.parent / "common" / "checks" / "CORE.md").read_text())
+        # Claude still listens to range runs with Monitor (its SKILL.md says how).
+        skill = (TEMPLATE / "SKILL.md").read_text()
+        self.assertIn("Monitor", skill)
+        self.assertIn("cardinal-checks range watch", skill)
+        self.assertIn("mcp__plugin_cardinal_cardinal-behavior__", skill)
 
 
 class LabelLedgerTests(ChecksTestBase):
