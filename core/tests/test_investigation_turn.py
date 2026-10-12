@@ -309,12 +309,34 @@ class OwnerInputContract(OwnerInputBase):
                  "print('secret plan')\n--- End of content ---")
         self.assertEqual(n(files), "explain @src/a.py")
         self.assertEqual(n(files + "\n<hook_context>x</hook_context>"), "explain @src/a.py")
+        # gemini-cli appends the section after the typed text: cut to the end
+        # even without the end marker (a file read cut short).
+        self.assertEqual(n("explain @a.py\n--- Content from referenced files ---\nContent from @a.py:\nno end"),
+                         "explain @a.py")
+
+    def test_gemini_referenced_files_holding_the_markers_never_leak(self):
+        n = lambda p: oi.normalize_prompt("gemini", p)   # noqa: E731
+        start, end = oi.REFERENCE_CONTENT_START, oi.REFERENCE_CONTENT_END
+        # A file that itself contains the end marker: what follows it is still the file.
+        holds_end = (f"review @notes.md\n{start}\nContent from @notes.md:\nbefore\n{end}\n"
+                     f"SECRET after the marker\n{end}")
+        self.assertEqual(n(holds_end), "review @notes.md")
+        # A file that contains the start marker.
+        holds_start = (f"review @notes.md\n{start}\nContent from @notes.md:\nx\n{start}\nSECRET\n{end}")
+        self.assertEqual(n(holds_start), "review @notes.md")
+        # Several files, one of them holding the end marker.
+        many = (f"compare @a.py and @b.py\n{start}\nContent from @a.py:\nA {end} SECRET-A\n"
+                f"Content from @b.py:\nSECRET-B\n{end}")
+        self.assertEqual(n(many), "compare @a.py and @b.py")
+        # The prompt is only the section: nothing typed.
+        self.assertIsNone(n(f"{start}\nContent from @a.py:\nA\n{end}"))
+        # A stray end marker in what is left fails closed.
+        self.assertIsNone(n(f"explain {end} this"))
 
     def test_gemini_normalization_returns_none_when_unsure(self):
         n = lambda p: oi.normalize_prompt("gemini", p)   # noqa: E731
         for prompt in ("fix it <hook_context>never closed", "fix it </hook_context>",
                        "<hook_context>a <hook_context>b</hook_context> c</hook_context>",
-                       "explain @a.py\n--- Content from referenced files ---\nContent from @a.py:\nno end",
                        "<hook_context>only context</hook_context>", "   ", None, 7,
                        "System: Potential loop detected. Details: x. Please take a step back"):
             self.assertIsNone(n(prompt), prompt)

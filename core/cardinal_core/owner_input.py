@@ -812,11 +812,25 @@ MACHINE_PROMPTS = {
 }
 
 # gemini-cli wraps hook context in <hook_context>…</hook_context> and inlines
-# @file references between REFERENCE_CONTENT_START and _END, after the typed
-# text (it strips them itself with this same pattern).
+# @file references between REFERENCE_CONTENT_START and _END, always appended
+# after the typed text (atCommandProcessor). A referenced file may itself
+# contain either marker, so the section is cut from its first start marker to
+# the END of the prompt, never to the first end marker (which could be inside
+# a file and leak the rest of it).
 HOOK_CONTEXT_RE = re.compile(r"<hook_context>[\s\S]*?</hook_context>")
-REFERENCED_FILES_RE = re.compile(r"\n?--- Content from referenced files ---[\s\S]*?--- End of content ---")
-_GEMINI_MARKERS = ("<hook_context>", "</hook_context>", "--- Content from referenced files ---")
+REFERENCE_CONTENT_START = "--- Content from referenced files ---"
+REFERENCE_CONTENT_END = "--- End of content ---"
+_GEMINI_MARKERS = ("<hook_context>", "</hook_context>", REFERENCE_CONTENT_START, REFERENCE_CONTENT_END)
+
+
+def _cut_referenced_files(s: str) -> str:
+    """`s` without gemini-cli's inlined @file section: everything from the
+    first "\n--- Content from referenced files ---" (or the start, when `s`
+    begins with it) to the end."""
+    if s.lstrip().startswith(REFERENCE_CONTENT_START):
+        return ""
+    i = s.find("\n" + REFERENCE_CONTENT_START)
+    return s if i < 0 else s[:i]
 
 DETACHED_BUDGET = 8.0   # wall-clock of a detached process's posts (capture(detached=True))
 
@@ -932,18 +946,20 @@ def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]:
     None when that cannot be told confidently (then nothing is captured):
       - not a string, or only whitespace: None;
       - gemini: every <hook_context>…</hook_context> block (context hooks
-        added; in -p mode the plugin's own SessionStart context) and the
-        inlined @file section ("--- Content from referenced files ---" …
-        "--- End of content ---") are removed, and the rest is stripped of
-        surrounding whitespace; a marker of either left over (unpaired, or
-        nested): None;
+        added; in -p mode the plugin's own SessionStart context) is removed,
+        then the inlined @file section: from the first "\n--- Content from
+        referenced files ---" to the END of the prompt (gemini-cli always
+        appends it after the typed text; a file's contents may hold either
+        marker). The rest is stripped of surrounding whitespace; any marker
+        left over (an unpaired or nested hook_context, a stray "--- End of
+        content ---"): None;
       - a machine prompt of the runtime (MACHINE_PROMPTS: Claude's task
         notifications, Gemini's loop-recovery request): None.
     Anything else is returned unchanged."""
     if not isinstance(prompt, str) or not prompt.strip():
         return None
     if runtime == "gemini":
-        cut = REFERENCED_FILES_RE.sub("", HOOK_CONTEXT_RE.sub("", prompt))
+        cut = _cut_referenced_files(HOOK_CONTEXT_RE.sub("", prompt))
         if any(m in cut for m in _GEMINI_MARKERS):
             return None
         if cut != prompt:
