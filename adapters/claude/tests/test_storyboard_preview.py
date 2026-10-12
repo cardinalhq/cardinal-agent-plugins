@@ -1,5 +1,5 @@
-"""Storyboard skills: the local preview renderer (skills/canvas/scripts/
-render_preview.py), the SessionStart session-id hook
+"""Storyboard skills: the local preview renderer (skills/storyboard/scripts/
+render_preview.py, run with --runtime claude), the SessionStart session-id hook
 (hooks/storyboard-session.py) and the PostToolUse auto-preview hook
 (hooks/storyboard-preview.py).
 
@@ -33,7 +33,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-RENDER_PREVIEW = PLUGIN_ROOT / "skills" / "canvas" / "scripts" / "render_preview.py"
+RENDER_PREVIEW = PLUGIN_ROOT / "skills" / "storyboard" / "scripts" / "render_preview.py"
 SESSION_HOOK = PLUGIN_ROOT / "hooks" / "storyboard-session.py"
 PREVIEW_HOOK = PLUGIN_ROOT / "hooks" / "storyboard-preview.py"
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -293,7 +293,8 @@ def hermetic_env(home: Path, **extra) -> dict:
 
 
 def run_renderer(args: list, env: dict, stdin: str | None = None, timeout: int = 60):
-    res = subprocess.run([sys.executable, str(RENDER_PREVIEW)] + args, input=stdin, capture_output=True,
+    res = subprocess.run([sys.executable, str(RENDER_PREVIEW), "--runtime", "claude"] + args, input=stdin,
+                         capture_output=True,
                          text=True, env=env, timeout=timeout)
     lines = [json.loads(line) for line in res.stdout.splitlines() if line.strip()]
     return res, lines
@@ -813,7 +814,7 @@ class EndToEndTests(unittest.TestCase):
         result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
         env = dict(self._env(FAKE_CHROME_MODE="hang"), TMPDIR=str(self.home / "tmp"))
         (self.home / "tmp").mkdir()
-        proc = subprocess.Popen([sys.executable, str(RENDER_PREVIEW)], stdin=subprocess.PIPE,
+        proc = subprocess.Popen([sys.executable, str(RENDER_PREVIEW), "--runtime", "claude"], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
         proc.stdin.write(json.dumps(result))
         proc.stdin.close()
@@ -938,7 +939,7 @@ class EndToEndTests(unittest.TestCase):
         page.write_text("x")
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(rp.sys, "platform", "win32"), redirect_stdout(out), redirect_stderr(err):
-            code = rp.main(["--html", str(page)])
+            code = rp.main(["--html", str(page), "--runtime", "claude"])
         self.assertEqual(code, 3)
         self.assertIn("not supported on Windows", out.getvalue())
 
@@ -1510,10 +1511,12 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         self.assertIn("(exit 1)", hook.crash_context(1, ""))
         # End to end: a renderer that dies before printing anything.
         fake = self.home / "fake-hook"
-        (fake / "skills" / "canvas" / "scripts").mkdir(parents=True)
+        (fake / "skills" / "storyboard" / "scripts").mkdir(parents=True)
         (fake / "hooks").mkdir()
         shutil.copy(PREVIEW_HOOK, fake / "hooks" / PREVIEW_HOOK.name)
-        (fake / "skills" / "canvas" / "scripts" / "render_preview.py").write_text(
+        # The hook is a thin wrapper over the vendored core, which ships next to it.
+        (fake / "hooks" / "cardinal_core").symlink_to(PLUGIN_ROOT / "hooks" / "cardinal_core")
+        (fake / "skills" / "storyboard" / "scripts" / "render_preview.py").write_text(
             "import sys\nsys.stdin.read()\nraise RuntimeError('boom ' + 'ck_live_secret')\n")
         res = subprocess.run([sys.executable, str(fake / "hooks" / PREVIEW_HOOK.name)],
                              input=json.dumps(self._payload()), capture_output=True, text=True, timeout=60,

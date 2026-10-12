@@ -403,12 +403,14 @@ class PreviewHookCardTests(unittest.TestCase):
 
     def test_cover_exit_3_stops_the_card_steps(self):
         fake = self.home / "fake-plugin"
-        (fake / "skills" / "canvas" / "scripts").mkdir(parents=True)
+        (fake / "skills" / "storyboard" / "scripts").mkdir(parents=True)
         (fake / "hooks").mkdir()
         for name in (PREVIEW_HOOK.name, "_storyboard_unfurl.py"):
             shutil.copy(HOOKS / name, fake / "hooks" / name)
+        # The hook is a thin wrapper over the vendored core, which ships next to it.
+        (fake / "hooks" / "cardinal_core").symlink_to(HOOKS / "cardinal_core")
         calls = self.home / "calls.log"
-        (fake / "skills" / "canvas" / "scripts" / "render_preview.py").write_text(
+        (fake / "skills" / "storyboard" / "scripts" / "render_preview.py").write_text(
             "import json, sys\n"
             f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
             "sys.stdin.read()\n"
