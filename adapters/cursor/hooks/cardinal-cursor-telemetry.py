@@ -1400,6 +1400,20 @@ def handle_session_start(payload: dict[str, Any]) -> None:
                 parts.append(line)
     except Exception:
         pass
+    try:
+        # Checks preview (opt-in, `scripts/cardinal-checks on|off`): make the
+        # installed skill match the setting (it takes effect at the next
+        # session: Cursor has no skill reload or skill-tool deny) and, while on
+        # and connected, the routing rule. Local only.
+        from cardinal_core import checks_install
+        from cardinal_core import storyboard_authoring as sa
+
+        _, rule = checks_install.session_start(
+            "cursor", CHECKS_PLUGIN_ROOT, connected=sa.is_connected(PATHS, "cursor"))
+        if rule:
+            parts.append(rule)
+    except Exception:
+        pass
     if not parts:
         return
     sys.stdout.write(json.dumps({"additional_context": "\n\n".join(parts)}))
@@ -1418,6 +1432,8 @@ def handle_session_start(payload: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 INVESTIGATION_POLLER = Path(__file__).resolve().parent / "investigation-poller.py"
+# The plugin root the Checks preview template (checks/skill/) ships in.
+CHECKS_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 # Payload keys that would name a subagent. Cursor documents none on tool
 # hooks (subagentStart carries subagent_id); kept so a build that adds one

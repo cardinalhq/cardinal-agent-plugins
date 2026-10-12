@@ -141,7 +141,27 @@ def build_mcp_entry(mcp_url: str, api_key: str) -> dict:
     }
 
 
-def write_mcp_config(path: Path, mcp_url: str, api_key: str) -> Path | None:
+# The local cardinal-behavior MCP server (Checks preview, behavior tools): a
+# stdio server Cursor runs outside its sandbox, with --runtime cursor (its
+# connection is ~/.cursor/cardinal.json + cardinal-secrets.json; no key here).
+BEHAVIOR_SERVER_NAME = "cardinal-behavior"
+BEHAVIOR_SCRIPT = PLUGIN_ROOT / "scripts" / "cardinal-behavior"
+
+
+def build_behavior_entry() -> dict:
+    return {
+        "command": "python3",
+        "args": [str(BEHAVIOR_SCRIPT), "--runtime", "cursor"],
+        "cardinalManaged": True,
+        "cardinalPluginVersion": PLUGIN_VERSION,
+    }
+
+
+def write_mcp_config(path: Path, mcp_url: str, api_key: str, behavior: bool = True) -> Path | None:
+    """The managed `cardinal` entry and, with `behavior` (the user-level
+    file; a project file is for cloud agents, which have no local plugin),
+    the managed `cardinal-behavior` entry. An unmanaged `cardinal` entry
+    stops the write; an unmanaged `cardinal-behavior` one is left alone."""
     data = load_json_object(path, "mcp.json")
     servers = data.get("mcpServers")
     if not isinstance(servers, dict):
@@ -153,6 +173,12 @@ def write_mcp_config(path: Path, mcp_url: str, api_key: str) -> Path | None:
             f"mcpServers.{MCP_SERVER_NAME} entry. Remove or rename that entry, then rerun."
         )
     servers[MCP_SERVER_NAME] = build_mcp_entry(mcp_url, api_key)
+    if behavior:
+        current = servers.get(BEHAVIOR_SERVER_NAME)
+        if isinstance(current, dict) and not current.get("cardinalManaged"):
+            print(f"WARN {path} already has an unmanaged mcpServers.{BEHAVIOR_SERVER_NAME} entry; left as it is.")
+        else:
+            servers[BEHAVIOR_SERVER_NAME] = build_behavior_entry()
     data["mcpServers"] = servers
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -522,7 +548,7 @@ def continue_after_grant(args: argparse.Namespace, grant: dict) -> int:
 
     if project_paths:
         if mcp:
-            b = write_mcp_config(Path(project_paths["mcp_path"]), mcp["url"], mcp["api_key"])
+            b = write_mcp_config(Path(project_paths["mcp_path"]), mcp["url"], mcp["api_key"], behavior=False)
             print(f"Wrote Cardinal MCP entry to {project_paths['mcp_path']} (cloud-agent path)")
             if b:
                 print(f"Project MCP backup: {b}")
