@@ -101,9 +101,13 @@ def default_config(environ=None, runtime=None, home=None):
     elif not base_url and runtime != 'claude':
         # Claude keeps its key in settings.json env, never in these files.
         url, key = agent_paths_connection(runtime, home)
-        if url:
-            base_url = behavior_url(url, f'{agent_dir(runtime, home) / "cardinal.json"} mcp_url')
-            api_key = key
+        try:
+            base_url = behavior_url(url) if url else None
+        except ValueError:
+            # Not an organization MCP endpoint: start anyway; every API tool
+            # then says to connect (a malformed file must not kill the server).
+            base_url = None
+        api_key = key if base_url else None
     config = {'base_url': base_url, 'org': env.get('CARDINAL_ORG_ID'), 'runtime': runtime,
               'api_key_env': 'CARDINAL_QUERY_API_KEY' if env.get('CARDINAL_BEHAVIOR_API_URL') else 'CARDINAL_MCP_API_KEY',
               'output_dir': env.get('CARDINAL_BEHAVIOR_OUTPUT_DIR', str(Path.home() / '.cardinal' / 'behavior-executions'))}

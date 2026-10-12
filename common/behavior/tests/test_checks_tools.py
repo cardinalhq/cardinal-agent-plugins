@@ -84,9 +84,12 @@ class ConnectionByRuntimeTests(unittest.TestCase):
         self.assertEqual(default_config({'CARDINAL_BEHAVIOR_RUNTIME': 'codex'}, home=self.home)['runtime'], 'codex')
         with self.assertRaises(ValueError):
             default_config({}, runtime='vim')
+        # A connect file that names no organization endpoint leaves the server
+        # unconnected (it still starts; every API tool says to connect).
         connect_files(self.home, 'codex', url='https://app.example/api/orgs/foreign/mcp')
-        with self.assertRaisesRegex(ValueError, 'cardinal.json mcp_url'):
-            default_config({}, runtime='codex', home=self.home)
+        config = default_config({}, runtime='codex', home=self.home)
+        self.assertIsNone(config['base_url'])
+        self.assertNotIn('api_key', config)
 
 
 class RangeWaitingByRuntimeTests(unittest.TestCase):
