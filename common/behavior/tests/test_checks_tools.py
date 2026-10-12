@@ -194,6 +194,8 @@ class LedgerToolTests(unittest.TestCase):
         for name in ('get_behavior_range', 'list_accepted_checks', 'set_check_example', 'approve_check_example',
                      'remove_check_example', 'get_check_draft', 'lock_check_examples'):
             self.assertIn(name, names)
+        described = {t['name']: t['description'] for t in json.loads(stdout.getvalue())['result']['tools']}
+        self.assertIn('a way to follow it (watch_command or poll', described['execute_behavior_range'])
         # Gemini CLI names a tool mcp_<server>_<tool> and truncates past 63 characters.
         self.assertTrue(all(len(f'mcp_cardinal-behavior_{n}') <= 63 for n in names))
 
