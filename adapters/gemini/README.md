@@ -13,7 +13,9 @@ This is a Gemini-CLI-native port of the command surface shared by the
 | `cardinal-connect` | Runs Cardinal's device-code flow, mints ingest and MCP keys, installs the Cardinal extension bundle under `~/.gemini/extensions/cardinal/`, and wires Gemini CLI's native OTLP exporter to Cardinal ingest. |
 | `cardinal-status` | Shows the recorded Cardinal workspace and probes the configured ingest and MCP endpoints. |
 | `cardinal-disconnect` | Best-effort revokes Cardinal keys, removes the extension bundle and managed settings.json entries, and deletes local state. |
-| `cardinal-decision` | Opt-in decision capture: `on` / `off` / `status`, and `record` (called by the agent) emits one `cardinal.decision` event tagged with repo, branch, head sha, PR, anchors and code clusters. |
+| `cardinal-decision` | Opt-in decision capture: `on` / `off` / `status`, and `record` (called by the agent) emits one `cardinal.decision` event tagged with repo, branch, head sha, PR, anchors and code clusters. The `cardinal-decision` skill reports status only and gives you the `on` / `off` command to run yourself. |
+| `canvas` skill | Draw and preview a storyboard scene's Canvas, then read the PNGs the preview hook renders. |
+| `brainstorm` agent | Self-contained divergent idea generation (N options with tradeoffs and a recommendation). |
 
 ## Telemetry scope
 
@@ -29,7 +31,7 @@ at the repository root for the full parity map):
 - `api_request` + `cardinal.turn_usage` per model call from `AfterModel`. Gemini CLI fires `AfterModel` once per streamed chunk; the hook exits immediately on non-final chunks and accounts the final chunk's `llm_response.usageMetadata` (prompt, candidates, total — thought/tool-use-prompt tokens are derived as the remainder; cached-content tokens are not exposed to hooks, so cost ignores cache discounts). Treat cost as an upper bound: the remainder mixes thought and tool-use-prompt tokens and is priced at the output rate. A stream that errors before its final chunk records no usage for that call.
 - `cardinal.turn_tool` + `tool_result` per tool call from `AfterTool`, with `mcp__<server>__<tool>` on `turn_tool` (from `mcp_context`), Bash-verb `bash_class` classification, and success from `tool_response.error`.
 - `cardinal.plan_usage` (compaction trigger) from `PreCompress`; Gemini's payload carries only `trigger`. Downstream disambiguates from per-model-call plan_usage on the presence of `plan.compact_trigger`.
-- No `cardinal.subagent_usage`: Gemini CLI's `AfterAgent` fires once per main-agent turn (not per subagent), so it is not registered. Subagents run their own chat through the same hooks, so their model usage likely lands in the parent session's `cardinal.turn_usage` without a subagent marker.
+- No `cardinal.subagent_usage`: Gemini CLI's `AfterAgent` fires once per main-agent turn (not per subagent); it is registered as the turn end (see "Investigations, owner input and turn ends"), not as a subagent stop. Subagents run their own chat through the same hooks, so their model usage likely lands in the parent session's `cardinal.turn_usage` without a subagent marker.
 
 Hooks never wait on the network: each one does local-file work, prints its
 output, and hands OTLP posts, the `gh` PR lookup and the limits-verdict
@@ -98,6 +100,76 @@ model gave it; MCP calls carry `mcp_context {server_name, tool_name}`; a
 rewritten. Fixtures: `tests/test_gemini_storyboard.py`. Re-run
 `cardinal-connect` to register `BeforeTool`.
 
+## Investigations, owner input and turn ends
+
+Every connected session is bound to a Cardinal Investigation (shared logic:
+`cardinal_core.investigation_agent`, `investigation_turn`, `owner_input`,
+`storyboard_authoring`; the same contract as the Claude, Codex and Cursor
+plugins). What each hook does:
+
+| Hook | What it does |
+| --- | --- |
+| `SessionStart` | Binds the session (`investigation_agent.start`: one 3 s request), starts the background poller (`hooks/investigation-poller.py`, one per session, stops with Gemini CLI) and puts the session guidance in context: the labeled links (`Storyboard (private draft until published)`, `Investigation timeline (shows the live record before any publish)`), how to acknowledge and post, and the checkpoint command. Unconnected: the connect hint (told once per machine). An MCP key without a URL: the stray-key warning (once per session). |
+| `BeforeAgent` | Owner input (below), then what was staged for this prompt (advisories that arrived after the last tool call, the discovery re-look) as `additionalContext`. The re-look itself (only when the branch or HEAD moved) runs in the detached background child and is staged. |
+| `AfterTool` | The Investigation's advisories at this tool boundary (`authority: ADVISORY`), a recording command that could not reach Cardinal (`run_shell_command`), the evidence token after Cardinal's `storyboard__create` / `add_act` / `preview`, the hero upload after `storyboard__publish`, and the storyboards about a file `write_file` / `replace` edited (edit lookup, once per directory, 1.5 s). Cardinal's MCP results arrive as Gemini's `{llmContent, returnDisplay}` and are converted to MCP shape first; the server comes from `mcp_context`. |
+| `AfterTool --role preview` | Its own hook group (matcher `storyboard__preview$`, 150 s: Gemini dedupes an event's hooks by `name:command`, so it needs a distinct command): renders Cardinal's `storyboard__preview` result in your local Chromium and names the PNGs under `~/.gemini/cardinal/storyboards/<sb>/r<rev>/`. |
+| `AfterAgent` | The turn's end: what is deliverable (the poller's inbox, one bounded check when the poller is stale, an open directive, decision reminders) is **staged** for the next `BeforeAgent` / `AfterTool`, and the owner-input outbox is flushed (2.6 s budget). **It never blocks and prints nothing**: on Gemini CLI an AfterAgent block re-enters the model as a plain user-role message and re-fires `BeforeAgent` with the reason as its `prompt` (gemini-cli 0.50.0 `GeminiClient.sendMessageStream`, `chunk-W4YMYD53.js:335735-335757`), so advisory text would become owner input. |
+
+Re-run `cardinal-connect` after upgrading the plugin: on an existing
+connection it rebuilds the installed extension (hooks, skills, agents) in
+place, credentials unchanged.
+
+### Owner input
+
+When the Cardinal server advertises `capabilities.owner_input.enabled` and
+this session authors its Investigation, `BeforeAgent` records what you typed
+as owner input of that Investigation (`owner_input.capture`):
+
+- **Disclosure first.** The first prompt is not recorded: the hook shows
+  `Cardinal: This session's prompts are recorded to Investigation <inv> as
+  owner input …` as a `systemMessage` (an info line in the interactive UI; in
+  `-p` mode Gemini prints it to stderr as `Hook system message: …`), and
+  capture starts with the next prompt.
+- **Exactly what you typed.** Gemini hands `BeforeAgent` the request text:
+  in `-p` mode the SessionStart context is prepended as
+  `<hook_context>…</hook_context>`, and an `@file` reference is followed by
+  the file's contents between `--- Content from referenced files ---` and
+  `--- End of content ---`; both are removed before anything is sent. A
+  custom TOML command (`~/.gemini/commands`, `<project>/.gemini/commands`, an
+  extension's `commands/`) reaches `BeforeAgent` already expanded, so a prompt
+  that is a command's template is recognized and never recorded. Gemini's
+  loop-recovery request, a prompt that names a subagent (`agent_id`) and the
+  same prompt again within one turn are never recorded.
+- **No waiting.** The turn is taken and the prompt queued under the session
+  lock; a detached process posts it (`AfterAgent` flushes what is left).
+  `BeforeAgent` never waits on the network.
+- **Kill switch.** `CARDINAL_OWNER_INPUT=0` (or `false` / `off` / `no`) in the
+  environment Gemini CLI starts with, or `{"gemini": "off"}` in
+  `~/.cardinal/owner-input.json`: nothing is recorded, a queued prompt is
+  deleted, and turning it back on shows the disclosure again first.
+- Credentials are scrubbed and the text is capped at 32 KiB; only you and the
+  grantees you authorize can read it. A prompt the spend-limits gate blocks is
+  not recorded.
+
+### Limits
+
+- **No subagent events.** Gemini CLI has no SubagentStart / SubagentStop hook
+  event (gemini-cli 0.50.0 `HookEventName`, `chunk-W4YMYD53.js:324340-324352`),
+  so a subagent gets no discovery block at its start, and `AfterTool` carries
+  no agent id: Gemini's subagents run tools through the same hooks, so an
+  advisory can be delivered at a subagent's tool boundary.
+- **Advisories after the turn's last tool call** cannot be delivered in that
+  turn (`AfterAgent` never blocks, above): they are delivered at the next
+  `BeforeAgent`, or at the next tool call.
+- **Built-in commands that submit a prompt** (for example `/plan`) reach
+  `BeforeAgent` as their expanded text, which no command file describes; that
+  text is recorded as the turn's owner input.
+- **Rendered PNGs are outside the workspace.** Gemini's `read_file` reads only
+  the workspace and the project temp directory, so the PNGs the preview hook
+  names under `~/.gemini/cardinal/storyboards/` need
+  `--include-directories ~/.gemini/cardinal/storyboards` (or the same in
+  `context.includeDirectories`) to be read.
+
 ## Session context & spend limits
 
 Parity features with the Claude, Codex, and Cursor plugins, driven by the
@@ -141,8 +213,10 @@ writes:
 
 | File | What gets written |
 | --- | --- |
-| `~/.gemini/extensions/cardinal/gemini-extension.json` | Extension manifest with concrete `mcpServers.cardinal` entry, tagged `cardinalManaged: true`. |
-| `~/.gemini/extensions/cardinal/hooks/hooks.json` | Cardinal hook entries for `SessionStart`, `BeforeAgent`, `AfterModel`, `AfterTool`, `PreCompress`, `SessionEnd`. Each command string embeds the marker `cardinal-gemini-plugin` for disconnect identification. |
+| `~/.gemini/extensions/cardinal/gemini-extension.json` | Extension manifest with a concrete `mcpServers.cardinal` entry, tagged `cardinalManaged: true`. Other `mcpServers` entries already in the installed manifest are kept (merged, never replaced). |
+| `~/.gemini/extensions/cardinal/hooks/hooks.json` | Cardinal hook groups for `SessionStart`, `BeforeAgent`, `BeforeTool` (storyboard tools), `AfterModel`, `AfterTool` (and `AfterTool --role preview`, 150 s), `AfterAgent`, `PreCompress`, `SessionEnd`. Each command string embeds the marker `cardinal-gemini-plugin` for disconnect identification. |
+| `~/.gemini/extensions/cardinal/skills/` | The plugin's skills (connect, status, disconnect, decision, storyboard, canvas, install-site, migrate-from-grafana, optimize-toolkit), with each script path rewritten to this plugin's absolute path. Gemini CLI loads an extension's `skills/*/SKILL.md`. |
+| `~/.gemini/extensions/cardinal/agents/` | The `brainstorm` subagent (Gemini's local-agent Markdown format, read-only tools). |
 | `~/.gemini/extensions/cardinal/GEMINI.md` | Context file loaded into the model context by Gemini CLI. |
 | `~/.gemini/settings.json` | Managed `telemetry` block pointing Gemini's native OTLP exporter at Cardinal ingest. |
 | `~/.gemini/cardinal.json` | Non-secret state: org/user metadata, endpoint URLs, key ids, key prefixes, and config locations. |

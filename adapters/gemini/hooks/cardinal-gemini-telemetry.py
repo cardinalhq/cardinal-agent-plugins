@@ -21,10 +21,17 @@ a detached background child with /dev/null stdio (`--background <spool>`).
 
 Event dispatch (payload shapes: packages/core/src/hooks/types.ts):
 
-  SessionStart  → convention prompt + budget standing + storyboard session
-                  id and discovery block (additionalContext)
-  BeforeAgent   → spend-limits gate + decision prompt (additionalContext);
-                  background: cardinal.git_state (+PR) + verdict refresh
+  SessionStart  → convention prompt + budget standing + the session's
+                  Investigation (investigation_agent.start: bootstrap,
+                  poller, guidance with the labeled links) + storyboard
+                  session id and discovery block + connect hint / stray-key
+                  warning (additionalContext)
+  BeforeAgent   → spend-limits gate + decision prompt + what was staged
+                  for this prompt (additionalContext); owner input
+                  (owner_input.capture, detached: no network here) with its
+                  one-time disclosure as systemMessage; background:
+                  cardinal.git_state (+PR) + verdict refresh + the discovery
+                  re-look (staged for the next boundary)
   AfterModel    → api_request + cardinal.turn_usage, final chunk only
                   (fires per streamed chunk; non-final chunks exit early)
   BeforeTool    → storyboard context stamping on Cardinal's storyboard
@@ -34,10 +41,19 @@ Event dispatch (payload shapes: packages/core/src/hooks/types.ts):
                   Cardinal's own) is also captured in the local evidence
                   spool through the generic pipeline
                   (cardinal_core.evidence_capture) and its [evidence:ev_…]
-                  id returned as additionalContext
-  AfterAgent    → cardinal.subagent_usage for subagent-shaped payloads only;
-                  not registered by cardinal-connect (Gemini fires it per
-                  main-agent turn with {prompt, prompt_response})
+                  id returned as additionalContext, with the Investigation's
+                  advisories (investigation_agent.deliver), recording
+                  failures, the evidence token / hero upload on Cardinal's
+                  storyboard tools and the storyboards about a file
+                  write_file / replace edited (edit lookup)
+  AfterTool --role preview
+                → the storyboard__preview render (its own 150 s group)
+  AfterAgent    → the main agent's turn end ({prompt, prompt_response,
+                  stop_hook_active}): investigation_agent.turn_end flushes
+                  owner input and STAGES what is deliverable; it never
+                  blocks (an AfterAgent block re-enters as user text and
+                  re-fires BeforeAgent); subagent-shaped payloads still
+                  give cardinal.subagent_usage
   PreCompress   → cardinal.plan_usage (compaction trigger)
   SessionEnd    → no-op
 """
@@ -45,6 +61,7 @@ Event dispatch (payload shapes: packages/core/src/hooks/types.ts):
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -55,6 +72,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+START = time.monotonic()
 
 # AfterModel fires once per streamed chunk and the host awaits each hook
 # (packages/core/src/core/geminiChat.ts: `await hookSystem.fireAfterModelEvent`
@@ -247,18 +266,185 @@ def decision_context(session_id: str) -> str | None:
     return build_decision_context(str(DECISION_CLI), session_id, entries)
 
 
-def merge_prompt_output(gate_out: dict[str, Any] | None, extra_context: str | None) -> dict[str, Any] | None:
-    """One BeforeAgent stdout JSON object from the spend-limits gate and the
-    decision prompt. A blocked turn carries only the block verdict."""
-    if not extra_context or (gate_out and gate_out.get("decision") == "block"):
+def merge_prompt_output(gate_out: dict[str, Any] | None, extra_context: str | None,
+                        system_message: str | None = None) -> dict[str, Any] | None:
+    """One BeforeAgent stdout JSON object from the spend-limits gate, the
+    prompt's additional context and a user-visible systemMessage (the
+    owner-input disclosure). A blocked turn carries only the block verdict
+    (Gemini shows a block's systemMessage in place of its reason)."""
+    if gate_out and gate_out.get("decision") == "block":
+        return gate_out
+    if not extra_context and not system_message:
         return gate_out
     out = dict(gate_out or {})
-    hso = dict(out.get("hookSpecificOutput") or {})
-    hso["hookEventName"] = "BeforeAgent"
-    prior = hso.get("additionalContext")
-    hso["additionalContext"] = f"{prior}\n\n{extra_context}" if prior else extra_context
-    out["hookSpecificOutput"] = hso
+    if extra_context:
+        hso = dict(out.get("hookSpecificOutput") or {})
+        hso["hookEventName"] = "BeforeAgent"
+        prior = hso.get("additionalContext")
+        hso["additionalContext"] = f"{prior}\n\n{extra_context}" if prior else extra_context
+        out["hookSpecificOutput"] = hso
+    if system_message:
+        prior = out.get("systemMessage")
+        out["systemMessage"] = f"{prior}\n{system_message}" if prior else system_message
     return out
+
+
+# ---------------------------------------------------------------------------
+# Owner input (cardinal_core.owner_input.capture: the gate every runtime
+# shares). BeforeAgent's `prompt` is partToString(request) (gemini-cli
+# 0.50.0 GeminiClient.fireBeforeAgentHookSafe, chunk-W4YMYD53.js:335207):
+# in -p mode the SessionStart context is prepended as <hook_context>…
+# </hook_context> (gemini-APOZRZEF.js:29098) and an @file is inlined after
+# the typed text between "--- Content from referenced files ---" and
+# "--- End of content ---" (atCommandProcessor); normalize_prompt("gemini")
+# removes both. A custom TOML command is expanded before BeforeAgent
+# (interactive submit_prompt, interactiveCli-YUJVNPR2.js:27527; -p without
+# hook context), so that prompt is NOT what the owner typed: it is
+# recognized against the command files (custom_command_expansion) and never
+# captured.
+# ---------------------------------------------------------------------------
+
+MAX_COMMAND_FILES = 200
+MAX_COMMAND_BYTES = 64 << 10
+MIN_TEMPLATE_LITERAL = 8
+MAX_TEMPLATE_PARTS = 9
+_TOML_PROMPT_RE = re.compile(r'(?m)^\s*prompt\s*=\s*("""|\'\'\'|"|\')')
+_INJECTION_RE = re.compile(r"\{\{args\}\}|[!@]\{[^{}]*\}")
+
+
+def _toml_prompt(text: str) -> str | None:
+    """The `prompt` string of a Gemini custom command file (basic and
+    literal strings, single- or multi-line); None when there is none."""
+    m = _TOML_PROMPT_RE.search(text)
+    if not m:
+        return None
+    quote = m.group(1)
+    rest = text[m.end():]
+    end = rest.find(quote)
+    if end < 0:
+        return None
+    value = rest[:end]
+    if len(quote) == 3 and value.startswith("\n"):
+        value = value[1:]
+    if quote.startswith('"'):
+        try:
+            value = json.loads('"' + value.replace("\n", "\\n").replace("\t", "\\t") + '"')
+        except ValueError:
+            pass
+    return value
+
+
+def command_dirs(cwd: str) -> list[Path]:
+    """Where Gemini loads custom commands (FileCommandLoader
+    getCommandDirectories): ~/.gemini/commands, <project>/.gemini/commands
+    and every installed extension's commands/."""
+    dirs = [PATHS.home / "commands", Path(cwd) / ".gemini" / "commands"]
+    try:
+        dirs += sorted(p / "commands" for p in (PATHS.home / "extensions").iterdir() if p.is_dir())
+    except OSError:
+        pass
+    return dirs
+
+
+def custom_command_expansion(prompt: Any, cwd: str) -> bool:
+    """Whether `prompt` (hook context and @file sections removed) is a
+    custom command's expanded template: its literal text with {{args}},
+    !{…} and @{…} standing for anything, and Gemini's appended raw
+    invocation when the template has no {{args}}. Local file reads only,
+    bounded; False when no command file matches."""
+    from cardinal_core import owner_input
+
+    typed = owner_input.normalize_prompt("gemini", prompt)
+    if typed is None:
+        return False
+    seen = 0
+    for d in command_dirs(cwd):
+        try:
+            files = sorted(d.rglob("*.toml")) if d.is_dir() else []
+        except OSError:
+            continue
+        for f in files:
+            seen += 1
+            if seen > MAX_COMMAND_FILES:
+                return False
+            try:
+                if f.stat().st_size > MAX_COMMAND_BYTES:
+                    continue
+                template = _toml_prompt(f.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not template or not template.strip():
+                continue
+            parts = _INJECTION_RE.split(template.strip())
+            # A template that is (almost) only placeholders would match every
+            # prompt; one with many is not worth the backtracking.
+            if len("".join(parts).strip()) < MIN_TEMPLATE_LITERAL or len(parts) > MAX_TEMPLATE_PARTS:
+                continue
+            pattern = ".*?".join(re.escape(part) for part in parts)
+            if re.fullmatch(r"\s*" + pattern + r"(?:\s*/[\s\S]*)?\s*", typed, re.DOTALL):
+                return True
+    return False
+
+
+def owner_input_log(status: str) -> None:
+    """The capture status (never the prompt) in the debug dir, when
+    CARDINAL_GEMINI_DEBUG_PAYLOADS=1."""
+    if os.environ.get(DEBUG_PAYLOADS_ENV) != "1":
+        return
+    try:
+        PATHS.debug_dir.mkdir(parents=True, exist_ok=True)
+        with open(PATHS.debug_dir / "owner-input.log", "a", encoding="utf-8") as fh:
+            fh.write(f"{time.time():.3f} {status}\n")
+    except OSError:
+        pass
+
+
+def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> str | None:
+    """Record what the owner typed as owner input of this session's
+    Investigation (owner_input.capture, detached: the turn is taken and the
+    prompt queued under the session lock, a detached process posts it).
+    Returns the one-time disclosure to show the user now, else None. Only a
+    bound session imports anything; never raises."""
+    status = "unbound"
+    try:
+        from cardinal_core import investigation_events as ie
+
+        if not ie.valid_session(session_id) or not ie.binding_path(Path.home(), session_id).exists():
+            return None
+        from cardinal_core import owner_input
+
+        binding = ie.read_binding(Path.home(), session_id)
+        prompt = payload.get("prompt")
+        if owner_input.enabled(binding) and custom_command_expansion(prompt, cwd):
+            status = "custom_command"
+            return None
+        wiring = storyboard_wiring()
+        agent_id = payload.get("agent_id")
+        res = owner_input.capture(Path.home(), session_id, prompt, runtime="gemini", conn=wiring.connection(),
+                                  client=wiring.client, environ=os.environ,
+                                  agent_id=agent_id if isinstance(agent_id, str) else None,
+                                  deadline=START + owner_input.BUDGET, detached=True, cwd=cwd)
+        status = res.status
+        return res.disclosure
+    except Exception:
+        status = "error"
+        return None
+    finally:
+        owner_input_log(status)
+
+
+def staged_for_prompt(session_id: str) -> str | None:
+    """What was staged for this prompt (turn-end advisories, the discovery
+    re-look) as model context (investigation_agent.prompt; no network)."""
+    try:
+        from cardinal_core import investigation_agent
+
+        wiring = storyboard_wiring()
+        investigation_agent.spawn_poller(wiring, session_id, str(INVESTIGATION_POLLER))
+        items = investigation_agent.prompt(wiring, session_id).agent_context
+        return "\n\n".join(items) if items else None
+    except Exception:
+        return None
 
 
 def handle_before_agent(payload: dict[str, Any]) -> None:
@@ -268,19 +454,31 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
         return
     cwd = str(payload.get("cwd") or os.getcwd())
 
-    # Sync half: local files only. The gate verdict and the decision prompt
-    # share one stdout JSON object (Gemini parses a single document).
+    # Sync half: local files only. The gate verdict, the prompt's context
+    # and the disclosure share one stdout JSON object (Gemini parses a
+    # single document).
     gate_out = None
     try:
         gate_out = limits.gate_output(PATHS, session_id, hook_event_name="BeforeAgent")
     except Exception:
         pass
-    extra_context = None
+    blocked = bool(gate_out and gate_out.get("decision") == "block")
+    parts: list[str] = []
     try:
-        extra_context = decision_context(session_id)
+        decision = decision_context(session_id)
+        if decision:
+            parts.append(decision)
     except Exception:
         pass
-    prompt_out = merge_prompt_output(gate_out, extra_context)
+    disclosure = None
+    if not blocked:
+        # A blocked prompt never reaches the model, and a block cannot show
+        # the disclosure: nothing is captured or delivered for it.
+        disclosure = capture_owner_input(payload, session_id, cwd)
+        staged = staged_for_prompt(session_id)
+        if staged:
+            parts.append(staged)
+    prompt_out = merge_prompt_output(gate_out, "\n\n".join(parts) or None, disclosure)
     if prompt_out:
         sys.stdout.write(json.dumps(prompt_out))
         sys.stdout.flush()
@@ -290,21 +488,64 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
     session.begin_user_turn(state)
     session.save_progress(PATHS, session_id, state)
 
-    # Network half (git_state + PR refresh + verdict refresh) runs detached.
-    if connected():
+    # Network half (git_state + PR refresh + verdict refresh + the discovery
+    # re-look) runs detached.
+    relook = not blocked and relook_wanted(session_id)
+    if connected() or relook:
         spawn_background({
             "kind": "before_agent",
             "session_id": session_id,
             "cwd": cwd,
             "command": initiative.detect_command(payload.get("prompt")),
             "ts_ns": time.time_ns(),
+            "relook": relook,
         })
+
+
+# The discovery re-look's network deadline in the detached child.
+RELOOK_BUDGET_S = 4.0
+
+
+def relook_wanted(session_id: str) -> bool:
+    """Whether the detached child should re-look for related storyboards:
+    discovery on, and a session bound to an Investigation (its staged items
+    are delivered at the next AfterTool / BeforeAgent). Local only."""
+    try:
+        from cardinal_core import investigation_events as ie
+        from cardinal_core import storyboard_authoring as sa
+
+        return (not sa.discovery_disabled(PATHS, "gemini")
+                and ie.valid_session(session_id)
+                and ie.binding_path(Path.home(), session_id).exists())
+    except Exception:
+        return False
+
+
+def relook_background(session_id: str, cwd: str) -> None:
+    """The discovery re-look (storyboard_authoring.relook_if_moved: only
+    when the branch or HEAD moved since the last look), its block staged
+    for the session's next boundary (investigation_turn.stage)."""
+    try:
+        from cardinal_core import investigation_turn
+        from cardinal_core import storyboard_authoring as sa
+
+        wiring = storyboard_wiring()
+        block = sa.relook_if_moved(PATHS, "gemini", session_id, cwd, connection=wiring.connection,
+                                   client=wiring.client, deadline=time.monotonic() + RELOOK_BUDGET_S)
+        if block:
+            investigation_turn.stage(Path.home(), session_id, block)
+    except Exception:
+        pass
 
 
 def before_agent_background(job: dict[str, Any]) -> None:
     session_id = str(job.get("session_id") or "")
     cwd = str(job.get("cwd") or "")
     if not session_id or not cwd:
+        return
+    if job.get("relook"):
+        relook_background(session_id, cwd)
+    if not connected():
         return
     ts_ns = job.get("ts_ns") if isinstance(job.get("ts_ns"), int) else time.time_ns()
 
@@ -781,6 +1022,7 @@ def capture_evidence(payload: dict[str, Any]) -> str | None:
 # ---------------------------------------------------------------------------
 
 STORYBOARD_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-storyboard"
+INVESTIGATION_POLLER = Path(__file__).resolve().parent / "investigation-poller.py"
 STORYBOARD_SERVER = "cardinal"
 # The four tools stamped_input fills (link's about refs are the model's);
 # the same set as the BeforeTool matcher.
@@ -889,16 +1131,145 @@ def handle_before_tool(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+# ---------------------------------------------------------------------------
+# AfterTool — the Investigation and storyboard authoring
+# (cardinal_core.investigation_agent, storyboard_authoring)
+# ---------------------------------------------------------------------------
+
+# Gemini's run_shell_command result ends with "Exit Code: N" when the
+# command failed (gemini-cli 0.50.0 shell tool, chunk-W4YMYD53.js:314500).
+_SHELL_EXIT_RE = re.compile(r"(?m)^Exit Code: (-?\d+)\s*$")
+SHELL_TOOL = "run_shell_command"
+
+
+def mcp_server(payload: dict[str, Any]) -> str | None:
+    """mcp_context.server_name of an MCP call (the flattened
+    mcp_<server>_<tool> name alone is ambiguous), else None."""
+    ctx = payload.get("mcp_context")
+    server = ctx.get("server_name") if isinstance(ctx, dict) else None
+    return server if isinstance(server, str) and server else None
+
+
+def mcp_result(payload: dict[str, Any]) -> Any:
+    """The tool result in MCP shape for cardinal_core (storyboard_authoring
+    takes {content, structuredContent}): Gemini's {llmContent,
+    returnDisplay} converted (gemini_tool_response, <untrusted_context>
+    removed); None for a failed call."""
+    response = payload.get("tool_response")
+    if isinstance(response, dict) and ("llmContent" in response or "returnDisplay" in response):
+        return gemini_tool_response(response)
+    return response
+
+
+def shell_failure(payload: dict[str, Any], session_id: str | None) -> str | None:
+    """investigation_failures.observe for a run_shell_command call: a
+    recording command (cardinal-storyboard investigation …, cardinal-evidence
+    promote …) that could not reach Cardinal says so once. The exit code is
+    read from Gemini's "Exit Code: N" line (none: it succeeded). Local only."""
+    try:
+        if payload.get("tool_name") != SHELL_TOOL:
+            return None
+        from cardinal_core import investigation_failures
+
+        response = payload.get("tool_response")
+        text = gemini_error_text(response)
+        failed = text is not None
+        if text is None and isinstance(response, dict):
+            llm = response.get("llmContent")
+            text = llm if isinstance(llm, str) else None
+        m = _SHELL_EXIT_RE.search(text or "")
+        code = int(m.group(1)) if m else (None if failed else 0)
+        result = {"exit_code": code, "output": text or ""} if code is not None else {"output": text or ""}
+        return investigation_failures.observe(Path.home(), session_id, payload.get("tool_input"), result,
+                                              text if failed else None, runtime="gemini", tool_name=SHELL_TOOL,
+                                              succeeded=not failed)
+    except Exception:
+        return None
+
+
+def authoring_lines(payload: dict[str, Any], session_id: str | None) -> list[str]:
+    """Storyboard authoring around Cardinal's tools: the evidence token
+    (storyboard__create / add_act / preview), the hero upload after
+    storyboard__publish (network, UPLOAD_TIMEOUT_S), and the storyboards
+    about a file write_file / replace just edited (edit lookup, network,
+    ending by START + EDIT_BUDGET_S). Never raises."""
+    lines: list[str] = []
+    try:
+        from cardinal_core import storyboard_authoring as sa
+
+        name = payload.get("tool_name")
+        server = mcp_server(payload)
+        if sa.is_cardinal_tool("gemini", name, server=server):
+            result = mcp_result(payload)
+            sa.observe_cardinal_result(PATHS, "gemini", name, result, session_id=session_id, server=server)
+            if sa.is_cardinal_tool("gemini", name, "storyboard__publish", server=server):
+                wiring = storyboard_wiring()
+                text = sa.on_publish(PATHS, "gemini", result, connection=wiring.connection, client=wiring.client)
+                if text:
+                    lines.append(text)
+            return lines
+        path = edited_file(payload)
+        if path and session_id:
+            wiring = storyboard_wiring()
+            block = sa.edit_lookup(PATHS, "gemini", session_id, path, payload.get("cwd"),
+                                   connection=wiring.connection, client=wiring.client,
+                                   deadline=START + sa.EDIT_BUDGET_S)
+            if block:
+                lines.append(block)
+    except Exception:
+        pass
+    return lines
+
+
+def advisories(session_id: str | None) -> list[str]:
+    """The Investigation's deliverable items at this tool boundary
+    (investigation_agent.deliver: staged items, the poller's inbox, an owed
+    challenge or directive; no network). Gemini names no subagent on a tool
+    call (AfterTool carries no agent id), so every call counts as the main
+    thread's."""
+    lines: list[str] = []
+    try:
+        from cardinal_core import investigation_agent
+
+        wiring = storyboard_wiring()
+        investigation_agent.spawn_poller(wiring, session_id, str(INVESTIGATION_POLLER))
+        investigation_agent.deliver(wiring, session_id, lines.append)
+    except Exception:
+        pass
+    return lines
+
+
+def handle_after_tool_preview(payload: dict[str, Any]) -> None:
+    """AfterTool --role preview (its own hook group, matcher
+    storyboard__preview$, 150 s): render Cardinal's storyboard__preview
+    result locally (storyboard_authoring.on_preview) and name the PNGs."""
+    from cardinal_core import storyboard_authoring as sa
+
+    if not sa.is_cardinal_tool("gemini", payload.get("tool_name"), "storyboard__preview",
+                               server=mcp_server(payload)):
+        return
+    tool_input = payload.get("tool_input")
+    ctx = sa.on_preview(PATHS, "gemini", mcp_result(payload), session_id=session_id_from_payload(payload),
+                        tool_input=tool_input if isinstance(tool_input, dict) else None, started=START)
+    if not ctx:
+        return
+    sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "AfterTool", "additionalContext": ctx}}))
+    sys.stdout.flush()
+
+
 def handle_after_tool(payload: dict[str, Any]) -> None:
     dump_debug_payload("AfterTool", payload)
     session_id = session_id_from_payload(payload)
     evidence_line = capture_evidence(payload)
     record_edit(payload)
-    if evidence_line:
+    lines = [line for line in (shell_failure(payload, session_id), evidence_line) if line]
+    lines += authoring_lines(payload, session_id)
+    lines += advisories(session_id)
+    if lines:
         sys.stdout.write(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "AfterTool",
-                "additionalContext": evidence_line,
+                "additionalContext": "\n\n".join(lines),
             }
         }))
         sys.stdout.flush()
@@ -972,8 +1343,36 @@ def handle_after_tool(payload: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AfterAgent — subagent stop (not registered; see module docstring)
+# AfterAgent — the main agent's turn end; never a block
 # ---------------------------------------------------------------------------
+
+# The turn end's network work (one bounded events check when the poller is
+# stale, the owner-input outbox flush) ends by START + this; the hook has
+# HOOK_TIMEOUT_MS (10 s).
+AFTER_AGENT_BUDGET_S = 2.6
+
+
+def turn_end(payload: dict[str, Any], session_id: str | None) -> None:
+    """investigation_agent.turn_end on runtime "gemini": what is deliverable
+    (the inbox, a sync check, an open directive, decision reminders) is
+    STAGED for the next BeforeAgent / AfterTool, the owner-input outbox is
+    flushed, and the owner-input turn boundary is marked. Its Delivery is
+    never printed: on Gemini an AfterAgent block re-enters the model as a
+    plain user-role message and re-fires BeforeAgent with it as the prompt
+    (gemini-cli 0.50.0 GeminiClient.sendMessageStream,
+    chunk-W4YMYD53.js:335735-335757), so advisory text would become owner
+    input (R1; investigation_turn.TURN_END_BLOCK["gemini"] is False).
+    Never raises."""
+    try:
+        from cardinal_core import investigation_agent
+
+        cwd = payload.get("cwd")
+        investigation_agent.turn_end(storyboard_wiring(), session_id,
+                                     stop_hook_active=payload.get("stop_hook_active") is True,
+                                     deadline=START + AFTER_AGENT_BUDGET_S,
+                                     cwd=cwd if isinstance(cwd, str) else None)
+    except Exception:
+        pass
 
 def subagent_description_from_payload(payload: dict[str, Any]) -> str | None:
     """Best-effort extraction of the subagent's short task label. Task
@@ -1006,6 +1405,7 @@ def handle_after_agent(payload: dict[str, Any]) -> None:
     # (core/client.ts, outermost call) with {prompt, prompt_response,
     # stop_hook_active} — not a subagent stop. Never report it as one.
     if "prompt_response" in payload or "stop_hook_active" in payload:
+        turn_end(payload, session_id)
         return
 
     usage_block = (
@@ -1091,6 +1491,9 @@ def handle_pre_compress(payload: dict[str, Any]) -> None:
 # SessionStart — convention prompt + budget standing
 # ---------------------------------------------------------------------------
 
+SESSION_START_DISCOVERY_BY_S = 7.0
+
+
 def handle_session_start(payload: dict[str, Any]) -> None:
     dump_debug_payload("SessionStart", payload)
     cwd = str(payload.get("cwd") or os.getcwd())
@@ -1106,16 +1509,36 @@ def handle_session_start(payload: dict[str, Any]) -> None:
         except Exception:
             pass
         parts.append(context)
+    sid = session_id_from_payload(payload)
     try:
-        # The session id line (any directory) + the storyboards that may
-        # relate to this checkout (2 s network deadline; the hook has 10 s).
-        from cardinal_core import storyboard_agent
+        # The session's Investigation (bootstrap bounded by its own 3 s
+        # request; the guidance with the labeled links), its background
+        # poller, then the session id line (unless the guidance has it) +
+        # the storyboards that may relate to this checkout (a 2 s network
+        # deadline, never past START + 7 s; the hook has 10 s).
+        from cardinal_core import investigation_agent, storyboard_agent
 
         wiring = storyboard_wiring()
+        live = investigation_agent.start(wiring, sid, payload.get("source"), cwd=cwd)
+        investigation_agent.spawn_poller(wiring, sid, str(INVESTIGATION_POLLER))
+        if live:
+            parts.append(live)
         storyboard = storyboard_agent.session_start_text(
-            wiring, cwd, session_id_from_payload(payload), auto_context=auto_context(wiring))
+            wiring, cwd, sid, include_session_line=not bool(live), auto_context=auto_context(wiring),
+            deadline=min(START + SESSION_START_DISCOVERY_BY_S, time.monotonic() + 2.0))
         if storyboard:
             parts.append(storyboard)
+    except Exception:
+        pass
+    try:
+        # Local only: how to connect (unconnected), or an MCP key without a URL.
+        from cardinal_core import storyboard_authoring as sa
+
+        source = payload.get("source")
+        for line in (sa.connect_hint(PATHS, "gemini", source=source),
+                     sa.stray_key_warning(PATHS, "gemini", sid=sid, source=source)):
+            if line:
+                parts.append(line)
     except Exception:
         pass
     if not parts:
@@ -1155,11 +1578,18 @@ HANDLERS = {
     "PreCompress": handle_pre_compress,
     "SessionEnd": handle_session_end,
 }
+# (event, --role) -> handler: the extra hook groups cardinal-connect registers.
+ROLE_HANDLERS = {
+    ("AfterTool", "preview"): handle_after_tool_preview,
+}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--event")
+    # A second hook group on the same event needs its own command (Gemini
+    # dedupes by name:command): AfterTool --role preview.
+    parser.add_argument("--role", default="")
     parser.add_argument("--background", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -1178,12 +1608,19 @@ def main() -> None:
     if not isinstance(payload, dict):
         payload = {}
 
-    handler = HANDLERS.get(args.event or "")
+    handler = ROLE_HANDLERS.get((args.event or "", args.role)) if args.role else HANDLERS.get(args.event or "")
+    # R1: AfterAgent never blocks. Whatever a handler might print there is
+    # discarded, so no decision, reason or context can leave this process.
+    real_stdout = sys.stdout
+    if args.event == "AfterAgent":
+        sys.stdout = io.StringIO()
     try:
         if handler:
             handler(payload)
     except Exception:
         pass
+    finally:
+        sys.stdout = real_stdout
     silent_exit()
 
 
