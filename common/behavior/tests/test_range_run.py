@@ -391,6 +391,8 @@ class RangeOrchestrationTests(unittest.TestCase):
             RangeRunner(self.behavior, range_id).run(sleep=lambda s: None)
         self.assertEqual(self.events(range_id)[-1]['event'], 'stalled')
         self.assertTrue(self.behavior.continue_range(range_id)['worker_restarted'])
+        # Written before the worker starts, so a fresh watch begins after the stall.
+        self.assertEqual(self.events(range_id)[-1]['event'], 'resumed')
         self.assertEqual(self.drive(range_id)[-1]['event'], 'needs_extents')
         self.assertEqual(len(api.submitted), 1)   # the saved execution was resumed, not resubmitted
 
