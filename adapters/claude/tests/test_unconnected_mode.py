@@ -276,6 +276,24 @@ class StrayKeyHelperTests(unittest.TestCase):
             self.assertNotIn(s, self.mod.WARNING)
 
 
+class SessionTextFromCoreTests(unittest.TestCase):
+    """storyboard-session.py takes its connect hint and stray-key warning
+    from cardinal_core.storyboard_authoring (runtime "claude"), and
+    bin/cardinal-status's copy of the connect steps matches core's."""
+
+    def test_session_hook_has_no_text_of_its_own(self):
+        src = (HOOKS / "storyboard-session.py").read_text()
+        self.assertIn("storyboard_authoring.connect_hint(", src)
+        self.assertIn("storyboard_authoring.stray_key_warning(", src)
+        for own in ("CONNECT_HINT =", "HINT_MARKER", "WARNED_DIR", "_stray_key", "Tell the user"):
+            self.assertNotIn(own, src)
+
+    def test_status_connect_steps_match_core(self):
+        conn = _load("_connection")
+        from cardinal_core import storyboard_authoring as sa
+        self.assertEqual(conn.CONNECT_STEPS, sa.CONNECT_STEPS["claude"])
+
+
 class HookRegistrationTests(unittest.TestCase):
     def test_every_hook_is_classified_and_every_gated_hook_checks_the_connection(self):
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]

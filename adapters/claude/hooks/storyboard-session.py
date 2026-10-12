@@ -25,8 +25,11 @@ Contract:
     lists `cardinal` as missing CARDINAL_MCP_URL. The first unconnected
     startup on this machine phrases it as "tell the user once" (marker
     ~/.cardinal/connect-hint); later sessions keep it as context only, for
-    Claude to use if the user asks about Cardinal or storyboards.
-  - Stray-key warning (_stray_key.py): when CARDINAL_MCP_API_KEY is set but
+    Claude to use if the user asks about Cardinal or storyboards. The text
+    and marker are core's (cardinal_core.storyboard_authoring.connect_hint,
+    runtime "claude"); the connected test stays _connection.is_connected.
+  - Stray-key warning (storyboard_authoring.stray_key_warning, the rule
+    bin/cardinal-status also reports): when CARDINAL_MCP_API_KEY is set but
     CARDINAL_MCP_URL is not, the cardinal server has no URL although the
     hooks count the machine as connected. Adds a short "tell the user" note
     to the context — at most once per session id (marker under
@@ -81,18 +84,15 @@ import json
 import os
 import re
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _connection  # noqa: E402
-import _stray_key  # noqa: E402
+from cardinal_core import storyboard_authoring  # noqa: E402
 from cardinal_core.investigation_text import ADVISORY_LINE, SESSION_ID_LINE  # noqa: E402
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-WARNED_DIR = Path(".cardinal") / "key-warning"
-WARNED_TTL_S = 30 * 86400
-HINT_MARKER = Path(".cardinal") / "connect-hint"
+PATHS = storyboard_authoring.agent_paths("claude")
 
 
 def session_id(payload: dict) -> str | None:
@@ -106,71 +106,17 @@ def session_id(payload: dict) -> str | None:
     return None
 
 
-def _first_warning(sid: str | None, source) -> bool:
-    """True the first time this session should see the key warning. Records
-    the session id so resume / clear / compact don't repeat it; prunes
-    markers older than WARNED_TTL_S. Without an id: startup only."""
-    if not sid:
-        return source in (None, "startup")
-    try:
-        home = Path(os.environ.get("HOME") or str(Path.home()))
-        warned = home / WARNED_DIR
-        marker = warned / sid
-        if marker.exists():
-            return False
-        warned.mkdir(parents=True, exist_ok=True)
-        now = time.time()
-        for old in warned.iterdir():
-            try:
-                if now - old.stat().st_mtime > WARNED_TTL_S:
-                    old.unlink()
-            except OSError:
-                pass
-        marker.touch()
-    except OSError:
-        pass  # can't record it: warn anyway, a repeat beats a silent send
-    return True
-
-
 def key_warning(sid: str | None, source) -> str | None:
-    if not _stray_key.key_without_url():
-        return None
-    if not _first_warning(sid, source):
-        return None
-    return "Tell the user, briefly: " + _stray_key.WARNING
+    """The "tell the user" note when CARDINAL_MCP_API_KEY is set without
+    CARDINAL_MCP_URL, once per session id (core: storyboard_authoring.stray_key_warning)."""
+    return storyboard_authoring.stray_key_warning(PATHS, "claude", sid=sid, source=source)
 
 
-CONNECT_HINT = (
-    "Cardinal is not connected: the cardinal MCP server is off (/mcp lists it as missing "
-    "CARDINAL_MCP_URL; expected) and evidence capture stays local. For write access "
-    "(publishing storyboards, Cardinal's tools): " + _connection.CONNECT_STEPS + "."
-)
-
-
-def _first_hint(source) -> bool:
-    """True once per machine: the first unconnected startup (marker
-    ~/.cardinal/connect-hint). resume / clear / compact never count."""
-    if source not in (None, "startup"):
-        return False
-    try:
-        home = Path(os.environ.get("HOME") or str(Path.home()))
-        marker = home / HINT_MARKER
-        if marker.exists():
-            return False
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-    except OSError:
-        pass  # can't record it: say it anyway
-    return True
-
-
-def connect_hint(source) -> str | None:
-    """One line for an unconnected machine, else None."""
-    if _connection.is_connected():
-        return None
-    if _first_hint(source):
-        return "Tell the user once, briefly: " + CONNECT_HINT
-    return CONNECT_HINT + " Mention it only if the user asks about Cardinal or storyboards."
+def connect_hint(source, connected: bool) -> str | None:
+    """One line for an unconnected machine, else None (core:
+    storyboard_authoring.connect_hint; Claude's connection rule is
+    hooks/_connection.is_connected, passed in)."""
+    return storyboard_authoring.connect_hint(PATHS, "claude", source=source, connected=connected)
 
 
 INVESTIGATION_ENV = "CARDINAL_INVESTIGATION_ID"
@@ -327,7 +273,7 @@ def main() -> None:
     if warning:
         parts.append(warning)
     try:
-        hint = None if connected else connect_hint(payload.get("source"))
+        hint = None if connected else connect_hint(payload.get("source"), connected)
     except Exception:
         hint = None
     if hint:
