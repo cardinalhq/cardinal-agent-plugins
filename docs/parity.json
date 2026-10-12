@@ -2469,5 +2469,81 @@
         }
       ]
     }
+  },
+  "session_repository_provenance": {
+    "title": "Additive repository provenance, saved-edit backfill and parent-workspace sessions",
+    "group": "investigation",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "present",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/session_repos.py"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/evidence_capture.py",
+          "pattern": "session_repos\\.observe\\("
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/storyboard_files.py",
+          "pattern": "session_repos\\.stage\\("
+        }
+      ],
+      "codex": [
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/session_repos.py"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/evidence_capture.py",
+          "pattern": "session_repos\\.observe\\("
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/storyboard_files.py",
+          "pattern": "session_repos\\.stage\\("
+        }
+      ],
+      "cursor": [
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/session_repos.py"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/evidence_capture.py",
+          "pattern": "session_repos\\.observe\\("
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/storyboard_files.py",
+          "pattern": "session_repos\\.stage\\("
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/session_repos.py"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/evidence_capture.py",
+          "pattern": "session_repos\\.observe\\("
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/storyboard_files.py",
+          "pattern": "session_repos\\.stage\\("
+        }
+      ]
+    }
   }
 }

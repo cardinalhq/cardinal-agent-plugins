@@ -629,8 +629,10 @@ class SessionStartBootstrap(Base):
     """Every connected session gets its Investigation and live Storyboard at
     SessionStart, with no command (CONTRACT §1, §5)."""
 
-    def start(self, sid=SID, source="startup", **env):
+    def start(self, sid=SID, source="startup", cwd=None, **env):
         payload = {"session_id": sid, "hook_event_name": "SessionStart", "source": source}
+        if cwd:
+            payload["cwd"] = str(cwd)
         res = subprocess.run([sys.executable, str(SESSION_HOOK)], input=json.dumps(payload), capture_output=True,
                              text=True, timeout=15, env=dict(self.env, **env), cwd=str(self.base))
         self.assertEqual((res.returncode, res.stderr), (0, ""))
@@ -638,6 +640,14 @@ class SessionStartBootstrap(Base):
 
     def ensures(self) -> list:
         return [b for t, b in self.fake.requests if t == "ensure-session-investigation"]
+
+    def test_payload_checkout_context_matches_the_other_adapters(self):
+        checkout = self.base / "checkout"
+        checkout.mkdir()
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", "git@github.com:acme/widgets.git"], check=True)
+        self.start(cwd=checkout)
+        self.assertEqual(self.ensures()[0]["context"]["repo"], "acme/widgets")
 
     def test_a_fresh_session_gets_an_investigation_storyboard_and_url(self):
         ctx = self.start()
@@ -943,6 +953,24 @@ class Cli(Base):
         e = dict(self.env, **env)
         return subprocess.run([sys.executable, str(CLI), "investigation", *args], capture_output=True, text=True,
                               timeout=60, env=e)
+
+    def test_repos_backfills_multiple_repositories_through_the_shipped_launcher(self):
+        self.fake.capabilities = {"repository_provenance": {"enabled": True}}
+        self.assertEqual(self.cli("link", "--session", SID).returncode, 0)
+        files = self.home / ".claude/cardinal/storyboard-files"
+        files.mkdir(parents=True)
+        (files / f"{SID}.json").write_text(json.dumps({"files": [
+            {"repo": "acme/first", "path": "one.py"},
+            {"repo": "acme/second", "path": "two.py"}]}))
+        result = self.cli("repos", "--session", SID, "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        answer = json.loads(result.stdout)
+        self.assertEqual(answer["repos"], ["acme/first", "acme/second"])
+        self.assertTrue(answer["multi_repo_supported"])
+        contexts = [body.get("context", {}).get("repo") for tool, body in self.fake.requests
+                    if tool == "ensure-session-investigation"]
+        self.assertIn("acme/first", contexts)
+        self.assertIn("acme/second", contexts)
 
     def test_bind_then_delivery_then_ack(self):
         res = self.cli("bind", INV, "--session", SID)
