@@ -195,6 +195,46 @@ class ConnectHookRegistrationTest(unittest.TestCase):
         self.assertTrue((self.ext_dir / "skills" / "storyboard" / "scripts" / "render_preview.py").is_file())
         self.assertFalse(list(self.ext_dir.rglob("__pycache__")))
 
+    def test_the_bundle_is_staged_outside_the_extensions_dir(self):
+        # Gemini CLI loads every subdirectory of ~/.gemini/extensions/: a
+        # staging copy there is a second "cardinal" extension.
+        seen = {}
+        real = self.connect.build_extension_bundle
+
+        def build(target, *args, **kwargs):
+            seen["target"] = Path(target)
+            seen["extensions"] = sorted(p.name for p in self.ext_dir.parent.iterdir())
+            return real(target, *args, **kwargs)
+
+        self.connect.install_extension_bundle(None, None)   # an existing install to replace
+        with mock.patch.object(self.connect, "build_extension_bundle", build):
+            self.connect.install_extension_bundle("https://c.example/mcp", "ck_1")
+        self.assertEqual(seen["target"].parent, self.home / ".gemini" / "cardinal")
+        self.assertEqual(seen["extensions"], ["cardinal"])
+        self.assertEqual(sorted(p.name for p in self.ext_dir.parent.iterdir()), ["cardinal"])
+        self.assertEqual(self.manifest()["mcpServers"]["cardinal"]["url"], "https://c.example/mcp")
+        self.assertFalse(seen["target"].exists(), "renamed into place")
+        with mock.patch.object(self.connect, "build_extension_bundle", build):
+            self.connect.refresh_extension_bundle("https://c.example/mcp", "ck_1")
+        self.assertEqual(seen["target"].parent, self.home / ".gemini" / "cardinal")
+        self.assertEqual(sorted(p.name for p in (self.home / ".gemini" / "cardinal").iterdir()
+                                if p.name.startswith(".extension-staging-")), [])
+
+    def test_leftover_staging_copies_are_removed_on_the_next_connect(self):
+        extensions = self.home / ".gemini" / "extensions"
+        old = extensions / ".cardinal.staging-4242"
+        (old / "hooks").mkdir(parents=True)
+        (old / "gemini-extension.json").write_text(json.dumps({"name": "cardinal"}))
+        runtime = self.home / ".gemini" / "cardinal"
+        dead = runtime / ".extension-staging-999999999"
+        dead.mkdir(parents=True)
+        live = runtime / f".extension-staging-{os.getppid()}"   # a running process: another connect
+        live.mkdir()
+        self.connect.install_extension_bundle(None, None)
+        self.assertEqual(sorted(p.name for p in extensions.iterdir()), ["cardinal"])
+        self.assertFalse(dead.exists())
+        self.assertTrue(live.exists())
+
     def test_install_copies_agents(self):
         self.connect.install_extension_bundle(None, None)
         agent = self.ext_dir / "agents" / "brainstorm.md"

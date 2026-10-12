@@ -322,8 +322,50 @@ def _tree(root: Path) -> dict:
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
+# The extension is built OUTSIDE ~/.gemini/extensions/: Gemini CLI loads
+# every subdirectory there as an extension, and a staging copy (same name
+# "cardinal") makes it throw on the duplicate. ~/.gemini/cardinal/ is on the
+# same filesystem, so the finished copy is renamed into place.
+STAGING_PARENT = PATHS.runtime_dir
+STAGING_PREFIX = ".extension-staging-"
+OLD_STAGING_GLOB = f".{EXTENSION_NAME}.staging-*"   # before: inside extensions/
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True   # exists, another user's
+    return True
+
+
+def _clean_stale_staging() -> None:
+    """Remove what an interrupted connect left: old-style staging copies in
+    ~/.gemini/extensions/ (which Gemini CLI loads as duplicate extensions),
+    and staging copies under ~/.gemini/cardinal/ whose process is gone."""
+    try:
+        for p in EXTENSIONS_DIR.glob(OLD_STAGING_GLOB):
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+    except OSError:
+        pass
+    try:
+        for p in STAGING_PARENT.glob(STAGING_PREFIX + "*"):
+            suffix = p.name[len(STAGING_PREFIX):]
+            if suffix.isdigit() and int(suffix) != os.getpid() and _pid_alive(int(suffix)):
+                continue
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _staging_dir() -> Path:
-    staging = EXTENSIONS_DIR / f".{EXTENSION_NAME}.staging-{os.getpid()}"
+    _clean_stale_staging()
+    STAGING_PARENT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    staging = STAGING_PARENT / f"{STAGING_PREFIX}{os.getpid()}"
     if staging.exists():
         shutil.rmtree(staging)
     EXTENSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -333,15 +375,18 @@ def _staging_dir() -> Path:
 def _swap_in(staging: Path) -> None:
     if EXTENSION_INSTALL_DIR.exists():
         shutil.rmtree(EXTENSION_INSTALL_DIR)
-    staging.rename(EXTENSION_INSTALL_DIR)
+    # A rename (same filesystem); shutil.move copies if ~/.gemini/cardinal
+    # was linked elsewhere.
+    shutil.move(str(staging), str(EXTENSION_INSTALL_DIR))
 
 
 def install_extension_bundle(mcp_url: str | None, mcp_key: str | None) -> None:
     """Install this plugin's extension as ~/.gemini/extensions/cardinal/:
     GEMINI.md, the manifest (mcpServers merged: merged_mcp_servers),
     hooks/hooks.json (`__HOOK_SCRIPT__` replaced with the absolute path to
-    this plugin's telemetry hook), skills/ and agents/. Built next to the
-    old copy, then swapped in."""
+    this plugin's telemetry hook), skills/ and agents/. Built under
+    ~/.gemini/cardinal/ (never inside extensions/, which Gemini CLI loads
+    whole), then renamed into place."""
     staging = _staging_dir()
     try:
         build_extension_bundle(staging, mcp_url, mcp_key,
