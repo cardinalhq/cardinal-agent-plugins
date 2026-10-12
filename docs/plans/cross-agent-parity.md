@@ -142,8 +142,8 @@ cached tokens; the Codex sandbox has no network and can't write to `~/.codex`.
 ## 4. Frozen core API (Phase 1 deliverable)
 
 Lane A's part below is FINAL (implemented in Phase 1a; signatures as shipped).
-Lane E finalizes the `storyboard_authoring` part. Phase 2 lanes code only against
-this section.
+Lane E's `storyboard_authoring` part is FINAL too (Phase 1b). Phase 2 lanes code only
+against this section.
 
 Conventions for every function below:
 - `home` is the USER's home (`Path.home()`), never the agent dir; per-runtime
@@ -288,16 +288,109 @@ How the Phase 2 lanes call it (Claude's hooks are the reference wrappers):
   `owner_input.set_consent("cursor", Path.home(), on)`.
 
 ```python
-# core/cardinal_core/storyboard_authoring.py  (new; Lane E)
-def on_preview(paths, runtime: str, tool_result) -> str | None     # context text (PNG paths/errors)
-def on_publish(paths, runtime: str, tool_result) -> str | None     # hero upload
-def observe_cardinal_result(paths, runtime: str, tool_name: str, result) -> None  # token store
-def is_cardinal_tool(runtime: str, tool_name: str, op: str) -> bool  # mcp__cardinal__* / mcp__plugin_cardinal_cardinal__* / Gemini mcp_cardinal_*
-def edit_lookup(paths, runtime: str, sid: str, path: str, cwd: str) -> str | None
-def relook_if_moved(paths, runtime: str, sid: str, cwd: str) -> str | None  # network: callers run detached or bounded
-def stray_key_warning(paths, runtime: str, cwd: str) -> str | None
-def connect_hint(paths, runtime: str) -> str | None
+# core/cardinal_core/storyboard_authoring.py  (new; Lane E; FINAL, as shipped in Phase 1b)
+# Conventions (in addition to the ones above):
+# - `paths` is the runtime's AgentPaths (agent_paths(runtime) = ~/.<runtime>; Wiring.paths).
+#   Renders: paths.runtime_dir/"storyboards"/<sb>/r<rev>/ (render_preview.py --runtime <r>'s
+#   default); edit-lookup state "storyboard-edit-lookup"; discovery cache "storyboard-discovery";
+#   capability cache "server-caps.json". Evidence tokens and the connect / key-warning markers
+#   are the user's (~/.cardinal/...).
+# - `connection` is a zero-arg callable -> {origin, org, key} or {} (Wiring.connection),
+#   called only after the local gates. None: codex/cursor/gemini use
+#   evidence_promote.agent_paths_connection(paths); claude gets {} (its rule is the adapter's).
+# - `client` is the X-Cardinal-Client value or a zero-arg callable returning it (resolved only
+#   when a request is sent); None -> the runtime name. Lanes pass wiring.client.
+# - Tool results are MCP-shaped ({content, structuredContent} / text blocks / JSON text; a
+#   Cursor tool_output string is fine). Gemini converts AfterTool's {llmContent, returnDisplay}
+#   first (its gemini_tool_response). Only claude follows a spill notice (~/.claude/projects).
+# - Opt-outs (CARDINAL_STORYBOARD_HERO, CARDINAL_STORYBOARD_DISCOVERY) come from `environ`;
+#   claude also reads ~/.claude/settings.json `env`. Nothing raises.
+RUNTIMES = ("claude", "codex", "cursor", "gemini")
+CARDINAL_SERVERS = {"claude": ("cardinal", "plugin_cardinal_cardinal"), "codex": ("cardinal",),
+                    "cursor": ("cardinal",), "gemini": ("cardinal",)}
+def is_cardinal_tool(runtime: str, tool_name, op: str | Iterable[str] | None = None, *,
+                     server: Optional[str] = None) -> bool
+    # Cardinal's own server in this runtime's naming (mcp_tool), and op (one name or several)
+    # when given. claude/codex: mcp__<server>__<tool>. cursor: mcp__<server>__<tool>; the
+    # serverless "MCP:<tool>" only with server= (unverified on a live Cursor; Lane D checks).
+    # gemini: mcp_<server>_<tool> (gemini-cli 0.50 generateValidName, W4:265051-265070,
+    # 265388-265400); pass server=mcp_context.server_name when the payload has it (the
+    # flattened name is ambiguous), and the bare mcp_context.tool_name then works too.
+def mcp_tool(runtime, tool_name, *, server=None) -> Optional[Tuple[str, str]]   # (server, tool)
+
+def on_preview(paths, runtime: str, tool_result, *, session_id=None, tool_input: dict | None = None,
+               renderer: Path | None = None, environ=None, started: float | None = None) -> str | None
+    # SLOW (Chromium). Caller first checks is_cardinal_tool(runtime, name, "storyboard__preview")
+    # (the renderer fetches what the result names with the Cardinal key). Runs
+    # skills/storyboard/scripts/render_preview.py --runtime <r> (renderer default: the plugin
+    # this core is vendored into), then the card's cover and link-preview mock (one Chromium
+    # launch each). Returns the context: PNG dir, per-scene PNGs/errors, the Read instruction,
+    # cover/mock lines; at most MAX_CONTEXT_CHARS. No Chromium: said once per session_id.
+    # Bounded: renderer --timeout RENDER_TIMEOUT_S=120, killed at PREVIEW_BUDGET_S=135 from
+    # `started`; the hook entry needs PREVIEW_HOOK_TIMEOUT_S=150 (Claude's hooks.json value).
+    # Measured 2026-10-12 (Chrome 153, macOS arm64, 2-step local pages, no bundle fetch):
+    # 1 scene 2.5 s warm / 7.5 s cold, 5 scenes 6.6-9.5 s, 10 scenes 12-19 s; the static mock
+    # 2.4-3.0 s, the cover one more launch. Real scenes (d3, prefabs) and each bundle GET add
+    # to that. So: a short preview with a card is ~10 s, a 10-scene one ~20-40 s, and the
+    # 135 s budget is reachable on big storyboards. Gemini: a distinct command with a
+    # ~150000 ms timeout; Cursor: if no entry can get ~150 s, render detached and stage the text.
+def on_publish(paths, runtime: str, tool_result, *, connection=None, client=None, environ=None,
+               opener=None) -> str | None
+    # NETWORK: one PUT of the hero render (storyboard_hero), bounded by UPLOAD_TIMEOUT_S=7 (hook
+    # entry ~10 s). Caller checks is_cardinal_tool(runtime, name, "storyboard__publish").
+    # None: CARDINAL_STORYBOARD_HERO off, not connected, unpublished / card-less result.
+def observe_cardinal_result(paths, runtime: str, tool_name, result, *, session_id,
+                            server: Optional[str] = None, home: Path | None = None, environ=None) -> None
+    # Local only. Gates itself on is_cardinal_tool(runtime, tool_name, TOKEN_TOOLS, server=server)
+    # (storyboard__create / add_act / preview); stores the evidence token under
+    # ~/.cardinal/evidence/<session_id>/token.json unless evidence capture is off.
+def edit_lookup(paths, runtime: str, sid, path, cwd, *, connection=None, client=None, environ=None,
+                deadline: float | None = None, opener=None,
+                debug: Callable[[str], None] | None = None) -> str | None
+    # NETWORK: one find, ending by deadline (default now + EDIT_BUDGET_S=1.5). Stdlib fast path
+    # first (opt-out, directory already looked up, EDIT_MAX_LOOKUPS, a fresh <sid>.skip marker),
+    # then connection(); unconnected / caps < 1 leaves the marker. The module imports nothing
+    # heavy (subprocess, paths, tempfile load lazily: ~12-20 ms). Block <= 1 KB, framed as DATA.
+def relook_if_moved(paths, runtime: str, sid, cwd, *, event: str = "UserPromptSubmit",
+                    connection=None, client=None, environ=None, deadline: float | None = None,
+                    deliver_by: float | None = None, opener=None) -> str | None
+    # NETWORK: up to two requests (storyboard_discovery.discover), ending by deadline (default
+    # now + 2 s); a block ready after deliver_by is stored as pending for the next prompt.
+    # UserPromptSubmit looks only when branch/HEAD moved (one git call otherwise);
+    # "SessionStart" always looks; "SubagentStart" re-emits the stored block (no network).
+    # Callers run it detached or under a hard deadline, and stage what it returns.
+def stray_key_warning(paths, runtime: str, *, sid=None, source=None, home: Path | None = None,
+                      environ=None) -> str | None
+    # Local only. "Tell the user, briefly: …" when an MCP key is set without a URL (claude:
+    # settings env + environ; others: cardinal-secrets.json mcp_api_key / CARDINAL_MCP_API_KEY
+    # vs cardinal.json mcp_url / CARDINAL_MCP_URL); once per sid (~/.cardinal/key-warning/),
+    # without a sid only on source "startup". Also: key_without_url, mcp_url, stray_key_text.
+def connect_hint(paths, runtime: str, *, source=None, connected: bool | None = None,
+                 home: Path | None = None, environ=None) -> str | None
+    # Local only. Unconnected: "Tell the user once, briefly: …" on this runtime's first
+    # unconnected startup (~/.cardinal/connect-hint, connect-hint-<runtime> for non-claude),
+    # else the line as context only. connected None -> is_connected(paths, runtime) (ingest
+    # connection or MCP key); claude must pass it (hooks/_connection.is_connected).
+# Also public: agent_paths, storyboards_dir, edit_state_dir, discovery_state_dir, caps_path,
+# spill_root, unwrap, preview_result, publish_result, publish_message, build_context,
+# card_lines, crash_context, scene_lines, mock_html, hero_disabled, discovery_disabled,
+# edit_lookup_disabled, is_connected, connect_text.
 ```
+
+How Phase 2 lanes call it (Claude's hooks are the reference wrappers):
+- Post-tool: `if sa.is_cardinal_tool(rt, name, "storyboard__preview", server=…): ctx =
+  sa.on_preview(wiring.paths, rt, result, session_id=sid, tool_input=…)` in its own
+  long-timeout entry; same for `storyboard__publish` -> `sa.on_publish(wiring.paths, rt, result,
+  connection=wiring.connection, client=wiring.client)`; on every tool,
+  `sa.observe_cardinal_result(wiring.paths, rt, name, result, session_id=sid, server=…)`.
+- Edit: `sa.edit_lookup(wiring.paths, rt, sid, file_path, cwd, connection=wiring.connection,
+  client=wiring.client, deadline=START + 1.5)`.
+- Prompt: `sa.relook_if_moved(wiring.paths, rt, sid, cwd, connection=wiring.connection,
+  client=wiring.client, deadline=…)`, detached where the prompt budget is tight; stage the block.
+- Session start: `sa.stray_key_warning(wiring.paths, rt, sid=sid, source=…)` and
+  `sa.connect_hint(wiring.paths, rt, source=…)`.
+- Claude: `storyboard-session.py` still has its own `connect_hint` / `key_warning` (Lane A's
+  file; the same text as core's claude branch); routing them through core is a follow-up.
 
 ## 5. Phases and lanes
 
