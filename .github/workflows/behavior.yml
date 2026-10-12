@@ -11,6 +11,16 @@ on:
       - 'adapters/*/bin/cardinal-checks'
       - 'adapters/*/scripts/cardinal-behavior'
       - 'adapters/*/scripts/cardinal-checks'
+      - 'adapters/*/scripts/cardinal-connect'
+      - 'adapters/*/scripts/cardinal-disconnect'
+      - 'adapters/claude/hooks/checks-gate.py'
+      - 'adapters/claude/hooks/_checks.py'
+      - 'adapters/gemini/extension/hooks/hooks.json'
+      - 'adapters/claude/tests/test_checks.py'
+      - 'adapters/codex/tests/test_codex_checks.py'
+      - 'adapters/cursor/tests/test_cursor_checks.py'
+      - 'adapters/gemini/tests/test_gemini_checks.py'
+      - 'adapters/gemini/tests/test_connect.py'
       - 'adapters/*/checks/**'
       - 'adapters/*/.mcp.json'
       - 'adapters/*/.claude-plugin/plugin.json'
@@ -34,6 +44,16 @@ on:
       - 'adapters/*/bin/cardinal-checks'
       - 'adapters/*/scripts/cardinal-behavior'
       - 'adapters/*/scripts/cardinal-checks'
+      - 'adapters/*/scripts/cardinal-connect'
+      - 'adapters/*/scripts/cardinal-disconnect'
+      - 'adapters/claude/hooks/checks-gate.py'
+      - 'adapters/claude/hooks/_checks.py'
+      - 'adapters/gemini/extension/hooks/hooks.json'
+      - 'adapters/claude/tests/test_checks.py'
+      - 'adapters/codex/tests/test_codex_checks.py'
+      - 'adapters/cursor/tests/test_cursor_checks.py'
+      - 'adapters/gemini/tests/test_gemini_checks.py'
+      - 'adapters/gemini/tests/test_connect.py'
       - 'adapters/*/checks/**'
       - 'adapters/*/.mcp.json'
       - 'adapters/*/.claude-plugin/plugin.json'
@@ -69,3 +89,12 @@ jobs:
         run: python3 build/sync_skills.py --check
       - name: Packaged behavior MCP smoke test (all four adapters)
         run: python3 -m unittest discover -s tests -p test_behavior_release.py -v
+      # Adapter suites need 3.11+ (tomllib, runtime `X | None`), as in investigation-tests.yml.
+      - name: Checks preview in each adapter (connect, disconnect, skill, gate)
+        if: matrix.python-version != '3.9'
+        run: |
+          python3 build/vendor.py claude codex cursor gemini
+          (cd adapters/claude && python3 -m unittest tests.test_checks -v)
+          (cd adapters/codex && python3 -m unittest tests.test_codex_checks -v)
+          (cd adapters/cursor && python3 -m unittest tests.test_cursor_checks -v)
+          (cd adapters/gemini && python3 -m unittest tests.test_gemini_checks tests.test_connect -v)
