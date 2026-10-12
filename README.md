@@ -31,7 +31,9 @@ Claude also ships opt-in decision capture (`cardinal-decision on`): a
 `UserPromptSubmit` hook asks the agent to record the choices it makes with
 `bin/cardinal-decision`, and each one is sent as a `cardinal.decision` event
 tagged with engineer, session, repo, branch, PR, anchors, and D18 code
-clusters. See [docs/specs/decision-telemetry.md](docs/specs/decision-telemetry.md).
+clusters. The model-invoked `/cardinal:decision` skill answers "is decision
+capture on?" and turns it on or off by running `cardinal-decision`. See
+[docs/specs/decision-telemetry.md](docs/specs/decision-telemetry.md).
 
 Before `/cardinal:connect` the Claude plugin is local-only: its `cardinal` MCP
 server has no URL and never connects, evidence capture keeps every tool call's
@@ -83,15 +85,15 @@ scene) through the `storyboard__*` MCP tools, and
 scene's visual and previews it. `storyboard__preview` returns one
 self-contained page per scene. A synchronous `PostToolUse` hook on
 `storyboard__preview` (`hooks/storyboard-preview.py`) passes the result to
-`canvas/scripts/render_preview.py`, which renders each page in the user's own
-Chrome/Chromium, over the DevTools pipe, with the sandbox on and the network
-locked; the hook hands Claude the PNG paths (and any per-scene render errors)
-to Read. `render_preview.py` stays the manual fallback (dark theme, a subset,
-a timed-out run). Nothing is rendered server-side, and publish trust is
-deterministic. Local preview supports macOS and Linux, not Windows. A
-synchronous `SessionStart` hook (`hooks/storyboard-session.py`) puts the
-session id, the investigation and the live storyboard URL in context. The
-skills are Claude-only for now.
+the storyboard skill's `scripts/render_preview.py --runtime claude`, which
+renders each page in the user's own Chrome/Chromium, over the DevTools pipe,
+with the sandbox on and the network locked; the hook hands Claude the PNG
+paths (and any per-scene render errors) to Read. `render_preview.py` stays
+the manual fallback (dark theme, a subset, a timed-out run). Nothing is
+rendered server-side, and publish trust is deterministic. Local preview
+supports macOS and Linux, not Windows. A synchronous `SessionStart` hook
+(`hooks/storyboard-session.py`) puts the session id, the investigation and
+the live storyboard URL in context. The canvas skill is Claude-only for now.
 
 Every adapter ships generic local evidence capture for storyboards: every
 tool call the agent makes (shell commands, file reads and edits, searches,

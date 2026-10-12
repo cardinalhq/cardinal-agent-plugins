@@ -269,7 +269,16 @@ environment), or the connect state file `~/.claude/cardinal.json`.
   `CARDINAL_INVESTIGATION_TOKEN` set, `investigation events|post|show` act
   as that grantee (`Authorization: CardinalInvestigation`, never a key) and
   the author-only commands refuse to run.
-- `cardinal-decision`: decision capture.
+- `cardinal-decision on|off|status`: decision capture, off by default. When
+  it is on, `hooks/decision-prompt.py` (UserPromptSubmit, connected only)
+  gives Claude the exact `cardinal-decision record --session …` command for
+  the choices it makes; each one is saved to a local per-session ledger and
+  sent as a `cardinal.decision` event when telemetry is connected.
+  `CARDINAL_DECISIONS=1|0` (environment or settings `env`) overrides the
+  toggle. The model-invoked `decision` skill (`skills/decision/`,
+  `/cardinal:decision [status|on|off]`) routes "is decision capture on?" to
+  `status` and "turn it on/off" to `on` / `off`; Claude runs the command and
+  reports the result, and never toggles it unasked.
 - `cardinal-checks on|off|status`: the Checks preview (per-trace,
   evidence-backed decisions over telemetry, built on the `cardinal-behavior`
   tools). Off by default. `on` installs the model-invoked `checks` skill
