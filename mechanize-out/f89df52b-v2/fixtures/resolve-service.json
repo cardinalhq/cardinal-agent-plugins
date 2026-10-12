@@ -1,9 +1,0 @@
-{
-  "services": [
-    {
-      "name": "sentinel-test-service",
-      "cluster": "prod-us-east-2-global",
-      "namespace": "sentinel-spike"
-    }
-  ]
-}
