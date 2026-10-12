@@ -186,16 +186,18 @@ class PromptCaptureTests(OwnerInputBase):
         self.prompt()
         self.assertEqual(self.records(), [])
 
-    def test_the_same_prompt_again_in_one_turn_is_not_recorded_twice(self):
+    def test_the_same_prompt_typed_again_is_recorded_again(self):
+        # Codex fires UserPromptSubmit once per prompt: no repeat skip
+        # (owner_input.DEDUPE_REPEATS is Gemini only).
         self.setup_live()
         self.disclosed()
         self.prompt()
         self.prompt()
-        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(len(self.records()), 2, "the owner typed it twice")
         self.run_hook("Stop", {**PROMPT, "hook_event_name": "Stop", "stop_hook_active": False},
                       CARDINAL_INVESTIGATION_POLLER="0")
         self.prompt()
-        self.assertEqual(len(self.records()), 2, "a new turn: the owner typed it again")
+        self.assertEqual(len(self.records()), 3)
 
     def write_verdict(self, verdict: dict) -> None:
         limits_dir = self.home / ".codex" / "cardinal" / "limits"

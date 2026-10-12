@@ -309,7 +309,7 @@ class CursorInvestigationTests(unittest.TestCase):
         self.assertEqual(self.owner_records(), [])
         self.assertFalse(owner_input.outbox_path(self.home, CONV).exists())
 
-    def test_consented_prompt_is_recorded_once_per_turn(self):
+    def test_consented_prompt_is_recorded_each_time_it_is_typed(self):
         self.setup_live()
         self.consent()
         self.start()
@@ -323,14 +323,14 @@ class CursorInvestigationTests(unittest.TestCase):
         self.assertEqual(body["payload"]["text"], "why is checkout slow?")
         self.assertEqual(body["payload"]["source"], "user_prompt")
         self.assertEqual(records[0]["headers"]["x-cardinal-client"], f"cursor/{VERSION}")
-        # The same prompt again before the turn ends is a re-fire, not a turn ...
-        self.run_hook(PROMPT)
-        time.sleep(1.0)
-        self.assertEqual(len(self.owner_records()), 1)
-        # ... until stop ends the turn (turn_end -> owner_input.turn_ended).
-        self.run_hook(STOP)
+        # Cursor fires beforeSubmitPrompt once per prompt: the same prompt typed
+        # again, before the turn ended or after, is the owner's (no repeat skip;
+        # DEDUPE_REPEATS is Gemini only).
         self.run_hook(PROMPT)
         self.assertEqual(len(self.wait_for_records(2)), 2)
+        self.run_hook(STOP)
+        self.run_hook(PROMPT)
+        self.assertEqual(len(self.wait_for_records(3)), 3)
 
     def test_kill_switch_wins_over_consent(self):
         self.setup_live()

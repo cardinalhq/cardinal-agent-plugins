@@ -21,7 +21,7 @@ environment, ~/.cardinal/owner-input.json, and on Claude its settings
 reduced to what the owner typed (normalize_prompt; unsure: not captured),
 enabled(), the runtime's connect-time consent (consent; Cursor only, which
 has no per-session user-visible channel), a re-fired repeat of the same
-prompt within a turn skipped (DEDUPE_REPEATS), disclosed() (if not yet: the
+prompt within a turn skipped (DEDUPE_REPEATS, Gemini only), disclosed() (if not yet: the
 disclosure is returned for the adapter to show and this prompt is not
 captured), then submit() (bounded) or, detached, the prompt queued with its
 turn and posted by a detached process. Capture happens only when ALL of
@@ -783,13 +783,16 @@ CONSENT_TEXT = ("Cardinal records the prompts you type in each {runtime} session
                 "authorize can read them. Run `cardinal-connect --owner-input off` to stop.")
 
 # Runtimes whose prompt hook may fire again for a prompt already seen this
-# turn: the same scrubbed prompt again before the turn ends is skipped.
-# Defense in depth: gemini-cli 0.50.0 fires BeforeAgent once per prompt_id
-# (its loop recovery reuses the id), but that guard lives in per-prompt
-# state it drops and re-creates; Codex and Cursor are unverified. Claude
-# fires UserPromptSubmit once per prompt, and an owner retyping a prompt
-# after an interrupt (no Stop) is captured again, as before.
-DEDUPE_REPEATS = frozenset({"codex", "cursor", "gemini"})
+# turn: the same scrubbed prompt again before the turn ends, and within
+# REPEAT_WINDOW seconds of when it was first seen, is skipped. Gemini only:
+# gemini-cli 0.50.0 fires BeforeAgent once per prompt_id (its loop recovery
+# reuses the id), but that guard lives in per-prompt state it drops and
+# re-creates. Claude, Codex and Cursor fire their prompt hook once per
+# prompt, so an owner retyping a prompt (after an interrupt, no turn end) is
+# captured again. The window bounds the skip on Gemini too: the same prompt
+# typed again later, after a turn whose end was missed, is recorded.
+DEDUPE_REPEATS = frozenset({"gemini"})
+REPEAT_WINDOW = 30.0
 
 # Prompts a runtime submits by itself, never a turn the owner took.
 MACHINE_PROMPTS = {
@@ -997,11 +1000,12 @@ def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]:
     return prompt
 
 
-def _repeat(home: Path, sid: str, sha: str) -> Optional[bool]:
+def _repeat(home: Path, sid: str, sha: str, now: float) -> Optional[bool]:
     """Whether `sha` (a scrubbed prompt's) is the prompt this session's hook
-    already saw in this turn (since turn_ended); if not, it is remembered as
-    this turn's (the binding's owner_input_last). None: the lock is busy or
-    the session unbound (capture nothing)."""
+    already saw in this turn (since turn_ended) less than REPEAT_WINDOW
+    seconds before `now` (wall clock); if not, it is remembered as this
+    turn's (the binding's owner_input_last, with when). None: the lock is
+    busy or the session unbound (capture nothing)."""
     with ie.locked(home, sid, wait=1.0) as got:
         if not got:
             return None
@@ -1009,9 +1013,10 @@ def _repeat(home: Path, sid: str, sha: str) -> Optional[bool]:
         if b is None:
             return None
         last = b.get("owner_input_last")
-        if isinstance(last, dict) and last.get("sha") == sha and last.get("ended") is not True:
+        if isinstance(last, dict) and last.get("sha") == sha and last.get("ended") is not True \
+                and 0 <= now - ie._num(last.get("at")) < REPEAT_WINDOW:
             return True
-        b["owner_input_last"] = {"sha": sha, "ended": False}
+        b["owner_input_last"] = {"sha": sha, "ended": False, "at": now}
         ie.write_binding(home, sid, b)
         return False
 
@@ -1063,8 +1068,9 @@ def capture(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[d
                       outbox
       no_consent      CONSENT_REQUIRED and no current consent: the outbox
                       is deleted
-      repeat          DEDUPE_REPEATS: the same scrubbed prompt again before
-                      the turn ended (busy: the lock could not be had)
+      repeat          DEDUPE_REPEATS (Gemini): the same scrubbed prompt
+                      again before the turn ended and within REPEAT_WINDOW
+                      seconds (busy: the lock could not be had)
       disclosed       not disclosed(): mark_disclosed, and `disclosure` is
                       returned for the adapter to show now; this prompt is
                       not captured (a CONSENT_REQUIRED runtime's consent
@@ -1111,7 +1117,7 @@ def _capture(home, sid, prompt, runtime, conn, client, environ, agent_id, deadli
         drop_outbox(home, sid)
         return CaptureResult("no_consent")
     if runtime in DEDUPE_REPEATS:
-        seen = _repeat(home, sid, text_of(typed)[2])
+        seen = _repeat(home, sid, text_of(typed)[2], now)
         if seen is None:
             return CaptureResult("busy")
         if seen:

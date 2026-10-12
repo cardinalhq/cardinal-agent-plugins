@@ -65,8 +65,9 @@ R2. **Owner input = what the owner typed, or nothing.** Core `capture()`:
   plugin's own SessionStart context in `-p` mode) and the `--- Content from
   referenced files ---` section (inlined `@file` contents). A prompt that can't be
   reduced confidently to typed text is not captured;
-- skips a repeat of the same session + same scrubbed sha within one turn (Gemini
-  re-fires BeforeAgent on loop-detection resubmits);
+- on Gemini only, skips a repeat of the same session + same scrubbed sha within one
+  turn and within 30 s of when it was first seen (Gemini re-fires BeforeAgent on
+  loop-detection resubmits; Claude, Codex and Cursor fire once per prompt);
 - skips machine prompts (Claude task notifications, plus any per-runtime equivalents
   found during verification).
 
@@ -223,7 +224,7 @@ prompt(wiring, sid) -> Delivery                              # at_prompt
 # core/cardinal_core/owner_input.py  (additions)
 RUNTIMES = ("claude", "codex", "cursor", "gemini")
 CONSENT_REQUIRED = frozenset({"cursor"})
-DEDUPE_REPEATS = frozenset({"codex", "cursor", "gemini"})   # Claude: never deduped
+DEDUPE_REPEATS = frozenset({"gemini"})   # within REPEAT_WINDOW = 30 s; others never deduped
 MACHINE_PROMPTS = {"claude": (task-notification,), "gemini": (loop-recovery request,)}
 def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]
     # None: not a str / blank / machine prompt / unsure. gemini: strips every

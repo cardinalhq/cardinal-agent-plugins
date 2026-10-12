@@ -383,9 +383,26 @@ class OwnerInputContract(OwnerInputBase):
         self.assertEqual(self.cap("run the tests").status, "posted", "a new turn: the owner typed it again")
         self.assertEqual([b["payload"]["turn"] for b in self.fake.records()], [1, 2, 3, 4])
 
-    def test_claude_is_not_deduped(self):
+    def test_a_repeat_is_skipped_only_within_the_window(self):
         self.bind()
-        self.assertEqual([self.cap("yes", "claude").status for _ in range(2)], ["posted", "posted"])
+        self.assertEqual(self.cap("run the tests", now=self.now).status, "posted")
+        self.assertEqual(self.cap("run the tests", now=self.now + oi.REPEAT_WINDOW - 1).status, "repeat")
+        # The window runs from when it was first seen, not from the last skip.
+        self.assertEqual(self.cap("run the tests", now=self.now + oi.REPEAT_WINDOW).status, "posted")
+        self.assertEqual(self.cap("run the tests", now=self.now + oi.REPEAT_WINDOW + 1).status, "repeat")
+        # A clock that went backwards is not within the window.
+        self.assertEqual(self.cap("run the tests", now=self.now).status, "posted")
+
+    def test_only_gemini_skips_repeats(self):
+        self.assertEqual(oi.DEDUPE_REPEATS, frozenset({"gemini"}))
+        for runtime in ("claude", "codex", "cursor"):
+            with self.subTest(runtime=runtime):
+                self.fake.requests.clear()
+                self.fake.events.clear()
+                self.bind()
+                if runtime == "cursor":
+                    oi.set_consent("cursor", self.home, True)
+                self.assertEqual([self.cap("yes", runtime).status for _ in range(2)], ["posted", "posted"])
 
     # R4: the kill switch, env and file ------------------------------------------
     def test_kill_switch_env_and_file(self):
