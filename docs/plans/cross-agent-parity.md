@@ -1,7 +1,10 @@
 # Cross-agent parity: Claude, Codex, Cursor, Gemini
 
-Status: plan v2 (2026-10-12). v1 was independently reviewed (approve-with-fixes: 7
-blockers, 12 should-fix); v2 resolves all of them (see §8).
+Status: implemented (2026-10-12). Phases 1, 2 and 2b are merged on this branch, and
+Phase 3's matrix and guard test are in. The shipped state is the matrix in
+[`docs/parity.md`](../parity.md) (source: `docs/parity.json`, checked by
+`tests/test_parity_matrix.py`). Plan v2: v1 was independently reviewed
+(approve-with-fixes: 7 blockers, 12 should-fix); v2 resolves all of them (see §8).
 Branch: `feat/cross-agent-parity`. Owner direction: close every parity gap between the
 four adapters ("Everything"). A gap may be documented only when the agent runtime
 itself can't support the feature.
@@ -91,6 +94,10 @@ environment variable, plus a Cardinal-owned file `~/.cardinal/owner-input.json`
 keeps its settings-`env` reading.
 
 ## 3. Gap inventory
+
+These tables are the audit this plan started from (lanes updated a few cells while
+verifying). The implemented state, with a probe for every present cell and a citation
+for every limit, is [`docs/parity.md`](../parity.md).
 
 Legend: P = present, A = absent, ~ = partial, L = platform limit (cited), N/A = not a
 parity item (with reason).
@@ -628,7 +635,10 @@ Redesigned for sandboxed runtimes:
   script.
 - Gate: Claude keeps the Skill deny and `reloadSkills`. Elsewhere the skill is
   installed or removed at SessionStart and takes effect at the next session; document
-  that as a limit (no skill reload, no skill-tool deny).
+  that as a limit. Codex and Cursor: no skill reload and no skill tool call to deny.
+  Gemini CLI: a BeforeTool group (`--role checks-gate`, matcher `^activate_skill$`)
+  denies `activate_skill` for the checks skill while the preview is off; only the
+  hook-triggered reload is missing, and the user can type `/skills reload`.
 - Packaging and CI:
   - `build/release.py` copies `lib/behavior` + the checks template for all four
     (:97-101, `REQUIRED_ARTIFACTS` :45-54, `OPT_IN_SKILLS`)
