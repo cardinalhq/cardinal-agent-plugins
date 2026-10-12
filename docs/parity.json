@@ -2483,64 +2483,64 @@
       "claude": [
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/session_repos.py"
+          "path": "../../core/cardinal_core/session_repos.py"
         },
         {
           "kind": "grep",
-          "path": "hooks/cardinal_core/evidence_capture.py",
+          "path": "../../core/cardinal_core/evidence_capture.py",
           "pattern": "session_repos\\.observe\\("
         },
         {
           "kind": "grep",
-          "path": "hooks/cardinal_core/storyboard_files.py",
+          "path": "../../core/cardinal_core/storyboard_files.py",
           "pattern": "session_repos\\.stage\\("
         }
       ],
       "codex": [
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/session_repos.py"
+          "path": "../../core/cardinal_core/session_repos.py"
         },
         {
           "kind": "grep",
-          "path": "hooks/cardinal_core/evidence_capture.py",
+          "path": "../../core/cardinal_core/evidence_capture.py",
           "pattern": "session_repos\\.observe\\("
         },
         {
           "kind": "grep",
-          "path": "hooks/cardinal_core/storyboard_files.py",
+          "path": "../../core/cardinal_core/storyboard_files.py",
           "pattern": "session_repos\\.stage\\("
         }
       ],
       "cursor": [
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/session_repos.py"
+          "path": "../../core/cardinal_core/session_repos.py"
         },
         {
           "kind": "grep",
-          "path": "hooks/cardinal_core/evidence_capture.py",
+          "path": "../../core/cardinal_core/evidence_capture.py",
           "pattern": "session_repos\\.observe\\("
         },
         {
           "kind": "grep",
-          "path": "hooks/cardinal_core/storyboard_files.py",
+          "path": "../../core/cardinal_core/storyboard_files.py",
           "pattern": "session_repos\\.stage\\("
         }
       ],
       "gemini": [
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/session_repos.py"
+          "path": "../../core/cardinal_core/session_repos.py"
         },
         {
           "kind": "grep",
-          "path": "hooks/cardinal_core/evidence_capture.py",
+          "path": "../../core/cardinal_core/evidence_capture.py",
           "pattern": "session_repos\\.observe\\("
         },
         {
           "kind": "grep",
-          "path": "hooks/cardinal_core/storyboard_files.py",
+          "path": "../../core/cardinal_core/storyboard_files.py",
           "pattern": "session_repos\\.stage\\("
         }
       ]
