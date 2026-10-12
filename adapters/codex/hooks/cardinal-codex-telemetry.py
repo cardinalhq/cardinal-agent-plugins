@@ -526,6 +526,8 @@ def handle_tool_evidence(payload: dict[str, Any]) -> None:
 
 STORYBOARD_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-storyboard"
 INVESTIGATION_POLLER = Path(__file__).resolve().parent / "investigation-poller.py"
+# The plugin root the Checks preview template (checks/skill/) ships in.
+CHECKS_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 STORYBOARD_CONTEXT_EVENT = "StoryboardContext"
 # The four tools stamped_input fills (link's about refs are the model's);
 # the same set as cardinal-connect's PreToolUse matcher.
@@ -1481,6 +1483,20 @@ def handle_session_start(payload: dict[str, Any]) -> None:
                      sa.connect_hint(codex_paths(), "codex", source=source)):
             if line:
                 parts.append(line)
+    except Exception:
+        pass
+    try:
+        # Checks preview (opt-in, `scripts/cardinal-checks on|off`): make the
+        # installed skill match the setting (it takes effect at the next
+        # session: Codex has no skill reload or skill-tool deny) and, while on
+        # and connected, the routing rule. Local only.
+        from cardinal_core import checks_install
+        from cardinal_core import storyboard_authoring as sa
+
+        _, rule = checks_install.session_start(
+            "codex", CHECKS_PLUGIN_ROOT, connected=sa.is_connected(codex_paths(), "codex"))
+        if rule:
+            parts.append(rule)
     except Exception:
         pass
     if not parts:

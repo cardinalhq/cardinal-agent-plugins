@@ -64,6 +64,14 @@ END_MARKER = "# END cardinal-codex-plugin managed MCP server"
 UNMANAGED_CARDINAL_TABLE_RE = re.compile(
     r'(?m)^\s*\[mcp_servers\.(?:"cardinal"|cardinal)\]\s*$'
 )
+UNMANAGED_BEHAVIOR_TABLE_RE = re.compile(
+    r'(?m)^\s*\[mcp_servers\.(?:"cardinal-behavior"|cardinal-behavior)\]\s*$'
+)
+# The local cardinal-behavior MCP server (Checks preview, behavior tools),
+# launched through a stable launcher like the hooks (survives plugin upgrades).
+BEHAVIOR_SERVER_NAME = "cardinal-behavior"
+BEHAVIOR_LAUNCHER_PATH = LAUNCHER_DIR / "cardinal-behavior.py"
+BEHAVIOR_SCRIPT = PLUGIN_ROOT / "scripts" / "cardinal-behavior"
 
 
 def toml_string(value: str) -> str:
@@ -89,8 +97,10 @@ def clear_pending() -> None:
 
 
 _ANY_TABLE_HEADER_RE = re.compile(r"^\s*\[")
+# Both managed tables: [mcp_servers.cardinal] (Cardinal's MCP endpoint) and
+# [mcp_servers.cardinal-behavior] (the local Checks / behavior MCP server).
 _CARDINAL_TABLE_HEADER_RE = re.compile(
-    r'^\s*\[mcp_servers\.(?:"cardinal"|cardinal)(?:\]|\.)'
+    r'^\s*\[mcp_servers\.(?:"cardinal"|cardinal|"cardinal-behavior"|cardinal-behavior)(?:\]|\.)'
 )
 
 
@@ -138,14 +148,27 @@ def strip_managed_block(text: str) -> tuple[str, bool]:
 MCP_CLIENT = f"codex/{PLUGIN_VERSION}"
 
 
-def build_managed_block(mcp_url: str, api_key: str) -> str:
+def build_behavior_table() -> str:
+    """[mcp_servers.cardinal-behavior]: the stdio server, run by Codex outside
+    its sandbox with --runtime codex (its connection is ~/.codex/cardinal.json
+    + cardinal-secrets.json; no key in this file)."""
+    args = [str(BEHAVIOR_LAUNCHER_PATH), "--runtime", "codex"]
+    return (
+        f"[mcp_servers.{BEHAVIOR_SERVER_NAME}]\n"
+        f'command = "python3"\n'
+        f"args = [{', '.join(toml_string(a) for a in args)}]\n"
+    )
+
+
+def build_managed_block(mcp_url: str, api_key: str, behavior: bool = True) -> str:
     return (
         f"{BEGIN_MARKER}\n"
         f"[mcp_servers.{MCP_SERVER_NAME}]\n"
         f"url = {toml_string(mcp_url)}\n"
         f'http_headers = {{ "X-CardinalHQ-API-Key" = {toml_string(api_key)}, '
         f'"X-Cardinal-Client" = {toml_string(MCP_CLIENT)} }}\n'
-        f"{END_MARKER}\n"
+        + (f"\n{build_behavior_table()}" if behavior else "")
+        + f"{END_MARKER}\n"
     )
 
 
@@ -157,8 +180,13 @@ def write_codex_config(mcp_url: str, api_key: str) -> Path | None:
             f"Refusing to write because {CONFIG_PATH} already contains an unmanaged "
             "[mcp_servers.cardinal] table. Remove or rename that table, then rerun."
         )
+    behavior = not UNMANAGED_BEHAVIOR_TABLE_RE.search(text_without_managed)
+    if not behavior:
+        print(f"WARN {CONFIG_PATH} already has an unmanaged [mcp_servers.cardinal-behavior] table; "
+              "left as it is (the Checks preview needs it to run this plugin's scripts/cardinal-behavior "
+              "--runtime codex).")
 
-    block = build_managed_block(mcp_url, api_key)
+    block = build_managed_block(mcp_url, api_key, behavior=behavior)
     new_text = text_without_managed.rstrip()
     if new_text:
         new_text += "\n\n"
@@ -274,10 +302,26 @@ def render_launcher() -> str:
     return LAUNCHER_TEMPLATE.format(fallback_root_repr=repr(str(PLUGIN_ROOT)))
 
 
+def render_behavior_launcher() -> str:
+    """The same stable launcher, resolving scripts/cardinal-behavior (the
+    cardinal-behavior MCP server) instead of the telemetry hook."""
+    text = render_launcher()
+    for old, new in (('"""cardinal-codex-plugin telemetry launcher (stable path).',
+                      '"""cardinal-codex-plugin cardinal-behavior MCP launcher (stable path).'),
+                     ('TELEMETRY_REL = Path("hooks") / "cardinal-codex-telemetry.py"',
+                      'TELEMETRY_REL = Path("scripts") / "cardinal-behavior"')):
+        if old not in text:
+            raise RuntimeError("launcher template changed; update render_behavior_launcher")
+        text = text.replace(old, new)
+    return text
+
+
 def write_launcher() -> None:
     LAUNCHER_DIR.mkdir(parents=True, exist_ok=True)
     atomic_write(LAUNCHER_PATH, render_launcher())
     LAUNCHER_PATH.chmod(0o755)
+    atomic_write(BEHAVIOR_LAUNCHER_PATH, render_behavior_launcher())
+    BEHAVIOR_LAUNCHER_PATH.chmod(0o755)
 
 
 def managed_hook_group(event_name: str, timeout: int, status_message: str | None = None) -> dict:
@@ -477,6 +521,7 @@ def repair_hooks(dry_run: bool = False) -> int:
             "would_write": {
                 "codex_hooks": str(HOOKS_PATH),
                 "telemetry_launcher": str(LAUNCHER_PATH),
+                "behavior_launcher": str(BEHAVIOR_LAUNCHER_PATH),
                 "codex_agents": [str(AGENTS_DIR / name) for name in AGENT_FILES.values()],
             },
             "plugin_root": str(PLUGIN_ROOT),
@@ -486,6 +531,7 @@ def repair_hooks(dry_run: bool = False) -> int:
 
     write_launcher()
     print(f"Wrote Cardinal telemetry launcher to {LAUNCHER_PATH}")
+    print(f"Wrote Cardinal behavior MCP launcher to {BEHAVIOR_LAUNCHER_PATH}")
     hooks_backup = write_hooks_config()
     print(f"Wrote Cardinal hooks to {HOOKS_PATH}")
     if hooks_backup:
@@ -691,6 +737,7 @@ def continue_after_grant(args: argparse.Namespace, grant: dict) -> int:
 
     write_launcher()
     print(f"Wrote Cardinal telemetry launcher to {LAUNCHER_PATH}")
+    print(f"Wrote Cardinal behavior MCP launcher to {BEHAVIOR_LAUNCHER_PATH}")
 
     hooks_backup = write_hooks_config()
     print(f"Wrote Cardinal hooks to {HOOKS_PATH}")

@@ -102,8 +102,10 @@ def read_secrets() -> dict:
 
 
 _ANY_TABLE_HEADER_RE = re.compile(r"^\s*\[")
+# Both managed tables: [mcp_servers.cardinal] (Cardinal's MCP endpoint) and
+# [mcp_servers.cardinal-behavior] (the local Checks / behavior MCP server).
 _CARDINAL_TABLE_HEADER_RE = re.compile(
-    r'^\s*\[mcp_servers\.(?:"cardinal"|cardinal)(?:\]|\.)'
+    r'^\s*\[mcp_servers\.(?:"cardinal"|cardinal|"cardinal-behavior"|cardinal-behavior)(?:\]|\.)'
 )
 
 
