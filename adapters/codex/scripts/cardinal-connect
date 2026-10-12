@@ -97,10 +97,18 @@ def clear_pending() -> None:
 
 
 _ANY_TABLE_HEADER_RE = re.compile(r"^\s*\[")
-# Both managed tables: [mcp_servers.cardinal] (Cardinal's MCP endpoint) and
-# [mcp_servers.cardinal-behavior] (the local Checks / behavior MCP server).
+# [mcp_servers.cardinal] (Cardinal's MCP endpoint): removed wherever it sits.
+# connect refuses to write next to an unmanaged one, and a second table of
+# that name would be invalid TOML, so with the BEGIN marker present any
+# [mcp_servers.cardinal] is the managed one, possibly moved by Codex.
 _CARDINAL_TABLE_HEADER_RE = re.compile(
-    r'^\s*\[mcp_servers\.(?:"cardinal"|cardinal|"cardinal-behavior"|cardinal-behavior)(?:\]|\.)'
+    r'^\s*\[mcp_servers\.(?:"cardinal"|cardinal)(?:\]|\.)'
+)
+# [mcp_servers.cardinal-behavior] (the local Checks / behavior MCP server):
+# removed only between the BEGIN and END markers. A user's own table of that
+# name (connect then writes none of its own) sits outside them and is kept.
+_BEHAVIOR_TABLE_HEADER_RE = re.compile(
+    r'^\s*\[mcp_servers\.(?:"cardinal-behavior"|cardinal-behavior)(?:\]|\.)'
 )
 
 
@@ -110,10 +118,11 @@ def strip_managed_block(text: str) -> tuple[str, bool]:
     The BEGIN/END markers are ADVISORY, not a deletion span: Codex rewrites
     config.toml itself and can move its own sections (e.g. [desktop],
     [hooks.state]) inside the marker span (issue #10). Removal is therefore
-    parse-aware — only the marker comment lines and the
-    [mcp_servers.cardinal] table (header through the line before the next
-    table header), wherever they sit, are removed. Foreign content that
-    drifted between the markers is preserved verbatim.
+    parse-aware — only the marker comment lines, the [mcp_servers.cardinal]
+    table (header through the line before the next table header) wherever it
+    sits, and an [mcp_servers.cardinal-behavior] table between the markers
+    are removed. Foreign content that drifted between the markers is
+    preserved verbatim; a cardinal-behavior table outside them is the user's.
 
     The BEGIN marker still gates the whole operation: without it the file
     is considered unmanaged and returned untouched, so a hand-written
@@ -125,16 +134,21 @@ def strip_managed_block(text: str) -> tuple[str, bool]:
         return text, False
     out: list[str] = []
     in_cardinal = False
+    in_span = False
     for line in text.splitlines(keepends=True):
         stripped = line.strip()
-        if stripped.startswith(BEGIN_MARKER) or stripped.startswith(END_MARKER):
+        if stripped.startswith(BEGIN_MARKER):
+            in_span = True
+            continue
+        if stripped.startswith(END_MARKER):
+            in_span = False
             continue
         if in_cardinal:
             if _ANY_TABLE_HEADER_RE.match(line):
                 in_cardinal = False  # table ended; fall through for this line
             else:
                 continue
-        if _CARDINAL_TABLE_HEADER_RE.match(line):
+        if _CARDINAL_TABLE_HEADER_RE.match(line) or (in_span and _BEHAVIOR_TABLE_HEADER_RE.match(line)):
             in_cardinal = True
             continue
         out.append(line)

@@ -97,6 +97,38 @@ class ConnectRegistersBehaviorTests(unittest.TestCase):
         self.assertIn("cardinal", config["mcp_servers"])
         self.assertEqual(self.config.read_text().count("[mcp_servers.cardinal-behavior]"), 1)
 
+    def test_a_users_behavior_table_outside_the_markers_survives_rotate_and_disconnect(self):
+        mine = '[mcp_servers.cardinal-behavior]\ncommand = "/opt/mine"\n'
+        user_entry = {"command": "/opt/mine"}
+        # Before the managed block (the file it was connected into) ...
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(mine)
+        self.connect()
+        self.assertEqual(read_toml(self.config)["mcp_servers"]["cardinal-behavior"], user_entry)
+        for _ in range(2):
+            self.connect("--rotate")
+            self.assertEqual(read_toml(self.config)["mcp_servers"]["cardinal-behavior"], user_entry)
+            self.assertEqual(self.config.read_text().count("[mcp_servers.cardinal-behavior]"), 1)
+        result = run_script(DISCONNECT, [], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(read_toml(self.config), {"mcp_servers": {"cardinal-behavior": user_entry}})
+
+    def test_a_users_behavior_table_added_after_the_managed_block_survives(self):
+        self.connect()
+        # The user replaces the managed entry with their own, after the END marker.
+        text = self.config.read_text()
+        begin = text.index("[mcp_servers.cardinal-behavior]")
+        end = text.index("# END cardinal-codex-plugin")
+        text = text[:begin] + text[end:] + '\n[mcp_servers.cardinal-behavior]\ncommand = "/opt/mine"\n'
+        self.config.write_text(text)
+        self.connect("--rotate")
+        config = read_toml(self.config)
+        self.assertEqual(config["mcp_servers"]["cardinal-behavior"], {"command": "/opt/mine"})
+        self.assertEqual(self.config.read_text().count("[mcp_servers.cardinal-behavior]"), 1)
+        result = run_script(DISCONNECT, [], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(read_toml(self.config), {"mcp_servers": {"cardinal-behavior": {"command": "/opt/mine"}}})
+
     def test_repair_hooks_restores_the_behavior_launcher(self):
         self.connect()
         self.launcher.unlink()
