@@ -493,10 +493,13 @@ class GrantAndEvents(Base):
 
 class AgentGuidance(Base):
     def test_session_start_names_the_precedence_only_with_the_capability(self):
-        with_cap = agent.describe(self.wiring, SID, {**self.binding, "bootstrap": {"status": "ok"}})
+        # The shared guidance (investigation_text) gives the author's
+        # guidance to a binding with a storyboard, as Claude's always did.
+        live = {**self.binding, "storyboard_id": "sb_" + "b" * 24, "bootstrap": {"status": "ok"}}
+        with_cap = agent.describe(self.wiring, SID, live)
         self.assertIn(ie.SUPERVISION_LINE, with_cap)
         self.assertIn("never widens your permissions", ie.SUPERVISION_LINE)
-        without = agent.describe(self.wiring, SID, {**self.binding, "capabilities": {}, "bootstrap": {"status": "ok"}})
+        without = agent.describe(self.wiring, SID, {**live, "capabilities": {}})
         self.assertNotIn("DELEGATED SUPERVISION", without)
 
     def test_codex_delivery_counts_and_resurfaces(self):
