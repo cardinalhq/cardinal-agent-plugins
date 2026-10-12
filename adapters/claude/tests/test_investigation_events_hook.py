@@ -989,7 +989,8 @@ class Cli(Base):
         res = self.cli("link", CLAUDE_CODE_SESSION_ID=SID)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(res.stdout.splitlines()[0],
-                         f"Storyboard (live, private to its author while draft): https://app.example.test/storyboards/{SB}?org=o1")
+                         f"Storyboard (private draft until published): https://app.example.test/storyboards/{SB}?org=o1")
+        self.assertIn("Investigation timeline (shows the live record before any publish): ", res.stdout)
         self.assertIn(f"investigation {INV} · storyboard {SB}", res.stdout)
         self.assertEqual(len(self.fake.requests), n)
         got = json.loads(self.cli("link", "--session", SID, "--json").stdout)

@@ -443,6 +443,17 @@ class FailureDetection(Base):
     def observe(self, *args, **kwargs):
         return failures.observe(*args, runtime="claude", tool_name="Bash", **kwargs)
 
+    def test_every_runtime_shell_tool_is_observed(self):
+        for runtime, tool in (("cursor", "Shell"), ("cursor", "run_terminal_cmd"), ("gemini", "run_shell_command")):
+            with self.subTest(runtime=runtime, tool=tool):
+                msg = failures.observe(self.home, SID, self.command, failures.MARKER + " DNS",
+                                       runtime=runtime, tool_name=tool, now=2000)
+                self.assertIn("could not record", msg)
+                failures.observe(self.home, SID, self.command, "ok", runtime=runtime, tool_name=tool,
+                                 now=2001, succeeded=True)
+        self.assertIsNone(failures.observe(self.home, SID, self.command, failures.MARKER + " DNS",
+                                           runtime="gemini", tool_name="read_file", now=3000))
+
     def test_marker_exit_three_throttle_clear_and_never_usage(self):
         for response in (
             {"exit_code": 2, "stderr": "not checkpointed: invalid"},

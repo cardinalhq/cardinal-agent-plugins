@@ -6,6 +6,8 @@ on:
       - 'core/**'
       - 'adapters/claude/**'
       - 'adapters/codex/**'
+      - 'adapters/cursor/**'
+      - 'adapters/gemini/**'
       - 'build/vendor.py'
       - '.github/workflows/investigation-tests.yml'
 
@@ -32,3 +34,9 @@ jobs:
       - name: Codex adapter unittest suite
         if: matrix.python-version != '3.9'
         run: python3 build/vendor.py codex && (cd adapters/codex && python3 -m unittest discover tests)
+      - name: Cursor adapter unittest suite
+        if: matrix.python-version != '3.9'
+        run: python3 build/vendor.py cursor && (cd adapters/cursor && python3 -m unittest discover tests)
+      - name: Gemini CLI adapter unittest suite
+        if: matrix.python-version != '3.9'
+        run: python3 build/vendor.py gemini && (cd adapters/gemini && python3 -m unittest discover tests)

@@ -89,6 +89,11 @@ jobs:
           import cardinal_core.investigation_artifacts
           import cardinal_core.investigation_receipts
           import cardinal_core.owner_input
+          import cardinal_core.investigation_text
+          import cardinal_core.investigation_turn
+          import cardinal_core.storyboard_authoring
+          import cardinal_core.checks_install
+          import cardinal_core.checks_cli
           print('ok: all core modules import under 3.9')
           "
 
@@ -142,7 +147,8 @@ jobs:
             ! -name '*.py' ! -name '*.pyc')
           exit $fail
 
-      # Skill helper scripts (e.g. canvas/scripts/render_preview.py,
+      # Skill helper scripts (e.g. storyboard/scripts/render_preview.py, the one
+      # renderer the canvas skill and the preview hooks share;
       # migrate-from-grafana/scripts/*.py) are run by the agent with the
       # user's python3, so they carry the same 3.9 bar. Standard library only.
       - name: skill scripts --help under 3.9

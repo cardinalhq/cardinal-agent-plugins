@@ -1,5 +1,5 @@
-"""Storyboard skills: the local preview renderer (skills/canvas/scripts/
-render_preview.py), the SessionStart session-id hook
+"""Storyboard skills: the local preview renderer (skills/storyboard/scripts/
+render_preview.py, run with --runtime claude), the SessionStart session-id hook
 (hooks/storyboard-session.py) and the PostToolUse auto-preview hook
 (hooks/storyboard-preview.py).
 
@@ -33,7 +33,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-RENDER_PREVIEW = PLUGIN_ROOT / "skills" / "canvas" / "scripts" / "render_preview.py"
+RENDER_PREVIEW = PLUGIN_ROOT / "skills" / "storyboard" / "scripts" / "render_preview.py"
 SESSION_HOOK = PLUGIN_ROOT / "hooks" / "storyboard-session.py"
 PREVIEW_HOOK = PLUGIN_ROOT / "hooks" / "storyboard-preview.py"
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -293,7 +293,8 @@ def hermetic_env(home: Path, **extra) -> dict:
 
 
 def run_renderer(args: list, env: dict, stdin: str | None = None, timeout: int = 60):
-    res = subprocess.run([sys.executable, str(RENDER_PREVIEW)] + args, input=stdin, capture_output=True,
+    res = subprocess.run([sys.executable, str(RENDER_PREVIEW), "--runtime", "claude"] + args, input=stdin,
+                         capture_output=True,
                          text=True, env=env, timeout=timeout)
     lines = [json.loads(line) for line in res.stdout.splitlines() if line.strip()]
     return res, lines
@@ -813,7 +814,7 @@ class EndToEndTests(unittest.TestCase):
         result = preview_result([{"id": "rhythm", "preview_bundle": bundle_ref("rhythm", self.body)}])
         env = dict(self._env(FAKE_CHROME_MODE="hang"), TMPDIR=str(self.home / "tmp"))
         (self.home / "tmp").mkdir()
-        proc = subprocess.Popen([sys.executable, str(RENDER_PREVIEW)], stdin=subprocess.PIPE,
+        proc = subprocess.Popen([sys.executable, str(RENDER_PREVIEW), "--runtime", "claude"], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
         proc.stdin.write(json.dumps(result))
         proc.stdin.close()
@@ -938,7 +939,7 @@ class EndToEndTests(unittest.TestCase):
         page.write_text("x")
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(rp.sys, "platform", "win32"), redirect_stdout(out), redirect_stderr(err):
-            code = rp.main(["--html", str(page)])
+            code = rp.main(["--html", str(page), "--runtime", "claude"])
         self.assertEqual(code, 3)
         self.assertIn("not supported on Windows", out.getvalue())
 
@@ -1085,6 +1086,11 @@ class RealChromeSmokeTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 CANVAS_SKILL = PLUGIN_ROOT / "skills" / "canvas" / "SKILL.md"
+CANVAS_CORE = CANVAS_SKILL.parent / "CORE.md"  # shared (common/canvas), synced next to SKILL.md
+
+
+def _canvas_text() -> str:
+    return CANVAS_SKILL.read_text() + "\n" + CANVAS_CORE.read_text()
 
 
 class CanvasSkillTests(unittest.TestCase):
@@ -1092,7 +1098,7 @@ class CanvasSkillTests(unittest.TestCase):
         text = CANVAS_SKILL.read_text()
         self.assertNotRegex(text, r"find [^\n]*\s\.\s", "the renderer is never looked up under the cwd")
         self.assertNotIn("ls -t", text, "never pick the renderer by mtime")
-        self.assertIn("<this skill's base directory>/scripts/render_preview.py", text)
+        self.assertIn("<this skill's base directory>/../storyboard/scripts/render_preview.py", text)
 
     def test_locator_fallback_picks_the_newest_plugin_version_not_a_planted_copy(self):
         m = re.search(r"^(RENDER=\$\(python3 -I -c .*?'\))$", CANVAS_SKILL.read_text(), re.S | re.M)
@@ -1101,11 +1107,11 @@ class CanvasSkillTests(unittest.TestCase):
             root = Path(tmp)
             home = root / "home"
             for v in ("0.9.0", "0.32.0", "0.10.1"):
-                d = home / ".claude/plugins/cache/mkt place/cardinal" / v / "skills/canvas/scripts"
+                d = home / ".claude/plugins/cache/mkt place/cardinal" / v / "skills/storyboard/scripts"
                 d.mkdir(parents=True)
                 (d / "render_preview.py").write_text("")
             # The oldest version is the most recently touched: mtime must not win.
-            old = home / ".claude/plugins/cache/mkt place/cardinal/0.9.0/skills/canvas/scripts/render_preview.py"
+            old = home / ".claude/plugins/cache/mkt place/cardinal/0.9.0/skills/storyboard/scripts/render_preview.py"
             os.utime(old, (2_000_000_000, 2_000_000_000))
             planted = root / "repo/tools/canvas/scripts"
             planted.mkdir(parents=True)
@@ -1119,13 +1125,13 @@ class CanvasSkillTests(unittest.TestCase):
                                  capture_output=True, text=True, timeout=30)
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertNotIn("PLANTED", res.stdout + res.stderr)
-            self.assertEqual(res.stdout, str(home / ".claude/plugins/cache/mkt place/cardinal/0.32.0/skills/canvas/"
+            self.assertEqual(res.stdout, str(home / ".claude/plugins/cache/mkt place/cardinal/0.32.0/skills/storyboard/"
                                                     "scripts/render_preview.py"))
 
     def test_every_python_invocation_in_the_skill_is_isolated(self):
         # A bare `python3 -c` / `python3 <script>` imports from the cwd or
         # honours PYTHONPATH; the skill runs inside the user's repo.
-        text = CANVAS_SKILL.read_text()
+        text = _canvas_text()
         calls = re.findall(r"python3\b[^\n]*", text)
         self.assertTrue(calls)
         for call in calls:
@@ -1135,11 +1141,11 @@ class CanvasSkillTests(unittest.TestCase):
         # The full rule ("Past a few thousand marks draw on a <canvas>") is
         # served by describe_grammar canvas.design.rules_that_bite (conductor
         # #1975); the skill keeps the pointer where it names the row exemplar.
-        text = " ".join(CANVAS_SKILL.read_text().split())
+        text = " ".join(_canvas_text().split())
         self.assertIn("For thousands of rows, draw on a `<canvas>` instead.", text)
 
     def test_exemplars_ship_with_the_skill_and_follow_the_frame_rules(self):
-        text = CANVAS_SKILL.read_text()
+        text = _canvas_text()
         names = re.findall(r"`exemplars/([a-z-]+\.js)`", text)
         self.assertGreaterEqual(len(set(names)), 2)
         for name in set(names):
@@ -1510,10 +1516,12 @@ class StoryboardPreviewHookTests(unittest.TestCase):
         self.assertIn("(exit 1)", hook.crash_context(1, ""))
         # End to end: a renderer that dies before printing anything.
         fake = self.home / "fake-hook"
-        (fake / "skills" / "canvas" / "scripts").mkdir(parents=True)
+        (fake / "skills" / "storyboard" / "scripts").mkdir(parents=True)
         (fake / "hooks").mkdir()
         shutil.copy(PREVIEW_HOOK, fake / "hooks" / PREVIEW_HOOK.name)
-        (fake / "skills" / "canvas" / "scripts" / "render_preview.py").write_text(
+        # The hook is a thin wrapper over the vendored core, which ships next to it.
+        (fake / "hooks" / "cardinal_core").symlink_to(PLUGIN_ROOT / "hooks" / "cardinal_core")
+        (fake / "skills" / "storyboard" / "scripts" / "render_preview.py").write_text(
             "import sys\nsys.stdin.read()\nraise RuntimeError('boom ' + 'ck_live_secret')\n")
         res = subprocess.run([sys.executable, str(fake / "hooks" / PREVIEW_HOOK.name)],
                              input=json.dumps(self._payload()), capture_output=True, text=True, timeout=60,

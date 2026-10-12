@@ -1,4 +1,5 @@
-"""Exercise the behavior MCP using the same artifact shipped to Claude users."""
+"""Exercise the behavior MCP and the Checks preview using the same artifact
+shipped to users of every adapter (Claude, Codex, Cursor, Gemini CLI)."""
 from __future__ import annotations
 
 import importlib.util
@@ -16,20 +17,36 @@ RELEASE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RELEASE)
 
 
+ADAPTERS = ("claude", "codex", "cursor", "gemini")
+CHECKS_TOOLS = {'get_behavior_range', 'list_accepted_checks', 'set_check_example', 'approve_check_example',
+                'remove_check_example', 'get_check_draft', 'lock_check_examples',
+                'execute_behavior_range', 'continue_behavior_range'}
+
+
+def bin_dir(adapter):
+    return "bin" if adapter == "claude" else "scripts"
+
+
 class BehaviorReleaseTests(unittest.TestCase):
     def test_packaged_launcher_exposes_authoring_without_source_checkout_or_config(self):
+        for adapter in ADAPTERS:
+            with self.subTest(adapter=adapter):
+                self.check_packaged_launcher(adapter)
+
+    def check_packaged_launcher(self, adapter):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             package = root / "plugins" / "cardinal"
-            RELEASE.build_artifact("claude", package)
-            launcher = package / "bin" / "cardinal-behavior"
+            RELEASE.build_artifact(adapter, package)
+            launcher = package / bin_dir(adapter) / "cardinal-behavior"
             help_result = subprocess.run([sys.executable, str(launcher), "--help"],
                                          cwd=root, capture_output=True, text=True, timeout=10)
             self.assertEqual(help_result.returncode, 0, help_result.stderr)
             self.assertIn("--config", help_result.stdout)
             # The normal installed MCP starts without frozen local artifacts/config.
-            environment = dict(os.environ, CARDINAL_BEHAVIOR_OUTPUT_DIR=str(root / 'receipts'))
+            environment = dict(os.environ, CARDINAL_BEHAVIOR_OUTPUT_DIR=str(root / 'receipts'), HOME=str(root / 'home'))
             environment.pop('CARDINAL_BEHAVIOR_CONFIG', None)
+            environment.pop('CARDINAL_BEHAVIOR_RUNTIME', None)
             requests = [
                 {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
@@ -48,9 +65,23 @@ class BehaviorReleaseTests(unittest.TestCase):
                              'get_behavior_compilation', 'run_behavior_regressions',
                              'execute_behavior', 'next_behavior_result', 'render_storyboard'} <= names)
             self.assertNotIn('select_behavior', names)
-            self.assertEqual((package / ".mcp.json").read_bytes(),
-                             (ROOT / "adapters" / "claude" / ".mcp.json").read_bytes())
+            self.assertTrue(CHECKS_TOOLS <= names, CHECKS_TOOLS - names)
+            if adapter == "claude":
+                self.assertEqual((package / ".mcp.json").read_bytes(),
+                                 (ROOT / "adapters" / "claude" / ".mcp.json").read_bytes())
             self.assertFalse((package / "lib" / "behavior" / "tests").exists())
+            # The Checks preview: template (opt-in, never pre-installed) and a CLI
+            # that runs from the artifact alone (core + lib/behavior inside it).
+            self.assertTrue((package / "checks" / "skill" / "SKILL.md").is_file())
+            self.assertEqual((package / "checks" / "skill" / "CORE.md").read_bytes(),
+                             (ROOT / "common" / "checks" / "CORE.md").read_bytes())
+            self.assertFalse((package / "skills" / "checks").exists())
+            status = subprocess.run([sys.executable, str(package / bin_dir(adapter) / "cardinal-checks"), "status"],
+                                    cwd=root, env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn("Checks preview: off", status.stdout)
+            self.assertIn("Accepted checks: 0", status.stdout)
+            RELEASE.validate_artifact(adapter, package)
             # Offline components must import from a built artifact with no source
             # checkout or external experiment on sys.path. SDK imports are lazy.
             probe = subprocess.run([sys.executable, '-c',

@@ -81,16 +81,29 @@ class FakeMaestro:
     def __init__(self) -> None:
         self.requests: list = []
         self.routes: dict = {}
+        self.delays: dict = {}   # route -> seconds to wait before answering
 
     def start(self) -> "FakeMaestro":
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_PUT(self) -> None:  # noqa: N802
+                body = self.rfile.read(int(self.headers.get("content-length") or 0))
+                fake.requests.append({"method": "PUT", "path": self.path,
+                                      "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body})
+                self._answer(*fake.routes.get("PUT", (404, {})))
+
             def do_POST(self) -> None:  # noqa: N802
                 body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
                 fake.requests.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
                                       "body": body})
-                status, out = fake.routes.get(self.path.rsplit("/", 1)[-1], (404, {}))
+                route = self.path.rsplit("/", 1)[-1]
+                if fake.delays.get(route):
+                    import time
+                    time.sleep(fake.delays[route])
+                self._answer(*fake.routes.get(route, (404, {})))
+
+            def _answer(self, status: int, out: Any) -> None:
                 data = json.dumps(out).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")

@@ -42,15 +42,31 @@ EXCLUDE = {"tests", "REPORT.md", "CORE_GAPS.md", "__pycache__"}
 # Opt-in skills installed into skills/ at runtime from a shipped template.
 OPT_IN_SKILLS = {"checks"}
 
+# The behavior runtime (lib/behavior, copied from common/behavior) and the
+# Checks preview ship in every adapter: the cardinal-behavior MCP server, the
+# checks skill template, the opt-in CLI and the shared core it runs on.
+BEHAVIOR_ARTIFACTS = (
+    "lib/behavior/server.py", "lib/behavior/storyboard.py", "lib/behavior/range_run.py",
+    "lib/behavior/range_runner.py", "lib/behavior/checks_ledger.py",
+    "lib/behavior/compilation/hosted.py", "lib/behavior/compilation/regression.py",
+    "lib/behavior/compilation/engine.py", "lib/behavior/compilation/workflow.py",
+    "lib/behavior/compilation/sdk_adapter.py", "lib/behavior/compilation/corpus.py",
+    "lib/behavior/compilation/llm.py", "lib/behavior/compilation/lifecycle.py",
+    "checks/skill/SKILL.md", "checks/skill/CORE.md",
+    "hooks/cardinal_core/checks_install.py", "hooks/cardinal_core/checks_cli.py",
+    # The storyboard renderer every adapter's preview hook and canvas skill run.
+    "skills/storyboard/scripts/render_preview.py",
+)
+
 REQUIRED_ARTIFACTS = {
-    "claude": (".claude-plugin/plugin.json", "lib/behavior/server.py", "lib/behavior/storyboard.py",
-               "lib/behavior/range_run.py", "lib/behavior/range_runner.py", "checks/skill/SKILL.md", "checks/skill/CORE.md",
-               "bin/cardinal-checks", "hooks/checks-gate.py", "hooks/_checks.py",
-               "lib/behavior/compilation/hosted.py", "lib/behavior/compilation/regression.py",
-               "lib/behavior/compilation/engine.py", "lib/behavior/compilation/workflow.py",
-               "lib/behavior/compilation/sdk_adapter.py", "lib/behavior/compilation/corpus.py",
-               "lib/behavior/compilation/llm.py", "lib/behavior/compilation/lifecycle.py"),
-    "codex": (".codex-plugin/plugin.json",),
+    "claude": (".claude-plugin/plugin.json", ".mcp.json", "bin/cardinal-behavior", "bin/cardinal-checks",
+               "hooks/checks-gate.py", "hooks/_checks.py") + BEHAVIOR_ARTIFACTS,
+    "codex": (".codex-plugin/plugin.json", "scripts/cardinal-behavior", "scripts/cardinal-checks")
+             + BEHAVIOR_ARTIFACTS,
+    "cursor": (".cursor-plugin/plugin.json", "scripts/cardinal-behavior", "scripts/cardinal-checks")
+              + BEHAVIOR_ARTIFACTS,
+    "gemini": (".gemini-plugin/plugin.json", "extension/gemini-extension.json", "scripts/cardinal-behavior",
+               "scripts/cardinal-checks") + BEHAVIOR_ARTIFACTS,
 }
 
 BANNER = (
@@ -82,7 +98,8 @@ def build_artifact(adapter: str, dest: Path) -> None:
     def _ignore(directory: str, names: list[str]) -> set[str]:
         ignored = {n for n in names if n in EXCLUDE}
         # skills/checks/ is the Checks preview's opt-in install (cardinal-checks
-        # on), never product source: only its template checks/skill/ ships.
+        # on), never product source: only its template checks/skill/ ships
+        # (every adapter; Gemini installs it into its extension instead).
         if Path(directory).name == "skills" and Path(directory).parent == src:
             ignored |= {n for n in names if n in OPT_IN_SKILLS}
         return ignored
@@ -95,10 +112,10 @@ def build_artifact(adapter: str, dest: Path) -> None:
         shutil.rmtree(vendor_dest)
     shutil.copytree(CORE_PKG, vendor_dest, ignore=shutil.ignore_patterns("__pycache__"))
     # The shared behavior source is canonical; install a self-contained copy
-    # alongside the Claude launcher instead of depending on the monorepo layout.
-    if adapter == "claude":
-        shutil.copytree(ROOT / "common" / "behavior", dest / "lib" / "behavior",
-                        ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"))
+    # alongside each adapter's cardinal-behavior / cardinal-checks launchers
+    # instead of depending on the monorepo layout.
+    shutil.copytree(ROOT / "common" / "behavior", dest / "lib" / "behavior",
+                    ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"))
     # Plugin-level LICENSE and .gitignore ship in every artifact even when
     # the adapter dir doesn't carry them (marketplaces expect LICENSE; the
     # ignore file keeps user checkouts from committing pyc noise).

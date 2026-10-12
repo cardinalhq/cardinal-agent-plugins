@@ -1,0 +1,47 @@
+name: Cross-agent parity matrix
+
+# docs/parity.json says, per feature, whether each plugin adapter (claude,
+# codex, cursor, gemini) has it, cannot (a cited platform limit), or need
+# not (n/a). tests/test_parity_matrix.py probes every "present" cell in the
+# code, fails when a Claude hook is not mapped to a feature, and checks that
+# docs/parity.md matches parity.json. Stdlib only, no vendoring needed.
+on:
+  pull_request:
+    paths:
+      - 'docs/parity.json'
+      - 'docs/parity.md'
+      - 'adapters/**'
+      - 'core/**'
+      - 'common/**'
+      - 'build/parity_md.py'
+      - 'tests/test_parity_matrix.py'
+      - '.github/workflows/parity-matrix.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/parity.json'
+      - 'docs/parity.md'
+      - 'adapters/**'
+      - 'core/**'
+      - 'common/**'
+      - 'build/parity_md.py'
+      - 'tests/test_parity_matrix.py'
+      - '.github/workflows/parity-matrix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Parity matrix
+        run: python3 -m unittest discover -s tests -p test_parity_matrix.py -v

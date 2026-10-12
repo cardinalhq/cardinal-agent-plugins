@@ -76,11 +76,18 @@ class HookSmokeTests(unittest.TestCase):
                 result = run_hook(event, payload, self.home)
                 self.assertEqual(result.returncode, 0, msg=result.stderr.decode())
 
-    def test_session_start_outside_git_repo_emits_nothing(self) -> None:
-        payload = {"session_id": "s1", "cwd": str(self.home)}
+    def test_session_start_outside_git_repo_has_no_convention_prompt(self) -> None:
+        payload = {"session_id": "s1", "cwd": str(self.home), "source": "startup"}
         result = run_hook("SessionStart", payload, self.home)
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, b"", "Should suppress convention prompt outside a git repo")
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("one branch = one initiative", ctx, "no convention prompt outside a git repo")
+        # Unconnected: only the connect hint (storyboard_authoring.connect_hint),
+        # said to the user once per machine, then kept as quiet context.
+        self.assertTrue(ctx.startswith("Tell the user once, briefly: Cardinal is not connected"), ctx)
+        again = json.loads(run_hook("SessionStart", payload, self.home).stdout)["hookSpecificOutput"]
+        self.assertTrue(again["additionalContext"].startswith("Cardinal is not connected"), again)
+        self.assertIn("Mention it only if the user asks", again["additionalContext"])
 
     def test_after_model_writes_progress_cursor(self) -> None:
         # Even without a connected state (no ingest post), the hook still
