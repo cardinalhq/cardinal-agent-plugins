@@ -257,9 +257,6 @@ Each of these is a property of Cursor, not of the plugin:
   this plugin uses (evidence ids, limits notices, decisions, investigation
   deliveries, preview PNG lists) depends on them. The canvas and storyboard
   skills tell the agent to render by hand when no preview report arrives.
-- **Tool-failure notices** (`investigation_failures`: a shell call that writes
-  to the Investigation and can't reach Cardinal) are wired, but stay inert
-  until core lists Cursor's shell tool.
 
 ## Cloud agents
 
