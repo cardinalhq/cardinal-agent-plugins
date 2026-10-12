@@ -17,7 +17,10 @@ which renders every scene and reveal step in your local Chromium. The hook then 
 your context the PNG directory (`~/.gemini/cardinal/storyboards/<storyboard_id>/r<revision>/`),
 each scene's files (`<scene>-<step>.png`, step 0 first) and any per-scene render error, then
 the cover and the link-preview mock when the preview carried `card`. You do not build the
-renderer's input. Read every PNG it names with `read_file`, as CORE.md says.
+renderer's input. Read every PNG it names with `read_file`, as CORE.md says. `read_file` reads
+only the workspace: if it refuses a PNG as outside the workspace, ask the user to restart
+Gemini CLI with `--include-directories ~/.gemini/cardinal/storyboards` (or add that directory
+to `context.includeDirectories` in settings), and do not claim the scene was reviewed.
 
 ## Rendering by hand (fallback)
 
