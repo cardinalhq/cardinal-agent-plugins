@@ -81,19 +81,6 @@ EDIT_DEADLINE_S = 4.0
 RELOOK_EVENT = "_Relook"
 RELOOK_BUDGET_S = 4.0
 
-# Prompts Codex itself submits for a slash command, not what the owner typed
-# (captured from codex-cli 0.160.1 / 0.162.1 UserPromptSubmit payloads):
-# /review's presets and /init's AGENTS.md template. They are never recorded
-# as owner input. A /review with custom instructions submits exactly what the
-# owner typed, and is recorded.
-CODEX_MACHINE_PROMPTS = (
-    re.compile(r"^Review the current code changes \(staged, unstaged, and untracked files\) "
-               r"and provide prioritized findings\.$"),
-    re.compile(r"^Review the code changes (?:introduced by commit|against the base branch) "
-               r"[\s\S]*Provide prioritized, actionable findings\.$"),
-    re.compile(r"^Generate a file named AGENTS\.md that serves as a contributor guide for this repository\."),
-)
-
 TARGET_KEYS = {
     "Read": "file_path",
     "Edit": "file_path",
@@ -751,8 +738,10 @@ SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def is_codex_machine_prompt(prompt: Any) -> bool:
-    """A prompt Codex submitted for a slash command (CODEX_MACHINE_PROMPTS)."""
-    return isinstance(prompt, str) and any(r.match(prompt) for r in CODEX_MACHINE_PROMPTS)
+    """A prompt Codex submitted for a slash command (owner_input.MACHINE_PROMPTS["codex"])."""
+    from cardinal_core import owner_input
+
+    return owner_input.is_machine_prompt("codex", prompt)
 
 
 def guidance_marker(session_id: str) -> Path:
@@ -807,7 +796,7 @@ def prompt_investigation(payload: dict[str, Any], session_id: str) -> tuple[list
     Owner input (owner_input.capture, runtime "codex"): what the owner typed
     is recorded to the session's Investigation, network bounded by START +
     PROMPT_DEADLINE_S. Never a subagent's prompt (agent_id), never a prompt
-    Codex generated for /review or /init (CODEX_MACHINE_PROMPTS). The first
+    Codex generated for /review or /init (owner_input.MACHINE_PROMPTS). The first
     prompt that would be recorded is not: the disclosure is returned as the
     user-visible message instead, and capture starts with the next prompt.
     Then (main thread only) the session guidance when the model lacks it,

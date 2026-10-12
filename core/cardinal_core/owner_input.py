@@ -798,6 +798,17 @@ MACHINE_PROMPTS = {
     "claude": (re.compile(r"^\s*<?task-notification[\s>]", re.IGNORECASE),),
     # gemini-cli's loop recovery sends this as the request (_recoverFromLoop).
     "gemini": (re.compile(r"^\s*System: Potential loop detected\b"),),
+    # Codex submits these template prompts for /review's presets and /init's
+    # AGENTS.md (captured from codex-cli 0.160.1 / 0.162.1 UserPromptSubmit
+    # payloads; no agent_id on them). A /review with custom instructions
+    # submits exactly what the owner typed, and is recorded.
+    "codex": (
+        re.compile(r"^Review the current code changes \(staged, unstaged, and untracked files\) "
+                   r"and provide prioritized findings\.$"),
+        re.compile(r"^Review the code changes (?:introduced by commit|against the base branch) "
+                   r"[\s\S]*Provide prioritized, actionable findings\.$"),
+        re.compile(r"^Generate a file named AGENTS\.md that serves as a contributor guide for this repository\."),
+    ),
 }
 
 # gemini-cli wraps hook context in <hook_context>…</hook_context> and inlines
