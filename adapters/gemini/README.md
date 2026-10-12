@@ -139,7 +139,10 @@ as owner input of that Investigation (`owner_input.capture`):
   contains Gemini's markers cannot leak). A custom TOML command
   (`~/.gemini/commands`, `<project>/.gemini/commands`, an extension's
   `commands/`) reaches `BeforeAgent` already expanded, so a prompt that is a
-  command's template is recognized and never recorded. Gemini's
+  command's template is recognized and never recorded (a linked extension's
+  commands are read from its source). When the command files cannot be read
+  confidently (more than 200, one over 64 KiB, a `prompt` that does not
+  parse, an unreadable commands directory), no prompt is recorded. Gemini's
   loop-recovery request, `/init`'s `GEMINI.md` template, an MCP server's
   prompt (submitted as a JSON string literal, so a prompt that is exactly one
   quoted JSON string is skipped), a prompt that names a subagent

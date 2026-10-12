@@ -67,6 +67,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -301,7 +302,8 @@ def merge_prompt_output(gate_out: dict[str, Any] | None, extra_context: str | No
 # (interactive submit_prompt, interactiveCli-YUJVNPR2.js:27527; -p without
 # hook context), so that prompt is NOT what the owner typed: it is
 # recognized against the command files (custom_command_expansion) and never
-# captured.
+# captured. When the command files cannot be read confidently
+# (CommandFilesUnsure), no prompt is captured.
 # ---------------------------------------------------------------------------
 
 MAX_COMMAND_FILES = 200
@@ -312,38 +314,143 @@ _TOML_PROMPT_RE = re.compile(r'(?m)^\s*prompt\s*=\s*("""|\'\'\'|"|\')')
 _INJECTION_RE = re.compile(r"\{\{args\}\}|[!@]\{[^{}]*\}")
 
 
+class CommandFilesUnsure(Exception):
+    """The command files cannot be read confidently (too many, too large,
+    an unparseable `prompt`, an unreadable directory): whether a prompt is a
+    custom command's expansion cannot be told, so it is not captured."""
+
+
+_PROMPT_KEY_RE = re.compile(r'(?m)^\s*["\']?prompt["\']?\s*=')
+
+
+def _closing(rest: str, quote: str) -> int:
+    """Where `quote` closes a TOML string whose body starts `rest`: a basic
+    string's (") closing quote is not escaped by a backslash; -1 if none."""
+    i = 0
+    while True:
+        j = rest.find(quote, i)
+        if j < 0 or not quote.startswith('"'):
+            return j
+        backslashes = 0
+        k = j - 1
+        while k >= 0 and rest[k] == "\\":
+            backslashes += 1
+            k -= 1
+        if backslashes % 2 == 0:
+            return j
+        i = j + 1
+
+
 def _toml_prompt(text: str) -> str | None:
     """The `prompt` string of a Gemini custom command file (basic and
-    literal strings, single- or multi-line); None when there is none."""
+    literal strings, single- or multi-line); None when the file has none (or
+    one that is not a string: Gemini skips such a file). Raises
+    CommandFilesUnsure when there is a `prompt` that cannot be parsed."""
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:
+        tomllib = None
+    if tomllib is not None:
+        try:
+            value = tomllib.loads(text).get("prompt")
+        except Exception as e:
+            raise CommandFilesUnsure("unparseable command file") from e
+        return value if isinstance(value, str) else None
     m = _TOML_PROMPT_RE.search(text)
     if not m:
+        if _PROMPT_KEY_RE.search(text):
+            raise CommandFilesUnsure("a prompt key this parser cannot read")
         return None
     quote = m.group(1)
     rest = text[m.end():]
-    end = rest.find(quote)
+    end = _closing(rest, quote)
     if end < 0:
-        return None
+        raise CommandFilesUnsure("an unclosed prompt string")
     value = rest[:end]
     if len(quote) == 3 and value.startswith("\n"):
         value = value[1:]
     if quote.startswith('"'):
+        if len(quote) == 3:
+            # A line-ending backslash joins the next non-blank text.
+            value = re.sub(r"\\[ \t]*\n\s*", "", value)
         try:
-            value = json.loads('"' + value.replace("\n", "\\n").replace("\t", "\\t") + '"')
-        except ValueError:
-            pass
+            value = json.loads('"' + value.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r") + '"')
+        except ValueError as e:
+            raise CommandFilesUnsure("a prompt string with escapes this parser cannot read") from e
     return value
+
+
+def _extension_command_dir(ext: Path) -> Path:
+    """An installed extension's commands/: a linked one (`gemini extensions
+    link`) loads from its source (.gemini-extension-install.json
+    {"type": "link", "source"}). Raises CommandFilesUnsure when the install
+    metadata is there but cannot be read."""
+    meta = ext / ".gemini-extension-install.json"
+    if not meta.exists():
+        return ext / "commands"
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise CommandFilesUnsure("unreadable extension install metadata") from e
+    if isinstance(data, dict) and data.get("type") == "link":
+        source = data.get("source")
+        if not isinstance(source, str) or not source:
+            raise CommandFilesUnsure("a linked extension without a source")
+        return Path(source) / "commands"
+    return ext / "commands"
 
 
 def command_dirs(cwd: str) -> list[Path]:
     """Where Gemini loads custom commands (FileCommandLoader
     getCommandDirectories): ~/.gemini/commands, <project>/.gemini/commands
-    and every installed extension's commands/."""
+    and every installed extension's commands/ (a linked extension's in its
+    source). Raises CommandFilesUnsure when the extensions cannot be
+    listed."""
     dirs = [PATHS.home / "commands", Path(cwd) / ".gemini" / "commands"]
-    try:
-        dirs += sorted(p / "commands" for p in (PATHS.home / "extensions").iterdir() if p.is_dir())
-    except OSError:
-        pass
+    extensions = PATHS.home / "extensions"
+    if extensions.exists():
+        try:
+            exts = sorted(p for p in extensions.iterdir() if p.is_dir())
+        except OSError as e:
+            raise CommandFilesUnsure("unreadable extensions directory") from e
+        dirs += [_extension_command_dir(p) for p in exts]
     return dirs
+
+
+def _toml_files(d: Path) -> list[Path]:
+    """Every *.toml under `d` (sorted); none when `d` is not a directory.
+    Raises CommandFilesUnsure when `d` or a directory under it cannot be
+    read (a permission error, an unreachable linked source)."""
+    def unsure(err: OSError) -> None:
+        raise CommandFilesUnsure("unreadable commands directory") from err
+
+    try:
+        st = os.stat(d)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError as e:
+        unsure(e)
+    if not stat.S_ISDIR(st.st_mode):
+        return []
+    if not os.access(d, os.R_OK | os.X_OK):
+        raise CommandFilesUnsure("unreadable commands directory")
+    found = []
+    for root, _dirs, names in os.walk(d, onerror=unsure):
+        found += [Path(root) / n for n in names if n.endswith(".toml")]
+        if len(found) > MAX_COMMAND_FILES:
+            raise CommandFilesUnsure("too many command files")
+    return sorted(found)
+
+
+def _in_order(parts: list[str], typed: str) -> bool:
+    """Every literal part of a template appears in `typed`, in order."""
+    i = 0
+    for part in parts:
+        j = typed.find(part.strip(), i)
+        if j < 0:
+            return False
+        i = j + len(part.strip())
+    return True
 
 
 def custom_command_expansion(prompt: Any, cwd: str) -> bool:
@@ -351,7 +458,11 @@ def custom_command_expansion(prompt: Any, cwd: str) -> bool:
     custom command's expanded template: its literal text with {{args}},
     !{…} and @{…} standing for anything, and Gemini's appended raw
     invocation when the template has no {{args}}. Local file reads only,
-    bounded; False when no command file matches."""
+    bounded; False when no command file matches. Raises CommandFilesUnsure
+    when it cannot be told: more than MAX_COMMAND_FILES files, one larger
+    than MAX_COMMAND_BYTES, an unparseable `prompt`, an unreadable command
+    or extension directory, a template with too many placeholders to match
+    whose literal text the prompt contains."""
     from cardinal_core import owner_input
 
     typed = owner_input.normalize_prompt("gemini", prompt)
@@ -359,26 +470,28 @@ def custom_command_expansion(prompt: Any, cwd: str) -> bool:
         return False
     seen = 0
     for d in command_dirs(cwd):
-        try:
-            files = sorted(d.rglob("*.toml")) if d.is_dir() else []
-        except OSError:
-            continue
-        for f in files:
+        for f in _toml_files(d):
             seen += 1
             if seen > MAX_COMMAND_FILES:
-                return False
+                raise CommandFilesUnsure("too many command files")
             try:
                 if f.stat().st_size > MAX_COMMAND_BYTES:
-                    continue
+                    raise CommandFilesUnsure("a command file too large to read")
                 template = _toml_prompt(f.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError):
-                continue
+            except (OSError, UnicodeDecodeError) as e:
+                raise CommandFilesUnsure("an unreadable command file") from e
             if not template or not template.strip():
                 continue
             parts = _INJECTION_RE.split(template.strip())
             # A template that is (almost) only placeholders would match every
-            # prompt; one with many is not worth the backtracking.
-            if len("".join(parts).strip()) < MIN_TEMPLATE_LITERAL or len(parts) > MAX_TEMPLATE_PARTS:
+            # prompt (what it submits is what was typed as its args).
+            if len("".join(parts).strip()) < MIN_TEMPLATE_LITERAL:
+                continue
+            # One with many is not worth the backtracking: unsure when the
+            # prompt holds its literal text in order.
+            if len(parts) > MAX_TEMPLATE_PARTS:
+                if _in_order(parts, typed):
+                    raise CommandFilesUnsure("a template with too many placeholders")
                 continue
             pattern = ".*?".join(re.escape(part) for part in parts)
             if re.fullmatch(r"\s*" + pattern + r"(?:\s*/[\s\S]*)?\s*", typed, re.DOTALL):
@@ -421,9 +534,15 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
             # reason as the prompt: not typed (AFTER_AGENT_REFIRE_S).
             status = "not_typed"
             return None
-        if owner_input.enabled(binding) and custom_command_expansion(prompt, cwd):
-            status = "custom_command"
-            return None
+        if owner_input.enabled(binding):
+            try:
+                expansion = custom_command_expansion(prompt, cwd)
+            except CommandFilesUnsure:
+                status = "custom_command_unsure"   # cannot tell: never captured
+                return None
+            if expansion:
+                status = "custom_command"
+                return None
         wiring = storyboard_wiring()
         agent_id = payload.get("agent_id")
         res = owner_input.capture(Path.home(), session_id, prompt, runtime="gemini", conn=wiring.connection(),

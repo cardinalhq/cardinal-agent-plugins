@@ -337,6 +337,69 @@ class OwnerInputTests(GeminiInvestigationTests):
         time.sleep(1.0)
         self.assertEqual([r["payload"]["text"] for r in self.fake.records()], ["/greet Bob"])
 
+    def test_unsure_about_custom_commands_captures_nothing(self):
+        commands = self.home / ".gemini" / "commands"
+        commands.mkdir(parents=True)
+        self.disclosed()
+        cases = {
+            "too many files": lambda: [(commands / f"c{i}.toml").write_text(f'prompt = "Command number {i} here."\n')
+                                       for i in range(201)],
+            "a file too large": lambda: (commands / "big.toml").write_text(
+                'prompt = """' + "x" * (64 << 10) + '"""\n'),
+            "an unparseable prompt": lambda: (commands / "bad.toml").write_text('prompt = "never closed\n'),
+        }
+        for what, make in cases.items():
+            with self.subTest(what):
+                for f in commands.iterdir():
+                    f.unlink()
+                make()
+                self.prompt(f"{TYPED} ({what})")
+        time.sleep(1.0)
+        self.assertEqual(self.fake.records(), [])
+        for f in commands.iterdir():
+            f.unlink()
+        self.prompt(TYPED)
+        self.assertEqual([r["payload"]["text"] for r in self.wait_records(1)], [TYPED], "sure again: captured")
+
+    def test_an_unreadable_linked_extension_captures_nothing(self):
+        source = self.home / "src" / "my-ext"
+        (source / "commands").mkdir(parents=True)
+        (source / "commands" / "go.toml").write_text('prompt = "Deploy the service to staging now."\n')
+        ext = self.home / ".gemini" / "extensions" / "my-ext"
+        ext.mkdir(parents=True)
+        (ext / ".gemini-extension-install.json").write_text(json.dumps({"type": "link", "source": str(source)}))
+        self.disclosed()
+        # A linked extension's command is recognized in its source.
+        self.prompt("Deploy the service to staging now.\n\n/go")
+        (source / "commands").chmod(0)
+        try:
+            self.prompt(TYPED)
+            time.sleep(1.0)
+        finally:
+            (source / "commands").chmod(0o755)
+        self.assertEqual(self.fake.records(), [])
+        # Readable again, and not a command: captured.
+        self.prompt(TYPED)
+        self.assertEqual([r["payload"]["text"] for r in self.wait_records(1)], [TYPED])
+
+    def test_command_prompts_are_parsed_without_tomllib(self):
+        mod = load_hook()
+        with mock.patch.dict(sys.modules, {"tomllib": None}):
+            self.assertEqual(mod._toml_prompt('prompt = "Say \\"hi\\" to {{args}}."\n'), 'Say "hi" to {{args}}.')
+            self.assertEqual(mod._toml_prompt("prompt = '''\nliteral \\n kept'''\n"), "literal \\n kept")
+            self.assertIsNone(mod._toml_prompt('description = "no prompt"\n'))
+            for bad in ('prompt = "never closed\n', '"prompt" = 1\n', 'prompt = "bad \\q escape"\n'):
+                with self.assertRaises(mod.CommandFilesUnsure, msg=bad):
+                    mod._toml_prompt(bad)
+        try:
+            import tomllib  # noqa: F401
+        except ImportError:
+            return
+        self.assertEqual(mod._toml_prompt('prompt = "Say \\"hi\\"."\n'), 'Say "hi".')
+        self.assertIsNone(mod._toml_prompt("prompt = 3\n"), "not a string: Gemini skips the file")
+        with self.assertRaises(mod.CommandFilesUnsure):
+            mod._toml_prompt('prompt = "never closed\n')
+
     def test_loop_recovery_prompt_is_not_captured(self):
         self.disclosed()
         self.prompt("System: Potential loop detected. Details: repetitive tool calls. Please take a step back.")
