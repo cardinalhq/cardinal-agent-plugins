@@ -93,6 +93,20 @@ class Base(unittest.TestCase):
 
 
 class CLIForms(Base):
+    def test_ack_and_post_help_explain_response_and_event_type(self):
+        for action, phrases in (
+            ("ack", ("use accepted", "information with no follow-up", "does not make it owner authorization")),
+            ("post", ("use challenge for a requested correction", "use cue for an informational lead")),
+        ):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exited:
+                agent.cli_main([action, "--help"], self.wiring)
+            self.assertEqual(exited.exception.code, 0)
+            text = out.getvalue()
+            for phrase in phrases:
+                # Help text may wrap depending on the terminal width.
+                self.assertIn(phrase, " ".join(text.split()))
+
     def test_ack_both_forms_and_default_bound_inv(self):
         for args in [
             (INV, "1", "--disposition", "accepted", "--note", "Yes"),
@@ -388,10 +402,12 @@ class DecisionDelivery(Base):
         self.assertIn("authority: OWNER DECISION", rendered)
         self.assertIn('"Pat"\'s signed-in Cardinal web session', rendered)
         self.assertIn("your owner's own words", rendered)
+        self.assertIn("If work is planned or underway, use accepted, not noted", rendered)
         joined = ie.render_event(decision, SID, ack=False)
         self.assertIn("authority: ADVISORY for you", joined)
         self.assertIn("who is not your owner", joined)
         self.assertNotIn("Acknowledge:", joined)
+        self.assertNotIn("use accepted", joined)
 
     def test_one_cursor_pending_cap_reminders_and_cli_ack_removal(self):
         decisions = [event(i) for i in range(1, 13)]

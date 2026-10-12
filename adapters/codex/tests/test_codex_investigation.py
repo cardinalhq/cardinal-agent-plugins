@@ -79,6 +79,37 @@ class InvestigationTests(unittest.TestCase):
         ensure = next(r for r in self.fake.requests if r["path"].endswith("/ensure-session-investigation"))
         self.assertNotIn("context", ensure["body"])
 
+    def test_session_guidance_separates_accepting_work_from_owner_authority(self):
+        self.setup_live()
+        ctx = self.start()
+        self.assertIn("If work is planned or underway, use accepted, not noted, even for a cue", ctx)
+        self.assertIn("does not make it owner authorization or widen your permissions", ctx)
+        self.assertIn("use challenge for a requested correction", ctx)
+        self.assertIn("--note '<response>'", ctx)
+
+    def test_existing_session_receives_actionable_cue_guidance_at_tool_completion(self):
+        self.setup_live()
+        self.start()
+        sessions = self.home / ".cardinal" / "investigations" / "sessions"
+        binding = json.loads((sessions / f"{SESSION}.json").read_text())
+        cue = {"investigation_id": INV, "seq": 12, "type": "cue.added", "class": "control",
+               "authority": "advisory", "created_at": "2026-10-12T00:47:48Z",
+               "producer": {"principal": {"kind": "user", "id": "supervisor"},
+                            "session_id": "supervisor-session", "is_investigation_author": True},
+               "payload": {"text": "Inspect accounting headers and pod placement."}}
+        inbox = sessions / f"{SESSION}.inbox.json"
+        inbox.write_text(json.dumps({"investigation_id": INV, "after": binding["cursor"],
+                                     "through": 12, "events": [cue]}))
+        post = {**SESSION_START, "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "git status --short"}, "tool_response": "",
+                "tool_use_id": "call_status"}
+        delivered = self.run_hook("ToolEvidence", post, CARDINAL_INVESTIGATION_POLLER="0")
+        self.assertIn("authority: ADVISORY", delivered.stdout)
+        self.assertIn("If work is planned or underway, use accepted, not noted, even for a cue", delivered.stdout)
+        self.assertIn("does not make it owner authorization", delivered.stdout)
+        self.assertEqual(json.loads((sessions / f"{SESSION}.json").read_text())["cursor"], 12)
+        self.assertFalse(inbox.exists())
+
     def test_legacy_projection_flag_does_not_change_session_authoring(self):
         self.setup_live(enabled=False)
         ctx = self.start()
@@ -88,7 +119,9 @@ class InvestigationTests(unittest.TestCase):
 
     def test_joined_non_author_cannot_checkpoint(self):
         self.setup_live(author=False)
-        self.assertIn("another author's", self.start())
+        ctx = self.start()
+        self.assertIn("another author's", ctx)
+        self.assertNotIn("use accepted", ctx)
         before = len(self.fake.requests)
         out = self.cli("checkpoint", data='[]')
         self.assertNotEqual(out.returncode, 0)

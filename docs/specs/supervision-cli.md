@@ -41,6 +41,26 @@ Explicit credential files and all shared Codex/Cursor/Gemini scoped posts retain
 the required target/outbox rule. Member outbox identity has
 `grant_id: null`; retries retain the same advisory content and key.
 
+## Acknowledgment and action
+
+Disposition describes the worker's response, independently of the event's
+authority. Use `accepted --note '<what I will do>'` when adopting a request or
+suggestion, `declined --note '<why not>'` when rejecting it, and `noted` only for
+information requiring no follow-up. Work already underway is accepted work,
+including when the request arrived as a cue. Accepting an advisory does not
+turn it into owner authorization or widen the worker's permissions. Checkpoint
+the completed result with `refs: ["#<event seq>"]`; acceptance is not completion.
+
+Supervisors should post a `challenge` for a requested correction, test, or other
+work needing an explicit position. A `cue` supplies an informational lead;
+a `question` asks a question. The worker still acknowledges adopted work as
+accepted if a sender used a cue. These meanings appear in session guidance,
+each event-delivery batch, and `ack --help` / `post --help`, without a
+server capability requirement. Event types and server validation are unchanged.
+The delegated-supervision workflow in PR #200 adds stricter challenge positions
+and tracks accepted challenges through resolution; this guidance also covers
+legacy servers and cues outside that workflow.
+
 ## Read and follow semantics
 
 Explicit investigation reads and Claude reads page through the visible stream

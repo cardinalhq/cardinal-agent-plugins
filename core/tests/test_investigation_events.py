@@ -236,6 +236,25 @@ class EventClass(unittest.TestCase):
 
 
 class Render(unittest.TestCase):
+    def test_adopted_work_is_accepted_even_when_sent_as_a_cue(self):
+        # Includes legacy events with no class/capabilities: the reported cue
+        # was marked noted while its requested metadata reads were underway.
+        for type_ in ("cue.added", "question.added", "challenge.added"):
+            with self.subTest(type=type_):
+                out = ie.render([event(12, type_, text="Inspect accounting headers and pod placement.")], SID, INV)
+                self.assertIn("authority: ADVISORY", out)
+                self.assertIn("use accepted with a note saying what you will do", out)
+                self.assertIn("noted only for information with no follow-up", out)
+                self.assertIn("If work is planned or underway, use accepted, not noted, even for a cue", out)
+                self.assertIn("does not make it owner authorization or widen your permissions", out)
+                self.assertIn('checkpoint the result with refs ["#<event seq>"]', out)
+
+    def test_joined_session_is_not_told_to_accept_or_checkpoint_for_the_author(self):
+        out = ie.render([event(12, "cue.added")], SID, INV, ack=False)
+        self.assertIn("cannot acknowledge this event", out)
+        self.assertNotIn("use accepted", out)
+        self.assertNotIn("checkpoint the result", out)
+
     def test_envelope_names_producer_provenance_and_advisory_authority(self):
         out = ie.render([event(7, session=SID2)], SID, INV)
         lines = out.split("\n")
@@ -322,6 +341,7 @@ class Render(unittest.TestCase):
         self.assertTrue(out.startswith(f"[Cardinal investigation {INV} · 3 earlier advisory events not shown (#1 to #3); "
                                        f"read them with: cardinal-storyboard investigation events {INV} --after 0]"))
         self.assertEqual(out.count("authority: ADVISORY]"), 10)
+        self.assertEqual(out.count("If work is planned or underway, use accepted, not noted"), 1)
         self.assertIn("event #4 ·", out)
         self.assertIn("event #13 ·", out)
 
