@@ -163,6 +163,9 @@ as owner input of that Investigation (`owner_input.capture`):
 
 ### Limits
 
+What Gemini CLI can and can't do next to the Claude, Codex and Cursor plugins,
+feature by feature, with a citation for every limit: [`docs/parity.md`](../../docs/parity.md).
+
 - **Checks preview: a hook cannot reload skills.** Gemini CLI loads an
   extension's `skills/` when it loads the extension
   (`ExtensionManager.loadExtension`), and a SessionStart hook's output

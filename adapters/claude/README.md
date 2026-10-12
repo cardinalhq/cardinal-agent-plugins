@@ -303,3 +303,15 @@ environment), or the connect state file `~/.claude/cardinal.json`.
   Claude Code's Monitor, `range status <id>` prints a local snapshot, and
   `continue_behavior_range` supplies edge extents or restarts a stopped worker.
 - `cardinal-install-site`: see the install-site skill.
+
+## Limits and parity
+
+Claude Code is the reference runtime: every feature in the cross-agent matrix
+is present here except Cursor's connect-time owner-input consent (Claude shows
+the per-session disclosure instead, so it needs none). Two things are Claude-only by design: the invariant check (an internal
+developer gate, `hooks/invariant-check.py`) and following a Checks range run
+with the Monitor tool (Codex, Cursor and Gemini CLI poll `get_behavior_range`
+instead). What the Codex, Cursor and Gemini CLI plugins can and can't do next
+to this one, feature by feature, with a citation for every limit:
+[`docs/parity.md`](../../docs/parity.md). A new hook in `hooks/hooks.json`
+fails `tests/test_parity_matrix.py` until it is mapped to a feature there.

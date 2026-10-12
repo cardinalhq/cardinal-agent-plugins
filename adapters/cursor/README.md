@@ -265,6 +265,9 @@ fixtures are `tests/test_cursor_checks.py`.
 
 ## Limits on Cursor
 
+What Cursor can and can't do next to the Claude, Codex and Gemini CLI plugins,
+feature by feature, with a citation for every limit: [`docs/parity.md`](../../docs/parity.md).
+
 Each of these is a property of Cursor, not of the plugin:
 
 - **Checks preview: a change takes effect at the next session; no skill
@@ -294,6 +297,12 @@ Each of these is a property of Cursor, not of the plugin:
   `additional_context`, so a subagent can't be handed the discovery block when
   it starts ([hooks docs](https://cursor.com/docs/agent/hooks)). Staged items
   still reach it at its first `postToolUse`.
+- **A subagent's tool call may get the session's advisories.** The tool-boundary
+  delivery skips a payload that names a subagent (`agent_id` / `subagent_id`),
+  but Cursor documents no subagent id on its tool hooks
+  ([hooks docs](https://cursor.com/docs/agent/hooks)). If a subagent's
+  `postToolUse` carries the parent conversation's id, the advisories can reach
+  the subagent instead of the main agent. Not checked on a live Cursor.
 - **No automatic context stamping on storyboard tools.** `beforeMCPExecution`
   answers with a permission only and can't rewrite the call's input; the agent
   passes `cardinal-storyboard context` (see [Storyboard associations](#storyboard-associations)).

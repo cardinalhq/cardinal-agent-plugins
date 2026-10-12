@@ -375,6 +375,9 @@ servers without projection are described honestly as not automatically updating.
 
 ### Platform limits
 
+What Codex can and can't do next to the Claude, Cursor and Gemini CLI plugins,
+feature by feature, with a citation for every limit: [`docs/parity.md`](../../docs/parity.md).
+
 - `/prompts:<name>` custom prompts do not exist in codex-cli 0.160.1 / 0.162.1
   (the TUI answers "Unrecognized command"; `codex exec` passes the text
   through literally), so there is no expanded custom-prompt shape to handle.
