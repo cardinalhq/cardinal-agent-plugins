@@ -416,6 +416,11 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
 
         binding = ie.read_binding(Path.home(), session_id)
         prompt = payload.get("prompt")
+        if owner_input.enabled(binding) and just_after_agent(session_id):
+            # Another hook's AfterAgent block re-fired BeforeAgent with its
+            # reason as the prompt: not typed (AFTER_AGENT_REFIRE_S).
+            status = "not_typed"
+            return None
         if owner_input.enabled(binding) and custom_command_expansion(prompt, cwd):
             status = "custom_command"
             return None
@@ -1369,6 +1374,57 @@ def handle_after_tool(payload: dict[str, Any]) -> None:
 # HOOK_TIMEOUT_MS (10 s).
 AFTER_AGENT_BUDGET_S = 2.6
 
+# When ANOTHER hook's AfterAgent blocks, gemini-cli re-fires BeforeAgent with
+# the block reason as `prompt` (GeminiClient.sendMessageStream): that text is
+# not what the owner typed. Every AfterAgent turn end records when it ran
+# (wall clock, in a small per-session file under ~/.gemini/cardinal/, not the
+# binding, so no session lock is contended), and a BeforeAgent within
+# AFTER_AGENT_REFIRE_S of it is not captured (not_typed).
+AFTER_AGENT_REFIRE_S = 2.0
+_SAFE_SID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
+def after_agent_marker(session_id: str) -> Path | None:
+    """~/.gemini/cardinal/after-agent/<sid>.json, or None for an id that is
+    not a safe file name."""
+    if not isinstance(session_id, str) or not _SAFE_SID_RE.fullmatch(session_id) or session_id in (".", ".."):
+        return None
+    return PATHS.runtime_dir / "after-agent" / f"{session_id}.json"
+
+
+def record_after_agent(session_id: str | None) -> None:
+    """Note that this session's AfterAgent ran now ({last_after_agent_at}).
+    Never raises."""
+    try:
+        path = after_agent_marker(session_id or "")
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"last_after_agent_at": time.time()}), encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except Exception:
+        pass
+
+
+def just_after_agent(session_id: str, now: float | None = None) -> bool:
+    """Whether this session's AfterAgent ran within AFTER_AGENT_REFIRE_S of
+    `now` (wall clock): BeforeAgent is then most likely the re-fire of
+    another hook's AfterAgent block. The wall clock may step: a recorded time
+    up to the window AHEAD of now counts too (never capture when unsure).
+    Local file read only; never raises."""
+    try:
+        path = after_agent_marker(session_id)
+        if path is None or not path.exists():
+            return False
+        at = json.loads(path.read_text(encoding="utf-8")).get("last_after_agent_at")
+        if not isinstance(at, (int, float)) or isinstance(at, bool):
+            return False
+        now = time.time() if now is None else now
+        return abs(now - at) < AFTER_AGENT_REFIRE_S
+    except Exception:
+        return False
+
 
 def turn_end(payload: dict[str, Any], session_id: str | None) -> None:
     """investigation_agent.turn_end on runtime "gemini": what is deliverable
@@ -1380,7 +1436,10 @@ def turn_end(payload: dict[str, Any], session_id: str | None) -> None:
     (gemini-cli 0.50.0 GeminiClient.sendMessageStream,
     chunk-W4YMYD53.js:335735-335757), so advisory text would become owner
     input (R1; investigation_turn.TURN_END_BLOCK["gemini"] is False).
-    Never raises."""
+    The time it ran is recorded (record_after_agent) at its start and again
+    at its end, since a re-fired BeforeAgent follows the last AfterAgent hook
+    to finish. Never raises."""
+    record_after_agent(session_id)
     try:
         from cardinal_core import investigation_agent
 
@@ -1391,6 +1450,7 @@ def turn_end(payload: dict[str, Any], session_id: str | None) -> None:
                                      cwd=cwd if isinstance(cwd, str) else None)
     except Exception:
         pass
+    record_after_agent(session_id)
 
 def subagent_description_from_payload(payload: dict[str, Any]) -> str | None:
     """Best-effort extraction of the subagent's short task label. Task

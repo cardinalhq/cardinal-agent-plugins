@@ -200,9 +200,19 @@ class GeminiInvestigationTests(unittest.TestCase):
     def prompt(self, text: str, **env: str) -> dict:
         return self.out(self.run_hook("BeforeAgent", {"prompt": text}, **env))
 
-    def after_agent(self, **payload: Any) -> subprocess.CompletedProcess:
-        return self.run_hook("AfterAgent", {"prompt": "x", "prompt_response": "done",
-                                            "stop_hook_active": False, **payload})
+    @property
+    def after_agent_marker(self) -> Path:
+        return self.home / ".gemini" / "cardinal" / "after-agent" / f"{SID}.json"
+
+    def after_agent(self, refire_window: bool = False, **payload: Any) -> subprocess.CompletedProcess:
+        """AfterAgent (the turn end). Unless refire_window, its time is moved
+        back past the re-fire window, as when the owner types the next prompt
+        a while later."""
+        res = self.run_hook("AfterAgent", {"prompt": "x", "prompt_response": "done",
+                                           "stop_hook_active": False, **payload})
+        if not refire_window and self.after_agent_marker.exists():
+            self.after_agent_marker.write_text(json.dumps({"last_after_agent_at": time.time() - 60}))
+        return res
 
     def wait_records(self, n: int, timeout: float = 15.0) -> list:
         deadline = time.monotonic() + timeout
@@ -358,6 +368,40 @@ class OwnerInputTests(GeminiInvestigationTests):
         self.run_hook("BeforeAgent", {"prompt": TYPED, "agent_id": "sub-1"})
         time.sleep(1.0)
         self.assertEqual(self.fake.records(), [])
+
+    def test_a_before_agent_right_after_after_agent_is_not_captured(self):
+        # Another hook's AfterAgent blocked: gemini-cli re-fires BeforeAgent
+        # with the block reason as the prompt.
+        self.disclosed()
+        self.after_agent(refire_window=True)
+        self.assertTrue(self.after_agent_marker.exists())
+        out = self.prompt("Another hook's block reason: run the linter before stopping.")
+        self.assertNotIn("decision", out)
+        time.sleep(1.0)
+        self.assertEqual(self.fake.records(), [])
+        # Past the window, a prompt is the owner's again.
+        self.after_agent_marker.write_text(json.dumps({"last_after_agent_at": time.time() - 2.5}))
+        self.prompt(TYPED)
+        self.assertEqual([r["payload"]["text"] for r in self.wait_records(1)], [TYPED])
+
+    def test_the_refire_window(self):
+        mod = load_hook()
+        self.assertEqual(mod.AFTER_AGENT_REFIRE_S, 2.0)
+        self.assertFalse(mod.just_after_agent(SID), "no AfterAgent yet")
+        mod.record_after_agent(SID)
+        self.assertTrue(self.after_agent_marker.exists())
+        at = json.loads(self.after_agent_marker.read_text())["last_after_agent_at"]
+        self.assertTrue(mod.just_after_agent(SID, now=at + 1.9))
+        self.assertFalse(mod.just_after_agent(SID, now=at + 2.0))
+        self.assertTrue(mod.just_after_agent(SID, now=at - 1.0), "a clock stepped back: unsure, not captured")
+        self.assertFalse(mod.just_after_agent(SID, now=at - 5.0))
+        self.after_agent_marker.write_text("not json")
+        self.assertFalse(mod.just_after_agent(SID))
+        # Never a path outside the runtime dir.
+        self.assertIsNone(mod.after_agent_marker("../x"))
+        self.assertIsNone(mod.after_agent_marker(".."))
+        mod.record_after_agent("../escape")
+        self.assertFalse((self.home / ".gemini" / "cardinal" / "escape.json").exists())
 
     def prompt_with_checked_stdout(self, fail_write: bool) -> str:
         """BeforeAgent with a stdout that notes, at every write, whether the

@@ -229,6 +229,11 @@ Each of these is a property of Cursor, not of the plugin:
   text would turn into owner input and start a turn by itself
   ([hooks docs](https://cursor.com/docs/agent/hooks)). `beforeSubmitPrompt` has
   no context output. The plugin never uses `followup_message`.
+- **Another hook's `followup_message` may be recorded as owner input.** It is
+  unverified whether a `followup_message` from another hook's `stop` fires
+  `beforeSubmitPrompt`. If it does, that text reaches the owner-input capture
+  like a typed prompt and could be recorded (with your consent on), since the
+  payload does not say where the prompt came from.
 - **No automatic context stamping on storyboard tools.** `beforeMCPExecution`
   answers with a permission only and can't rewrite the call's input; the agent
   passes `cardinal-storyboard context` (see [Storyboard associations](#storyboard-associations)).

@@ -143,7 +143,8 @@ as owner input of that Investigation (`owner_input.capture`):
   loop-recovery request, `/init`'s `GEMINI.md` template, an MCP server's
   prompt (submitted as a JSON string literal, so a prompt that is exactly one
   quoted JSON string is skipped), a prompt that names a subagent
-  (`agent_id`) and the same prompt again within one turn are never recorded.
+  (`agent_id`) and the same prompt again within one turn (and within 30 s)
+  are never recorded.
   `/plan <args>` submits exactly the args you typed, and they are recorded.
 - **No waiting.** The turn is taken and the prompt queued under the session
   lock; a detached process posts it (`AfterAgent` flushes what is left).
@@ -166,6 +167,13 @@ as owner input of that Investigation (`owner_input.capture`):
 - **Advisories after the turn's last tool call** cannot be delivered in that
   turn (`AfterAgent` never blocks, above): they are delivered at the next
   `BeforeAgent`, or at the next tool call.
+- **A prompt right after a turn ends is not recorded.** When another
+  extension's or settings hook's `AfterAgent` blocks, Gemini CLI re-fires
+  `BeforeAgent` with that hook's reason as the `prompt`, which nothing marks
+  as not typed. Every `AfterAgent` notes when it ran
+  (`~/.gemini/cardinal/after-agent/<session>.json`), and a `BeforeAgent`
+  within 2 s of it is not captured. A prompt you really submit that fast (a
+  message queued while the agent was still working) is not recorded either.
 - **Rendered PNGs are outside the workspace.** Gemini's `read_file` reads only
   the workspace and the project temp directory, so the PNGs the preview hook
   names under `~/.gemini/cardinal/storyboards/` need
