@@ -116,7 +116,7 @@ The consent is stored in `~/.cursor/cardinal/owner-input-consent.json` (0600), v
 
 **Kill switch**, whatever the consent says: `CARDINAL_OWNER_INPUT=0` (or `false` / `off` / `no`) in the environment Cursor's hooks run with, or `{"cursor": "off"}` in `~/.cardinal/owner-input.json`. The file is for GUI launches, which don't see your shell's environment. With either set, nothing is captured and queued prompts are deleted instead of sent.
 
-How it is captured: `beforeSubmitPrompt` calls `cardinal_core.owner_input.capture(..., detached=True)`. The turn is numbered under the session lock and a detached process posts it, so the prompt never waits on the network, and nothing ever blocks it or prints. A payload naming a subagent is refused. The same prompt again before the turn ends is skipped as a re-fire, so the dedupe depends on `stop` running `turn_end`. Anything still queued is flushed at `stop`.
+How it is captured: `beforeSubmitPrompt` calls `cardinal_core.owner_input.capture(..., detached=True)`. The turn is numbered under the session lock and a detached process posts it, so the prompt never waits on the network, and nothing ever blocks it or prints. A payload naming a subagent is refused. Cursor fires `beforeSubmitPrompt` once per prompt, so the same prompt typed twice is recorded twice. Anything still queued is flushed at `stop`.
 
 ## Evidence capture (storyboards)
 
