@@ -13,6 +13,8 @@ subprocesses with HOME overridden to a temp dir.
 Run with: python3 -m unittest tests.test_cardinal_plugin -v
 """
 
+from __future__ import annotations
+
 import importlib.util
 import json
 import os

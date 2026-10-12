@@ -4,10 +4,22 @@ on:
   pull_request:
     paths:
       - 'common/behavior/**'
-      - 'adapters/claude/bin/cardinal-behavior'
-      - 'adapters/claude/.mcp.json'
-      - 'adapters/claude/.claude-plugin/plugin.json'
+      - 'common/checks/**'
+      - 'core/cardinal_core/checks_*.py'
+      - 'core/tests/test_checks_install.py'
+      - 'adapters/*/bin/cardinal-behavior'
+      - 'adapters/*/bin/cardinal-checks'
+      - 'adapters/*/scripts/cardinal-behavior'
+      - 'adapters/*/scripts/cardinal-checks'
+      - 'adapters/*/checks/**'
+      - 'adapters/*/.mcp.json'
+      - 'adapters/*/.claude-plugin/plugin.json'
+      - 'adapters/*/.codex-plugin/plugin.json'
+      - 'adapters/*/.cursor-plugin/plugin.json'
+      - 'adapters/*/.gemini-plugin/plugin.json'
+      - 'adapters/gemini/extension/gemini-extension.json'
       - 'build/release.py'
+      - 'build/sync_skills.py'
       - 'tests/test_behavior_release.py'
       - '.github/workflows/behavior.yml'
       - '.github/workflows/release-mirrors.yml'
@@ -15,10 +27,22 @@ on:
     branches: [main]
     paths:
       - 'common/behavior/**'
-      - 'adapters/claude/bin/cardinal-behavior'
-      - 'adapters/claude/.mcp.json'
-      - 'adapters/claude/.claude-plugin/plugin.json'
+      - 'common/checks/**'
+      - 'core/cardinal_core/checks_*.py'
+      - 'core/tests/test_checks_install.py'
+      - 'adapters/*/bin/cardinal-behavior'
+      - 'adapters/*/bin/cardinal-checks'
+      - 'adapters/*/scripts/cardinal-behavior'
+      - 'adapters/*/scripts/cardinal-checks'
+      - 'adapters/*/checks/**'
+      - 'adapters/*/.mcp.json'
+      - 'adapters/*/.claude-plugin/plugin.json'
+      - 'adapters/*/.codex-plugin/plugin.json'
+      - 'adapters/*/.cursor-plugin/plugin.json'
+      - 'adapters/*/.gemini-plugin/plugin.json'
+      - 'adapters/gemini/extension/gemini-extension.json'
       - 'build/release.py'
+      - 'build/sync_skills.py'
       - 'tests/test_behavior_release.py'
       - '.github/workflows/behavior.yml'
       - '.github/workflows/release-mirrors.yml'
@@ -39,5 +63,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Behavior bridge
         run: python3 -m unittest discover -s common/behavior/tests -v
-      - name: Packaged behavior MCP smoke test
+      - name: Checks preview core (opt-in, CLI)
+        run: cd core && python3 -m unittest tests.test_checks_install -v
+      - name: Checks skill templates in sync
+        run: python3 build/sync_skills.py --check
+      - name: Packaged behavior MCP smoke test (all four adapters)
         run: python3 -m unittest discover -s tests -p test_behavior_release.py -v
