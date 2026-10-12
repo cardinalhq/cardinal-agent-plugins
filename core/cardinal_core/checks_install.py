@@ -23,8 +23,10 @@ Per runtime:
   gemini   ~/.gemini/extensions/cardinal/skills/checks/ (Gemini CLI loads an
            extension's skills/; cardinal-connect builds that extension), only
            when that extension is Cardinal's.
-  On codex, cursor and gemini a change takes effect at the next session: no
-  skill reload, no skill-tool deny.
+  On codex and cursor a change takes effect at the next session: no skill
+  reload, no skill-tool deny. On gemini, BeforeTool --role checks-gate denies
+  activate_skill for the skill while off; the user's /skills reload applies
+  on / off to a running session (a hook cannot reload skills).
 
 State, per runtime (AgentPaths(runtime).runtime_dir / "checks", removed with
 the runtime's identity caches on disconnect, which turns the preview off):
@@ -65,6 +67,18 @@ ROUTING_RULE = (
     "events inside one trace, reading what was said, or a rule the user wants to reuse. Never build a "
     "check for something one aggregate query answers (counts, rates, top endpoints, latency); answer it."
 )
+
+# What an agent is told when it tries the checks skill while the preview is
+# off: Claude Code's Skill-tool deny (adapters/claude/hooks/checks-gate.py)
+# and Gemini CLI's activate_skill deny (BeforeTool --role checks-gate).
+DENY_REASON = (
+    "The Cardinal Checks preview is off on this machine, so the checks skill is unavailable. Answer with the "
+    "ordinary Cardinal query tools, or tell the user that per-trace checks are not enabled "
+    "(`cardinal-checks on` turns the preview on)."
+)
+# The checks skill's name in its SKILL.md frontmatter (Gemini CLI's
+# activate_skill passes it as tool_input.name).
+SKILL_NAME = "cardinal-checks"
 
 
 def _runtime(runtime: str) -> str:

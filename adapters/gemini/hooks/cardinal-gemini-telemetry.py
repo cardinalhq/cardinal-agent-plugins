@@ -36,6 +36,9 @@ Event dispatch (payload shapes: packages/core/src/hooks/types.ts):
                   (fires per streamed chunk; non-final chunks exit early)
   BeforeTool    → storyboard context stamping on Cardinal's storyboard
                   tools only (matcher), via hookSpecificOutput.tool_input
+  BeforeTool --role checks-gate
+                → denies the built-in activate_skill for the checks skill
+                  while the Checks preview is off (matcher ^activate_skill$)
   AfterTool     → cardinal.turn_tool + tool_result (per tool call); every
                   tool call (built-in or MCP, succeeded or failed; not
                   Cardinal's own) is also captured in the local evidence
@@ -1133,6 +1136,35 @@ def handle_before_tool(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+def checks_gate_decision(payload: dict[str, Any]) -> dict | None:
+    """The deny for Gemini CLI's built-in activate_skill naming the checks
+    skill (tool_input.name) while the Checks preview is off, else None.
+    gemini-cli 0.63.0 runs BeforeTool for activate_skill and blocks the call
+    on stdout {"decision": "deny", "reason"} with exit 0. A session that
+    loaded the skill before `cardinal-checks off` keeps listing it until the
+    user's /skills reload; this keeps it from being used meanwhile."""
+    if payload.get("tool_name") not in (None, "activate_skill"):
+        return None
+    tool_input = payload.get("tool_input")
+    name = tool_input.get("name") if isinstance(tool_input, dict) else None
+    from cardinal_core import checks_install
+
+    if not isinstance(name, str) or name.strip() != checks_install.SKILL_NAME:
+        return None
+    if checks_install.is_enabled("gemini"):
+        return None
+    return {"decision": "deny", "reason": checks_install.DENY_REASON}
+
+
+def handle_before_tool_checks_gate(payload: dict[str, Any]) -> None:
+    """BeforeTool --role checks-gate (its own hook group, matcher
+    ^activate_skill$: Gemini dedupes an event's hooks by name:command)."""
+    out = checks_gate_decision(payload)
+    if out is not None:
+        sys.stdout.write(json.dumps(out))
+        sys.stdout.flush()
+
+
 # ---------------------------------------------------------------------------
 # AfterTool — the Investigation and storyboard authoring
 # (cardinal_core.investigation_agent, storyboard_authoring)
@@ -1598,6 +1630,7 @@ HANDLERS = {
 # (event, --role) -> handler: the extra hook groups cardinal-connect registers.
 ROLE_HANDLERS = {
     ("AfterTool", "preview"): handle_after_tool_preview,
+    ("BeforeTool", "checks-gate"): handle_before_tool_checks_gate,
 }
 
 
@@ -1605,7 +1638,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--event")
     # A second hook group on the same event needs its own command (Gemini
-    # dedupes by name:command): AfterTool --role preview.
+    # dedupes by name:command): AfterTool --role preview, BeforeTool --role
+    # checks-gate.
     parser.add_argument("--role", default="")
     parser.add_argument("--background", help=argparse.SUPPRESS)
     args = parser.parse_args()

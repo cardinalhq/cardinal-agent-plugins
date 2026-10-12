@@ -73,6 +73,9 @@ def _on_text(runtime: str) -> str:
     if runtime == "claude":
         return ("Checks preview is on. Start a new session (or run /reload-plugins) and ask a per-trace "
                 "question, e.g. \"find traces where …\". Judge-based checks are experimental.")
+    if runtime == "gemini":
+        return ("Checks preview is on. Start a new Gemini CLI session (or type /skills reload in a running one) "
+                "and ask a per-trace question, e.g. \"find traces where …\". Judge-based checks are experimental.")
     return (f"Checks preview is on. Start a new {checks_install.DISPLAY[runtime]} session (a running one does "
             "not pick the skill up) and ask a per-trace question, e.g. \"find traces where …\". "
             "Judge-based checks are experimental.")
@@ -82,6 +85,9 @@ def _off_text(runtime: str) -> str:
     if runtime == "claude":
         return ("Checks preview is off. Claude can no longer invoke the checks skill; the raw "
                 "cardinal-behavior tools stay available.")
+    if runtime == "gemini":
+        return ("Checks preview is off. Gemini CLI can no longer activate the checks skill; a running session "
+                "lists it until you type /skills reload. The raw cardinal-behavior tools stay available.")
     return (f"Checks preview is off. New {checks_install.DISPLAY[runtime]} sessions no longer have the checks "
             "skill; a session already running keeps it until it ends. The raw cardinal-behavior tools stay "
             "available.")

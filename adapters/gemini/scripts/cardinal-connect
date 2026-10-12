@@ -78,6 +78,9 @@ PREVIEW_TIMEOUT_MS = 150000
 # getHookKey, chunk-W4YMYD53.js:324365, and HookPlanner.deduplicateHooks),
 # so a second group on the same event needs its own command: the role.
 #   BeforeTool       context stamping on Cardinal's storyboard tools
+#   BeforeTool       role checks-gate: denies activate_skill for the checks
+#                    skill while the Checks preview is off (matcher: the
+#                    built-in tool's exact name)
 #   AfterTool        telemetry, evidence, advisories, authoring (every call)
 #   AfterTool        role preview: the storyboard__preview render (slow)
 #   AfterAgent       the turn's end: flush and stage only, never a block
@@ -85,6 +88,7 @@ HOOK_GROUPS = (
     ("SessionStart", "", "", HOOK_TIMEOUT_MS),
     ("BeforeAgent", "", "", HOOK_TIMEOUT_MS),
     ("BeforeTool", "storyboard__(create|add_act|publish|find)$", "", HOOK_TIMEOUT_MS),
+    ("BeforeTool", "^activate_skill$", "checks-gate", HOOK_TIMEOUT_MS),
     ("AfterModel", "", "", HOOK_TIMEOUT_MS),
     ("AfterTool", "", "", HOOK_TIMEOUT_MS),
     ("AfterTool", "storyboard__preview$", "preview", PREVIEW_TIMEOUT_MS),

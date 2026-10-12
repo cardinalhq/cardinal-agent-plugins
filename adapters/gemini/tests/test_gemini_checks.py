@@ -190,6 +190,41 @@ class ChecksSkillTests(PluginCopy):
         self.assertEqual(self.checks("off").returncode, 0)
         self.assertFalse(skill.exists())
 
+    def gate(self, name, tool_name="activate_skill"):
+        result = subprocess.run([sys.executable, str(self.plugin / "hooks" / "cardinal-gemini-telemetry.py"),
+                                 "--event", "BeforeTool", "--role", "checks-gate"],
+                                input=json.dumps({"session_id": "s1", "hook_event_name": "BeforeTool",
+                                                  "tool_name": tool_name, "tool_input": {"name": name},
+                                                  "cwd": str(self.home)}),
+                                capture_output=True, text=True, env=self.env(), timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout) if result.stdout.strip() else None
+
+    def test_checks_gate_denies_activate_skill_for_the_checks_skill_while_off(self):
+        denied = self.gate("cardinal-checks")
+        self.assertEqual(denied["decision"], "deny")
+        self.assertIn("Checks preview is off", denied["reason"])
+        self.assertIn("cardinal-checks on", denied["reason"])
+        # Other skills, and other tools, pass untouched.
+        self.assertIsNone(self.gate("cardinal-storyboard"))
+        self.assertIsNone(self.gate("cardinal-checks", tool_name="run_shell_command"))
+
+    def test_checks_gate_allows_the_checks_skill_while_on(self):
+        self.connect.install_extension_bundle("https://c.example/mcp", "ck_1")
+        self.assertEqual(self.checks("on").returncode, 0)
+        self.assertIsNone(self.gate("cardinal-checks"))
+        self.assertEqual(self.checks("off").returncode, 0)
+        self.assertEqual(self.gate("cardinal-checks")["decision"], "deny")
+
+    def test_checks_gate_is_registered_in_hooks_json_and_hook_groups(self):
+        group = ("BeforeTool", "^activate_skill$", "checks-gate", self.connect.HOOK_TIMEOUT_MS)
+        self.assertIn(group, self.connect.HOOK_GROUPS)
+        source = json.loads((ADAPTER / "extension" / "hooks" / "hooks.json").read_text())
+        commands = {g["matcher"]: g["hooks"][0]["command"] for g in source["hooks"]["BeforeTool"]}
+        self.assertEqual(commands["^activate_skill$"],
+                         "python3 __HOOK_SCRIPT__ --event BeforeTool --role checks-gate # cardinal-gemini-plugin")
+        self.assertEqual(len(set(commands.values())), len(commands), "Gemini dedupes hooks by name:command")
+
     def test_session_start_reconciles_and_routes_only_while_on_and_connected(self):
         self.connect_files()
         self.connect.install_extension_bundle("https://c.example/mcp", "ck_1")

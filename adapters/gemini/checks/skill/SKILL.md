@@ -49,5 +49,5 @@ exists on another instance (for example `otel-demo`) cannot be checked: say so a
   only when you need one.
 - The user turns the preview on or off in their own terminal with this plugin's
   `scripts/cardinal-checks on|off`. Never run it yourself. A change takes effect at the
-  next Gemini CLI session: Gemini CLI has no skill reload, so a running session keeps the
-  skill it started with.
+  next Gemini CLI session, or in this one after the user types `/skills reload`; while the
+  preview is off, activating this skill is denied.

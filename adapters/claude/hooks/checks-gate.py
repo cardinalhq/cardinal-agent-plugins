@@ -31,11 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _checks  # noqa: E402
 
 ROUTING_RULE = _checks.ROUTING_RULE
-DENY_REASON = (
-    "The Cardinal Checks preview is off on this machine, so the checks skill is unavailable. Answer with the "
-    "ordinary Cardinal query tools, or tell the user that per-trace checks are not enabled "
-    "(`cardinal-checks on` turns the preview on)."
-)
+DENY_REASON = _checks.checks_install.DENY_REASON
 
 
 def session_start(payload: dict) -> dict | None:

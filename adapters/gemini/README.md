@@ -154,15 +154,20 @@ as owner input of that Investigation (`owner_input.capture`):
 
 ### Limits
 
-- **Checks preview: a change takes effect at the next session; no skill
-  reload.** Claude Code's gate returns `reloadSkills` and denies its Skill
-  tool while the preview is off. Gemini CLI loads an extension's `skills/`
-  when it loads the extension (`ExtensionManager.loadExtension`), and a
-  SessionStart hook's output (`additionalContext`, `systemMessage`) cannot
-  make it load them again, so `cardinal-checks on` / `off` apply to sessions
-  started afterwards. Gemini CLI does run skills through its `activate_skill`
-  tool, so a BeforeTool deny would be possible; the plugin does not register
-  one (not a platform limit; a follow-up).
+- **Checks preview: a hook cannot reload skills.** Gemini CLI loads an
+  extension's `skills/` when it loads the extension
+  (`ExtensionManager.loadExtension`), and a SessionStart hook's output
+  (`additionalContext`, `systemMessage`) cannot make it load them again. So
+  `cardinal-checks on` / `off` apply to sessions started afterwards, or to a
+  running session once you type `/skills reload` (gemini-cli 0.63.0,
+  `chunk-ED56GFWH.js:101678`); no hook can trigger that reload, which is the
+  only remaining limit. While the preview is off, a session that still lists
+  the skill cannot use it: a second BeforeTool group (`--role checks-gate`,
+  matcher `^activate_skill$`; gemini-cli 0.63.0 runs BeforeTool for the
+  built-in `activate_skill`, `bundle/chunk-RWBXO4OP.js:342886, :348609`)
+  denies `activate_skill` for `cardinal-checks` (`tool_input.name`) with
+  `{"decision": "deny", "reason": ...}`. Re-run `cardinal-connect` after an
+  upgrade to register it.
 - **No subagent events.** Gemini CLI has no SubagentStart / SubagentStop hook
   event (gemini-cli 0.50.0 `HookEventName`, `chunk-W4YMYD53.js:324340-324352`),
   so a subagent gets no discovery block at its start, and `AfterTool` carries

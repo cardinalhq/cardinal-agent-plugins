@@ -107,6 +107,8 @@ class ConnectHookRegistrationTest(unittest.TestCase):
         self.assertIn(("AfterTool", "storyboard__preview$", "preview", 150000), groups)
         self.assertIn(("AfterTool", "", "", 10000), groups)
         self.assertEqual(self.connect.PREVIEW_TIMEOUT_MS, 150000)
+        # The Checks preview's activate_skill deny: its own BeforeTool group.
+        self.assertIn(("BeforeTool", "^activate_skill$", "checks-gate", 10000), groups)
 
     def test_handler_commands_are_distinct_per_event(self):
         # Gemini dedupes an event's hooks by name:command (getHookKey): two
