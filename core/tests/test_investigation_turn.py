@@ -341,6 +341,22 @@ class OwnerInputContract(OwnerInputBase):
                        "System: Potential loop detected. Details: x. Please take a step back"):
             self.assertIsNone(n(prompt), prompt)
 
+    def test_gemini_built_in_prompts_that_are_not_typed(self):
+        n = lambda p: oi.normalize_prompt("gemini", p)   # noqa: E731
+        init = ("\nYou are an AI agent that brings the power of Gemini directly into the terminal. Your task is to "
+                "analyze the current directory and generate a comprehensive GEMINI.md file to be used as "
+                "instructional context for future interactions.\n\n**Analysis Process:**\n")
+        self.assertIsNone(n(init), "/init's template")
+        # An MCP server's prompt: JSON.stringify(text).
+        self.assertIsNone(n(json.dumps("Summarize the open incidents\nfor team \"core\"")))
+        self.assertIsNone(n('  "x"  '))
+        self.assertIsNone(n(json.dumps("p") + "\n<hook_context>c</hook_context>"))
+        # Not a JSON string: recorded as typed.
+        for typed in ('"quoted" and more', '"unterminated', '"a" "b"', '"', "/plan add a cache layer"):
+            self.assertEqual(n(typed), typed.strip(), typed)
+        # Other runtimes are not touched by Gemini's rules.
+        self.assertEqual(oi.normalize_prompt("codex", '"x"'), '"x"')
+
     def test_other_runtimes_are_not_rewritten(self):
         typed = "keep <hook_context>this</hook_context> as typed"
         for runtime in ("claude", "codex", "cursor"):

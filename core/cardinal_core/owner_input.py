@@ -796,8 +796,16 @@ MACHINE_PROMPTS = {
     # Claude Code re-enters UserPromptSubmit with a synthetic body when a
     # background task finishes ("<task-notification>…" / "task-notification …").
     "claude": (re.compile(r"^\s*<?task-notification[\s>]", re.IGNORECASE),),
-    # gemini-cli's loop recovery sends this as the request (_recoverFromLoop).
-    "gemini": (re.compile(r"^\s*System: Potential loop detected\b"),),
+    # gemini-cli's loop recovery sends this as the request (_recoverFromLoop),
+    # and /init submits its GEMINI.md template (performInit, gemini-cli
+    # 0.63.0 packages/core/src/commands/init.ts). An MCP server's prompt
+    # (McpPromptLoader) is submitted as JSON.stringify(text): see
+    # _is_json_string, applied in normalize_prompt.
+    "gemini": (
+        re.compile(r"^\s*System: Potential loop detected\b"),
+        re.compile(r"^\s*You are an AI agent that brings the power of Gemini directly into the terminal\. "
+                   r"Your task is to analyze the current directory and generate a comprehensive GEMINI\.md file"),
+    ),
     # Codex submits these template prompts for /review's presets and /init's
     # AGENTS.md (captured from codex-cli 0.160.1 / 0.162.1 UserPromptSubmit
     # payloads; no agent_id on them). A /review with custom instructions
@@ -941,6 +949,19 @@ def is_machine_prompt(runtime: str, prompt: Any) -> bool:
     return isinstance(prompt, str) and any(r.match(prompt) for r in MACHINE_PROMPTS.get(runtime, ()))
 
 
+def _is_json_string(s: str) -> bool:
+    """`s` (stripped) is a JSON string literal: how gemini-cli submits an MCP
+    server's prompt (McpPromptLoader: submit_prompt with
+    JSON.stringify(text)), never what the owner typed."""
+    s = s.strip()
+    if len(s) < 2 or not (s.startswith('"') and s.endswith('"')):
+        return False
+    try:
+        return isinstance(json.loads(s), str)
+    except ValueError:
+        return False
+
+
 def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]:
     """What the owner typed, from the text `runtime`'s prompt hook got, or
     None when that cannot be told confidently (then nothing is captured):
@@ -953,8 +974,11 @@ def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]:
         marker). The rest is stripped of surrounding whitespace; any marker
         left over (an unpaired or nested hook_context, a stray "--- End of
         content ---"): None;
+      - gemini: a prompt that is a JSON string literal (an MCP server's
+        prompt, which gemini-cli submits as JSON.stringify(text)): None;
       - a machine prompt of the runtime (MACHINE_PROMPTS: Claude's task
-        notifications, Gemini's loop-recovery request): None.
+        notifications, Gemini's loop-recovery request and /init template):
+        None.
     Anything else is returned unchanged."""
     if not isinstance(prompt, str) or not prompt.strip():
         return None
@@ -966,6 +990,8 @@ def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]:
             prompt = cut.strip()
             if not prompt:
                 return None
+        if _is_json_string(prompt):
+            return None
     if is_machine_prompt(runtime, prompt):
         return None
     return prompt

@@ -132,14 +132,19 @@ as owner input of that Investigation (`owner_input.capture`):
   capture starts with the next prompt.
 - **Exactly what you typed.** Gemini hands `BeforeAgent` the request text:
   in `-p` mode the SessionStart context is prepended as
-  `<hook_context>…</hook_context>`, and an `@file` reference is followed by
-  the file's contents between `--- Content from referenced files ---` and
-  `--- End of content ---`; both are removed before anything is sent. A
-  custom TOML command (`~/.gemini/commands`, `<project>/.gemini/commands`, an
-  extension's `commands/`) reaches `BeforeAgent` already expanded, so a prompt
-  that is a command's template is recognized and never recorded. Gemini's
-  loop-recovery request, a prompt that names a subagent (`agent_id`) and the
-  same prompt again within one turn are never recorded.
+  `<hook_context>…</hook_context>`, and `@file` references append the
+  files' contents after what you typed, starting at `--- Content from
+  referenced files ---`; both are removed before anything is sent (the
+  referenced-files section up to the end of the prompt, so a file that itself
+  contains Gemini's markers cannot leak). A custom TOML command
+  (`~/.gemini/commands`, `<project>/.gemini/commands`, an extension's
+  `commands/`) reaches `BeforeAgent` already expanded, so a prompt that is a
+  command's template is recognized and never recorded. Gemini's
+  loop-recovery request, `/init`'s `GEMINI.md` template, an MCP server's
+  prompt (submitted as a JSON string literal, so a prompt that is exactly one
+  quoted JSON string is skipped), a prompt that names a subagent
+  (`agent_id`) and the same prompt again within one turn are never recorded.
+  `/plan <args>` submits exactly the args you typed, and they are recorded.
 - **No waiting.** The turn is taken and the prompt queued under the session
   lock; a detached process posts it (`AfterAgent` flushes what is left).
   `BeforeAgent` never waits on the network.
@@ -161,9 +166,6 @@ as owner input of that Investigation (`owner_input.capture`):
 - **Advisories after the turn's last tool call** cannot be delivered in that
   turn (`AfterAgent` never blocks, above): they are delivered at the next
   `BeforeAgent`, or at the next tool call.
-- **Built-in commands that submit a prompt** (for example `/plan`) reach
-  `BeforeAgent` as their expanded text, which no command file describes; that
-  text is recorded as the turn's owner input.
 - **Rendered PNGs are outside the workspace.** Gemini's `read_file` reads only
   the workspace and the project temp directory, so the PNGs the preview hook
   names under `~/.gemini/cardinal/storyboards/` need
