@@ -50,6 +50,8 @@ information requiring no follow-up. Work already underway is accepted work,
 including when the request arrived as a cue. Accepting an advisory does not
 turn it into owner authorization or widen the worker's permissions. Checkpoint
 the completed result with `refs: ["#<event seq>"]`; acceptance is not completion.
+`ACK_GUIDANCE` is the one place session guidance states that refs rule (with
+"Acceptance is not completion"); `SUPERVISION_LINE` no longer repeats it.
 
 Supervisors should post a `challenge` for a requested correction, test, or other
 work needing an explicit position. A `cue` supplies an informational lead;
@@ -84,6 +86,43 @@ Owner decisions are never excluded. An older server without viewer metadata
 excludes nothing. With repeated class filters, the route's single-class filter
 cannot represent the union, so the CLI reads unfiltered and displays the union.
 In-memory reads send single-class and type filters to the server.
+
+## Watching an investigation (supervisor guidance)
+
+A supervisor watches with one command, never a hand-written polling loop:
+
+```sh
+cardinal-storyboard investigation events <inv> --follow --json --fields compact
+```
+
+The same guidance appears in four places, from one source
+(`cardinal_core.investigation_text.WATCH_GUIDANCE` / `watch_command`): the
+`investigation events --help` epilog; one line on stderr from `investigation
+grant` naming the exact command for the grantee (with `--credential-file` when
+`--out` wrote one; stdout stays the single export line or the JSON); the
+"Supervising another session" section of the shared storyboard skill core
+(`common/storyboard/CORE.md`); and this spec. It says:
+
+- `--follow` replaces hand-written loops; run one `--follow` per watched
+  investigation.
+- `--exclude-self` is the default under `--follow` with a session (`--session`,
+  or the runtime's session id from the environment) or a grant;
+  `--include-self` turns it off.
+- `--fields compact` (with `--json`) gives every event the same bounded field
+  set with one uniform `text`.
+- Inside a sandbox with network off (Codex workspace-write, Cursor
+  Auto-review) these commands need the user's approval. The MCP tools
+  `storyboard__read_investigation_events` / `storyboard__post_investigation_event`
+  avoid that when no local evidence promotion is needed.
+
+## Links
+
+Session guidance and `investigation link` label both links
+(`investigation_text.link_lines`): `Storyboard (private draft until
+published): <url>` and `Investigation timeline (shows the live record before
+any publish): <url>`. Until an act is published the Storyboard shows only a
+private draft, so the guidance names the Investigation timeline as the link to
+share with someone who wants to follow the work.
 
 ## Capabilities and authority
 
