@@ -151,17 +151,28 @@ the approved contract, and the reason. Then ask the user to approve or correct e
 
 ## 9. Run over the requested range
 
-1. `execute_behavior_range` with the accepted version, the service and the exact range.
-   Then call `next_behavior_range_result` until `phase` changes. Windows run one at a time.
-   A window the API rejects for size is halved and retried automatically.
-   - `failed`: report the error verbatim and stop.
-2. **Phase `edges`**: traces that cross a window boundary may have been judged on part of
-   their spans. Use the spans query tools to measure the span extent (earliest start, latest
-   end, across every service) of each trace in `multi_window_traces`, and of each trace of
-   this service with spans on both sides of any listed boundary. Look a few minutes either
-   side of each boundary. Pass them as `trace_extents` `{trace_id: {start, end}}`, or `{}`
-   when none cross. Edge traces without an extent become UNKNOWN (`window-edge`); say so.
-3. Phase `whole` re-evaluates the edge traces whole, then `completed` returns the results.
+The run happens in the background. You listen to it and read local files. You never poll in a loop.
+
+1. `execute_behavior_range` with the accepted version, the service and the exact range. It
+   returns at once with `range_id`, `events_file` and `watch_command`.
+2. Start **Monitor** on `watch_command` (`cardinal-checks range watch <range_id>`, timeout
+   at the maximum). Each line is one event: a window done with its verdict counts, a
+   window split (too large, or its results couldn't be read), a retry, and so on. The
+   watch exits on `needs_extents`, `completed`, `failed` or `stalled`. If the Monitor
+   expires first, re-arm it. Keep the user posted in a line or two as windows finish.
+   Don't narrate every event.
+3. **`needs_extents`**: traces that cross a window boundary may have been judged on part
+   of their spans. Read the last line of `events_file` for `multi_window_traces` and
+   `boundaries`. Use the spans query tools to measure the span extent (earliest start,
+   latest end, across every service) of each listed trace, and of each trace of this
+   service with spans on both sides of a boundary. Look a few minutes either side of
+   each boundary. Call `continue_behavior_range` with `trace_extents`
+   `{trace_id: {start, end}}`, or `{}` when none cross, then listen again. Edge traces
+   without an extent become UNKNOWN (`window-edge`). Say so.
+4. **`stalled`**: the worker stopped. `continue_behavior_range` restarts it from its saved
+   state, then listen again. **`failed`**: report the error verbatim and stop.
+5. **`completed`**: read `summary_file` (bounded). Only open `result_file` (every raw
+   per-window verdict plus the canonical column) for the details you need, e.g. with `jq`.
 
 ## 10. Results
 
@@ -181,7 +192,7 @@ Show, in this order:
 7. **Judge usage**, as reported: calls, tokens, and cost or "not available"
    (`judge_usage`). It must be 0 calls for a rules-only check. Never estimate.
 
-Everything per window, raw, is in `result_file`. If you checkpoint the investigation, cite
+Everything per window, raw, is in `result_file`; the run's event log is `events_file`. If you checkpoint the investigation, cite
 the evidence ids of the tool results.
 
 ## 11. Storyboard

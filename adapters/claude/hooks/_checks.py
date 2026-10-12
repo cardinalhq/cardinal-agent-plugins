@@ -361,3 +361,138 @@ def accepted_checks(output: Path | None = None) -> list[dict]:
                       "diagnostic_version": version, "acceptance_id": program.get("acceptance_id"),
                       "compilation_scope": scope, "accepted_at": mtime}
     return sorted(found.values(), key=lambda c: c["accepted_at"], reverse=True)
+
+
+# --- background range runs (written by lib/behavior/range_runner.py) ----------
+
+RANGE_TERMINAL = ("needs_extents", "completed", "failed", "stalled")
+RANGE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def range_dir(range_id: str, output: Path | None = None) -> Path:
+    if not isinstance(range_id, str) or not RANGE_ID_RE.match(range_id):
+        raise ValueError("range id must be 32 lowercase hex characters")
+    return (output or behavior_output_dir()) / "ranges" / range_id
+
+
+def range_worker_running(directory: Path) -> bool:
+    import fcntl
+    try:
+        with (directory / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return False
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+
+
+def _counts(counts) -> str:
+    if not isinstance(counts, dict):
+        return "counts not reported"
+    order = ("MATCH", "NON_MATCH", "UNKNOWN", "NOT_APPLICABLE", "ERROR")
+    return " · ".join(f"{k} {counts.get(k, 0)}" for k in order)
+
+
+def _window(event) -> str:
+    w = event.get("window") or ["?", "?"]
+    return f"{w[0]}–{w[1]}"
+
+
+def format_range_event(event: dict, events_file: Path) -> str | None:
+    """One notification line per event worth acting on; None for the rest."""
+    kind = event.get("event")
+    if kind == "started":
+        return (f"started: {event.get('population')} {event.get('start')}–{event.get('end')}, "
+                f"{event.get('windows')} window(s){' (judge-based: experimental)' if event.get('judge_based') else ''}")
+    if kind in ("window_done", "whole_done"):
+        progress = event.get("progress") or {}
+        where = "whole-trace window" if kind == "whole_done" else "window"
+        tail = (f" ({progress.get('windows_done')} done, {progress.get('windows_left')} left)"
+                if kind == "window_done" else "")
+        return f"{where} {_window(event)} {event.get('status', '').lower()}: {_counts(event.get('verdicts'))}{tail}"
+    if kind == "window_split":
+        return f"window {_window(event)} split in two: {event.get('reason')}"
+    if kind in ("window_rejected", "whole_rejected", "window_unreadable"):
+        return f"{kind.replace('_', ' ')} {_window(event)}: {event.get('error') or 'results could not be read'}"
+    if kind == "read_retry":
+        return (f"results read for {_window(event)} failed ({event.get('failures')}x): {event.get('error')}; "
+                "retrying")
+    if kind == "needs_extents":
+        return (f"needs_extents: {event.get('multi_window_trace_count', 0)} trace(s) seen in several windows, "
+                f"{len(event.get('boundaries') or [])} boundaries. Read the last line of {events_file}, measure "
+                "span extents with the query tools, then call continue_behavior_range.")
+    if kind == "extents_received":
+        return (f"extents received for {event.get('traces')} trace(s); "
+                f"{event.get('whole_trace_windows')} whole-trace window(s) to run")
+    if kind == "completed":
+        return (f"completed: {event.get('population')} traces · {_counts(event.get('counts'))} · flagged "
+                f"{event.get('flagged')} · edge traces {event.get('edge_traces')} · conflicts {event.get('conflicts')}"
+                f" · coverage holes {event.get('coverage_holes')} · judge calls {event.get('judge_calls')}"
+                f"{' · EXPERIMENTAL' if event.get('experimental') else ''}. Read {event.get('summary_file')}")
+    if kind == "failed":
+        return f"failed: {event.get('error')}"
+    if kind == "stalled":
+        return f"stalled: {event.get('error')}. Call continue_behavior_range to restart the worker."
+    return None
+
+
+def watch_range(range_id: str, out, poll_s: float = 1.0, idle_s: float = 30.0, output: Path | None = None,
+                sleep=None) -> int:
+    """Stream a range run's events as lines until a terminal event.
+
+    Replays the events written so far, then follows the file. Exits 0 on a
+    terminal event; prints a stalled line and exits 0 when the worker is gone
+    with no terminal event for idle_s. Exits 2 for an unknown range."""
+    import time as _time
+    sleep = sleep or _time.sleep
+    directory = range_dir(range_id, output)
+    events_file = directory / "events.jsonl"
+    if not directory.is_dir():
+        print(f"cardinal-checks: no range run {range_id} under {directory.parent}", file=out)
+        return 2
+    offset, idle = 0, 0.0
+    while True:
+        try:
+            with events_file.open("rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+        except OSError:
+            chunk = b""
+        complete = chunk[: chunk.rfind(b"\n") + 1] if b"\n" in chunk else b""
+        offset += len(complete)
+        for raw in complete.decode("utf-8", "replace").splitlines():
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue
+            line = format_range_event(event, events_file)
+            if line:
+                print(line, file=out, flush=True)
+            if event.get("event") in RANGE_TERMINAL:
+                return 0
+        if complete:
+            idle = 0.0
+        else:
+            idle += poll_s
+            if idle >= idle_s and not range_worker_running(directory):
+                print(f"stalled: the range worker is not running and wrote nothing for {int(idle)}s. "
+                      "Call continue_behavior_range to restart it.", file=out, flush=True)
+                return 0
+        sleep(poll_s)
+
+
+def range_status(range_id: str, output: Path | None = None) -> dict:
+    directory = range_dir(range_id, output)
+    state = json.loads((directory / "state.json").read_text())
+    out = {"range_id": range_id, "phase": state.get("phase"), "population": state.get("population"),
+           "start": state.get("start"), "end": state.get("end"),
+           "windows_done": len(state.get("windows", [])), "windows_left": len(state.get("pending", [])),
+           "worker_running": range_worker_running(directory), "events_file": str(directory / "events.jsonl")}
+    if state.get("error"):
+        out["error"] = state["error"]
+    if (directory / "summary.json").is_file():
+        out["summary_file"] = str(directory / "summary.json")
+        out["result_file"] = str(directory / "result.json")
+    return out

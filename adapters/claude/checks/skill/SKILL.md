@@ -23,7 +23,8 @@ storyboard, reuse) and the lessons that keep checks honest.
 - Check tools (`mcp__plugin_cardinal_cardinal-behavior__*`), unchanged:
   `get_behavior_sdk`, `compile_behavior`, `test_behavior`, `inspect_behavior`,
   `get_behavior_compilation`, `run_behavior_regressions`, `accept_behavior`,
-  `execute_behavior_range` / `next_behavior_range_result` (any time range),
+  `execute_behavior_range` / `continue_behavior_range` (any time range, run in the
+  background; listen with Monitor on `cardinal-checks range watch <range_id>`),
   `get_behavior_execution`, `render_storyboard`. `execute_behavior` /
   `next_behavior_result` stay available for a single window of at most one hour.
 - `cardinal-checks` (on PATH via this plugin's bin/), the teaching-label ledger:
@@ -37,5 +38,8 @@ exists on another instance (for example `otel-demo`) cannot be checked: say so a
 
 - Turning the preview off (`cardinal-checks off`) removes this skill; if it was off you
   would not be reading this. Users turn it on with `cardinal-checks on` and a new session.
-- Long tool results land in files the tools name (`receipt_file`, `result_file`); read
-  them with the Read tool rather than asking for the full payload again.
+- Long tool results land in files the tools name (`receipt_file`, `summary_file`,
+  `result_file`, `events_file`); read them with the Read tool or `jq` rather than asking for
+  the full payload again.
+- A range run is listened to, never polled: Monitor on the `watch_command`, re-armed on
+  expiry, gets one notification per event while you keep working.

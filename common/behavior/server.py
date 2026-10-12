@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -16,6 +17,7 @@ import urllib.request
 import urllib.parse
 from storyboard import render_storyboard
 import range_run
+from range_runner import RangeRunner
 from compilation.files import private_json, private_text
 from compilation.hosted import APIRejected, Authoring, SDK_IDENTITIES
 
@@ -105,7 +107,10 @@ def compact(raw: dict) -> dict:
 MCP_TEXT_LIMIT = 1024 * 1024
 # A month of one-hour windows; longer ranges are almost certainly a mistake.
 MAX_RANGE_WINDOWS = 24 * 31
-RANGE_LIST_LIMIT = 100
+RANGE_LISTEN = ('The run continues in the background. Listen with Monitor on watch_command (one line per event; it '
+                'exits at needs_extents, completed, failed or stalled; re-arm it on expiry). On needs_extents or '
+                'stalled call continue_behavior_range; on completed read summary_file (result_file holds every raw '
+                'verdict).')
 
 
 def teaching_verdicts(results) -> list:
@@ -226,6 +231,9 @@ class Behavior(Authoring):
             raise RuntimeError(f'Cardinal API returned HTTP {status}; check the configured service and credentials') from None
         except urllib.error.URLError:
             raise RuntimeError('Cardinal API is unreachable; check the configured service') from None
+        except (OSError, http.client.HTTPException):
+            # e.g. RemoteDisconnected: a gateway closed a slow request without a response.
+            raise RuntimeError('Cardinal API closed the connection or timed out before answering') from None
 
     def state_path(self, execution_id):
         if not re.fullmatch('[a-f0-9]{32}', execution_id):
@@ -415,13 +423,8 @@ class Behavior(Authoring):
                             next_jev=after_jev + len(summaries) if after_jev + len(summaries) < len(receipts) else None)
         return response
 
-    # Range execution: consecutive one-hour windows through start()/poll(),
-    # with the window-edge canonicalization in range_run.py.
-
-    def range_path(self, range_id):
-        if not isinstance(range_id, str) or not re.fullmatch('[a-f0-9]{32}', range_id):
-            raise ValueError('invalid range reference')
-        return self.output / 'ranges' / f'{range_id}.json'
+    # Range execution runs in a detached worker (range_runner.py) that writes
+    # events and results to local files; these tools only start or continue it.
 
     def start_range(self, accepted_behavior, population, start, end):
         if self.legacy:
@@ -430,208 +433,25 @@ class Behavior(Authoring):
         program = json.loads(self.program_path(accepted_behavior).read_text())
         if not program.get('acceptance_id'):
             raise ValueError('Accept this immutable DiagnosticVersion before executing it')
-        windows = range_run.split_windows(range_run.parse_time(start), range_run.parse_time(end))
-        if len(windows) > MAX_RANGE_WINDOWS:
-            raise ValueError(f'range covers {len(windows)} one-hour windows; at most {MAX_RANGE_WINDOWS} are allowed')
-        range_id = os.urandom(16).hex()
         judge_based = (any((c.get('judge_site') or '').strip()
                            for c in (program.get('behavior_contract') or {}).get('clauses', []))
                        or range_run.uses_judge(program.get('source')))
-        state = {'range_id': range_id, 'accepted_behavior': accepted_behavior, 'population': population,
-                 'start': range_run.format_time(windows[0][0]), 'end': range_run.format_time(windows[-1][1]),
-                 'judge_based': judge_based, 'phase': 'windows', 'error': None, 'halvings': 0,
-                 'pending': [{'window': w} for w in windows], 'current': None, 'windows': [],
-                 'whole_pending': [], 'whole': [], 'extents': {},
-                 'created_at': time.time()}
-        private_json(self.range_path(range_id), state)
-        # Submit the first window now: a population the version is not bound to
-        # is rejected here, before any polling.
-        return self._range_step(state, time.monotonic() + 5)
+        runner = RangeRunner.create(self, accepted_behavior, population, start, end, judge_based, MAX_RANGE_WINDOWS)
+        spawned = runner.spawn(self.config.get('_config_path'))
+        # The new worker may not hold its lock yet.
+        return {**runner.snapshot(), 'worker_running': True if spawned else runner.worker_running(),
+                'next_action': RANGE_LISTEN}
 
-    def poll_range(self, range_id, wait_seconds=60, trace_extents=None):
-        state = json.loads(self.range_path(range_id).read_text())
-        if state.get('range_id') != range_id:
-            raise ValueError('range receipt identity mismatch')
+    def continue_range(self, range_id, trace_extents=None):
+        runner = RangeRunner(self, range_id)
         if trace_extents is not None:
-            if state['phase'] not in ('windows', 'edges'):
-                raise ValueError('trace_extents are accepted until the edge phase ends')
-            state['extents'].update(range_run.parse_extents(trace_extents))
-            if state['phase'] == 'edges':
-                self._plan_whole(state)
-            private_json(self.range_path(range_id), state)
-        deadline = time.monotonic() + max(0, min(120, float(wait_seconds)))
-        return self._range_step(state, deadline)
-
-    def _range_step(self, state, deadline):
-        path = self.range_path(state['range_id'])
-        fmt = range_run.format_time
-        while state['phase'] in ('windows', 'whole'):
-            current = state.get('current')
-            if current:
-                remaining = deadline - time.monotonic()
-                response = self.poll(current['execution_id'], wait_seconds=max(0, min(20, remaining)))
-                if response.get('receipt') or response['execution_status'] == 'FAILED':
-                    done = {**current, 'status': 'COMPLETED' if response.get('receipt') else 'FAILED'}
-                    state['windows' if state['phase'] == 'windows' else 'whole'].append(done)
-                    state['current'] = None
-                    private_json(path, state)
-                    continue
-                if time.monotonic() >= deadline:
-                    break
-                continue
-            queue = state['pending'] if state['phase'] == 'windows' else state['whole_pending']
-            if queue:
-                if time.monotonic() >= deadline:
-                    break
-                item = queue.pop(0)
-                try:
-                    submitted = self.start(state['accepted_behavior'], state['population'],
-                                           fmt(item['window'][0]), fmt(item['window'][1]))
-                except APIRejected as exc:
-                    if state['phase'] == 'whole':
-                        # A whole-trace window cannot be narrowed: its traces stay UNKNOWN.
-                        state['whole'].append({**item, 'status': 'REJECTED', 'error': str(exc)[:500]})
-                    elif range_run.is_size_rejection(exc):
-                        halves = range_run.halve(item['window'])
-                        if halves:
-                            queue[0:0] = [{'window': h} for h in halves]
-                            state['halvings'] += 1
-                        else:
-                            state['windows'].append({**item, 'status': 'REJECTED', 'error': str(exc)[:500]})
-                    else:
-                        # Not a size problem (e.g. the version is bound to another
-                        # service): every window would fail the same way.
-                        queue.insert(0, item)
-                        state['phase'], state['error'] = 'failed', str(exc)[:1000]
-                    private_json(path, state)
-                    continue
-                state['current'] = {**item, 'execution_id': submitted['execution_id']}
-                private_json(path, state)
-                continue
-            if state['phase'] == 'windows':
-                # Wait for the span extents the query tools supply (poll_range).
-                state['phase'] = 'edges'
-                break
-            self._finalize_range(state)
-        private_json(path, state)
-        return self._range_view(state)
-
-    def _window_rows(self, entries):
-        """Compact rows (plus execution_id) and raw results for completed executions."""
-        rows, raw = [], []
-        for entry in entries:
-            if entry.get('status') != 'COMPLETED':
-                rows.append([])
-                continue
-            results = self.read(entry['execution_id'])['results']
-            raw.extend(results)
-            rows.append([{**compact(r), 'execution_id': entry['execution_id']} for r in results])
-        return rows, raw
-
-    def _observations(self, state):
-        done = [w for w in state['windows'] if w.get('status') == 'COMPLETED']
-        rows, raw = self._window_rows(done)
-        return [w['window'] for w in done], rows, raw
-
-    def _plan_whole(self, state):
-        """Aligned whole-trace windows for the edge traces that have extents."""
-        if state['phase'] != 'edges':
-            return
-        windows, rows, _ = self._observations(state)
-        observed = {}
-        for index, window_rows in enumerate(rows):
-            for row in window_rows:
-                observed.setdefault(row['trace_id'], []).append(index)
-        edges = range_run.detect_edges(windows, observed, state['extents'])
-        extents = {t: state['extents'][t] for t in edges if t in state['extents']}
-        groups, _ = range_run.align_whole(extents)
-        state['whole_pending'] = [{'window': g['window'], 'trace_ids': g['trace_ids']} for g in groups]
-        state['phase'] = 'whole'
-
-    def _finalize_range(self, state):
-        windows, rows, raw = self._observations(state)
-        whole_rows, whole_raw = self._window_rows(state['whole'])
-        whole_runs = [{**entry, 'results': whole_rows[i]} for i, entry in enumerate(state['whole'])]
-        result = range_run.canonicalize(windows, rows, state['extents'], whole_runs)
-        usage = range_run.judge_usage(raw + whole_raw)
-        usage['whole_trace_reevaluation'] = range_run.judge_usage(whole_raw)
-        result_file = self.range_path(state['range_id']).with_name(state['range_id'] + '-result.json')
-        holes = [{'window': [range_run.format_time(t) for t in w['window']], 'status': w['status'],
-                  'execution_id': w.get('execution_id'), 'error': w.get('error')}
-                 for w in state['windows'] if w.get('status') != 'COMPLETED']
-        full = {'range_id': state['range_id'], 'accepted_behavior': state['accepted_behavior'],
-                'population': state['population'], 'start': state['start'], 'end': state['end'],
-                'judge_based': state['judge_based'], 'coverage_holes': holes, 'judge_usage': usage,
-                'executions': self._executions(state), **result}
-        private_json(result_file, full)
-        traces = result['traces']
-        state['summary'] = {
-            'counts': result['counts'], 'population': result['population'],
-            'raw_window_counts': result['raw_window_counts'],
-            'unknown_reasons': range_run.unknown_reasons(traces),
-            'flagged': [{'trace_id': t['trace_id'], 'reason': t['canonical']['reason'],
-                         'witness_refs': t['canonical']['witness_refs'],
-                         'execution_id': t['canonical']['execution_id'], 'source': t['canonical']['source']}
-                        for t in traces if t['canonical']['verdict'] == 'MATCH'],
-            'edge_traces': result['edge_traces'], 'conflicts': result['conflicts'],
-            'judge_usage': usage, 'coverage_holes': holes, 'result_file': str(result_file)}
-        state['phase'] = 'completed'
-
-    @staticmethod
-    def _executions(state):
-        fmt = range_run.format_time
-        out = [{'kind': 'window', 'window': [fmt(t) for t in w['window']], 'execution_id': w.get('execution_id'),
-                'status': w['status'], **({'error': w['error']} if w.get('error') else {})} for w in state['windows']]
-        out += [{'kind': 'whole-trace', 'window': [fmt(t) for t in w['window']], 'execution_id': w.get('execution_id'),
-                 'trace_ids': w['trace_ids'], 'status': w['status'], **({'error': w['error']} if w.get('error') else {})}
-                for w in state['whole']]
-        return out
-
-    def _range_view(self, state):
-        fmt = range_run.format_time
-        planned = len(state['windows']) + len(state['pending']) + (1 if state.get('current') and state['phase'] == 'windows' else 0)
-        view = {'range_id': state['range_id'], 'phase': state['phase'], 'accepted_behavior': state['accepted_behavior'],
-                'population': state['population'], 'start': state['start'], 'end': state['end'],
-                'judge_based': state['judge_based'],
-                'progress': {'windows_planned': planned,
-                             'windows_completed': sum(w['status'] == 'COMPLETED' for w in state['windows']),
-                             'windows_failed': sum(w['status'] == 'FAILED' for w in state['windows']),
-                             'windows_rejected': sum(w['status'] == 'REJECTED' for w in state['windows']),
-                             'halvings': state['halvings'],
-                             'whole_trace_windows': len(state['whole']) + len(state['whole_pending'])
-                             + (1 if state.get('current') and state['phase'] == 'whole' else 0)}}
-        if state.get('current'):
-            view['current'] = {'window': [fmt(t) for t in state['current']['window']],
-                               'execution_id': state['current']['execution_id']}
-        if state['phase'] == 'failed':
-            view['error'] = state['error']
-            view['next_action'] = 'Nothing further runs for this range. Report the error; fix the population or version and start a new range.'
-        elif state['phase'] == 'edges':
-            windows, rows, _ = self._observations(state)
-            seen = Counter(row['trace_id'] for window_rows in rows for row in window_rows)
-            multi = sorted(t for t, n in seen.items() if n > 1)
-            view.update(boundaries=range_run.boundaries(windows), multi_window_traces=multi[:RANGE_LIST_LIMIT],
-                        multi_window_trace_count=len(multi), evaluated_traces=len(seen),
-                        next_action=('Find this population\'s traces whose spans cross any boundary (spans query a few '
-                                     'minutes either side of each boundary: earliest start, latest end per trace) and '
-                                     'the span extent of every multi_window_trace. Then call next_behavior_range_result '
-                                     'with trace_extents {trace_id: {start, end}}; pass {} when none cross. Edge traces '
-                                     'without an extent become UNKNOWN (window-edge).'))
-        elif state['phase'] == 'completed':
-            summary = state['summary']
-            view.update({k: summary[k] for k in ('counts', 'population', 'raw_window_counts', 'unknown_reasons',
-                                                  'judge_usage', 'coverage_holes', 'result_file')})
-            view.update(flagged=summary['flagged'][:RANGE_LIST_LIMIT], flagged_count=len(summary['flagged']),
-                        edge_traces=summary['edge_traces'][:RANGE_LIST_LIMIT], edge_trace_count=len(summary['edge_traces']),
-                        conflicts=summary['conflicts'][:RANGE_LIST_LIMIT], conflict_count=len(summary['conflicts']),
-                        executions=self._executions(state),
-                        note=('Every per-window raw verdict is kept in result_file; canonical verdicts only add a column. '
-                              'render_storyboard works per completed execution.'))
-            if state['judge_based'] or summary['judge_usage']['judge_calls']:
-                view['experimental'] = 'Judge-based check: experimental. Judge verdicts can vary between runs on identical evidence.'
-        else:
-            view['next_action'] = 'Call next_behavior_range_result again; windows run one at a time.'
-        return view
+            runner.supply_extents(trace_extents)
+        state = runner.read_state()
+        restarted = state['phase'] not in ('completed', 'failed', 'edges') and runner.spawn(self.config.get('_config_path'))
+        snapshot = runner.snapshot()
+        if restarted:
+            snapshot['worker_running'] = True
+        return {**snapshot, 'worker_restarted': bool(restarted), 'next_action': RANGE_LISTEN}
 
 
 def tools_list(behavior: Behavior):
@@ -684,11 +504,10 @@ def tools_list(behavior: Behavior):
         tool('render_storyboard', 'Render the existing evidence Storyboard from a completed execution receipt. Evidence remains expandable in the HTML; raw receipts never enter this chat.',
              {'receipt': execution, 'accepted_behavior': version}, ['receipt', 'accepted_behavior'])]
         + ([] if behavior.legacy else [
-        tool('execute_behavior_range', 'Run an accepted DiagnosticVersion over any time range as consecutive windows of at most one hour, one at a time, through execute_behavior. A window the API rejects for its size is halved and retried. Verdicts, judge use and receipts are unchanged. Returns a range_id; continue with next_behavior_range_result.',
+        tool('execute_behavior_range', 'Start running an accepted DiagnosticVersion over any time range in the background: consecutive windows of at most one hour, one at a time, through execute_behavior; a window rejected for size, or whose results cannot be read, is split and rerun. Returns at once with range_id, the events file and a watch_command to listen to; results land in local files (summary_file, result_file). Verdicts, judge use and receipts are unchanged.',
              execution_properties, ['accepted_behavior', 'population', 'start', 'end']),
-        tool('next_behavior_range_result', 'Advance a range run: polls the current window and submits the next until all have run (phase windows), then asks for span extents of traces that may cross a window edge (phase edges: pass trace_extents, {} when none), re-evaluates edge traces in one aligned whole-trace window where they fit (phase whole), and returns canonical counts, grouped UNKNOWN reasons, flagged traces with witnesses, edge traces and conflicts with their per-window raw verdicts, actual judge usage and coverage holes (phase completed). An edge trace that cannot be evaluated whole is UNKNOWN (window-edge); a partial window never decides it.',
+        tool('continue_behavior_range', 'Continue a background range run without waiting: supply trace_extents after a needs_extents event (edge traces are then re-evaluated whole where they fit within an hour; others become UNKNOWN window-edge), or restart a stalled worker from its saved state. Returns a snapshot read from local files.',
              {'range_id': {'type': 'string', 'pattern': '^[a-f0-9]{32}$'},
-              'wait_seconds': {'type': 'number', 'minimum': 0, 'maximum': 120, 'default': 60},
               'trace_extents': {'type': 'object', 'description': '{trace_id: {start, end}}: earliest span start and latest span end (RFC3339) per trace, from the query tools.',
                                 'additionalProperties': {'type': 'object', 'properties': {'start': {'type': 'string'}, 'end': {'type': 'string'}},
                                                          'required': ['start', 'end'], 'additionalProperties': False}}},
@@ -700,6 +519,9 @@ def main():
     parser.add_argument('--config', default=os.environ.get('CARDINAL_BEHAVIOR_CONFIG'))
     args = parser.parse_args()
     config = json.loads(Path(args.config).expanduser().read_text()) if args.config else default_config()
+    if args.config:
+        # The background range worker loads the same configuration.
+        config['_config_path'] = str(Path(args.config).expanduser().resolve())
     behavior = Behavior(config)
     for line in sys.stdin:
         request = json.loads(line)
@@ -724,7 +546,7 @@ def main():
                              'next_behavior_result': behavior.poll, 'render_storyboard': behavior.render,
                              'get_behavior_execution': behavior.inspect,
                              'execute_behavior_range': behavior.start_range,
-                             'next_behavior_range_result': behavior.poll_range}
+                             'continue_behavior_range': behavior.continue_range}
                 result = functions[params['name']](**params.get('arguments', {}))
                 value = {'content': [{'type': 'text', 'text': mcp_result(params['name'], result, behavior.output)}]}
             else:

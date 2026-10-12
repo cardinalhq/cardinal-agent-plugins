@@ -272,5 +272,63 @@ class AcceptedChecksTests(ChecksTestBase):
         self.assertEqual(json.loads(self.cli("accepted", "--service", "traefik").stdout), [])
 
 
+class RangeWatchTests(ChecksTestBase):
+    RANGE = "c" * 32
+
+    def write_events(self, *events):
+        directory = self.home / ".cardinal" / "behavior-executions" / "ranges" / self.RANGE
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / "events.jsonl").open("a") as handle:
+            for event in events:
+                handle.write(json.dumps(event) + "\n")
+        return directory
+
+    def test_watch_prints_one_line_per_event_and_exits_on_a_terminal_event(self):
+        self.write_events(
+            {"event": "started", "population": "maestro", "start": "S", "end": "E", "windows": 24},
+            {"event": "window_submitted", "window": ["a", "b"], "execution_id": "x"},
+            {"event": "window_done", "window": ["a", "b"], "status": "COMPLETED",
+             "verdicts": {"MATCH": 0, "NON_MATCH": 3589, "UNKNOWN": 1, "NOT_APPLICABLE": 243, "ERROR": 0},
+             "progress": {"windows_done": 1, "windows_left": 23}},
+            {"event": "completed", "population": 3833, "counts": {"MATCH": 0}, "flagged": 0, "edge_traces": 0,
+             "conflicts": 0, "coverage_holes": 0, "judge_calls": 0, "summary_file": "/x/summary.json"},
+            {"event": "window_done", "window": ["c", "d"], "status": "COMPLETED"})
+        proc = self.cli("range", "watch", self.RANGE)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        lines = proc.stdout.splitlines()
+        self.assertEqual(len(lines), 3)   # submitted is not a notification; nothing after completed
+        self.assertIn("NON_MATCH 3589", lines[1])
+        self.assertIn("1 done, 23 left", lines[1])
+        self.assertTrue(lines[2].startswith("completed:"))
+        self.assertIn("/x/summary.json", lines[2])
+
+    def test_watch_reports_a_stalled_worker(self):
+        sys.path.insert(0, str(self.plugin / "hooks"))
+        try:
+            import importlib
+            import _checks
+            importlib.reload(_checks)
+            directory = self.write_events({"event": "started", "population": "p", "start": "S", "end": "E",
+                                           "windows": 1})
+            import io
+            out = io.StringIO()
+            code = _checks.watch_range(self.RANGE, out, poll_s=1, idle_s=2,
+                                       output=directory.parent.parent, sleep=lambda s: None)
+        finally:
+            sys.path.remove(str(self.plugin / "hooks"))
+        self.assertEqual(code, 0)
+        self.assertIn("stalled", out.getvalue().splitlines()[-1])
+        self.assertIn("continue_behavior_range", out.getvalue())
+
+    def test_status_reads_local_state(self):
+        directory = self.write_events({"event": "started"})
+        (directory / "state.json").write_text(json.dumps({"phase": "windows", "population": "maestro",
+                                                          "windows": [{}], "pending": [{}, {}]}))
+        status = json.loads(self.cli("range", "status", self.RANGE).stdout)
+        self.assertEqual((status["phase"], status["windows_done"], status["windows_left"]), ("windows", 1, 2))
+        self.assertFalse(status["worker_running"])
+        self.assertEqual(self.cli("range", "watch", "d" * 32).returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

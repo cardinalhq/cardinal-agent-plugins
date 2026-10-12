@@ -15,6 +15,7 @@ by the plugin's gate hook while the preview is off.
 Used by the checks skill, not typed by users:
     cardinal-checks example set|approve|remove|expected|show --draft <id> ...
     cardinal-checks accepted [--service S]
+    cardinal-checks range watch|status <range_id>   (a background range run)
 """
 
 from __future__ import annotations
@@ -77,6 +78,17 @@ def cmd_accepted(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_range(args: argparse.Namespace) -> int:
+    try:
+        if args.action == "watch":
+            return _checks.watch_range(args.range_id, sys.stdout)
+        print(json.dumps(_checks.range_status(args.range_id), indent=2))
+        return 0
+    except (ValueError, OSError) as err:
+        print(f"cardinal-checks: {err}", file=sys.stderr)
+        return EXIT_USAGE
+
+
 def _print(obj) -> None:
     print(json.dumps(obj, indent=2, sort_keys=True))
 
@@ -120,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
     accepted = sub.add_parser("accepted", help=argparse.SUPPRESS)
     accepted.add_argument("--service")
     accepted.set_defaults(func=cmd_accepted)
+
+    rng = sub.add_parser("range", help=argparse.SUPPRESS)
+    rng.add_argument("action", choices=("watch", "status"))
+    rng.add_argument("range_id")
+    rng.set_defaults(func=cmd_range)
 
     example = sub.add_parser("example", help=argparse.SUPPRESS)
     example.add_argument("action", choices=("set", "approve", "remove", "expected", "show"))

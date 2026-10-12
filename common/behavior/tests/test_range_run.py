@@ -11,6 +11,8 @@ import range_run
 from range_run import (EDGE_REASON, align_whole, canonicalize, format_time, halve, is_size_rejection,
                        judge_usage, parse_extents, parse_time, split_windows)
 from server import APIRejected, Behavior, tools_list
+from range_runner import RangeRunner
+from unittest.mock import patch
 
 T0 = parse_time('2026-10-11T00:00:00Z')
 A, B, C, D = 'a' * 32, 'b' * 32, 'c' * 32, 'd' * 32
@@ -220,6 +222,8 @@ class FakeAPI:
 
 
 class RangeOrchestrationTests(unittest.TestCase):
+    """The background worker, driven synchronously (spawn is stubbed)."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -231,9 +235,33 @@ class RangeOrchestrationTests(unittest.TestCase):
                                     'source': 'def evaluate(run, recorder, judge):\n    pass\n',
                                     'behavior_contract': {'clauses': [{'judge_site': ''}]}}))
         self.behavior.context = lambda version: None
+        self.spawned = []
+        patcher = patch.object(RangeRunner, 'spawn', lambda runner, config_path=None: self.spawned.append(runner.range_id) or True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def use(self, api):
         self.behavior.start, self.behavior.poll, self.behavior.read = api.start, api.poll, api.read
+
+    def drive(self, range_id):
+        RangeRunner(self.behavior, range_id).run(sleep=lambda s: None)
+        return self.events(range_id)
+
+    def events(self, range_id):
+        path = Path(self.temp.name) / 'ranges' / range_id / 'events.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def summary(self, range_id):
+        return json.loads((Path(self.temp.name) / 'ranges' / range_id / 'summary.json').read_text())
+
+    def test_start_returns_at_once_with_files_to_listen_to(self):
+        self.use(FakeAPI([]))
+        view = self.behavior.start_range(self.version, 'svc', '2026-10-11T00:00:00Z', '2026-10-11T02:00:00Z')
+        self.assertEqual(self.spawned, [view['range_id']])
+        self.assertEqual(view['phase'], 'windows')
+        self.assertTrue(view['events_file'].endswith('events.jsonl'))
+        self.assertEqual(view['watch_command'], f"cardinal-checks range watch {view['range_id']}")
+        self.assertEqual(self.events(view['range_id'])[0]['event'], 'started')
 
     def test_a_range_runs_in_windows_halves_on_size_and_resolves_edges_whole(self):
         # A crosses the 01:00 boundary; B lives inside the first window; C needs two hours.
@@ -242,54 +270,129 @@ class RangeOrchestrationTests(unittest.TestCase):
                   (C, T0 + 1000, T0 + 6000, lambda whole: 'MATCH')]
         api = FakeAPI(traces, max_window=1800)
         self.use(api)
-        view = self.behavior.start_range(self.version, 'svc', '2026-10-11T00:00:00Z', '2026-10-11T02:00:00Z')
-        range_id = view['range_id']
-        while view['phase'] == 'windows':
-            view = self.behavior.poll_range(range_id, wait_seconds=5)
-        self.assertEqual(view['phase'], 'edges')
-        # Each one-hour window was rejected once and halved.
-        self.assertEqual(view['progress']['halvings'], 2)
-        self.assertEqual(len(api.submitted), 4)
-        self.assertEqual(sorted(view['multi_window_traces']), [A, C])
-        self.assertIn('2026-10-11T01:00:00Z', view['boundaries'])
+        range_id = self.behavior.start_range(self.version, 'svc', '2026-10-11T00:00:00Z',
+                                             '2026-10-11T02:00:00Z')['range_id']
+        events = self.drive(range_id)
+        kinds = [e['event'] for e in events]
+        self.assertEqual(kinds.count('window_split'), 2)
+        self.assertEqual(kinds.count('window_done'), 4)
+        self.assertEqual(kinds[-1], 'needs_extents')
+        self.assertEqual(sorted(events[-1]['multi_window_traces']), [A, C])
+        self.assertIn('2026-10-11T01:00:00Z', events[-1]['boundaries'])
         extents = {A: {'start': format_time(T0 + 3500), 'end': format_time(T0 + 3700)},
                    C: {'start': format_time(T0 + 1000), 'end': format_time(T0 + 6000)}}
-        view = self.behavior.poll_range(range_id, wait_seconds=5, trace_extents=extents)
-        self.assertEqual(view['phase'], 'completed')
+        view = self.behavior.continue_range(range_id, trace_extents=extents)
+        self.assertEqual(view['phase'], 'whole')
+        self.assertTrue(view['worker_restarted'])
+        events = self.drive(range_id)
+        self.assertEqual(events[-1]['event'], 'completed')
         self.assertEqual(len(api.submitted), 5)   # one aligned whole-trace window, for A only
-        self.assertEqual(view['counts']['MATCH'], 1)
-        self.assertEqual(view['counts']['NON_MATCH'], 1)
-        self.assertEqual(view['counts']['UNKNOWN'], 1)
-        self.assertEqual([f['trace_id'] for f in view['flagged']], [A])
-        self.assertEqual(view['flagged'][0]['source'], 'whole')
-        self.assertEqual(view['edge_traces'], [A, C])
-        self.assertEqual(view['unknown_reasons'][0]['count'], 1)
-        self.assertIn(EDGE_REASON, view['unknown_reasons'][0]['reason'])
-        self.assertEqual(view['judge_usage']['judge_calls'], sum(len(r) for r in api.executions.values()))
-        self.assertEqual(view['judge_usage']['cost'], 'not available')
+        summary = self.summary(range_id)
+        self.assertEqual(summary['counts']['MATCH'], 1)
+        self.assertEqual(summary['counts']['NON_MATCH'], 1)
+        self.assertEqual(summary['counts']['UNKNOWN'], 1)
+        self.assertEqual([f['trace_id'] for f in summary['flagged']], [A])
+        self.assertEqual(summary['flagged'][0]['source'], 'whole')
+        self.assertEqual(summary['edge_traces'], [A, C])
+        self.assertIn(EDGE_REASON, summary['unknown_reasons'][0]['reason'])
+        self.assertEqual(summary['judge_usage']['judge_calls'], sum(len(r) for r in api.executions.values()))
+        self.assertEqual(summary['judge_usage']['cost'], 'not available')
         # The fake program is rules-only, but judge receipts were observed.
-        self.assertIn('experimental', view)
-        full = json.loads(Path(view['result_file']).read_text())
+        self.assertIn('experimental', summary)
+        full = json.loads(Path(summary['result_file']).read_text())
         a = next(t for t in full['traces'] if t['trace_id'] == A)
         self.assertEqual([w['verdict'] for w in a['windows']], ['UNKNOWN', 'UNKNOWN'])
         self.assertEqual(a['canonical']['verdict'], 'MATCH')
 
+    def test_a_window_whose_results_cannot_be_read_is_split_and_rerun(self):
+        # Results of executions over 30 minutes never arrive (the gateway times out).
+        api = FakeAPI([(A, T0 + 100, T0 + 200, lambda whole: 'NON_MATCH'),
+                       (B, T0 + 2000, T0 + 2100, lambda whole: 'MATCH')])
+        lengths = {}
+        start, poll = api.start, api.poll
+        def tracking_start(version, population, s, e):
+            out = start(version, population, s, e)
+            lengths[out['execution_id']] = parse_time(e) - parse_time(s)
+            return out
+        def slow_poll(execution_id, wait_seconds=20):
+            if lengths[execution_id] > 1800:
+                raise RuntimeError('Cardinal API closed the connection or timed out before answering')
+            return poll(execution_id)
+        api.start, api.poll = tracking_start, slow_poll
+        self.use(api)
+        range_id = self.behavior.start_range(self.version, 'svc', '2026-10-11T00:00:00Z',
+                                             '2026-10-11T01:00:00Z')['range_id']
+        events = self.drive(range_id)
+        self.assertEqual([e['failures'] for e in events if e['event'] == 'read_retry'], [1, 2, 3])
+        self.assertIn('could not be read', next(e for e in events if e['event'] == 'window_split')['reason'])
+        self.behavior.continue_range(range_id, trace_extents={})
+        self.drive(range_id)
+        summary = self.summary(range_id)
+        self.assertEqual(summary['counts']['MATCH'], 1)
+        self.assertEqual(summary['counts']['NON_MATCH'], 1)
+        self.assertEqual(summary['coverage_holes'], [])
+        self.assertFalse(summary['judge_usage']['usage_complete'])
+        self.assertEqual(len(summary['judge_usage']['unreadable_executions']), 1)
+        self.assertIn('abandoned-window', [e['kind'] for e in summary['executions']])
+
+    def test_an_unreadable_minimum_window_is_a_coverage_hole(self):
+        api = FakeAPI([(A, T0 + 10, T0 + 20, lambda whole: 'NON_MATCH')])
+        def failing_poll(execution_id, wait_seconds=20):
+            raise RuntimeError('Cardinal API closed the connection or timed out before answering')
+        api.poll = failing_poll
+        self.use(api)
+        range_id = self.behavior.start_range(self.version, 'svc', '2026-10-11T00:00:00Z',
+                                             '2026-10-11T00:01:30Z')['range_id']
+        self.drive(range_id)
+        self.behavior.continue_range(range_id, trace_extents={})
+        self.drive(range_id)
+        summary = self.summary(range_id)
+        self.assertEqual([h['status'] for h in summary['coverage_holes']], ['UNREADABLE'])
+        self.assertIn('could not be read', summary['coverage_holes'][0]['error'])
+
+    def test_a_dropped_connection_is_a_clear_runtime_error(self):
+        import http.client
+        import urllib.request
+        behavior = Behavior({'output_dir': self.temp.name, 'base_url': 'https://query.example',
+                             'api_key_env': 'TEST_BEHAVIOR_KEY'})
+        opener = urllib.request.build_opener()
+        with patch.dict('os.environ', {'TEST_BEHAVIOR_KEY': 'k'}), \
+                patch('urllib.request.build_opener', return_value=opener), \
+                patch.object(opener, 'open', side_effect=http.client.RemoteDisconnected('closed')):
+            with self.assertRaisesRegex(RuntimeError, 'closed the connection or timed out'):
+                behavior.request('GET', '/api/v1/behavior-executions/x/results')
+
     def test_a_non_size_rejection_fails_the_range_with_the_api_reason(self):
         self.use(FakeAPI([], reject='Cardinal API rejected the request (HTTP 422): version is bound to service '
                                     'megan, not traefik'))
-        view = self.behavior.start_range(self.version, 'traefik', '2026-10-11T00:00:00Z', '2026-10-11T03:00:00Z')
+        range_id = self.behavior.start_range(self.version, 'traefik', '2026-10-11T00:00:00Z',
+                                             '2026-10-11T03:00:00Z')['range_id']
+        events = self.drive(range_id)
+        self.assertEqual(events[-1]['event'], 'failed')
+        self.assertIn('bound to service megan', events[-1]['error'])
+        view = self.behavior.continue_range(range_id)
         self.assertEqual(view['phase'], 'failed')
-        self.assertIn('bound to service megan', view['error'])
+        self.assertFalse(view['worker_restarted'])
 
-    def test_a_window_too_large_even_at_the_minimum_is_a_reported_coverage_hole(self):
-        self.use(FakeAPI([(B, T0 + 10, T0 + 20, lambda whole: 'NON_MATCH')], max_window=30))
-        view = self.behavior.start_range(self.version, 'svc', '2026-10-11T00:00:00Z', '2026-10-11T00:02:00Z')
-        while view['phase'] == 'windows':
-            view = self.behavior.poll_range(view['range_id'], wait_seconds=5)
-        view = self.behavior.poll_range(view['range_id'], wait_seconds=5, trace_extents={})
-        self.assertEqual(view['phase'], 'completed')
-        self.assertEqual(len(view['coverage_holes']), 2)
-        self.assertTrue(all(h['status'] == 'REJECTED' for h in view['coverage_holes']))
+    def test_a_crashed_worker_reports_stalled_and_resumes_from_state(self):
+        api = FakeAPI([(B, T0 + 10, T0 + 20, lambda whole: 'NON_MATCH')])
+        poll = api.poll
+        calls = []
+        def crashing_poll(execution_id, wait_seconds=20):
+            calls.append(execution_id)
+            if len(calls) == 1:
+                raise KeyError('unexpected payload')
+            return poll(execution_id)
+        api.poll = crashing_poll
+        self.use(api)
+        range_id = self.behavior.start_range(self.version, 'svc', '2026-10-11T00:00:00Z',
+                                             '2026-10-11T00:30:00Z')['range_id']
+        with self.assertRaises(KeyError):
+            RangeRunner(self.behavior, range_id).run(sleep=lambda s: None)
+        self.assertEqual(self.events(range_id)[-1]['event'], 'stalled')
+        self.assertTrue(self.behavior.continue_range(range_id)['worker_restarted'])
+        self.assertEqual(self.drive(range_id)[-1]['event'], 'needs_extents')
+        self.assertEqual(len(api.submitted), 1)   # the saved execution was resumed, not resubmitted
 
     def test_judge_based_checks_carry_the_experimental_label(self):
         # judge_site empty (as in real accepted programs): the source's judge call decides.
@@ -299,21 +402,23 @@ class RangeOrchestrationTests(unittest.TestCase):
                              '    judge.decide(proposition="Supported?", evidence=[])\n')
         path.write_text(json.dumps(program))
         api = FakeAPI([(B, T0 + 10, T0 + 20, lambda whole: 'NON_MATCH')])
-        api_start = api.start
+        start = api.start
         def start_without_receipts(*args):
-            out = api_start(*args)
+            out = start(*args)
             for result in api.executions[out['execution_id']]:
                 result['jev_receipts'] = []
             return out
         api.start = start_without_receipts
         self.use(api)
         view = self.behavior.start_range(self.version, 'svc', '2026-10-11T00:00:00Z', '2026-10-11T00:30:00Z')
-        while view['phase'] == 'windows':
-            view = self.behavior.poll_range(view['range_id'], wait_seconds=5)
-        view = self.behavior.poll_range(view['range_id'], wait_seconds=5, trace_extents={})
         self.assertTrue(view['judge_based'])
-        self.assertEqual(view['judge_usage']['judge_calls'], 0)
-        self.assertIn('experimental', view)
+        self.drive(view['range_id'])
+        self.behavior.continue_range(view['range_id'], trace_extents={})
+        events = self.drive(view['range_id'])
+        self.assertTrue(events[-1]['experimental'])
+        summary = self.summary(view['range_id'])
+        self.assertEqual(summary['judge_usage']['judge_calls'], 0)
+        self.assertIn('experimental', summary)
 
     def test_unaccepted_versions_and_overlong_ranges_are_refused(self):
         path = self.behavior.program_path(self.version)
@@ -327,7 +432,25 @@ class RangeOrchestrationTests(unittest.TestCase):
     def test_range_tools_are_listed_for_authored_checks(self):
         names = [t['name'] for t in tools_list(self.behavior)['tools']]
         self.assertIn('execute_behavior_range', names)
-        self.assertIn('next_behavior_range_result', names)
+        self.assertIn('continue_behavior_range', names)
+        self.assertNotIn('next_behavior_range_result', names)
+
+    def test_spawn_starts_a_detached_worker_once(self):
+        runner = RangeRunner.create(self.behavior, self.version, 'svc', '2026-10-11T00:00:00Z',
+                                    '2026-10-11T00:30:00Z', False, 10)
+        patch.stopall()
+        with patch('range_runner.subprocess.Popen') as popen:
+            self.assertTrue(runner.spawn())
+            command = popen.call_args[0][0]
+            self.assertTrue(command[1].endswith('range_runner.py'))
+            self.assertEqual(command[2:4], ['--range', runner.range_id])
+            self.assertTrue(popen.call_args[1]['start_new_session'])
+        import fcntl
+        with (runner.dir / 'lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with patch('range_runner.subprocess.Popen') as popen:
+                self.assertFalse(runner.spawn())
+                popen.assert_not_called()
 
 
 if __name__ == '__main__':

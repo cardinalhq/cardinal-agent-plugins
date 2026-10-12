@@ -281,7 +281,11 @@ environment), or the connect state file `~/.claude/cardinal.json`.
   and connected, and denies the Skill tool for it while the preview is off.
   `cardinal-checks example …` / `accepted` are the skill's teaching-label
   ledger and its list of accepted checks. The raw `cardinal-behavior` tools
-  stay registered for everyone; `execute_behavior_range` /
-  `next_behavior_range_result` run an accepted check over any range in
-  one-hour windows with window-edge canonicalization (`common/behavior/range_run.py`).
+  stay registered for everyone; `execute_behavior_range` starts a detached
+  worker (`common/behavior/range_runner.py`) that runs an accepted check over
+  any range in one-hour windows with window-edge canonicalization and writes
+  `ranges/<id>/events.jsonl`, `summary.json` and `result.json`;
+  `cardinal-checks range watch <id>` turns the events into one line each for
+  Claude Code's Monitor, `range status <id>` prints a local snapshot, and
+  `continue_behavior_range` supplies edge extents or restarts a stopped worker.
 - `cardinal-install-site`: see the install-site skill.

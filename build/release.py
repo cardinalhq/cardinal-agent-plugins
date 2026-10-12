@@ -44,7 +44,7 @@ OPT_IN_SKILLS = {"checks"}
 
 REQUIRED_ARTIFACTS = {
     "claude": (".claude-plugin/plugin.json", "lib/behavior/server.py", "lib/behavior/storyboard.py",
-               "lib/behavior/range_run.py", "checks/skill/SKILL.md", "checks/skill/CORE.md",
+               "lib/behavior/range_run.py", "lib/behavior/range_runner.py", "checks/skill/SKILL.md", "checks/skill/CORE.md",
                "bin/cardinal-checks", "hooks/checks-gate.py", "hooks/_checks.py",
                "lib/behavior/compilation/hosted.py", "lib/behavior/compilation/regression.py",
                "lib/behavior/compilation/engine.py", "lib/behavior/compilation/workflow.py",
