@@ -17,9 +17,9 @@ Code applies to its own environment) and the process environment, the same
 two places Claude Code substitutes from. An empty or blank value counts as
 unset.
 
-Used by storyboard-session.py (SessionStart, runs connected or not) and
-bin/cardinal-status. Core logic, shared with the other runtimes:
-cardinal_core.storyboard_authoring (key_without_url, mcp_url,
+Used by bin/cardinal-status. storyboard-session.py (SessionStart) calls
+core's stray_key_warning directly. Core logic, shared with the other
+runtimes: cardinal_core.storyboard_authoring (key_without_url, mcp_url,
 stray_key_warning). Reads only local files; never raises.
 """
 
