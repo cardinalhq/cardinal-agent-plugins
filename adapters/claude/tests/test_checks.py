@@ -292,17 +292,52 @@ class RangeWatchTests(ChecksTestBase):
              "progress": {"windows_done": 1, "windows_left": 23}},
             {"event": "read_retry", "window": ["a", "b"], "failures": 3, "final": True, "error": "timed out"},
             {"event": "completed", "population": 3833, "counts": {"MATCH": 0}, "flagged": 0, "edge_traces": 0,
-             "conflicts": 0, "coverage_holes": 0, "judge_calls": 0, "summary_file": "/x/summary.json"},
-            {"event": "window_done", "window": ["c", "d"], "status": "COMPLETED"})
+             "conflicts": 0, "coverage_holes": 0, "judge_calls": 0, "summary_file": "/x/summary.json"})
         proc = self.cli("range", "watch", self.RANGE)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         lines = proc.stdout.splitlines()
-        self.assertEqual(len(lines), 4)   # submitted is not a notification; nothing after completed
+        self.assertEqual(len(lines), 4)   # window_submitted is not a notification
         self.assertIn("NON_MATCH 3589", lines[1])
         self.assertIn("1 done, 23 left", lines[1])
         self.assertIn("giving up on this execution", lines[2])
         self.assertTrue(lines[3].startswith("completed:"))
         self.assertIn("/x/summary.json", lines[3])
+
+    def test_a_watch_after_continue_starts_at_the_new_segment(self):
+        self.write_events(
+            {"event": "started", "population": "p", "start": "S", "end": "E", "windows": 1},
+            {"event": "needs_extents", "multi_window_trace_count": 0, "boundaries": ["S", "E"]},
+            {"event": "extents_received", "traces": 0, "whole_trace_windows": 0},
+            {"event": "completed", "population": 5, "counts": {}, "flagged": 0, "edge_traces": 0,
+             "conflicts": 0, "coverage_holes": 0, "judge_calls": 0, "summary_file": "/s.json"})
+        lines = self.cli("range", "watch", self.RANGE).stdout.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("extents received"))
+        self.assertTrue(lines[1].startswith("completed:"))
+
+    def test_a_watch_does_not_stop_at_a_superseded_terminal_event(self):
+        sys.path.insert(0, str(self.plugin / "hooks"))
+        try:
+            import importlib
+            import io
+            import _checks
+            importlib.reload(_checks)
+            directory = self.write_events(
+                {"event": "needs_extents", "multi_window_trace_count": 0, "boundaries": []},
+                {"event": "extents_received", "traces": 0, "whole_trace_windows": 1})
+            appended = []
+            def sleep(_):
+                if not appended:
+                    appended.append(1)
+                    self.write_events({"event": "completed", "population": 1, "counts": {}, "flagged": 0,
+                                       "edge_traces": 0, "conflicts": 0, "coverage_holes": 0, "judge_calls": 0,
+                                       "summary_file": "/s.json"})
+            out = io.StringIO()
+            code = _checks.watch_range(self.RANGE, out, idle_s=5, output=directory.parent.parent, sleep=sleep)
+        finally:
+            sys.path.remove(str(self.plugin / "hooks"))
+        self.assertEqual(code, 0)
+        self.assertTrue(out.getvalue().splitlines()[-1].startswith("completed:"))
 
     def test_watch_reports_a_stalled_worker(self):
         sys.path.insert(0, str(self.plugin / "hooks"))
