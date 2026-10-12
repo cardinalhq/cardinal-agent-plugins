@@ -129,6 +129,40 @@ class ConnectRegistersBehaviorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertEqual(read_toml(self.config), {"mcp_servers": {"cardinal-behavior": {"command": "/opt/mine"}}})
 
+    def test_repair_hooks_registers_behavior_on_a_connection_made_before_it(self):
+        self.connect()
+        # A connection from before the Checks preview: the managed block holds
+        # only [mcp_servers.cardinal].
+        text = self.config.read_text()
+        start = text.index("[mcp_servers.cardinal-behavior]")
+        end = text.index("# END cardinal-codex-plugin")
+        old = 'model = "o3"\n\n' + text[:start].rstrip("\n") + "\n" + text[end:] + '\n[desktop]\nx = 1\n'
+        self.config.write_text(old)
+        self.assertNotIn("cardinal-behavior", read_toml(self.config)["mcp_servers"])
+        result = run_script(CONNECT, ["--repair-hooks"], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Registered the cardinal-behavior MCP server", result.stdout)
+        config = read_toml(self.config)
+        self.assertEqual(config["mcp_servers"]["cardinal-behavior"],
+                         {"command": "python3", "args": [str(self.launcher), "--runtime", "codex"]})
+        self.assertIn("X-CardinalHQ-API-Key", config["mcp_servers"]["cardinal"]["http_headers"])
+        self.assertEqual((config["model"], config["desktop"]), ("o3", {"x": 1}))
+        text = self.config.read_text()
+        self.assertTrue(text.index("# BEGIN cardinal-codex-plugin") < text.index("[mcp_servers.cardinal-behavior]")
+                        < text.index("# END cardinal-codex-plugin"))
+        # Idempotent; disconnect still removes it.
+        again = run_script(CONNECT, ["--repair-hooks"], self.home)
+        self.assertNotIn("Registered the cardinal-behavior", again.stdout)
+        self.assertEqual(self.config.read_text(), text)
+        run_script(DISCONNECT, [], self.home)
+        self.assertNotIn("cardinal-behavior", self.config.read_text())
+
+    def test_repair_hooks_without_a_managed_block_says_so(self):
+        result = run_script(CONNECT, ["--repair-hooks"], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("No managed Cardinal MCP block", result.stdout)
+        self.assertFalse(self.config.exists())
+
     def test_repair_hooks_restores_the_behavior_launcher(self):
         self.connect()
         self.launcher.unlink()
@@ -190,6 +224,13 @@ class LaunchersAndSessionStartTests(unittest.TestCase):
         off = self.checks("off")
         self.assertEqual(off.returncode, 0, off.stderr)
         self.assertFalse(self.installed.exists())
+
+    def test_on_without_the_behavior_registration_prints_the_repair_command(self):
+        self.connect_files()   # connected, but config.toml has no cardinal-behavior table
+        on = self.checks("on")
+        self.assertEqual(on.returncode, 0, on.stderr)
+        self.assertIn("not registered for Codex", on.stdout)
+        self.assertIn(f"python3 {self.plugin.resolve() / 'scripts' / 'cardinal-connect'} --repair-hooks", on.stdout)
 
     def test_session_start_reconciles_and_adds_the_rule_only_when_on_and_connected(self):
         self.connect_files()

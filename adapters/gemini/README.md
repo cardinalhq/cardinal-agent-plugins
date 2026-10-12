@@ -116,8 +116,9 @@ plugins). What each hook does:
 | `AfterAgent` | The turn's end: what is deliverable (the poller's inbox, one bounded check when the poller is stale, an open directive, decision reminders) is **staged** for the next `BeforeAgent` / `AfterTool`, and the owner-input outbox is flushed (2.6 s budget). **It never blocks and prints nothing**: on Gemini CLI an AfterAgent block re-enters the model as a plain user-role message and re-fires `BeforeAgent` with the reason as its `prompt` (gemini-cli 0.50.0 `GeminiClient.sendMessageStream`, `chunk-W4YMYD53.js:335735-335757`), so advisory text would become owner input. |
 
 Re-run `cardinal-connect` after upgrading the plugin: on an existing
-connection it rebuilds the installed extension (hooks, skills, agents) in
-place, credentials unchanged.
+connection it rebuilds the installed extension (hooks, skills, agents, and
+its `mcpServers`, adding `cardinal-behavior` to a connection made before the
+Checks preview) in place, credentials unchanged.
 
 ### Owner input
 
@@ -194,7 +195,10 @@ python3 scripts/cardinal-checks status   # the setting, the installed skill, acc
 
 - **`cardinal-behavior` MCP server.** `cardinal-connect` registers it
   in the Cardinal extension's `mcpServers` (merged: other servers stay; it goes with the `cardinal` entry when there is no MCP credential), or as a `cardinalManaged` entry in `~/.gemini/settings.json` with `--no-extension`, launched as `scripts/cardinal-behavior --runtime gemini`;
-  `cardinal-disconnect` removes it. It is a local stdio server that Gemini CLI
+  `cardinal-disconnect` removes it. A connection made before the Checks
+  preview has none: re-running `python3 scripts/cardinal-connect` (no
+  `--rotate`) adds it without a new key, and `cardinal-checks on` / `status`
+  print that command while it is missing. It is a local stdio server that Gemini CLI
   starts outside its sandbox, so it can write the Checks ledger and read
   range runs that a sandboxed agent cannot. It reads this runtime's
   connection (`~/.gemini/cardinal.json` `mcp_url` + `cardinal-secrets.json`

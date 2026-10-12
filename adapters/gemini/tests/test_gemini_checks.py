@@ -112,6 +112,29 @@ class RegistrationTests(PluginCopy):
         self.assertTrue(changed)
         self.assertEqual(stripped["mcpServers"], {"mine": {"command": "x"}})
 
+    def test_repair_registers_behavior_on_a_connection_made_before_it(self):
+        # The extension: its manifest has only `cardinal`.
+        self.connect.install_extension_bundle("https://c.example/mcp", "ck_1")
+        manifest_path = self.ext / "gemini-extension.json"
+        manifest = json.loads(manifest_path.read_text())
+        del manifest["mcpServers"]["cardinal-behavior"]
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        self.assertEqual(self.connect.repair_hook_registration(), [str(self.ext)])
+        servers = json.loads(manifest_path.read_text())["mcpServers"]
+        self.assertEqual(servers["cardinal-behavior"]["args"][1:], ["--runtime", "gemini"])
+        self.assertEqual(servers["cardinal"]["headers"], {"X-CardinalHQ-API-Key": "ck_1"})
+        # --no-extension: settings.json.
+        shutil.rmtree(self.ext)
+        settings = self.home / ".gemini" / "settings.json"
+        self.connect.apply_settings(None, "https://c.example/mcp", "ck_1", include_hooks=True)
+        data = json.loads(settings.read_text())
+        del data["mcpServers"]["cardinal-behavior"]
+        settings.write_text(json.dumps(data))
+        self.assertEqual(self.connect.repair_hook_registration(), [str(settings)])
+        entry = json.loads(settings.read_text())["mcpServers"]["cardinal-behavior"]
+        self.assertTrue(entry["cardinalManaged"])
+        self.assertEqual(self.connect.repair_hook_registration(), [], "repair must be idempotent")
+
     def test_a_users_own_settings_behavior_entry_is_kept(self):
         settings = self.home / ".gemini" / "settings.json"
         settings.write_text(json.dumps({"mcpServers": {"cardinal-behavior": {"command": "mine"}}}))

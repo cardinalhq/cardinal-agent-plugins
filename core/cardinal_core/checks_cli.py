@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -134,7 +135,26 @@ class Cli:
             self.fail(f"could not install the checks skill: {err}")
             return 1
         self.say(_on_text(self.runtime))
+        self._registration_advice()
         return 0
+
+    def _registration_advice(self) -> bool:
+        """Say how to register cardinal-behavior when the runtime's config
+        lacks it (an upgrade from before the Checks preview). True when
+        registered."""
+        if checks_install.behavior_registered(self.runtime, self.home):
+            return True
+        display = checks_install.DISPLAY[self.runtime]
+        connect = Path(self.root) / "scripts" / "cardinal-connect"
+        if not checks_install.is_connected(self.runtime, self.home):
+            self.say(f"Not ready: Cardinal is not connected for {display}, so the cardinal-behavior MCP server "
+                     "the checks skill uses is not registered. Connect, then restart "
+                     f"{display}:\n  python3 {shlex.quote(str(connect))}")
+            return False
+        self.say(f"Not ready: the cardinal-behavior MCP server the checks skill uses is not registered for "
+                 f"{display} (a connection made before the Checks preview). Register it (no new key), then "
+                 f"restart {display}:\n  {checks_install.repair_command(self.runtime, self.root)}")
+        return False
 
     def cmd_off(self, _args) -> int:
         checks_install.set_enabled(self.runtime, False, self.home)
@@ -154,6 +174,11 @@ class Cli:
         self.say(f"Checks skill installed: {'yes' if installed else 'no'} ({dest or 'no skills directory'})")
         if enabled != installed:
             self.say("The skill and the setting disagree; the next session start fixes it.")
+        if self.runtime != "claude":
+            registered = checks_install.behavior_registered(self.runtime, self.home)
+            self.say(f"cardinal-behavior MCP server: {'registered' if registered else 'not registered'}")
+            if not registered:
+                self._registration_advice()
         try:
             checks = self.ledger().accepted_checks(self.output)
         except (OSError, ImportError) as err:

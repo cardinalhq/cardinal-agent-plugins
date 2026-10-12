@@ -238,8 +238,9 @@ def strip_managed_hooks(data: dict) -> dict:
     return data
 
 
-def write_hooks_config(path: Path) -> Path | None:
-    """Write the Cursor hooks.json v1 shape.
+def build_hooks_config(path: Path) -> dict:
+    """The Cursor hooks.json v1 shape: `path`'s content with every managed
+    entry replaced by the current ones.
 
     Events registered:
       sessionStart        — initiative-convention + budget standing; the
@@ -288,10 +289,49 @@ def write_hooks_config(path: Path) -> Path | None:
         hooks.setdefault(event, []).append(managed_hook_entry(event, timeout))
     hooks["postToolUse"].append(managed_hook_entry(
         "postToolUse", AUTHORING_TIMEOUT_SECS, role=AUTHORING_ROLE, matcher=AUTHORING_MATCHER))
+    return data
+
+
+def write_hooks_config(path: Path) -> Path | None:
+    data = build_hooks_config(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     backup_path = backup(path)
     atomic_write(path, json.dumps(data, indent=2) + "\n")
     return backup_path
+
+
+def repair_registration() -> list[str]:
+    """Refresh, without new credentials, what an upgraded plugin registers in
+    the user-level files of an existing connection: the managed hooks in
+    ~/.cursor/hooks.json and the managed `cardinal-behavior` MCP entry in
+    ~/.cursor/mcp.json (a connection made before the Checks preview has none;
+    an upgrade moves this plugin's scripts). The managed `cardinal` entry and
+    its key are left as they are; an unmanaged `cardinal-behavior` entry is
+    the user's and is never replaced. Returns the paths rewritten."""
+    repaired: list[str] = []
+    if USER_MCP_PATH.exists():
+        data = load_json_object(USER_MCP_PATH, "mcp.json")
+        servers = data.get("mcpServers")
+        cardinal = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
+        if isinstance(cardinal, dict) and cardinal.get("cardinalManaged"):
+            current = servers.get(BEHAVIOR_SERVER_NAME)
+            unmanaged = isinstance(current, dict) and not current.get("cardinalManaged")
+            if not unmanaged and current != build_behavior_entry():
+                servers[BEHAVIOR_SERVER_NAME] = build_behavior_entry()
+                backup(USER_MCP_PATH)
+                atomic_write(USER_MCP_PATH, json.dumps(data, indent=2) + "\n")
+                repaired.append(str(USER_MCP_PATH))
+    if USER_HOOKS_PATH.exists():
+        before = load_json_object(USER_HOOKS_PATH, "hooks.json")
+        if any(HOOK_IDENTITY_MARKER in str(h.get("command") or "")
+               for entries in (before.get("hooks") or {}).values() if isinstance(entries, list)
+               for h in entries if isinstance(h, dict)):
+            after = build_hooks_config(USER_HOOKS_PATH)
+            if after != before:
+                backup(USER_HOOKS_PATH)
+                atomic_write(USER_HOOKS_PATH, json.dumps(after, indent=2) + "\n")
+                repaired.append(str(USER_HOOKS_PATH))
+    return repaired
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +761,16 @@ def main() -> int:
         except Exception:
             prior = {}
         user = prior.get("user_email") or "this account"
+        # Re-running on an existing connection refreshes the user-level hook
+        # and cardinal-behavior registration in place (an upgraded plugin),
+        # credentials unchanged. --project files still need --rotate --project.
+        repaired = repair_registration()
+        if repaired:
+            print("Refreshed the Cardinal registration (credentials unchanged):")
+            for path in repaired:
+                print(f"  {path}")
+            print(f"Cardinal is already connected as {user}. Restart Cursor so it reloads MCP and hook config.")
+            return 0
         sys.stderr.write(
             f"Cardinal is already connected as {user}. "
             "Re-run with --rotate to overwrite.\n"

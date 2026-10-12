@@ -70,7 +70,7 @@ The hook is the only thing that writes or emits a decision. In Run Everything mo
 
 **What runs where.** The `postToolUse` hook does only local work: parsing, the on/off gate, validation, id assignment, the ledger write, and the reply. Every network send for that tool call happens in a detached background process (its own session, stdio on `/dev/null`), handed off through an atomically written `0600` spool file under `~/.cursor/cardinal/spool/`. That covers the `cardinal.turn_tool` / `tool_result` records, the code-cluster tree listing, the `gh`-based PR lookup, and the `cardinal.decision` POST. With ingest stalled, the hook still returns in well under a second. Hooks and their background process run outside the agent sandbox (the existing hooks already write under `~/.cursor/cardinal/` and POST to ingest from there), so `git` and `gh` **still run unsandboxed**, with your `gh` credentials. If the background process dies, the decision stays in the local ledger but its event is never sent.
 
-**After upgrading, re-run `python3 scripts/cardinal-connect --rotate`** (add `--project` if you use it). That refreshes the hook entries, including the 15s `postToolUse` timeout; older installs have 5s.
+**After upgrading, re-run `python3 scripts/cardinal-connect`** (no `--rotate` needed: on an existing connection it refreshes the user-level hook entries and the `cardinal-behavior` MCP entry in place, with no new key). That includes the 15s `postToolUse` timeout; older installs have 5s. Project files (`--project`) still need `--rotate --project`.
 
 Known limits of the background process: several tool calls finishing together on a branch whose PR isn't cached yet can each start their own `gh pr view`, and their concurrent writes to the shared PR cache (`prs.json`, last writer wins) can drop another branch's cached entry. The only cost is an extra `gh` call later. An argument that is only a shell operator (for example `--why ";"`) is read as a separator, so that decision is reported as not recorded.
 
@@ -194,9 +194,10 @@ Shared logic: `cardinal_core.storyboard_authoring`, the same as the other agents
   is never taken for Cardinal's: the renderer and the token store act with the
   Cardinal key. Which spelling Cursor really sends is unverified.
 
-After upgrading, re-run `python3 scripts/cardinal-connect --rotate` (add
-`--project` if you use it) to register the new entries: `afterMCPExecution`,
-the authoring `postToolUse` entry, and the 10 s `sessionStart`.
+After upgrading, re-run `python3 scripts/cardinal-connect` (no key is
+minted; `--rotate --project` for project files) to register the new entries:
+`afterMCPExecution`, the authoring `postToolUse` entry, and the 10 s
+`sessionStart`.
 
 ## Skills and the brainstorm subagent
 
@@ -231,7 +232,10 @@ python3 scripts/cardinal-checks status   # the setting, the installed skill, acc
 
 - **`cardinal-behavior` MCP server.** `cardinal-connect` registers it
   as a `cardinalManaged` `mcpServers.cardinal-behavior` entry in `~/.cursor/mcp.json` (not in a `--project` `.cursor/mcp.json`: a cloud agent has no local plugin to run; an unmanaged entry of that name is left alone), launched as `scripts/cardinal-behavior --runtime cursor`;
-  `cardinal-disconnect` removes it. It is a local stdio server that Cursor
+  `cardinal-disconnect` removes it. A connection made before the Checks
+  preview has none: re-running `python3 scripts/cardinal-connect` (no
+  `--rotate`) adds it without a new key, and `cardinal-checks on` / `status`
+  print that command while it is missing. It is a local stdio server that Cursor
   starts outside its sandbox, so it can write the Checks ledger and read
   range runs that a sandboxed agent cannot. It reads this runtime's
   connection (`~/.cursor/cardinal.json` `mcp_url` + `cardinal-secrets.json`

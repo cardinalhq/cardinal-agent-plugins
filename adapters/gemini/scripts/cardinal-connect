@@ -173,9 +173,11 @@ def repair_hook_registration() -> list[str]:
     hooks.json that Gemini CLI rejects (no top-level `hooks` key) and
     seconds-style timeouts (5 = 5ms); re-running cardinal-connect fixes
     both. A Cardinal-managed extension is rebuilt from this plugin (hooks,
-    skills, agents, GEMINI.md, the manifest with its mcpServers kept) when
-    any of it differs, so an upgraded plugin's skills and hooks reach Gemini.
-    Returns the paths rewritten."""
+    skills, agents, GEMINI.md, the manifest with its mcpServers kept, plus
+    `cardinal-behavior` next to a concrete `cardinal`) when any of it
+    differs, so an upgraded plugin's skills, hooks and MCP servers reach
+    Gemini; without the extension, settings.json gets the same hooks and
+    `cardinal-behavior` entry. Returns the paths rewritten."""
     repaired: list[str] = []
     manifest = read_manifest(EXTENSION_INSTALL_DIR)
     if manifest is not None and manifest.get("cardinalManaged"):
@@ -184,15 +186,28 @@ def repair_hook_registration() -> list[str]:
             repaired.append(str(EXTENSION_INSTALL_DIR))
     if SETTINGS_PATH.exists():
         settings = load_json_object(SETTINGS_PATH, "settings.json")
+        changed = False
         hooks_root = settings.get("hooks")
         signature = _cardinal_signature(hooks_root)
         if signature:
             updated = set_cardinal_hook_entries(hooks_root)
             if _cardinal_signature(updated) != signature:
-                backup(SETTINGS_PATH)
                 settings["hooks"] = updated
-                atomic_write(SETTINGS_PATH, json.dumps(settings, indent=2) + "\n")
-                repaired.append(str(SETTINGS_PATH))
+                changed = True
+        # A --no-extension connection made before the Checks preview: its
+        # managed `cardinal` server has no `cardinal-behavior` next to it.
+        servers = settings.get("mcpServers")
+        cardinal = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
+        if isinstance(cardinal, dict) and cardinal.get("cardinalManaged"):
+            current = servers.get(BEHAVIOR_SERVER_NAME)
+            wanted = {**behavior_server(), "cardinalManaged": True}
+            if (not isinstance(current, dict) or current.get("cardinalManaged")) and current != wanted:
+                servers[BEHAVIOR_SERVER_NAME] = wanted
+                changed = True
+        if changed:
+            backup(SETTINGS_PATH)
+            atomic_write(SETTINGS_PATH, json.dumps(settings, indent=2) + "\n")
+            repaired.append(str(SETTINGS_PATH))
     return repaired
 
 

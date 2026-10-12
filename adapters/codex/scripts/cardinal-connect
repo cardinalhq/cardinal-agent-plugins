@@ -212,6 +212,48 @@ def write_codex_config(mcp_url: str, api_key: str) -> Path | None:
     return backup_path
 
 
+def _behavior_table_in_span(text: str) -> bool:
+    in_span = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(BEGIN_MARKER):
+            in_span = True
+        elif stripped.startswith(END_MARKER):
+            in_span = False
+        elif in_span and _BEHAVIOR_TABLE_HEADER_RE.match(line):
+            return True
+    return False
+
+
+def ensure_behavior_table(dry_run: bool = False) -> str:
+    """Add [mcp_servers.cardinal-behavior] to an existing managed block
+    (a connection made before the Checks preview has none). Needs no key:
+    the table names only the stable launcher. Returns what happened:
+    "added", "present" (managed or the user's own), "no-block" (no managed
+    block: not connected, or --telemetry-only) or "no-end" (an END marker
+    is missing; reconnect with --rotate)."""
+    text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else ""
+    if BEGIN_MARKER not in text:
+        return "no-block"
+    if _behavior_table_in_span(text) or UNMANAGED_BEHAVIOR_TABLE_RE.search(text):
+        return "present"
+    lines = text.splitlines(keepends=True)
+    end = next((i for i, line in enumerate(lines) if line.strip().startswith(END_MARKER)), None)
+    if end is None:
+        return "no-end"
+    if dry_run:
+        return "added"
+    before = "".join(lines[:end])
+    if before and not before.endswith("\n"):
+        before += "\n"
+    if before and not before.endswith("\n\n"):
+        before += "\n"
+    new_text = before + build_behavior_table() + "".join(lines[end:])
+    backup(CONFIG_PATH)
+    atomic_write(CONFIG_PATH, new_text)
+    return "added"
+
+
 def load_json_object(path: Path, label: str) -> dict:
     if not path.exists():
         return {}
@@ -522,7 +564,9 @@ def install_agents() -> list[str]:
 
 
 def repair_hooks(dry_run: bool = False) -> int:
-    """Rewrite the managed hook config without rotating Cardinal credentials.
+    """Rewrite the managed hook config without rotating Cardinal credentials,
+    and register the cardinal-behavior MCP server in an existing managed
+    block that lacks it (an upgrade from before the Checks preview).
 
     Also the supported way to clear Semantic DAG hook entries left behind
     by installs that predate the skill's removal.
@@ -536,6 +580,7 @@ def repair_hooks(dry_run: bool = False) -> int:
                 "codex_hooks": str(HOOKS_PATH),
                 "telemetry_launcher": str(LAUNCHER_PATH),
                 "behavior_launcher": str(BEHAVIOR_LAUNCHER_PATH),
+                "codex_config": str(CONFIG_PATH) if ensure_behavior_table(dry_run=True) == "added" else None,
                 "codex_agents": [str(AGENTS_DIR / name) for name in AGENT_FILES.values()],
             },
             "plugin_root": str(PLUGIN_ROOT),
@@ -546,6 +591,15 @@ def repair_hooks(dry_run: bool = False) -> int:
     write_launcher()
     print(f"Wrote Cardinal telemetry launcher to {LAUNCHER_PATH}")
     print(f"Wrote Cardinal behavior MCP launcher to {BEHAVIOR_LAUNCHER_PATH}")
+    behavior = ensure_behavior_table()
+    if behavior == "added":
+        print(f"Registered the {BEHAVIOR_SERVER_NAME} MCP server in {CONFIG_PATH}")
+    elif behavior == "no-block":
+        print(f"No managed Cardinal MCP block in {CONFIG_PATH}, so the {BEHAVIOR_SERVER_NAME} MCP server "
+              "was not registered (connect with MCP: cardinal-connect --rotate).")
+    elif behavior == "no-end":
+        print(f"WARN The managed Cardinal MCP block in {CONFIG_PATH} has no END marker; the "
+              f"{BEHAVIOR_SERVER_NAME} MCP server was not registered. Re-run cardinal-connect --rotate.")
     hooks_backup = write_hooks_config()
     print(f"Wrote Cardinal hooks to {HOOKS_PATH}")
     if hooks_backup:
@@ -558,7 +612,7 @@ def repair_hooks(dry_run: bool = False) -> int:
         state["plugin_version"] = PLUGIN_VERSION
         atomic_write(STATE_PATH, json.dumps(state, indent=2) + "\n")
         print(f"Updated Cardinal state version in {STATE_PATH}")
-    print("Restart Codex so it reloads the repaired hook config.")
+    print("Restart Codex so it reloads the repaired hook and MCP config.")
     return 0
 
 
@@ -805,7 +859,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repair-hooks",
         action="store_true",
-        help="Refresh the Cardinal launcher and hooks without rotating credentials.",
+        help="Refresh the Cardinal launchers and hooks, and register the cardinal-behavior MCP "
+             "server, without rotating credentials.",
     )
     parser.add_argument(
         "--telemetry-only",

@@ -40,6 +40,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import time
 from pathlib import Path
@@ -83,6 +85,61 @@ def agent_paths(runtime: str, home: Optional[Path] = None) -> AgentPaths:
 
 def state_dir(runtime: str, home: Optional[Path] = None) -> Path:
     return agent_paths(runtime, home).runtime_dir / "checks"
+
+
+# --- the cardinal-behavior MCP server's registration --------------------------
+
+BEHAVIOR_SERVER = "cardinal-behavior"
+_CODEX_BEHAVIOR_TABLE_RE = re.compile(
+    r'(?m)^\s*\[mcp_servers\.(?:"cardinal-behavior"|cardinal-behavior)\]\s*(?:#.*)?$')
+
+
+def _json_servers(path: Path) -> dict:
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return servers if isinstance(servers, dict) else {}
+
+
+def behavior_registered(runtime: str, home: Optional[Path] = None) -> bool:
+    """Whether the runtime's own config registers the cardinal-behavior MCP
+    server the checks skill uses (managed or the user's own entry):
+      claude   always: the plugin's .mcp.json ships it
+      codex    [mcp_servers.cardinal-behavior] in ~/.codex/config.toml
+      cursor   mcpServers.cardinal-behavior in ~/.cursor/mcp.json
+      gemini   mcpServers.cardinal-behavior in Cardinal's extension manifest
+               or ~/.gemini/settings.json (a --no-extension install)
+    A connection made before the Checks preview has none until its repair
+    (repair_command) runs. Never raises."""
+    runtime = _runtime(runtime)
+    if runtime == "claude":
+        return True
+    agent = agent_paths(runtime, home).home
+    if runtime == "codex":
+        try:
+            return bool(_CODEX_BEHAVIOR_TABLE_RE.search((agent / "config.toml").read_text()))
+        except (OSError, UnicodeDecodeError):
+            return False
+    if runtime == "cursor":
+        return BEHAVIOR_SERVER in _json_servers(agent / "mcp.json")
+    return any(BEHAVIOR_SERVER in _json_servers(path)
+               for path in (gemini_extension_dir(home) / "gemini-extension.json", agent / "settings.json"))
+
+
+def is_connected(runtime: str, home: Optional[Path] = None) -> bool:
+    return agent_paths(runtime, home).state_path.is_file()
+
+
+def repair_command(runtime: str, root: Path) -> Optional[str]:
+    """The command that registers cardinal-behavior on an existing
+    connection without new credentials (None for claude: nothing to repair).
+    Codex: --repair-hooks; Cursor and Gemini CLI: a re-run without --rotate."""
+    if _runtime(runtime) == "claude":
+        return None
+    script = shlex.quote(str(Path(root) / "scripts" / "cardinal-connect"))
+    return f"python3 {script} --repair-hooks" if runtime == "codex" else f"python3 {script}"
 
 
 # --- opt-in ---------------------------------------------------------------

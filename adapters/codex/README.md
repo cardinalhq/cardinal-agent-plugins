@@ -362,7 +362,10 @@ MCP URL.
 ### Upgrading: re-trust the hooks
 
 Upgrade the plugin, run `scripts/cardinal-connect --repair-hooks`, and start
-Codex: it lists the new and modified Cardinal hooks for review, and runs none of
+Codex. The repair needs no new key: it refreshes the launchers and hooks, and
+adds `[mcp_servers.cardinal-behavior]` to the managed block of a connection
+made before the Checks preview (`cardinal-checks on` / `status` print this
+command while it is missing). Codex lists the new and modified Cardinal hooks for review, and runs none of
 them until you trust them in the TUI. Every hook entry whose command or matcher
 changed must be trusted again (`codex exec` runs only trusted hooks unless
 `--dangerously-bypass-hook-trust` is given). Start a new session to pick them up.
@@ -395,7 +398,11 @@ python3 scripts/cardinal-checks status   # the setting, the installed skill, acc
 
 - **`cardinal-behavior` MCP server.** `cardinal-connect` registers it
   as `[mcp_servers.cardinal-behavior]` inside the managed block of `~/.codex/config.toml` (through the stable launcher `~/.codex/cardinal/cardinal-behavior.py`, like the hooks, so a plugin upgrade does not dangle it; an unmanaged table of that name is left alone), launched as `scripts/cardinal-behavior --runtime codex`;
-  `cardinal-disconnect` removes it. It is a local stdio server that Codex
+  `cardinal-disconnect` removes it (only the managed one: a table of that
+  name outside the markers is yours and is kept). A connection made before
+  the Checks preview has none: `python3 scripts/cardinal-connect --repair-hooks`
+  adds it without a new key, and `cardinal-checks on` / `status` print that
+  command while it is missing. It is a local stdio server that Codex
   starts outside its sandbox, so it can write the Checks ledger and read
   range runs that a sandboxed agent cannot. It reads this runtime's
   connection (`~/.codex/cardinal.json` `mcp_url` + `cardinal-secrets.json`

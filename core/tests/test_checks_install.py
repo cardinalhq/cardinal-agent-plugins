@@ -154,6 +154,52 @@ class CliTests(Base):
         self.assertEqual(json.loads(out), {TRACE: "UNKNOWN"})
         self.assertEqual(self.cli("cursor", "example", "show", "--draft", "../x")[0], checks_cli.EXIT_USAGE)
 
+    def test_on_without_the_behavior_registration_prints_the_repair_command(self):
+        agent = self.home / ".codex"
+        agent.mkdir()
+        (agent / "cardinal.json").write_text("{}")
+        (agent / "config.toml").write_text('# BEGIN cardinal-codex-plugin managed MCP server\n'
+                                           '[mcp_servers.cardinal]\nurl = "u"\n'
+                                           '# END cardinal-codex-plugin managed MCP server\n')
+        code, out, _ = self.cli("codex", "on")
+        self.assertEqual(code, 0)
+        repair = f"python3 {self.root / 'scripts' / 'cardinal-connect'} --repair-hooks"
+        self.assertIn("cardinal-behavior MCP server the checks skill uses is not registered", out)
+        self.assertIn(repair, out)
+        code, out, _ = self.cli("codex", "status")
+        self.assertIn("cardinal-behavior MCP server: not registered", out)
+        self.assertIn(repair, out)
+        # Registered (managed block, or the user's own table): no advice.
+        with (agent / "config.toml").open("a") as config:
+            config.write('[mcp_servers.cardinal-behavior]\ncommand = "/opt/mine"\n')
+        code, out, _ = self.cli("codex", "on")
+        self.assertNotIn("Not ready", out)
+        self.assertIn("cardinal-behavior MCP server: registered", self.cli("codex", "status")[1])
+
+    def test_registration_probe_per_runtime(self):
+        self.assertTrue(checks_install.behavior_registered("claude", self.home))
+        for runtime in ("codex", "cursor", "gemini"):
+            self.assertFalse(checks_install.behavior_registered(runtime, self.home), runtime)
+        (self.home / ".cursor").mkdir()
+        (self.home / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"cardinal": {}}}))
+        self.assertFalse(checks_install.behavior_registered("cursor", self.home))
+        (self.home / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"cardinal-behavior": {}}}))
+        self.assertTrue(checks_install.behavior_registered("cursor", self.home))
+        ext = self.gemini_extension()
+        self.assertFalse(checks_install.behavior_registered("gemini", self.home))
+        (ext / "gemini-extension.json").write_text(json.dumps({"mcpServers": {"cardinal-behavior": {}}}))
+        self.assertTrue(checks_install.behavior_registered("gemini", self.home))
+        self.assertEqual(checks_install.repair_command("cursor", Path("/p q")),
+                         "python3 '/p q/scripts/cardinal-connect'")
+        self.assertIsNone(checks_install.repair_command("claude", self.root))
+
+    def test_on_unconnected_says_to_connect(self):
+        code, out, _ = self.cli("cursor", "on")
+        self.assertEqual(code, 0)
+        self.assertIn("Cardinal is not connected for Cursor", out)
+        self.assertIn(f"python3 {self.root / 'scripts' / 'cardinal-connect'}", out)
+        self.assertNotIn("Not ready", self.cli("claude", "on")[1])
+
     def test_a_plugin_without_the_behavior_runtime_says_so(self):
         shutil.rmtree(self.root / "lib")
         code, _, err = self.cli("codex", "accepted")

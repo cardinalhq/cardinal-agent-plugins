@@ -111,6 +111,53 @@ class RegistrationTests(PluginCopy):
         self.assertTrue(self.disconnect.remove_mcp_entry(self.mcp_json))
         self.assertFalse(self.mcp_json.exists())
 
+    def old_connection(self, servers=None):
+        """A connection made before the Checks preview: state, the managed
+        `cardinal` entry only, current hooks."""
+        (self.home / ".cursor" / "cardinal.json").write_text(json.dumps({"user_email": "u@example.com"}))
+        managed = {"url": "https://mcp.example", "headers": {"X-CardinalHQ-API-Key": "key"}, "cardinalManaged": True}
+        self.mcp_json.write_text(json.dumps({"mcpServers": {"other": {"url": "https://foreign"},
+                                                            "cardinal": managed, **(servers or {})}}))
+        self.connect.write_hooks_config(self.home / ".cursor" / "hooks.json")
+        return managed
+
+    def rerun(self):
+        return subprocess.run([sys.executable, str(self.plugin / "scripts" / "cardinal-connect")],
+                              capture_output=True, text=True, env=self.env(), timeout=30)
+
+    def test_a_rerun_without_rotate_registers_behavior_on_an_old_connection(self):
+        managed = self.old_connection()
+        result = self.rerun()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("credentials unchanged", result.stdout)
+        servers = json.loads(self.mcp_json.read_text())["mcpServers"]
+        self.assertEqual(servers["cardinal-behavior"]["args"],
+                         [str(self.plugin.resolve() / "scripts" / "cardinal-behavior"), "--runtime", "cursor"])
+        self.assertEqual(servers["cardinal"], managed)      # the key is untouched
+        self.assertEqual(servers["other"], {"url": "https://foreign"})
+        # Up to date: nothing to refresh, the usual "already connected".
+        again = self.rerun()
+        self.assertEqual(again.returncode, 2, again.stdout)
+        self.assertIn("--rotate", again.stderr)
+
+    def test_repair_refreshes_stale_hooks_and_keeps_a_users_behavior_entry(self):
+        mine = {"command": "/opt/mine"}
+        self.old_connection({"cardinal-behavior": mine})
+        hooks = self.home / ".cursor" / "hooks.json"
+        data = json.loads(hooks.read_text())
+        data["hooks"]["postToolUse"] = [h for h in data["hooks"]["postToolUse"] if "--role" not in h["command"]]
+        hooks.write_text(json.dumps(data))
+        self.assertEqual(self.connect.repair_registration(), [str(hooks)])
+        self.assertTrue(any("--role authoring" in h["command"]
+                            for h in json.loads(hooks.read_text())["hooks"]["postToolUse"]))
+        self.assertEqual(json.loads(self.mcp_json.read_text())["mcpServers"]["cardinal-behavior"], mine)
+        self.assertEqual(self.connect.repair_registration(), [])
+
+    def test_repair_without_a_managed_cardinal_entry_registers_nothing(self):
+        self.mcp_json.write_text(json.dumps({"mcpServers": {"cardinal": {"url": "mine"}}}))
+        self.assertEqual(self.connect.repair_registration(), [])
+        self.assertNotIn("cardinal-behavior", json.loads(self.mcp_json.read_text())["mcpServers"])
+
     def test_the_registered_server_starts_for_cursor(self):
         self.connect.write_mcp_config(self.mcp_json, "https://mcp.example", "key")
         entry = json.loads(self.mcp_json.read_text())["mcpServers"]["cardinal-behavior"]
