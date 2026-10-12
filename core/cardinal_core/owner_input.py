@@ -182,6 +182,18 @@ def mark_disclosed(home: Path, sid: str) -> Optional[str]:
         return None
 
 
+def disclosure_text(home: Path, sid: str) -> Optional[str]:
+    """DISCLOSURE for this session when it records owner input (enabled),
+    WITHOUT recording that it was shown: the caller shows it and then calls
+    mark_disclosed once the message has been flushed to the user (capture's
+    mark_disclosure=False). None: nothing to show. Never raises."""
+    try:
+        b = ie.read_binding(home, sid)
+        return DISCLOSURE.format(inv=b["investigation_id"]) if enabled(b) else None
+    except Exception:
+        return None
+
+
 def forget_disclosure(home: Path, sid: str) -> None:
     """The user turned owner input off (the kill switch): forget that they
     were told, so capture resumes only after they are told again. Never
@@ -1049,7 +1061,8 @@ class CaptureResult:
 
 def capture(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[dict], client: str,
             environ: Mapping, agent_id: Optional[str] = None, deadline: float, detached: bool = False,
-            cwd: Optional[str] = None, now: Optional[float] = None, opener=None) -> CaptureResult:
+            cwd: Optional[str] = None, now: Optional[float] = None, opener=None,
+            mark_disclosure: bool = True) -> CaptureResult:
     """The prompt hook of every runtime: record `prompt` as owner input of
     session `sid`, or say why not. The gate, in order (the first that
     applies decides):
@@ -1074,7 +1087,11 @@ def capture(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[d
       disclosed       not disclosed(): mark_disclosed, and `disclosure` is
                       returned for the adapter to show now; this prompt is
                       not captured (a CONSENT_REQUIRED runtime's consent
-                      stands in for it: recorded, and this prompt goes on)
+                      stands in for it: recorded, and this prompt goes on).
+                      mark_disclosure=False: the disclosure is returned but
+                      NOT recorded as shown; the adapter calls
+                      mark_disclosed after it flushed the message to the
+                      user, so a failed write never counts as told
       no_connection   no usable connection (origin, org, key; never a token)
       posted / duplicate / queued / dropped / busy
                       submit(): everything on the network finishes by
@@ -1089,13 +1106,13 @@ def capture(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[d
     (error)."""
     try:
         return _capture(home, sid, prompt, runtime, conn, client, environ, agent_id, deadline, detached, cwd,
-                        time.time() if now is None else now, opener)
+                        time.time() if now is None else now, opener, mark_disclosure)
     except Exception:
         return CaptureResult("error")
 
 
 def _capture(home, sid, prompt, runtime, conn, client, environ, agent_id, deadline, detached, cwd, now,
-             opener) -> CaptureResult:
+             opener, mark_disclosure=True) -> CaptureResult:
     if runtime not in RUNTIMES or not ie.valid_session(sid):
         return CaptureResult("invalid")
     if kill_switch(runtime, home, environ, cwd=cwd):
@@ -1123,7 +1140,12 @@ def _capture(home, sid, prompt, runtime, conn, client, environ, agent_id, deadli
         if seen:
             return CaptureResult("repeat")
     if not disclosed(b):
-        text = mark_disclosed(home, sid)
+        # A CONSENT_REQUIRED runtime shows nothing: its consent is recorded
+        # as the disclosure now and this prompt goes on.
+        if mark_disclosure or runtime in CONSENT_REQUIRED:
+            text = mark_disclosed(home, sid)
+        else:
+            text = disclosure_text(home, sid)
         if not text:
             return CaptureResult("capability_off")
         if runtime not in CONSENT_REQUIRED:

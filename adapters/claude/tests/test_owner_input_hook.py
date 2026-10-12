@@ -215,6 +215,31 @@ class Base(unittest.TestCase):
     def silent(self, res):
         self.assertEqual((res.returncode, res.stdout, res.stderr), (0, "", ""))
 
+    def checked_stdout(self, hook: Path, payload: dict, fail_write: bool) -> str:
+        """`hook` run with a stdout that notes, at every write, whether the
+        binding already says the user was told (and can fail the write)."""
+        log = self.base / "writes.log"
+        wrapper = (
+            "import json, runpy, sys\n"
+            f"BINDING, LOG, FAIL = {str(self.sessions() / (SID + '.json'))!r}, {str(log)!r}, {fail_write!r}\n"
+            "class Out:\n"
+            "    def write(self, s):\n"
+            "        b = json.load(open(BINDING))\n"
+            "        open(LOG, 'a').write(repr(b.get('owner_input_disclosed')) + ' ' + str('systemMessage' in s) + '\\n')\n"
+            "        if FAIL:\n"
+            "            raise BrokenPipeError('closed')\n"
+            "        return len(s)\n"
+            "    def flush(self):\n"
+            "        pass\n"
+            "sys.stdout = Out()\n"
+            f"sys.argv = [{str(hook)!r}]\n"
+            f"runpy.run_path({str(hook)!r}, run_name='__main__')\n")
+        res = subprocess.run([sys.executable, "-c", wrapper],
+                             input=json.dumps(payload),
+                             capture_output=True, text=True, timeout=30, env=self.env, cwd=str(self.base))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return log.read_text()
+
 
 class Hook(Base):
     def test_records_the_owner_prompt_and_prints_nothing(self):
@@ -284,6 +309,24 @@ class Hook(Base):
         self.assertIn("systemMessage", json.loads(self.run_hook("told again first").stdout))
         self.silent(self.run_hook("now it records"))
         self.assertEqual([b["payload"]["text"] for b in self.fake.records()], ["now it records"])
+
+    def prompt_with_checked_stdout(self, prompt: str, fail_write: bool) -> str:
+        return self.checked_stdout(HOOK, {"session_id": SID, "transcript_path": "/x.jsonl", "cwd": str(self.base),
+                                          "hook_event_name": "UserPromptSubmit", "prompt": prompt}, fail_write)
+
+    def test_the_prompt_hooks_disclosure_is_recorded_only_after_it_was_flushed(self):
+        self.bind(owner_input_disclosed=False)
+        self.assertEqual(self.prompt_with_checked_stdout("first", fail_write=False), "False True\n")
+        self.assertIs(self.binding()["owner_input_disclosed"], True)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_the_prompt_hooks_failed_write_records_no_disclosure(self):
+        self.bind(owner_input_disclosed=False)
+        self.assertEqual(self.prompt_with_checked_stdout("first", fail_write=True), "False True\n")
+        self.assertFalse(self.binding().get("owner_input_disclosed"))
+        res = self.run_hook("not captured: told again first")
+        self.assertIn("systemMessage", json.loads(res.stdout))
+        self.assertEqual(self.fake.records(), [])
 
     def test_discloses_to_the_user_before_the_first_capture(self):
         self.bind(owner_input_disclosed=False)
@@ -426,27 +469,8 @@ class SessionStart(Base):
     def run_with_checked_stdout(self, fail_write: bool) -> str:
         """SessionStart with a stdout that notes, at every write, whether the
         binding already says the user was told (and can fail the write)."""
-        log = self.base / "writes.log"
-        wrapper = (
-            "import json, runpy, sys\n"
-            f"BINDING, LOG, FAIL = {str(self.sessions() / (SID + '.json'))!r}, {str(log)!r}, {fail_write!r}\n"
-            "class Out:\n"
-            "    def write(self, s):\n"
-            "        b = json.load(open(BINDING))\n"
-            "        open(LOG, 'a').write(repr(b.get('owner_input_disclosed')) + ' ' + str('systemMessage' in s) + '\\n')\n"
-            "        if FAIL:\n"
-            "            raise BrokenPipeError('closed')\n"
-            "        return len(s)\n"
-            "    def flush(self):\n"
-            "        pass\n"
-            "sys.stdout = Out()\n"
-            f"sys.argv = [{str(SESSION_HOOK)!r}]\n"
-            f"runpy.run_path({str(SESSION_HOOK)!r}, run_name='__main__')\n")
-        res = subprocess.run([sys.executable, "-c", wrapper],
-                             input=json.dumps({"session_id": SID, "source": "startup", "cwd": str(self.base)}),
-                             capture_output=True, text=True, timeout=30, env=self.env, cwd=str(self.base))
-        self.assertEqual(res.returncode, 0, res.stderr)
-        return log.read_text()
+        return self.checked_stdout(SESSION_HOOK, {"session_id": SID, "source": "startup", "cwd": str(self.base)},
+                                   fail_write)
 
     def test_the_disclosure_is_recorded_only_after_it_was_written(self):
         self.bind(owner_input_disclosed=False)

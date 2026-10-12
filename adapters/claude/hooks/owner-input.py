@@ -21,8 +21,9 @@ when ALL of these hold:
   - the user has been told: the binding's owner_input_disclosed. If not yet
     (the capability arrived after SessionStart: a bootstrap the poller
     completed, a refresh mid-session), this prompt is NOT captured; the hook
-    records the disclosure and shows it to the user as a systemMessage, and
-    capture starts with the next prompt;
+    shows the disclosure to the user as a systemMessage and records it only
+    once that write was flushed (a failed write discloses again on the next
+    prompt), and capture starts with the next prompt;
   - the prompt is not a task notification (owner_input.MACHINE_PROMPTS)
     and not empty, the payload names no subagent (agent_id), and the
     machine is connected (hooks/_connection.py).
@@ -94,11 +95,14 @@ def main() -> str:
     got = owner_input.capture(home, sid, payload.get("prompt"), runtime="claude",
                               conn=_storyboard_discovery.connection(), client=_storyboard_discovery.client_header(),
                               environ=os.environ, agent_id=payload.get("agent_id"),
-                              deadline=START + owner_input.BUDGET, cwd=payload.get("cwd"))
+                              deadline=START + owner_input.BUDGET, cwd=payload.get("cwd"), mark_disclosure=False)
     if got.disclosure:
-        # Tell the user before anything is captured; this prompt is not.
+        # Tell the user before anything is captured; this prompt is not. It
+        # counts as told only once the message was flushed (a failed write
+        # raises here and leaves it unrecorded).
         sys.stdout.write(json.dumps({"systemMessage": got.disclosure}))
         sys.stdout.flush()
+        owner_input.mark_disclosed(home, sid)
     return got.status
 
 

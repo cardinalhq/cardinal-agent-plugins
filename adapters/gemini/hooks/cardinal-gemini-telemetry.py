@@ -403,7 +403,8 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
     """Record what the owner typed as owner input of this session's
     Investigation (owner_input.capture, detached: the turn is taken and the
     prompt queued under the session lock, a detached process posts it).
-    Returns the one-time disclosure to show the user now, else None. Only a
+    Returns the one-time disclosure to show the user now, else None; it is
+    recorded as shown (mark_disclosure_shown) only after it was flushed. Only a
     bound session imports anything; never raises."""
     status = "unbound"
     try:
@@ -423,7 +424,8 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
         res = owner_input.capture(Path.home(), session_id, prompt, runtime="gemini", conn=wiring.connection(),
                                   client=wiring.client, environ=os.environ,
                                   agent_id=agent_id if isinstance(agent_id, str) else None,
-                                  deadline=START + owner_input.BUDGET, detached=True, cwd=cwd)
+                                  deadline=START + owner_input.BUDGET, detached=True, cwd=cwd,
+                                  mark_disclosure=False)
         status = res.status
         return res.disclosure
     except Exception:
@@ -431,6 +433,18 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
         return None
     finally:
         owner_input_log(status)
+
+
+def mark_disclosure_shown(session_id: str) -> None:
+    """The owner-input disclosure was flushed to Gemini as a systemMessage:
+    record it (owner_input.mark_disclosed), so capture starts with the next
+    prompt. Never raises."""
+    try:
+        from cardinal_core import owner_input
+
+        owner_input.mark_disclosed(Path.home(), session_id)
+    except Exception:
+        pass
 
 
 def staged_for_prompt(session_id: str) -> str | None:
@@ -482,6 +496,10 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
     if prompt_out:
         sys.stdout.write(json.dumps(prompt_out))
         sys.stdout.flush()
+        if disclosure and disclosure in str(prompt_out.get("systemMessage") or ""):
+            # R3: told only once the message reached Gemini (a failed write
+            # raised above): the next prompt discloses again otherwise.
+            mark_disclosure_shown(session_id)
 
     # Turn boundary: user_turn_seq increments; per-turn counters reset.
     state = session.load_progress(PATHS, session_id)

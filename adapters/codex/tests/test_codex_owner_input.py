@@ -350,5 +350,109 @@ class StopTests(OwnerInputBase):
         self.assertEqual(len(self.records()), n)
 
 
+class DisclosureFlushTests(OwnerInputBase):
+    """R3: the disclosure counts as shown only once it was flushed to Codex."""
+
+    def prompt_with_checked_stdout(self, fail_write: bool) -> str:
+        """UserPromptSubmit with a stdout that notes, at every write, whether
+        the binding already says the user was told (and can fail the write)."""
+        log = self.home / "writes.log"
+        binding = self.sessions / f"{SESSION}.json"
+        wrapper = (
+            "import json, runpy, sys\n"
+            f"BINDING, LOG, FAIL = {str(binding)!r}, {str(log)!r}, {fail_write!r}\n"
+            "class Out:\n"
+            "    def write(self, s):\n"
+            "        b = json.load(open(BINDING))\n"
+            "        open(LOG, 'a').write(repr(b.get('owner_input_disclosed')) + ' ' + str('systemMessage' in s) + '\\n')\n"
+            "        if FAIL:\n"
+            "            raise BrokenPipeError('closed')\n"
+            "        return len(s)\n"
+            "    def flush(self):\n"
+            "        pass\n"
+            "sys.stdout = Out()\n"
+            f"sys.argv = [{str(HOOK)!r}, '--event', 'UserPromptSubmit']\n"
+            f"runpy.run_path({str(HOOK)!r}, run_name='__main__')\n")
+        payload = json.loads(json.dumps(PROMPT).replace("<cwd>", str(self.repo)))
+        res = subprocess.run([sys.executable, "-c", wrapper], input=json.dumps(payload), capture_output=True,
+                             text=True, timeout=30, cwd=str(self.repo),
+                             env=self.env(CARDINAL_INVESTIGATION_POLLER="0", CARDINAL_STORYBOARD_DISCOVERY="0"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return log.read_text()
+
+    def test_the_disclosure_is_recorded_only_after_it_was_flushed(self):
+        self.setup_live()
+        self.start()
+        self.assertEqual(self.prompt_with_checked_stdout(fail_write=False), "None True\n")
+        self.assertIs(self.binding()["owner_input_disclosed"], True)
+        self.assertEqual(self.records(), [])
+
+    def test_a_failed_write_records_no_disclosure(self):
+        self.setup_live()
+        self.start()
+        self.assertEqual(self.prompt_with_checked_stdout(fail_write=True), "None True\n")
+        self.assertNotIn("owner_input_disclosed", self.binding())
+        self.assertIn("systemMessage", self.out(self.prompt()), "told again: the first one never reached Codex")
+        self.assertEqual(self.records(), [])
+
+
+def load_hook_module():
+    """The hook as a module (its own sys.path.insert finds the vendored core)."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    loader = SourceFileLoader("cardinal_codex_telemetry_budget", str(HOOK))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class PostOutputBudgetTests(unittest.TestCase):
+    """Everything after the prompt's output (git, git_state, the verdict
+    refresh) ends by START + PROMPT_EXIT_S: each git call gets what is left,
+    and the rest is skipped once it is spent."""
+
+    def run_prompt(self, left: float, git_takes: float):
+        from unittest import mock
+
+        mod = load_hook_module()
+        calls: dict = {"git": [], "emit": [], "refresh": []}
+
+        def fake_git(args, cwd, timeout=1.0):
+            calls["git"].append(timeout)
+            time.sleep(min(timeout, git_takes))
+            return None if git_takes >= timeout else "x"
+
+        mod.START = time.monotonic() - mod.PROMPT_EXIT_S + left
+        with mock.patch.object(mod.initiative, "git", fake_git), \
+                mock.patch.object(mod.limits, "gate_output", return_value=None), \
+                mock.patch.object(mod.limits, "maybe_refresh_verdict",
+                                  side_effect=lambda *a, **k: calls["refresh"].append(k["timeout"])), \
+                mock.patch.object(mod, "decision_context", return_value=None), \
+                mock.patch.object(mod, "prompt_investigation", return_value=([], None)), \
+                mock.patch.object(mod, "spawn_relook"), \
+                mock.patch.object(mod, "cached_pr", return_value=(None, None, True)), \
+                mock.patch.object(mod, "emit_records",
+                                  side_effect=lambda recs, timeout: calls["emit"].append(timeout)):
+            began = time.monotonic()
+            mod.handle_user_prompt_submit({"session_id": SESSION, "cwd": str(ADAPTER), "prompt": "hi"})
+            took = time.monotonic() - began
+        return calls, took
+
+    def test_slow_git_is_bounded_by_what_is_left_and_the_rest_is_skipped(self):
+        calls, took = self.run_prompt(left=0.3, git_takes=5.0)
+        self.assertTrue(calls["git"], "git was asked")
+        self.assertTrue(all(t <= 0.31 for t in calls["git"]), calls["git"])
+        self.assertLess(took, 0.3 + 0.25, "no git call outlives the budget")
+        self.assertEqual((calls["emit"], calls["refresh"]), ([], []), "the budget is spent: the rest is skipped")
+
+    def test_with_time_left_git_state_is_posted_within_it(self):
+        calls, _ = self.run_prompt(left=3.0, git_takes=0.0)
+        self.assertEqual(len(calls["emit"]), 1)
+        self.assertLessEqual(calls["emit"][0], 3.0)
+        self.assertTrue(all(t <= 3.0 for t in calls["git"]), calls["git"])
+
+
 if __name__ == "__main__":
     unittest.main()

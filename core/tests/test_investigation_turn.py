@@ -300,6 +300,32 @@ class OwnerInputContract(OwnerInputBase):
                 self.assertEqual(self.cap(f"second {runtime}", runtime).status, "posted")
                 self.assertEqual(self.texts(), [f"second {runtime}"])
 
+    def test_the_disclosure_can_be_marked_only_after_it_was_shown(self):
+        for runtime in ("claude", "codex", "gemini"):
+            with self.subTest(runtime=runtime):
+                self.fake.requests.clear()
+                self.fake.events.clear()
+                self.bind(owner_input_disclosed=False)
+                got = self.cap(f"first {runtime}", runtime, mark_disclosure=False)
+                self.assertEqual(got.status, "disclosed")
+                self.assertIn(oi.DISCLOSURE.format(inv=INV), got.disclosure)
+                self.assertFalse(self.binding().get("owner_input_disclosed"), "not marked before it was shown")
+                # The adapter's write failed: the next prompt discloses again.
+                again = self.cap(f"second {runtime}", runtime, mark_disclosure=False)
+                self.assertEqual(again.status, "disclosed")
+                # Flushed: the adapter marks it, and capture starts.
+                self.assertIsNotNone(oi.mark_disclosed(self.home, OI_SID))
+                self.assertEqual(self.cap(f"third {runtime}", runtime, mark_disclosure=False).status, "posted")
+                self.assertEqual(self.texts(), [f"third {runtime}"])
+        # Off: nothing to show, nothing marked.
+        self.bind(owner_input_disclosed=False, capabilities={})
+        self.assertIsNone(oi.disclosure_text(self.home, OI_SID))
+        # A CONSENT_REQUIRED runtime shows nothing, so consent is recorded as the disclosure.
+        self.bind(owner_input_disclosed=False)
+        oi.set_consent("cursor", self.home, True)
+        self.assertEqual(self.cap("cursor prompt", "cursor", mark_disclosure=False).status, "posted")
+        self.assertIs(self.binding()["owner_input_disclosed"], True)
+
     # R2: Gemini's prompt reduced to what was typed ----------------------------
     def test_gemini_normalization_strips_hook_context_and_referenced_files(self):
         n = lambda p: oi.normalize_prompt("gemini", p)   # noqa: E731

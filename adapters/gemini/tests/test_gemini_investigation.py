@@ -359,6 +359,48 @@ class OwnerInputTests(GeminiInvestigationTests):
         time.sleep(1.0)
         self.assertEqual(self.fake.records(), [])
 
+    def prompt_with_checked_stdout(self, fail_write: bool) -> str:
+        """BeforeAgent with a stdout that notes, at every write, whether the
+        binding already says the user was told (and can fail the write)."""
+        log = self.home / "writes.log"
+        binding = self.sessions / f"{SID}.json"
+        wrapper = (
+            "import json, runpy, sys\n"
+            f"BINDING, LOG, FAIL = {str(binding)!r}, {str(log)!r}, {fail_write!r}\n"
+            "class Out:\n"
+            "    def write(self, s):\n"
+            "        b = json.load(open(BINDING))\n"
+            "        open(LOG, 'a').write(repr(b.get('owner_input_disclosed')) + ' ' + str('systemMessage' in s) + '\\n')\n"
+            "        if FAIL:\n"
+            "            raise BrokenPipeError('closed')\n"
+            "        return len(s)\n"
+            "    def flush(self):\n"
+            "        pass\n"
+            "sys.stdout = Out()\n"
+            f"sys.argv = [{str(HOOK)!r}, '--event', 'BeforeAgent']\n"
+            f"runpy.run_path({str(HOOK)!r}, run_name='__main__')\n")
+        payload = {"session_id": SID, "cwd": str(self.repo), "hook_event_name": "BeforeAgent",
+                   "timestamp": "2026-10-12T00:00:00.000Z", "prompt": TYPED}
+        res = subprocess.run([sys.executable, "-c", wrapper], input=json.dumps(payload), capture_output=True,
+                             text=True, env=self.env(), cwd=str(self.repo), timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return log.read_text()
+
+    def test_the_disclosure_is_recorded_only_after_it_was_flushed(self):
+        self.start()
+        self.assertEqual(self.prompt_with_checked_stdout(fail_write=False), "None True\n")
+        self.assertIs(json.loads((self.sessions / f"{SID}.json").read_text())["owner_input_disclosed"], True)
+        time.sleep(0.5)
+        self.assertEqual(self.fake.records(), [])
+
+    def test_a_failed_write_records_no_disclosure(self):
+        self.start()
+        self.assertEqual(self.prompt_with_checked_stdout(fail_write=True), "None True\n")
+        self.assertNotIn("owner_input_disclosed", json.loads((self.sessions / f"{SID}.json").read_text()))
+        self.assertIn(DISCLOSURE, self.prompt("told again").get("systemMessage", ""))
+        time.sleep(0.5)
+        self.assertEqual(self.fake.records(), [])
+
 
 class CapabilityOffTests(GeminiInvestigationTests):
     owner_input = False
