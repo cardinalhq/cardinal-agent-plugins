@@ -141,59 +141,153 @@ cached tokens; the Codex sandbox has no network and can't write to `~/.codex`.
 
 ## 4. Frozen core API (Phase 1 deliverable)
 
-These are the proposed signatures. Lane A may refine them, but it must write the final
-signatures into this section before Phase 2 starts. Phase 2 lanes code only against this
-section.
+Lane A's part below is FINAL (implemented in Phase 1a; signatures as shipped).
+Lane E finalizes the `storyboard_authoring` part. Phase 2 lanes code only against
+this section.
+
+Conventions for every function below:
+- `home` is the USER's home (`Path.home()`), never the agent dir; per-runtime
+  files are derived from it (`~/.cardinal/…`, `~/.<runtime>/cardinal/…`).
+- `deadline` is an absolute `time.monotonic()` value.
+- Nothing raises: a failure delivers nothing / captures nothing.
+- `wiring` is a `storyboard_agent.Wiring` (needs `runtime`, `paths`, `environ`,
+  `client`, `connection()`, `_off()`, `cli`).
 
 ```python
 # core/cardinal_core/investigation_text.py  (new; the ONE session-guidance builder)
-def link_lines(view_url: str | None, investigation_url: str | None) -> str
-    # "Storyboard (private draft until published): <u>" /
-    # "Investigation timeline (shows the live record before any publish): <u>"
-def session_text(binding: dict, *, cmd: str, target: str, question_stated: bool,
-                 runtime: str) -> str
-    # author / joined variants; link_lines; question + checkpoint guidance;
-    # ADVISORY + ACK_GUIDANCE + POST_GUIDANCE; SUPERVISION_LINE when capable.
-    # Claude's storyboard-session.py live_line and investigation_agent.describe both
-    # call this.
+CLAUDE_CMD = "cardinal-storyboard investigation"
+STORYBOARD_LABEL = "Storyboard (private draft until published)"
+TIMELINE_LABEL = "Investigation timeline (shows the live record before any publish)"
+# also: SESSION_ID_LINE, ADVISORY_LINE, SHARE_LINE, SKILL_LINE, CHECKPOINT_LINE,
+#       FIRST_UPDATE_LINE, ACK_COMMAND_LINE, JOINED_LINE, SANDBOXED, SANDBOX_LINE,
+#       WATCH_GUIDANCE (the supervisor watch help: --follow, --exclude-self,
+#       --fields compact, one --follow per investigation, sandbox approval, MCP tools)
+def link_lines(view_url: Optional[str], investigation_url: Optional[str], *, sep: str = "\n") -> str
+    # "<STORYBOARD_LABEL>: <u>" then "<TIMELINE_LABEL>: <u>", only those present; "" when none
+def session_text(sid: str, binding: dict, *, cmd: str = CLAUDE_CMD, target: str = "",
+                 runtime: str = "claude", question_stated: Optional[bool] = None,
+                 owner_input_recorded: bool = False) -> str
+    # One line. Variants: no storyboard (short) / joined / author. Author: ids, link_lines,
+    # SHARE_LINE, SKILL_LINE, question line (until question_status == "stated"; None: from
+    # the binding), owner_input.DISCLOSURE when owner_input_recorded, ADVISORY_LINE,
+    # ie.ACK_GUIDANCE, ie.POST_GUIDANCE, ie.SUPERVISION_LINE when capable, CHECKPOINT_LINE.
+    # Commands are `{cmd} <action>{ target}`; checkpoint always `--session <sid>`.
+    # runtime != "claude": + FIRST_UPDATE_LINE, ACK_COMMAND_LINE, JOINED_LINE (joined);
+    # runtime in SANDBOXED ("codex", "cursor"): + SANDBOX_LINE.
+    # Claude's storyboard-session.py live_line and investigation_agent.describe both call it.
+def watch_command(investigation_id: str, *, credential_file: Optional[str] = None,
+                  cmd: str = CLAUDE_CMD) -> str
+    # "<cmd> events <inv> [--credential-file F] --follow --json --fields compact"
 
 # core/cardinal_core/investigation_turn.py  (new; runtime-neutral turn logic, no Wiring)
 @dataclass
 class Delivery:
-    agent_context: list[str]         # model-context text for this boundary
-    user_message: str | None         # user-visible text (e.g. disclosure)
-    turn_end_block: str | None       # only when TURN_END_BLOCK[runtime] is True
+    agent_context: List[str] = []      # model-context texts for this boundary, in order
+    user_message: Optional[str] = None  # user-visible text (never model context)
+    turn_end_block: Optional[str] = None  # only when TURN_END_BLOCK[runtime]
 TURN_END_BLOCK = {"claude": True, "codex": True, "gemini": False, "cursor": False}
-def at_tool(home: Path, sid: str, org: str, runtime: str, *, is_subagent: bool) -> Delivery
-    # staged items first, then inbox, then resurface. A subagent gets nothing.
-def at_turn_end(home: Path, sid: str, conn: dict, runtime: str, *, stop_hook_active: bool,
-                deadline: float, owner_input_flush: Callable[[float], None] | None) -> Delivery
-    # inbox, sync ie.check when the poller is stale, supervision_stop, remind_decisions,
-    # owner-input flush (bounded by deadline). When blocking isn't allowed, anything
-    # deliverable is staged instead of returned as turn_end_block.
-def at_prompt(home: Path, sid: str, runtime: str) -> Delivery   # consume staged items
-def stage(home: Path, sid: str, text: str) -> None
-def consume_staged(home: Path, sid: str) -> list[str]
+def can_block(runtime: str) -> bool                       # unknown runtime: False
+def at_tool(home: Path, sid: str, org: Optional[str], runtime: str, *, is_subagent: bool) -> Delivery
+    # is_subagent: nothing, nothing changes (inbox, cursor, staged items wait).
+    # Else staged items first, then the inbox, then (only if nothing else) one re-surfaced
+    # challenge/directive; the boundary is counted either way. org: binding of another
+    # org gets nothing (None: not checked). No network.
+def at_turn_end(home: Path, sid: str, conn: Optional[dict], client: str, runtime: str, *,
+                environ: Mapping, stop_hook_active: bool, deadline: float,
+                owner_input_flush: Optional[Callable[[float], None]] = None) -> Delivery
+    # inbox; else (poller not fresh) one sync ie.check bounded by the deadline (keeps
+    # TURN_END_RESERVE = 0.4 s for the flush); else supervision_stop / remind_decisions
+    # (own org, no grant token in environ). can_block(runtime): turn_end_block; otherwise
+    # every item is stage()d and nothing is returned. Always, last:
+    # owner_input_flush(deadline) and owner_input.turn_ended(home, sid).
+def at_prompt(home: Path, sid: str, runtime: str) -> Delivery   # consume staged items (no inbox)
+def stage(home: Path, sid: str, text: str) -> None   # <sid>.staged.json, 0600, MAX_STAGED=20
+def consume_staged(home: Path, sid: str) -> List[str]
+def staged_path(home: Path, sid: str) -> Path
 
 # core/cardinal_core/investigation_agent.py  (Wiring wrappers for codex/cursor/gemini)
-start(wiring, sid, source=None, *, cwd=None) -> str | None        # unchanged; uses session_text
-deliver(wiring, sid, emit, *, is_subagent=False) -> None          # thin wrapper over at_tool
-turn_end(wiring, sid, *, stop_hook_active, deadline) -> Delivery   # wraps at_turn_end
-prompt(wiring, sid) -> Delivery                                    # wraps at_prompt
+start(wiring, sid, source=None, *, cwd=None) -> Optional[str]    # unchanged; text via describe
+describe(wiring, sid, binding) -> str        # session_text(cmd=command(wiring),
+                                             #   target="--session <sid>", runtime=wiring.runtime,
+                                             #   owner_input_recorded=owner_input_recorded(...))
+owner_input_recorded(wiring, binding) -> bool  # enabled + no kill switch + consent
+deliver(wiring, sid, emit, *, is_subagent=False) -> None     # at_tool; emit(text) per item
+turn_end(wiring, sid, *, stop_hook_active: bool, deadline: float, cwd: Optional[str] = None,
+         owner_input: bool = True) -> Delivery
+    # at_turn_end with owner_input.flush_at_turn_end as the flush (owner_input=False: none)
+prompt(wiring, sid) -> Delivery                              # at_prompt
+# Every text these return has "cardinal-storyboard investigation" replaced by
+# command(wiring). All require: enabled(wiring), a valid sid, a binding on this
+# connection's org; else nothing.
 
 # core/cardinal_core/owner_input.py  (additions)
-def normalize_prompt(runtime: str, prompt: str) -> str | None
-def kill_switch(runtime: str, home: Path, environ: Mapping) -> bool
-def consent(runtime: str, home: Path) -> bool                      # Cursor: required; others: True
-def set_consent(runtime: str, home: Path, on: bool) -> None
+RUNTIMES = ("claude", "codex", "cursor", "gemini")
+CONSENT_REQUIRED = frozenset({"cursor"})
+DEDUPE_REPEATS = frozenset({"codex", "cursor", "gemini"})   # Claude: never deduped
+MACHINE_PROMPTS = {"claude": (task-notification,), "gemini": (loop-recovery request,)}
+def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]
+    # None: not a str / blank / machine prompt / unsure. gemini: strips every
+    # <hook_context>…</hook_context> and the "--- Content from referenced files ---" …
+    # "--- End of content ---" section, then .strip(); a leftover marker -> None.
+    # Other runtimes: unchanged.
+def is_machine_prompt(runtime: str, prompt: Any) -> bool
+def kill_switch(runtime: str, home: Path, environ: Mapping, *, cwd: Optional[str] = None) -> bool
+    # CARDINAL_OWNER_INPUT=0|false|off|no in environ; ~/.cardinal/owner-input.json
+    # {"<runtime>": "off"} (a non-object file counts as off); claude also ~/.claude and
+    # project (cwd, $CLAUDE_PROJECT_DIR) settings `env`. Cannot tell: True.
+def kill_switch_path(home: Path) -> Path
+def consent(runtime: str, home: Path) -> bool         # not in CONSENT_REQUIRED: True
+def set_consent(runtime: str, home: Path, on: bool) -> None   # raises ValueError / OSError
+def consent_text(runtime: str) -> str                 # print in full where the user consents
+def consent_path(runtime: str, home: Path) -> Path    # ~/.<runtime>/cardinal/owner-input-consent.json
+    # {on, text_sha256 (of consent_text), at}; another text => asked again
+def disclosure_message(runtime: str, text: str) -> str   # user-visible; says how to turn it off
 @dataclass
-class CaptureResult: status: str; disclosure: str | None           # disclosure: show to the user now
-def capture(home: Path, sid: str, prompt: str, *, runtime: str, conn: dict, client: str,
-            environ: Mapping, agent_id: str | None, deadline: float,
-            detached: bool = False) -> CaptureResult
-    # the gate: enabled -> agent_id -> consent -> kill switch -> normalize -> dedupe ->
-    # disclosed? (else return the disclosure and mark it) -> submit (bounded) or detach
+class CaptureResult:
+    status: str                       # debug code, never the prompt
+    disclosure: Optional[str] = None  # show to the user NOW (systemMessage or equivalent)
+def capture(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[dict], client: str,
+            environ: Mapping, agent_id: Optional[str] = None, deadline: float,
+            detached: bool = False, cwd: Optional[str] = None, now: Optional[float] = None,
+            opener=None) -> CaptureResult
+    # The gate, in order: invalid (runtime/sid) -> kill switch ("disabled": outbox deleted,
+    # disclosure forgotten) -> agent_id ("subagent") -> blank ("no_prompt") ->
+    # normalize_prompt ("not_typed") -> enabled() ("unbound" / "not_author" /
+    # "capability_off") -> consent ("no_consent", outbox deleted) -> DEDUPE_REPEATS
+    # ("repeat"; "busy") -> not disclosed: mark it and return ("disclosed", message) — this
+    # prompt is not captured; on CONSENT_REQUIRED runtimes consent stands in, so it is
+    # marked and capture goes on -> no connection ("no_connection") -> detached: turn taken
+    # and entry queued under the lock, spawn_flush ("detached"; "queued" if no process)
+    # | else submit() bounded by deadline ("posted" / "duplicate" / "queued" / "dropped" / "busy").
+    # What is sent is the normalized prompt.
+def turn_ended(home: Path, sid: str) -> None        # the dedupe turn boundary (at_turn_end calls it)
+def spawn_flush(home: Path, sid: str, conn: dict, client: str) -> bool
+    # detached `python -I` posting the outbox; the connection goes over a pipe
+def flush_at_turn_end(home: Path, sid: str, deadline: float, *, runtime: str, conn: Optional[dict],
+                      client: str, environ: Mapping, cwd: Optional[str] = None) -> None
+    # no outbox: nothing; kill switch: delete + forget; no consent: delete; else flush()
 
+# core/cardinal_core/paths.py
+AgentPaths.owner_input_consent_path -> Path          # <agent dir>/cardinal/owner-input-consent.json
+```
+
+How the Phase 2 lanes call it (Claude's hooks are the reference wrappers):
+- Prompt hook: `res = owner_input.capture(Path.home(), sid, payload_prompt, runtime=…,
+  conn=wiring.connection(), client=wiring.client, environ=wiring.environ,
+  agent_id=payload.get("agent_id"), deadline=START + budget, cwd=payload.get("cwd"),
+  detached=<Gemini: True>)`; show `res.disclosure` as a user-visible message when set.
+  Then `investigation_agent.prompt(wiring, sid).agent_context` into the prompt's
+  additional context.
+- Tool boundary: `investigation_agent.deliver(wiring, sid, lines.append,
+  is_subagent=bool(payload.get("agent_id")))`.
+- Turn end: `d = investigation_agent.turn_end(wiring, sid, stop_hook_active=…,
+  deadline=START + budget, cwd=…)`; block with `d.turn_end_block` only when it is set
+  (it never is on Gemini/Cursor). Gemini's AfterAgent and Cursor's stop must call it:
+  it is also the owner-input dedupe turn boundary.
+- Cursor connect: print `owner_input.consent_text("cursor")` in full, then
+  `owner_input.set_consent("cursor", Path.home(), on)`.
+
+```python
 # core/cardinal_core/storyboard_authoring.py  (new; Lane E)
 def on_preview(paths, runtime: str, tool_result) -> str | None     # context text (PNG paths/errors)
 def on_publish(paths, runtime: str, tool_result) -> str | None     # hero upload
