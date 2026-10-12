@@ -1023,6 +1023,8 @@ def capture_evidence(payload: dict[str, Any]) -> str | None:
 
 STORYBOARD_CLI = Path(__file__).resolve().parent.parent / "scripts" / "cardinal-storyboard"
 INVESTIGATION_POLLER = Path(__file__).resolve().parent / "investigation-poller.py"
+# The plugin root the Checks preview template (checks/skill/) ships in.
+CHECKS_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 STORYBOARD_SERVER = "cardinal"
 # The four tools stamped_input fills (link's about refs are the model's);
 # the same set as the BeforeTool matcher.
@@ -1539,6 +1541,21 @@ def handle_session_start(payload: dict[str, Any]) -> None:
                      sa.stray_key_warning(PATHS, "gemini", sid=sid, source=source)):
             if line:
                 parts.append(line)
+    except Exception:
+        pass
+    try:
+        # Checks preview (opt-in, `scripts/cardinal-checks on|off`): make the
+        # installed skill match the setting (it takes effect at the next
+        # session: Gemini CLI has no skill reload or skill-tool deny) and, while on
+        # and connected, the routing rule. Local only. The skill lives in
+        # Cardinal's extension (~/.gemini/extensions/cardinal/skills/checks).
+        from cardinal_core import checks_install
+        from cardinal_core import storyboard_authoring as sa
+
+        _, rule = checks_install.session_start(
+            "gemini", CHECKS_PLUGIN_ROOT, connected=sa.is_connected(PATHS, "gemini"))
+        if rule:
+            parts.append(rule)
     except Exception:
         pass
     if not parts:

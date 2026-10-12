@@ -260,20 +260,33 @@ def cardinal_server(manifest: dict | None) -> tuple:
     return url, key
 
 
+# The local cardinal-behavior MCP server (Checks preview, behavior tools): a
+# stdio server Gemini CLI runs outside its sandbox, with --runtime gemini (its
+# connection is ~/.gemini/cardinal.json + cardinal-secrets.json; no key here).
+BEHAVIOR_SERVER_NAME = "cardinal-behavior"
+BEHAVIOR_SCRIPT = PLUGIN_ROOT / "scripts" / "cardinal-behavior"
+MANAGED_SERVERS = (MCP_SERVER_NAME, BEHAVIOR_SERVER_NAME)
+
+
+def behavior_server() -> dict:
+    return {"command": "python3", "args": [str(BEHAVIOR_SCRIPT), "--runtime", "gemini"]}
+
+
 def merged_mcp_servers(installed: object, mcp_url: str | None, mcp_key: str | None) -> dict:
     """mcpServers for the installed manifest: every server already installed
     (a user's, or one a later Cardinal feature added) and every server this
     plugin's source manifest ships, MERGED, never replaced; then Cardinal's
-    own `cardinal` entry with concrete values (no `${VAR}` placeholders —
-    Gemini's manifest variable substitution is unstable across releases),
-    or without it when there is no MCP credential."""
+    own entries: `cardinal` with concrete values (no `${VAR}` placeholders —
+    Gemini's manifest variable substitution is unstable across releases) and
+    `cardinal-behavior`, or neither when there is no MCP credential."""
     source = json.loads((EXTENSION_SOURCE / "gemini-extension.json").read_text()).get("mcpServers")
     servers: dict = {}
     for group in (installed, source):
         if isinstance(group, dict):
-            servers.update({k: v for k, v in group.items() if k != MCP_SERVER_NAME})
+            servers.update({k: v for k, v in group.items() if k not in MANAGED_SERVERS})
     if mcp_url and mcp_key:
         servers[MCP_SERVER_NAME] = {"url": mcp_url, "headers": {"X-CardinalHQ-API-Key": mcp_key}}
+        servers[BEHAVIOR_SERVER_NAME] = behavior_server()
     return servers
 
 
@@ -313,7 +326,19 @@ def build_extension_bundle(target: Path, mcp_url: str | None, mcp_key: str | Non
     (target / "gemini-extension.json").write_text(json.dumps(manifest, indent=2) + "\n")
     write_extension_hooks(target)
     copy_skills(target)
+    install_checks_skill(target)
     copy_agents(target)
+
+
+def install_checks_skill(target: Path) -> None:
+    """The Checks preview's skill, when `cardinal-checks on` (a rebuilt
+    extension keeps it; SessionStart reconciles it otherwise)."""
+    try:
+        from cardinal_core import checks_install
+        if checks_install.is_enabled("gemini"):
+            checks_install.install(PLUGIN_ROOT, target / "skills" / checks_install.SKILL_DIR)
+    except (OSError, ValueError):
+        pass
 
 
 def _tree(root: Path) -> dict:
@@ -417,6 +442,9 @@ def apply_settings(ingest: dict | None, mcp_url: str | None, mcp_key: str | None
                 "headers": {"X-CardinalHQ-API-Key": mcp_key},
                 "cardinalManaged": True,
             }
+            current = servers.get(BEHAVIOR_SERVER_NAME)
+            if not isinstance(current, dict) or current.get("cardinalManaged"):
+                servers[BEHAVIOR_SERVER_NAME] = {**behavior_server(), "cardinalManaged": True}
             settings["mcpServers"] = servers
 
         settings["hooks"] = set_cardinal_hook_entries(settings.get("hooks"))

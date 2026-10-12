@@ -202,8 +202,12 @@ class ConnectHookRegistrationTest(unittest.TestCase):
 
     def test_install_writes_concrete_cardinal_server(self):
         self.connect.install_extension_bundle("https://c.example/mcp", "ck_1")
+        # Lane G: the local cardinal-behavior MCP server is registered next to
+        # Cardinal's endpoint (no key in its entry: it reads ~/.gemini's files).
         self.assertEqual(self.manifest()["mcpServers"], {
-            "cardinal": {"url": "https://c.example/mcp", "headers": {"X-CardinalHQ-API-Key": "ck_1"}}})
+            "cardinal": {"url": "https://c.example/mcp", "headers": {"X-CardinalHQ-API-Key": "ck_1"}},
+            "cardinal-behavior": {"command": "python3",
+                                  "args": [str(ADAPTER / "scripts" / "cardinal-behavior"), "--runtime", "gemini"]}})
         self.assertTrue(self.manifest()["cardinalManaged"])
         self.assertNotIn("${", (self.ext_dir / "gemini-extension.json").read_text())
 
