@@ -14,7 +14,9 @@ on:
       - 'core/**'
       - 'common/**'
       - 'build/parity_md.py'
+      - 'build/release.py'
       - 'tests/test_parity_matrix.py'
+      - 'tests/test_session_repo_release.py'
       - '.github/workflows/parity-matrix.yml'
   push:
     branches: [main]
@@ -25,7 +27,9 @@ on:
       - 'core/**'
       - 'common/**'
       - 'build/parity_md.py'
+      - 'build/release.py'
       - 'tests/test_parity_matrix.py'
+      - 'tests/test_session_repo_release.py'
       - '.github/workflows/parity-matrix.yml'
   workflow_dispatch:
 
@@ -45,3 +49,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Parity matrix
         run: python3 -m unittest discover -s tests -p test_parity_matrix.py -v
+      - name: Packaged multi-repository behavior across all adapters
+        if: matrix.python-version != '3.9'
+        run: python3 -m unittest discover -s tests -p test_session_repo_release.py -v

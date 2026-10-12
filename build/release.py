@@ -54,6 +54,7 @@ BEHAVIOR_ARTIFACTS = (
     "lib/behavior/compilation/llm.py", "lib/behavior/compilation/lifecycle.py",
     "checks/skill/SKILL.md", "checks/skill/CORE.md",
     "hooks/cardinal_core/checks_install.py", "hooks/cardinal_core/checks_cli.py",
+    "hooks/cardinal_core/session_repos.py",
     # The storyboard renderer every adapter's preview hook and canvas skill run.
     "skills/storyboard/scripts/render_preview.py",
 )
