@@ -65,8 +65,9 @@ R2. **Owner input = what the owner typed, or nothing.** Core `capture()`:
   plugin's own SessionStart context in `-p` mode) and the `--- Content from
   referenced files ---` section (inlined `@file` contents). A prompt that can't be
   reduced confidently to typed text is not captured;
-- skips a repeat of the same session + same scrubbed sha within one turn (Gemini
-  re-fires BeforeAgent on loop-detection resubmits);
+- on Gemini only, skips a repeat of the same session + same scrubbed sha within one
+  turn and within 30 s of when it was first seen (Gemini re-fires BeforeAgent on
+  loop-detection resubmits; Claude, Codex and Cursor fire once per prompt);
 - skips machine prompts (Claude task notifications, plus any per-runtime equivalents
   found during verification).
 
@@ -121,12 +122,12 @@ parity item (with reason).
 | Edit lookup | P | A | A | A |
 | Context stamping on storyboard tools | P | ~ (L: needs `allow`) | L (beforeMCPExecution can't rewrite input) | P |
 | Discovery re-look on prompt when branch/HEAD moved | P | A | A | A |
-| Discovery on subagent start | P | A (SubagentStart exists) | verify | L (no subagent events, W4:324340-324352) |
+| Discovery on subagent start | P | A (SubagentStart exists) | L (subagentStart has no context output) | L (no subagent events, W4:324340-324352) |
 | Connect hint + stray-key warning | P | A | A | A |
 | canvas skill | P | A | A | A |
 | decision skill | A | P | A | A |
-| connect/disconnect/status skills | P | P | A | verify that Gemini loads them |
-| brainstorm subagent | P | A (`[agents.<name>]` supported) | verify | A (`<ext>/agents` supported) |
+| connect/disconnect/status skills | P | P | A | P (installer fixed) |
+| brainstorm subagent | P | P (connect writes `~/.codex/agents/`) | P (`agents/` in the plugin) | P |
 | Checks preview + `cardinal-behavior` MCP | P | A | A | A |
 | Evidence capture on tool failure | P | L (no failure event; Bash non-zero exit covered) | P | P |
 | Invariant check | P | N/A | N/A | N/A |
@@ -223,7 +224,7 @@ prompt(wiring, sid) -> Delivery                              # at_prompt
 # core/cardinal_core/owner_input.py  (additions)
 RUNTIMES = ("claude", "codex", "cursor", "gemini")
 CONSENT_REQUIRED = frozenset({"cursor"})
-DEDUPE_REPEATS = frozenset({"codex", "cursor", "gemini"})   # Claude: never deduped
+DEDUPE_REPEATS = frozenset({"gemini"})   # within REPEAT_WINDOW = 30 s; others never deduped
 MACHINE_PROMPTS = {"claude": (task-notification,), "gemini": (loop-recovery request,)}
 def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]
     # None: not a str / blank / machine prompt / unsure. gemini: strips every

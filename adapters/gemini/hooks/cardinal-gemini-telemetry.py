@@ -70,6 +70,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -304,7 +305,8 @@ def merge_prompt_output(gate_out: dict[str, Any] | None, extra_context: str | No
 # (interactive submit_prompt, interactiveCli-YUJVNPR2.js:27527; -p without
 # hook context), so that prompt is NOT what the owner typed: it is
 # recognized against the command files (custom_command_expansion) and never
-# captured.
+# captured. When the command files cannot be read confidently
+# (CommandFilesUnsure), no prompt is captured.
 # ---------------------------------------------------------------------------
 
 MAX_COMMAND_FILES = 200
@@ -315,38 +317,143 @@ _TOML_PROMPT_RE = re.compile(r'(?m)^\s*prompt\s*=\s*("""|\'\'\'|"|\')')
 _INJECTION_RE = re.compile(r"\{\{args\}\}|[!@]\{[^{}]*\}")
 
 
+class CommandFilesUnsure(Exception):
+    """The command files cannot be read confidently (too many, too large,
+    an unparseable `prompt`, an unreadable directory): whether a prompt is a
+    custom command's expansion cannot be told, so it is not captured."""
+
+
+_PROMPT_KEY_RE = re.compile(r'(?m)^\s*["\']?prompt["\']?\s*=')
+
+
+def _closing(rest: str, quote: str) -> int:
+    """Where `quote` closes a TOML string whose body starts `rest`: a basic
+    string's (") closing quote is not escaped by a backslash; -1 if none."""
+    i = 0
+    while True:
+        j = rest.find(quote, i)
+        if j < 0 or not quote.startswith('"'):
+            return j
+        backslashes = 0
+        k = j - 1
+        while k >= 0 and rest[k] == "\\":
+            backslashes += 1
+            k -= 1
+        if backslashes % 2 == 0:
+            return j
+        i = j + 1
+
+
 def _toml_prompt(text: str) -> str | None:
     """The `prompt` string of a Gemini custom command file (basic and
-    literal strings, single- or multi-line); None when there is none."""
+    literal strings, single- or multi-line); None when the file has none (or
+    one that is not a string: Gemini skips such a file). Raises
+    CommandFilesUnsure when there is a `prompt` that cannot be parsed."""
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:
+        tomllib = None
+    if tomllib is not None:
+        try:
+            value = tomllib.loads(text).get("prompt")
+        except Exception as e:
+            raise CommandFilesUnsure("unparseable command file") from e
+        return value if isinstance(value, str) else None
     m = _TOML_PROMPT_RE.search(text)
     if not m:
+        if _PROMPT_KEY_RE.search(text):
+            raise CommandFilesUnsure("a prompt key this parser cannot read")
         return None
     quote = m.group(1)
     rest = text[m.end():]
-    end = rest.find(quote)
+    end = _closing(rest, quote)
     if end < 0:
-        return None
+        raise CommandFilesUnsure("an unclosed prompt string")
     value = rest[:end]
     if len(quote) == 3 and value.startswith("\n"):
         value = value[1:]
     if quote.startswith('"'):
+        if len(quote) == 3:
+            # A line-ending backslash joins the next non-blank text.
+            value = re.sub(r"\\[ \t]*\n\s*", "", value)
         try:
-            value = json.loads('"' + value.replace("\n", "\\n").replace("\t", "\\t") + '"')
-        except ValueError:
-            pass
+            value = json.loads('"' + value.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r") + '"')
+        except ValueError as e:
+            raise CommandFilesUnsure("a prompt string with escapes this parser cannot read") from e
     return value
+
+
+def _extension_command_dir(ext: Path) -> Path:
+    """An installed extension's commands/: a linked one (`gemini extensions
+    link`) loads from its source (.gemini-extension-install.json
+    {"type": "link", "source"}). Raises CommandFilesUnsure when the install
+    metadata is there but cannot be read."""
+    meta = ext / ".gemini-extension-install.json"
+    if not meta.exists():
+        return ext / "commands"
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise CommandFilesUnsure("unreadable extension install metadata") from e
+    if isinstance(data, dict) and data.get("type") == "link":
+        source = data.get("source")
+        if not isinstance(source, str) or not source:
+            raise CommandFilesUnsure("a linked extension without a source")
+        return Path(source) / "commands"
+    return ext / "commands"
 
 
 def command_dirs(cwd: str) -> list[Path]:
     """Where Gemini loads custom commands (FileCommandLoader
     getCommandDirectories): ~/.gemini/commands, <project>/.gemini/commands
-    and every installed extension's commands/."""
+    and every installed extension's commands/ (a linked extension's in its
+    source). Raises CommandFilesUnsure when the extensions cannot be
+    listed."""
     dirs = [PATHS.home / "commands", Path(cwd) / ".gemini" / "commands"]
-    try:
-        dirs += sorted(p / "commands" for p in (PATHS.home / "extensions").iterdir() if p.is_dir())
-    except OSError:
-        pass
+    extensions = PATHS.home / "extensions"
+    if extensions.exists():
+        try:
+            exts = sorted(p for p in extensions.iterdir() if p.is_dir())
+        except OSError as e:
+            raise CommandFilesUnsure("unreadable extensions directory") from e
+        dirs += [_extension_command_dir(p) for p in exts]
     return dirs
+
+
+def _toml_files(d: Path) -> list[Path]:
+    """Every *.toml under `d` (sorted); none when `d` is not a directory.
+    Raises CommandFilesUnsure when `d` or a directory under it cannot be
+    read (a permission error, an unreachable linked source)."""
+    def unsure(err: OSError) -> None:
+        raise CommandFilesUnsure("unreadable commands directory") from err
+
+    try:
+        st = os.stat(d)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError as e:
+        unsure(e)
+    if not stat.S_ISDIR(st.st_mode):
+        return []
+    if not os.access(d, os.R_OK | os.X_OK):
+        raise CommandFilesUnsure("unreadable commands directory")
+    found = []
+    for root, _dirs, names in os.walk(d, onerror=unsure):
+        found += [Path(root) / n for n in names if n.endswith(".toml")]
+        if len(found) > MAX_COMMAND_FILES:
+            raise CommandFilesUnsure("too many command files")
+    return sorted(found)
+
+
+def _in_order(parts: list[str], typed: str) -> bool:
+    """Every literal part of a template appears in `typed`, in order."""
+    i = 0
+    for part in parts:
+        j = typed.find(part.strip(), i)
+        if j < 0:
+            return False
+        i = j + len(part.strip())
+    return True
 
 
 def custom_command_expansion(prompt: Any, cwd: str) -> bool:
@@ -354,7 +461,11 @@ def custom_command_expansion(prompt: Any, cwd: str) -> bool:
     custom command's expanded template: its literal text with {{args}},
     !{…} and @{…} standing for anything, and Gemini's appended raw
     invocation when the template has no {{args}}. Local file reads only,
-    bounded; False when no command file matches."""
+    bounded; False when no command file matches. Raises CommandFilesUnsure
+    when it cannot be told: more than MAX_COMMAND_FILES files, one larger
+    than MAX_COMMAND_BYTES, an unparseable `prompt`, an unreadable command
+    or extension directory, a template with too many placeholders to match
+    whose literal text the prompt contains."""
     from cardinal_core import owner_input
 
     typed = owner_input.normalize_prompt("gemini", prompt)
@@ -362,26 +473,28 @@ def custom_command_expansion(prompt: Any, cwd: str) -> bool:
         return False
     seen = 0
     for d in command_dirs(cwd):
-        try:
-            files = sorted(d.rglob("*.toml")) if d.is_dir() else []
-        except OSError:
-            continue
-        for f in files:
+        for f in _toml_files(d):
             seen += 1
             if seen > MAX_COMMAND_FILES:
-                return False
+                raise CommandFilesUnsure("too many command files")
             try:
                 if f.stat().st_size > MAX_COMMAND_BYTES:
-                    continue
+                    raise CommandFilesUnsure("a command file too large to read")
                 template = _toml_prompt(f.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError):
-                continue
+            except (OSError, UnicodeDecodeError) as e:
+                raise CommandFilesUnsure("an unreadable command file") from e
             if not template or not template.strip():
                 continue
             parts = _INJECTION_RE.split(template.strip())
             # A template that is (almost) only placeholders would match every
-            # prompt; one with many is not worth the backtracking.
-            if len("".join(parts).strip()) < MIN_TEMPLATE_LITERAL or len(parts) > MAX_TEMPLATE_PARTS:
+            # prompt (what it submits is what was typed as its args).
+            if len("".join(parts).strip()) < MIN_TEMPLATE_LITERAL:
+                continue
+            # One with many is not worth the backtracking: unsure when the
+            # prompt holds its literal text in order.
+            if len(parts) > MAX_TEMPLATE_PARTS:
+                if _in_order(parts, typed):
+                    raise CommandFilesUnsure("a template with too many placeholders")
                 continue
             pattern = ".*?".join(re.escape(part) for part in parts)
             if re.fullmatch(r"\s*" + pattern + r"(?:\s*/[\s\S]*)?\s*", typed, re.DOTALL):
@@ -406,7 +519,8 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
     """Record what the owner typed as owner input of this session's
     Investigation (owner_input.capture, detached: the turn is taken and the
     prompt queued under the session lock, a detached process posts it).
-    Returns the one-time disclosure to show the user now, else None. Only a
+    Returns the one-time disclosure to show the user now, else None; it is
+    recorded as shown (mark_disclosure_shown) only after it was flushed. Only a
     bound session imports anything; never raises."""
     status = "unbound"
     try:
@@ -418,15 +532,27 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
 
         binding = ie.read_binding(Path.home(), session_id)
         prompt = payload.get("prompt")
-        if owner_input.enabled(binding) and custom_command_expansion(prompt, cwd):
-            status = "custom_command"
+        if owner_input.enabled(binding) and just_after_agent(session_id):
+            # Another hook's AfterAgent block re-fired BeforeAgent with its
+            # reason as the prompt: not typed (AFTER_AGENT_REFIRE_S).
+            status = "not_typed"
             return None
+        if owner_input.enabled(binding):
+            try:
+                expansion = custom_command_expansion(prompt, cwd)
+            except CommandFilesUnsure:
+                status = "custom_command_unsure"   # cannot tell: never captured
+                return None
+            if expansion:
+                status = "custom_command"
+                return None
         wiring = storyboard_wiring()
         agent_id = payload.get("agent_id")
         res = owner_input.capture(Path.home(), session_id, prompt, runtime="gemini", conn=wiring.connection(),
                                   client=wiring.client, environ=os.environ,
                                   agent_id=agent_id if isinstance(agent_id, str) else None,
-                                  deadline=START + owner_input.BUDGET, detached=True, cwd=cwd)
+                                  deadline=START + owner_input.BUDGET, detached=True, cwd=cwd,
+                                  mark_disclosure=False)
         status = res.status
         return res.disclosure
     except Exception:
@@ -434,6 +560,18 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
         return None
     finally:
         owner_input_log(status)
+
+
+def mark_disclosure_shown(session_id: str) -> None:
+    """The owner-input disclosure was flushed to Gemini as a systemMessage:
+    record it (owner_input.mark_disclosed), so capture starts with the next
+    prompt. Never raises."""
+    try:
+        from cardinal_core import owner_input
+
+        owner_input.mark_disclosed(Path.home(), session_id)
+    except Exception:
+        pass
 
 
 def staged_for_prompt(session_id: str) -> str | None:
@@ -485,6 +623,10 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
     if prompt_out:
         sys.stdout.write(json.dumps(prompt_out))
         sys.stdout.flush()
+        if disclosure and disclosure in str(prompt_out.get("systemMessage") or ""):
+            # R3: told only once the message reached Gemini (a failed write
+            # raised above): the next prompt discloses again otherwise.
+            mark_disclosure_shown(session_id)
 
     # Turn boundary: user_turn_seq increments; per-turn counters reset.
     state = session.load_progress(PATHS, session_id)
@@ -1385,6 +1527,57 @@ def handle_after_tool(payload: dict[str, Any]) -> None:
 # HOOK_TIMEOUT_MS (10 s).
 AFTER_AGENT_BUDGET_S = 2.6
 
+# When ANOTHER hook's AfterAgent blocks, gemini-cli re-fires BeforeAgent with
+# the block reason as `prompt` (GeminiClient.sendMessageStream): that text is
+# not what the owner typed. Every AfterAgent turn end records when it ran
+# (wall clock, in a small per-session file under ~/.gemini/cardinal/, not the
+# binding, so no session lock is contended), and a BeforeAgent within
+# AFTER_AGENT_REFIRE_S of it is not captured (not_typed).
+AFTER_AGENT_REFIRE_S = 2.0
+_SAFE_SID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
+def after_agent_marker(session_id: str) -> Path | None:
+    """~/.gemini/cardinal/after-agent/<sid>.json, or None for an id that is
+    not a safe file name."""
+    if not isinstance(session_id, str) or not _SAFE_SID_RE.fullmatch(session_id) or session_id in (".", ".."):
+        return None
+    return PATHS.runtime_dir / "after-agent" / f"{session_id}.json"
+
+
+def record_after_agent(session_id: str | None) -> None:
+    """Note that this session's AfterAgent ran now ({last_after_agent_at}).
+    Never raises."""
+    try:
+        path = after_agent_marker(session_id or "")
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"last_after_agent_at": time.time()}), encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except Exception:
+        pass
+
+
+def just_after_agent(session_id: str, now: float | None = None) -> bool:
+    """Whether this session's AfterAgent ran within AFTER_AGENT_REFIRE_S of
+    `now` (wall clock): BeforeAgent is then most likely the re-fire of
+    another hook's AfterAgent block. The wall clock may step: a recorded time
+    up to the window AHEAD of now counts too (never capture when unsure).
+    Local file read only; never raises."""
+    try:
+        path = after_agent_marker(session_id)
+        if path is None or not path.exists():
+            return False
+        at = json.loads(path.read_text(encoding="utf-8")).get("last_after_agent_at")
+        if not isinstance(at, (int, float)) or isinstance(at, bool):
+            return False
+        now = time.time() if now is None else now
+        return abs(now - at) < AFTER_AGENT_REFIRE_S
+    except Exception:
+        return False
+
 
 def turn_end(payload: dict[str, Any], session_id: str | None) -> None:
     """investigation_agent.turn_end on runtime "gemini": what is deliverable
@@ -1396,7 +1589,10 @@ def turn_end(payload: dict[str, Any], session_id: str | None) -> None:
     (gemini-cli 0.50.0 GeminiClient.sendMessageStream,
     chunk-W4YMYD53.js:335735-335757), so advisory text would become owner
     input (R1; investigation_turn.TURN_END_BLOCK["gemini"] is False).
-    Never raises."""
+    The time it ran is recorded (record_after_agent) at its start and again
+    at its end, since a re-fired BeforeAgent follows the last AfterAgent hook
+    to finish. Never raises."""
+    record_after_agent(session_id)
     try:
         from cardinal_core import investigation_agent
 
@@ -1407,6 +1603,7 @@ def turn_end(payload: dict[str, Any], session_id: str | None) -> None:
                                      cwd=cwd if isinstance(cwd, str) else None)
     except Exception:
         pass
+    record_after_agent(session_id)
 
 def subagent_description_from_payload(payload: dict[str, Any]) -> str | None:
     """Best-effort extraction of the subagent's short task label. Task

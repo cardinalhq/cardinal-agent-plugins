@@ -423,8 +423,7 @@ def failure_line(call: Any, *, succeeded: bool | None = None) -> str | None:
     """investigation_failures.observe for one tool call: a throttled line
     when a shell call that writes to the Investigation could not reach
     Cardinal (the sandbox's network denial). Core keys the shell tools by
-    runtime (investigation_failures.SHELL_TOOLS), so this is inert until
-    core lists Cursor's (`Shell`). Local only; never raises."""
+    runtime (investigation_failures.SHELL_TOOLS). Local only; never raises."""
     try:
         if call is None:
             return None

@@ -21,7 +21,7 @@ environment, ~/.cardinal/owner-input.json, and on Claude its settings
 reduced to what the owner typed (normalize_prompt; unsure: not captured),
 enabled(), the runtime's connect-time consent (consent; Cursor only, which
 has no per-session user-visible channel), a re-fired repeat of the same
-prompt within a turn skipped (DEDUPE_REPEATS), disclosed() (if not yet: the
+prompt within a turn skipped (DEDUPE_REPEATS, Gemini only), disclosed() (if not yet: the
 disclosure is returned for the adapter to show and this prompt is not
 captured), then submit() (bounded) or, detached, the prompt queued with its
 turn and posted by a detached process. Capture happens only when ALL of
@@ -178,6 +178,18 @@ def mark_disclosed(home: Path, sid: str) -> Optional[str]:
                 b["owner_input_disclosed"] = True
                 ie.write_binding(home, sid, b)
             return DISCLOSURE.format(inv=b["investigation_id"])
+    except Exception:
+        return None
+
+
+def disclosure_text(home: Path, sid: str) -> Optional[str]:
+    """DISCLOSURE for this session when it records owner input (enabled),
+    WITHOUT recording that it was shown: the caller shows it and then calls
+    mark_disclosed once the message has been flushed to the user (capture's
+    mark_disclosure=False). None: nothing to show. Never raises."""
+    try:
+        b = ie.read_binding(home, sid)
+        return DISCLOSURE.format(inv=b["investigation_id"]) if enabled(b) else None
     except Exception:
         return None
 
@@ -783,21 +795,32 @@ CONSENT_TEXT = ("Cardinal records the prompts you type in each {runtime} session
                 "authorize can read them. Run `cardinal-connect --owner-input off` to stop.")
 
 # Runtimes whose prompt hook may fire again for a prompt already seen this
-# turn: the same scrubbed prompt again before the turn ends is skipped.
-# Defense in depth: gemini-cli 0.50.0 fires BeforeAgent once per prompt_id
-# (its loop recovery reuses the id), but that guard lives in per-prompt
-# state it drops and re-creates; Codex and Cursor are unverified. Claude
-# fires UserPromptSubmit once per prompt, and an owner retyping a prompt
-# after an interrupt (no Stop) is captured again, as before.
-DEDUPE_REPEATS = frozenset({"codex", "cursor", "gemini"})
+# turn: the same scrubbed prompt again before the turn ends, and within
+# REPEAT_WINDOW seconds of when it was first seen, is skipped. Gemini only:
+# gemini-cli 0.50.0 fires BeforeAgent once per prompt_id (its loop recovery
+# reuses the id), but that guard lives in per-prompt state it drops and
+# re-creates. Claude, Codex and Cursor fire their prompt hook once per
+# prompt, so an owner retyping a prompt (after an interrupt, no turn end) is
+# captured again. The window bounds the skip on Gemini too: the same prompt
+# typed again later, after a turn whose end was missed, is recorded.
+DEDUPE_REPEATS = frozenset({"gemini"})
+REPEAT_WINDOW = 30.0
 
 # Prompts a runtime submits by itself, never a turn the owner took.
 MACHINE_PROMPTS = {
     # Claude Code re-enters UserPromptSubmit with a synthetic body when a
     # background task finishes ("<task-notification>…" / "task-notification …").
     "claude": (re.compile(r"^\s*<?task-notification[\s>]", re.IGNORECASE),),
-    # gemini-cli's loop recovery sends this as the request (_recoverFromLoop).
-    "gemini": (re.compile(r"^\s*System: Potential loop detected\b"),),
+    # gemini-cli's loop recovery sends this as the request (_recoverFromLoop),
+    # and /init submits its GEMINI.md template (performInit, gemini-cli
+    # 0.63.0 packages/core/src/commands/init.ts). An MCP server's prompt
+    # (McpPromptLoader) is submitted as JSON.stringify(text): see
+    # _is_json_string, applied in normalize_prompt.
+    "gemini": (
+        re.compile(r"^\s*System: Potential loop detected\b"),
+        re.compile(r"^\s*You are an AI agent that brings the power of Gemini directly into the terminal\. "
+                   r"Your task is to analyze the current directory and generate a comprehensive GEMINI\.md file"),
+    ),
     # Codex submits these template prompts for /review's presets and /init's
     # AGENTS.md (captured from codex-cli 0.160.1 / 0.162.1 UserPromptSubmit
     # payloads; no agent_id on them). A /review with custom instructions
@@ -812,11 +835,25 @@ MACHINE_PROMPTS = {
 }
 
 # gemini-cli wraps hook context in <hook_context>…</hook_context> and inlines
-# @file references between REFERENCE_CONTENT_START and _END, after the typed
-# text (it strips them itself with this same pattern).
+# @file references between REFERENCE_CONTENT_START and _END, always appended
+# after the typed text (atCommandProcessor). A referenced file may itself
+# contain either marker, so the section is cut from its first start marker to
+# the END of the prompt, never to the first end marker (which could be inside
+# a file and leak the rest of it).
 HOOK_CONTEXT_RE = re.compile(r"<hook_context>[\s\S]*?</hook_context>")
-REFERENCED_FILES_RE = re.compile(r"\n?--- Content from referenced files ---[\s\S]*?--- End of content ---")
-_GEMINI_MARKERS = ("<hook_context>", "</hook_context>", "--- Content from referenced files ---")
+REFERENCE_CONTENT_START = "--- Content from referenced files ---"
+REFERENCE_CONTENT_END = "--- End of content ---"
+_GEMINI_MARKERS = ("<hook_context>", "</hook_context>", REFERENCE_CONTENT_START, REFERENCE_CONTENT_END)
+
+
+def _cut_referenced_files(s: str) -> str:
+    """`s` without gemini-cli's inlined @file section: everything from the
+    first "\n--- Content from referenced files ---" (or the start, when `s`
+    begins with it) to the end."""
+    if s.lstrip().startswith(REFERENCE_CONTENT_START):
+        return ""
+    i = s.find("\n" + REFERENCE_CONTENT_START)
+    return s if i < 0 else s[:i]
 
 DETACHED_BUDGET = 8.0   # wall-clock of a detached process's posts (capture(detached=True))
 
@@ -927,39 +964,60 @@ def is_machine_prompt(runtime: str, prompt: Any) -> bool:
     return isinstance(prompt, str) and any(r.match(prompt) for r in MACHINE_PROMPTS.get(runtime, ()))
 
 
+def _is_json_string(s: str) -> bool:
+    """`s` (stripped) is a JSON string literal: how gemini-cli submits an MCP
+    server's prompt (McpPromptLoader: submit_prompt with
+    JSON.stringify(text)), never what the owner typed."""
+    s = s.strip()
+    if len(s) < 2 or not (s.startswith('"') and s.endswith('"')):
+        return False
+    try:
+        return isinstance(json.loads(s), str)
+    except ValueError:
+        return False
+
+
 def normalize_prompt(runtime: str, prompt: Any) -> Optional[str]:
     """What the owner typed, from the text `runtime`'s prompt hook got, or
     None when that cannot be told confidently (then nothing is captured):
       - not a string, or only whitespace: None;
       - gemini: every <hook_context>…</hook_context> block (context hooks
-        added; in -p mode the plugin's own SessionStart context) and the
-        inlined @file section ("--- Content from referenced files ---" …
-        "--- End of content ---") are removed, and the rest is stripped of
-        surrounding whitespace; a marker of either left over (unpaired, or
-        nested): None;
+        added; in -p mode the plugin's own SessionStart context) is removed,
+        then the inlined @file section: from the first "\n--- Content from
+        referenced files ---" to the END of the prompt (gemini-cli always
+        appends it after the typed text; a file's contents may hold either
+        marker). The rest is stripped of surrounding whitespace; any marker
+        left over (an unpaired or nested hook_context, a stray "--- End of
+        content ---"): None;
+      - gemini: a prompt that is a JSON string literal (an MCP server's
+        prompt, which gemini-cli submits as JSON.stringify(text)): None;
       - a machine prompt of the runtime (MACHINE_PROMPTS: Claude's task
-        notifications, Gemini's loop-recovery request): None.
+        notifications, Gemini's loop-recovery request and /init template):
+        None.
     Anything else is returned unchanged."""
     if not isinstance(prompt, str) or not prompt.strip():
         return None
     if runtime == "gemini":
-        cut = REFERENCED_FILES_RE.sub("", HOOK_CONTEXT_RE.sub("", prompt))
+        cut = _cut_referenced_files(HOOK_CONTEXT_RE.sub("", prompt))
         if any(m in cut for m in _GEMINI_MARKERS):
             return None
         if cut != prompt:
             prompt = cut.strip()
             if not prompt:
                 return None
+        if _is_json_string(prompt):
+            return None
     if is_machine_prompt(runtime, prompt):
         return None
     return prompt
 
 
-def _repeat(home: Path, sid: str, sha: str) -> Optional[bool]:
+def _repeat(home: Path, sid: str, sha: str, now: float) -> Optional[bool]:
     """Whether `sha` (a scrubbed prompt's) is the prompt this session's hook
-    already saw in this turn (since turn_ended); if not, it is remembered as
-    this turn's (the binding's owner_input_last). None: the lock is busy or
-    the session unbound (capture nothing)."""
+    already saw in this turn (since turn_ended) less than REPEAT_WINDOW
+    seconds before `now` (wall clock); if not, it is remembered as this
+    turn's (the binding's owner_input_last, with when). None: the lock is
+    busy or the session unbound (capture nothing)."""
     with ie.locked(home, sid, wait=1.0) as got:
         if not got:
             return None
@@ -967,9 +1025,10 @@ def _repeat(home: Path, sid: str, sha: str) -> Optional[bool]:
         if b is None:
             return None
         last = b.get("owner_input_last")
-        if isinstance(last, dict) and last.get("sha") == sha and last.get("ended") is not True:
+        if isinstance(last, dict) and last.get("sha") == sha and last.get("ended") is not True \
+                and 0 <= now - ie._num(last.get("at")) < REPEAT_WINDOW:
             return True
-        b["owner_input_last"] = {"sha": sha, "ended": False}
+        b["owner_input_last"] = {"sha": sha, "ended": False, "at": now}
         ie.write_binding(home, sid, b)
         return False
 
@@ -1002,7 +1061,8 @@ class CaptureResult:
 
 def capture(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[dict], client: str,
             environ: Mapping, agent_id: Optional[str] = None, deadline: float, detached: bool = False,
-            cwd: Optional[str] = None, now: Optional[float] = None, opener=None) -> CaptureResult:
+            cwd: Optional[str] = None, now: Optional[float] = None, opener=None,
+            mark_disclosure: bool = True) -> CaptureResult:
     """The prompt hook of every runtime: record `prompt` as owner input of
     session `sid`, or say why not. The gate, in order (the first that
     applies decides):
@@ -1021,12 +1081,17 @@ def capture(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[d
                       outbox
       no_consent      CONSENT_REQUIRED and no current consent: the outbox
                       is deleted
-      repeat          DEDUPE_REPEATS: the same scrubbed prompt again before
-                      the turn ended (busy: the lock could not be had)
+      repeat          DEDUPE_REPEATS (Gemini): the same scrubbed prompt
+                      again before the turn ended and within REPEAT_WINDOW
+                      seconds (busy: the lock could not be had)
       disclosed       not disclosed(): mark_disclosed, and `disclosure` is
                       returned for the adapter to show now; this prompt is
                       not captured (a CONSENT_REQUIRED runtime's consent
-                      stands in for it: recorded, and this prompt goes on)
+                      stands in for it: recorded, and this prompt goes on).
+                      mark_disclosure=False: the disclosure is returned but
+                      NOT recorded as shown; the adapter calls
+                      mark_disclosed after it flushed the message to the
+                      user, so a failed write never counts as told
       no_connection   no usable connection (origin, org, key; never a token)
       posted / duplicate / queued / dropped / busy
                       submit(): everything on the network finishes by
@@ -1041,13 +1106,13 @@ def capture(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[d
     (error)."""
     try:
         return _capture(home, sid, prompt, runtime, conn, client, environ, agent_id, deadline, detached, cwd,
-                        time.time() if now is None else now, opener)
+                        time.time() if now is None else now, opener, mark_disclosure)
     except Exception:
         return CaptureResult("error")
 
 
 def _capture(home, sid, prompt, runtime, conn, client, environ, agent_id, deadline, detached, cwd, now,
-             opener) -> CaptureResult:
+             opener, mark_disclosure=True) -> CaptureResult:
     if runtime not in RUNTIMES or not ie.valid_session(sid):
         return CaptureResult("invalid")
     if kill_switch(runtime, home, environ, cwd=cwd):
@@ -1069,13 +1134,18 @@ def _capture(home, sid, prompt, runtime, conn, client, environ, agent_id, deadli
         drop_outbox(home, sid)
         return CaptureResult("no_consent")
     if runtime in DEDUPE_REPEATS:
-        seen = _repeat(home, sid, text_of(typed)[2])
+        seen = _repeat(home, sid, text_of(typed)[2], now)
         if seen is None:
             return CaptureResult("busy")
         if seen:
             return CaptureResult("repeat")
     if not disclosed(b):
-        text = mark_disclosed(home, sid)
+        # A CONSENT_REQUIRED runtime shows nothing: its consent is recorded
+        # as the disclosure now and this prompt goes on.
+        if mark_disclosure or runtime in CONSENT_REQUIRED:
+            text = mark_disclosed(home, sid)
+        else:
+            text = disclosure_text(home, sid)
         if not text:
             return CaptureResult("capability_off")
         if runtime not in CONSENT_REQUIRED:

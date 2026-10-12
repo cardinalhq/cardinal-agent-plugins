@@ -200,9 +200,19 @@ class GeminiInvestigationTests(unittest.TestCase):
     def prompt(self, text: str, **env: str) -> dict:
         return self.out(self.run_hook("BeforeAgent", {"prompt": text}, **env))
 
-    def after_agent(self, **payload: Any) -> subprocess.CompletedProcess:
-        return self.run_hook("AfterAgent", {"prompt": "x", "prompt_response": "done",
-                                            "stop_hook_active": False, **payload})
+    @property
+    def after_agent_marker(self) -> Path:
+        return self.home / ".gemini" / "cardinal" / "after-agent" / f"{SID}.json"
+
+    def after_agent(self, refire_window: bool = False, **payload: Any) -> subprocess.CompletedProcess:
+        """AfterAgent (the turn end). Unless refire_window, its time is moved
+        back past the re-fire window, as when the owner types the next prompt
+        a while later."""
+        res = self.run_hook("AfterAgent", {"prompt": "x", "prompt_response": "done",
+                                           "stop_hook_active": False, **payload})
+        if not refire_window and self.after_agent_marker.exists():
+            self.after_agent_marker.write_text(json.dumps({"last_after_agent_at": time.time() - 60}))
+        return res
 
     def wait_records(self, n: int, timeout: float = 15.0) -> list:
         deadline = time.monotonic() + timeout
@@ -327,6 +337,69 @@ class OwnerInputTests(GeminiInvestigationTests):
         time.sleep(1.0)
         self.assertEqual([r["payload"]["text"] for r in self.fake.records()], ["/greet Bob"])
 
+    def test_unsure_about_custom_commands_captures_nothing(self):
+        commands = self.home / ".gemini" / "commands"
+        commands.mkdir(parents=True)
+        self.disclosed()
+        cases = {
+            "too many files": lambda: [(commands / f"c{i}.toml").write_text(f'prompt = "Command number {i} here."\n')
+                                       for i in range(201)],
+            "a file too large": lambda: (commands / "big.toml").write_text(
+                'prompt = """' + "x" * (64 << 10) + '"""\n'),
+            "an unparseable prompt": lambda: (commands / "bad.toml").write_text('prompt = "never closed\n'),
+        }
+        for what, make in cases.items():
+            with self.subTest(what):
+                for f in commands.iterdir():
+                    f.unlink()
+                make()
+                self.prompt(f"{TYPED} ({what})")
+        time.sleep(1.0)
+        self.assertEqual(self.fake.records(), [])
+        for f in commands.iterdir():
+            f.unlink()
+        self.prompt(TYPED)
+        self.assertEqual([r["payload"]["text"] for r in self.wait_records(1)], [TYPED], "sure again: captured")
+
+    def test_an_unreadable_linked_extension_captures_nothing(self):
+        source = self.home / "src" / "my-ext"
+        (source / "commands").mkdir(parents=True)
+        (source / "commands" / "go.toml").write_text('prompt = "Deploy the service to staging now."\n')
+        ext = self.home / ".gemini" / "extensions" / "my-ext"
+        ext.mkdir(parents=True)
+        (ext / ".gemini-extension-install.json").write_text(json.dumps({"type": "link", "source": str(source)}))
+        self.disclosed()
+        # A linked extension's command is recognized in its source.
+        self.prompt("Deploy the service to staging now.\n\n/go")
+        (source / "commands").chmod(0)
+        try:
+            self.prompt(TYPED)
+            time.sleep(1.0)
+        finally:
+            (source / "commands").chmod(0o755)
+        self.assertEqual(self.fake.records(), [])
+        # Readable again, and not a command: captured.
+        self.prompt(TYPED)
+        self.assertEqual([r["payload"]["text"] for r in self.wait_records(1)], [TYPED])
+
+    def test_command_prompts_are_parsed_without_tomllib(self):
+        mod = load_hook()
+        with mock.patch.dict(sys.modules, {"tomllib": None}):
+            self.assertEqual(mod._toml_prompt('prompt = "Say \\"hi\\" to {{args}}."\n'), 'Say "hi" to {{args}}.')
+            self.assertEqual(mod._toml_prompt("prompt = '''\nliteral \\n kept'''\n"), "literal \\n kept")
+            self.assertIsNone(mod._toml_prompt('description = "no prompt"\n'))
+            for bad in ('prompt = "never closed\n', '"prompt" = 1\n', 'prompt = "bad \\q escape"\n'):
+                with self.assertRaises(mod.CommandFilesUnsure, msg=bad):
+                    mod._toml_prompt(bad)
+        try:
+            import tomllib  # noqa: F401
+        except ImportError:
+            return
+        self.assertEqual(mod._toml_prompt('prompt = "Say \\"hi\\"."\n'), 'Say "hi".')
+        self.assertIsNone(mod._toml_prompt("prompt = 3\n"), "not a string: Gemini skips the file")
+        with self.assertRaises(mod.CommandFilesUnsure):
+            mod._toml_prompt('prompt = "never closed\n')
+
     def test_loop_recovery_prompt_is_not_captured(self):
         self.disclosed()
         self.prompt("System: Potential loop detected. Details: repetitive tool calls. Please take a step back.")
@@ -357,6 +430,82 @@ class OwnerInputTests(GeminiInvestigationTests):
         self.disclosed()
         self.run_hook("BeforeAgent", {"prompt": TYPED, "agent_id": "sub-1"})
         time.sleep(1.0)
+        self.assertEqual(self.fake.records(), [])
+
+    def test_a_before_agent_right_after_after_agent_is_not_captured(self):
+        # Another hook's AfterAgent blocked: gemini-cli re-fires BeforeAgent
+        # with the block reason as the prompt.
+        self.disclosed()
+        self.after_agent(refire_window=True)
+        self.assertTrue(self.after_agent_marker.exists())
+        out = self.prompt("Another hook's block reason: run the linter before stopping.")
+        self.assertNotIn("decision", out)
+        time.sleep(1.0)
+        self.assertEqual(self.fake.records(), [])
+        # Past the window, a prompt is the owner's again.
+        self.after_agent_marker.write_text(json.dumps({"last_after_agent_at": time.time() - 2.5}))
+        self.prompt(TYPED)
+        self.assertEqual([r["payload"]["text"] for r in self.wait_records(1)], [TYPED])
+
+    def test_the_refire_window(self):
+        mod = load_hook()
+        self.assertEqual(mod.AFTER_AGENT_REFIRE_S, 2.0)
+        self.assertFalse(mod.just_after_agent(SID), "no AfterAgent yet")
+        mod.record_after_agent(SID)
+        self.assertTrue(self.after_agent_marker.exists())
+        at = json.loads(self.after_agent_marker.read_text())["last_after_agent_at"]
+        self.assertTrue(mod.just_after_agent(SID, now=at + 1.9))
+        self.assertFalse(mod.just_after_agent(SID, now=at + 2.0))
+        self.assertTrue(mod.just_after_agent(SID, now=at - 1.0), "a clock stepped back: unsure, not captured")
+        self.assertFalse(mod.just_after_agent(SID, now=at - 5.0))
+        self.after_agent_marker.write_text("not json")
+        self.assertFalse(mod.just_after_agent(SID))
+        # Never a path outside the runtime dir.
+        self.assertIsNone(mod.after_agent_marker("../x"))
+        self.assertIsNone(mod.after_agent_marker(".."))
+        mod.record_after_agent("../escape")
+        self.assertFalse((self.home / ".gemini" / "cardinal" / "escape.json").exists())
+
+    def prompt_with_checked_stdout(self, fail_write: bool) -> str:
+        """BeforeAgent with a stdout that notes, at every write, whether the
+        binding already says the user was told (and can fail the write)."""
+        log = self.home / "writes.log"
+        binding = self.sessions / f"{SID}.json"
+        wrapper = (
+            "import json, runpy, sys\n"
+            f"BINDING, LOG, FAIL = {str(binding)!r}, {str(log)!r}, {fail_write!r}\n"
+            "class Out:\n"
+            "    def write(self, s):\n"
+            "        b = json.load(open(BINDING))\n"
+            "        open(LOG, 'a').write(repr(b.get('owner_input_disclosed')) + ' ' + str('systemMessage' in s) + '\\n')\n"
+            "        if FAIL:\n"
+            "            raise BrokenPipeError('closed')\n"
+            "        return len(s)\n"
+            "    def flush(self):\n"
+            "        pass\n"
+            "sys.stdout = Out()\n"
+            f"sys.argv = [{str(HOOK)!r}, '--event', 'BeforeAgent']\n"
+            f"runpy.run_path({str(HOOK)!r}, run_name='__main__')\n")
+        payload = {"session_id": SID, "cwd": str(self.repo), "hook_event_name": "BeforeAgent",
+                   "timestamp": "2026-10-12T00:00:00.000Z", "prompt": TYPED}
+        res = subprocess.run([sys.executable, "-c", wrapper], input=json.dumps(payload), capture_output=True,
+                             text=True, env=self.env(), cwd=str(self.repo), timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return log.read_text()
+
+    def test_the_disclosure_is_recorded_only_after_it_was_flushed(self):
+        self.start()
+        self.assertEqual(self.prompt_with_checked_stdout(fail_write=False), "None True\n")
+        self.assertIs(json.loads((self.sessions / f"{SID}.json").read_text())["owner_input_disclosed"], True)
+        time.sleep(0.5)
+        self.assertEqual(self.fake.records(), [])
+
+    def test_a_failed_write_records_no_disclosure(self):
+        self.start()
+        self.assertEqual(self.prompt_with_checked_stdout(fail_write=True), "None True\n")
+        self.assertNotIn("owner_input_disclosed", json.loads((self.sessions / f"{SID}.json").read_text()))
+        self.assertIn(DISCLOSURE, self.prompt("told again").get("systemMessage", ""))
+        time.sleep(0.5)
         self.assertEqual(self.fake.records(), [])
 
 

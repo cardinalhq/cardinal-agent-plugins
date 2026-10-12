@@ -800,7 +800,9 @@ def prompt_investigation(payload: dict[str, Any], session_id: str) -> tuple[list
     PROMPT_DEADLINE_S. Never a subagent's prompt (agent_id), never a prompt
     Codex generated for /review or /init (owner_input.MACHINE_PROMPTS). The first
     prompt that would be recorded is not: the disclosure is returned as the
-    user-visible message instead, and capture starts with the next prompt.
+    user-visible message instead (not yet recorded as shown: the caller
+    marks it after flushing it to stdout), and capture starts with the next
+    prompt.
     Then (main thread only) the session guidance when the model lacks it,
     and what was staged for this boundary (investigation_agent.prompt)."""
     from cardinal_core import investigation_agent, owner_input
@@ -812,7 +814,8 @@ def prompt_investigation(payload: dict[str, Any], session_id: str) -> tuple[list
         cwd = payload.get("cwd")
         got = owner_input.capture(Path.home(), session_id, prompt, runtime="codex", conn=wiring.connection(),
                                   client=wiring.client, environ=wiring.environ, agent_id=payload.get("agent_id"),
-                                  deadline=START + PROMPT_DEADLINE_S, cwd=cwd if isinstance(cwd, str) else None)
+                                  deadline=START + PROMPT_DEADLINE_S, cwd=cwd if isinstance(cwd, str) else None,
+                                  mark_disclosure=False)
         message = got.disclosure
     if payload.get("agent_id"):
         return [], message
@@ -822,6 +825,18 @@ def prompt_investigation(payload: dict[str, Any], session_id: str) -> tuple[list
         parts.append(guidance)
     parts.extend(investigation_agent.prompt(wiring, session_id).agent_context)
     return parts, message
+
+
+def mark_disclosure_shown(session_id: str) -> None:
+    """The owner-input disclosure was flushed to Codex as a systemMessage:
+    record it (owner_input.mark_disclosed), so capture starts with the next
+    prompt. Never raises."""
+    try:
+        from cardinal_core import owner_input
+
+        owner_input.mark_disclosed(Path.home(), session_id)
+    except Exception:
+        pass
 
 
 def spawn_relook(session_id: str, cwd: str) -> None:
@@ -901,6 +916,11 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
         if prompt_out:
             sys.stdout.write(json.dumps(prompt_out))
             sys.stdout.flush()
+            if message and message in str(prompt_out.get("systemMessage") or ""):
+                # R3: the disclosure counts as shown only once it reached
+                # Codex; a failed write (raised above) leaves it unmarked,
+                # so the next prompt discloses again instead of capturing.
+                mark_disclosure_shown(session_id)
     except Exception:
         pass
     if not blocked and not payload.get("agent_id"):
@@ -909,14 +929,27 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
         except Exception:
             pass
 
-    head_sha = initiative.git(["rev-parse", "HEAD"], cwd)
-    branch = initiative.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+    # Everything after the output is bounded by START + PROMPT_EXIT_S: each
+    # git call gets what is left of it, and once it is spent the rest
+    # (git_state, the verdict refresh) is skipped for this prompt.
+    def left() -> float:
+        return START + PROMPT_EXIT_S - time.monotonic()
+
+    def git(args: list[str]) -> str | None:
+        if left() <= 0:
+            return None
+        return initiative.git(args, cwd, timeout=max(0.05, left()))
+
+    head_sha = git(["rev-parse", "HEAD"])
+    branch = git(["rev-parse", "--abbrev-ref", "HEAD"])
     if not branch:
         # rev-parse HEAD fails in a freshly initialized repository. The
         # symbolic ref still gives us its branch, so these sessions can be
         # classified as research instead of silently losing all context.
-        branch = initiative.git(["symbolic-ref", "--short", "HEAD"], cwd)
-    remote_url = initiative.git(["remote", "get-url", "origin"], cwd)
+        branch = git(["symbolic-ref", "--short", "HEAD"])
+    remote_url = git(["remote", "get-url", "origin"])
+    if left() <= 0:
+        return  # the budget is spent: no git_state for this prompt
     repo = initiative.canonical_repo(remote_url)
     initiative_name, initiative_type = initiative.resolve_initiative(branch)
     pr_number = pr_url = None
@@ -948,19 +981,21 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
     # Emit a context shell even outside Git. Without this record, Codex
     # sessions started from a workspace root reach Outcomes with spend but
     # no initiative evidence and are defaulted to an in-flight feature.
+    if left() <= 0:
+        return
     emit_records([otlp.log_record("cardinal.git_state", attrs, time.time_ns())],
-                 timeout=max(0.5, min(HOOK_TIMEOUT_SEC, START + PROMPT_EXIT_S - time.monotonic())))
+                 timeout=max(0.05, min(HOOK_TIMEOUT_SEC, left())))
 
     # Spend-limits verdict refresh — the async half of the gate. Runs
     # AFTER the OTLP post and stays best-effort: limits must never cost
     # telemetry. Refetches from maestro when the server-assigned TTL has
     # lapsed and rewrites the verdict file the sync gate reads next turn.
-    left = START + PROMPT_EXIT_S - time.monotonic()
-    if left < 0.3:
+    remaining = left()
+    if remaining < 0.3:
         return  # the next prompt refreshes it
     try:
         limits.maybe_refresh_verdict(paths, session_id=session_id, repo=repo, branch=branch,
-                                     timeout=min(limits.FETCH_TIMEOUT_SEC, left))
+                                     timeout=min(limits.FETCH_TIMEOUT_SEC, remaining))
     except Exception:
         pass
 

@@ -315,7 +315,7 @@ only by you and grantees you authorize.
   `$skill` mentions and a `/review` with custom instructions are sent as typed.
   Never recorded: a subagent's prompt (payload `agent_id`), the prompts Codex
   generates for `/review`'s presets and `/init`, slash commands that submit no
-  prompt (`/compact`), and the same prompt repeated within one turn.
+  prompt (`/compact`). The same prompt typed twice is recorded twice.
 - **Bounded.** Recording finishes within 3.5 s of the hook's start (the hook's
   timeout is 5 s and Codex discards a timed-out hook's output, the spend-limits
   verdict with it); a prompt that cannot be posted in time is queued (0600) and

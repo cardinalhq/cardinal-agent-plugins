@@ -116,7 +116,7 @@ The consent is stored in `~/.cursor/cardinal/owner-input-consent.json` (0600), v
 
 **Kill switch**, whatever the consent says: `CARDINAL_OWNER_INPUT=0` (or `false` / `off` / `no`) in the environment Cursor's hooks run with, or `{"cursor": "off"}` in `~/.cardinal/owner-input.json`. The file is for GUI launches, which don't see your shell's environment. With either set, nothing is captured and queued prompts are deleted instead of sent.
 
-How it is captured: `beforeSubmitPrompt` calls `cardinal_core.owner_input.capture(..., detached=True)`. The turn is numbered under the session lock and a detached process posts it, so the prompt never waits on the network, and nothing ever blocks it or prints. A payload naming a subagent is refused. The same prompt again before the turn ends is skipped as a re-fire, so the dedupe depends on `stop` running `turn_end`. Anything still queued is flushed at `stop`.
+How it is captured: `beforeSubmitPrompt` calls `cardinal_core.owner_input.capture(..., detached=True)`. The turn is numbered under the session lock and a detached process posts it, so the prompt never waits on the network, and nothing ever blocks it or prints. A payload naming a subagent is refused. Cursor fires `beforeSubmitPrompt` once per prompt, so the same prompt typed twice is recorded twice. Anything still queued is flushed at `stop`.
 
 ## Evidence capture (storyboards)
 
@@ -284,6 +284,16 @@ Each of these is a property of Cursor, not of the plugin:
   text would turn into owner input and start a turn by itself
   ([hooks docs](https://cursor.com/docs/agent/hooks)). `beforeSubmitPrompt` has
   no context output. The plugin never uses `followup_message`.
+- **Another hook's `followup_message` may be recorded as owner input.** It is
+  unverified whether a `followup_message` from another hook's `stop` fires
+  `beforeSubmitPrompt`. If it does, that text reaches the owner-input capture
+  like a typed prompt and could be recorded (with your consent on), since the
+  payload does not say where the prompt came from.
+- **No storyboard discovery at a subagent's start.** `subagentStart` answers
+  `{permission, user_message}` only (`"ask"` counts as `"deny"`), with no
+  `additional_context`, so a subagent can't be handed the discovery block when
+  it starts ([hooks docs](https://cursor.com/docs/agent/hooks)). Staged items
+  still reach it at its first `postToolUse`.
 - **No automatic context stamping on storyboard tools.** `beforeMCPExecution`
   answers with a permission only and can't rewrite the call's input; the agent
   passes `cardinal-storyboard context` (see [Storyboard associations](#storyboard-associations)).
@@ -307,9 +317,6 @@ Each of these is a property of Cursor, not of the plugin:
   this plugin uses (evidence ids, limits notices, decisions, investigation
   deliveries, preview PNG lists) depends on them. The canvas and storyboard
   skills tell the agent to render by hand when no preview report arrives.
-- **Tool-failure notices** (`investigation_failures`: a shell call that writes
-  to the Investigation and can't reach Cardinal) are wired, but stay inert
-  until core lists Cursor's shell tool.
 
 ## Cloud agents
 

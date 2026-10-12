@@ -300,6 +300,32 @@ class OwnerInputContract(OwnerInputBase):
                 self.assertEqual(self.cap(f"second {runtime}", runtime).status, "posted")
                 self.assertEqual(self.texts(), [f"second {runtime}"])
 
+    def test_the_disclosure_can_be_marked_only_after_it_was_shown(self):
+        for runtime in ("claude", "codex", "gemini"):
+            with self.subTest(runtime=runtime):
+                self.fake.requests.clear()
+                self.fake.events.clear()
+                self.bind(owner_input_disclosed=False)
+                got = self.cap(f"first {runtime}", runtime, mark_disclosure=False)
+                self.assertEqual(got.status, "disclosed")
+                self.assertIn(oi.DISCLOSURE.format(inv=INV), got.disclosure)
+                self.assertFalse(self.binding().get("owner_input_disclosed"), "not marked before it was shown")
+                # The adapter's write failed: the next prompt discloses again.
+                again = self.cap(f"second {runtime}", runtime, mark_disclosure=False)
+                self.assertEqual(again.status, "disclosed")
+                # Flushed: the adapter marks it, and capture starts.
+                self.assertIsNotNone(oi.mark_disclosed(self.home, OI_SID))
+                self.assertEqual(self.cap(f"third {runtime}", runtime, mark_disclosure=False).status, "posted")
+                self.assertEqual(self.texts(), [f"third {runtime}"])
+        # Off: nothing to show, nothing marked.
+        self.bind(owner_input_disclosed=False, capabilities={})
+        self.assertIsNone(oi.disclosure_text(self.home, OI_SID))
+        # A CONSENT_REQUIRED runtime shows nothing, so consent is recorded as the disclosure.
+        self.bind(owner_input_disclosed=False)
+        oi.set_consent("cursor", self.home, True)
+        self.assertEqual(self.cap("cursor prompt", "cursor", mark_disclosure=False).status, "posted")
+        self.assertIs(self.binding()["owner_input_disclosed"], True)
+
     # R2: Gemini's prompt reduced to what was typed ----------------------------
     def test_gemini_normalization_strips_hook_context_and_referenced_files(self):
         n = lambda p: oi.normalize_prompt("gemini", p)   # noqa: E731
@@ -309,15 +335,53 @@ class OwnerInputContract(OwnerInputBase):
                  "print('secret plan')\n--- End of content ---")
         self.assertEqual(n(files), "explain @src/a.py")
         self.assertEqual(n(files + "\n<hook_context>x</hook_context>"), "explain @src/a.py")
+        # gemini-cli appends the section after the typed text: cut to the end
+        # even without the end marker (a file read cut short).
+        self.assertEqual(n("explain @a.py\n--- Content from referenced files ---\nContent from @a.py:\nno end"),
+                         "explain @a.py")
+
+    def test_gemini_referenced_files_holding_the_markers_never_leak(self):
+        n = lambda p: oi.normalize_prompt("gemini", p)   # noqa: E731
+        start, end = oi.REFERENCE_CONTENT_START, oi.REFERENCE_CONTENT_END
+        # A file that itself contains the end marker: what follows it is still the file.
+        holds_end = (f"review @notes.md\n{start}\nContent from @notes.md:\nbefore\n{end}\n"
+                     f"SECRET after the marker\n{end}")
+        self.assertEqual(n(holds_end), "review @notes.md")
+        # A file that contains the start marker.
+        holds_start = (f"review @notes.md\n{start}\nContent from @notes.md:\nx\n{start}\nSECRET\n{end}")
+        self.assertEqual(n(holds_start), "review @notes.md")
+        # Several files, one of them holding the end marker.
+        many = (f"compare @a.py and @b.py\n{start}\nContent from @a.py:\nA {end} SECRET-A\n"
+                f"Content from @b.py:\nSECRET-B\n{end}")
+        self.assertEqual(n(many), "compare @a.py and @b.py")
+        # The prompt is only the section: nothing typed.
+        self.assertIsNone(n(f"{start}\nContent from @a.py:\nA\n{end}"))
+        # A stray end marker in what is left fails closed.
+        self.assertIsNone(n(f"explain {end} this"))
 
     def test_gemini_normalization_returns_none_when_unsure(self):
         n = lambda p: oi.normalize_prompt("gemini", p)   # noqa: E731
         for prompt in ("fix it <hook_context>never closed", "fix it </hook_context>",
                        "<hook_context>a <hook_context>b</hook_context> c</hook_context>",
-                       "explain @a.py\n--- Content from referenced files ---\nContent from @a.py:\nno end",
                        "<hook_context>only context</hook_context>", "   ", None, 7,
                        "System: Potential loop detected. Details: x. Please take a step back"):
             self.assertIsNone(n(prompt), prompt)
+
+    def test_gemini_built_in_prompts_that_are_not_typed(self):
+        n = lambda p: oi.normalize_prompt("gemini", p)   # noqa: E731
+        init = ("\nYou are an AI agent that brings the power of Gemini directly into the terminal. Your task is to "
+                "analyze the current directory and generate a comprehensive GEMINI.md file to be used as "
+                "instructional context for future interactions.\n\n**Analysis Process:**\n")
+        self.assertIsNone(n(init), "/init's template")
+        # An MCP server's prompt: JSON.stringify(text).
+        self.assertIsNone(n(json.dumps("Summarize the open incidents\nfor team \"core\"")))
+        self.assertIsNone(n('  "x"  '))
+        self.assertIsNone(n(json.dumps("p") + "\n<hook_context>c</hook_context>"))
+        # Not a JSON string: recorded as typed.
+        for typed in ('"quoted" and more', '"unterminated', '"a" "b"', '"', "/plan add a cache layer"):
+            self.assertEqual(n(typed), typed.strip(), typed)
+        # Other runtimes are not touched by Gemini's rules.
+        self.assertEqual(oi.normalize_prompt("codex", '"x"'), '"x"')
 
     def test_other_runtimes_are_not_rewritten(self):
         typed = "keep <hook_context>this</hook_context> as typed"
@@ -345,9 +409,26 @@ class OwnerInputContract(OwnerInputBase):
         self.assertEqual(self.cap("run the tests").status, "posted", "a new turn: the owner typed it again")
         self.assertEqual([b["payload"]["turn"] for b in self.fake.records()], [1, 2, 3, 4])
 
-    def test_claude_is_not_deduped(self):
+    def test_a_repeat_is_skipped_only_within_the_window(self):
         self.bind()
-        self.assertEqual([self.cap("yes", "claude").status for _ in range(2)], ["posted", "posted"])
+        self.assertEqual(self.cap("run the tests", now=self.now).status, "posted")
+        self.assertEqual(self.cap("run the tests", now=self.now + oi.REPEAT_WINDOW - 1).status, "repeat")
+        # The window runs from when it was first seen, not from the last skip.
+        self.assertEqual(self.cap("run the tests", now=self.now + oi.REPEAT_WINDOW).status, "posted")
+        self.assertEqual(self.cap("run the tests", now=self.now + oi.REPEAT_WINDOW + 1).status, "repeat")
+        # A clock that went backwards is not within the window.
+        self.assertEqual(self.cap("run the tests", now=self.now).status, "posted")
+
+    def test_only_gemini_skips_repeats(self):
+        self.assertEqual(oi.DEDUPE_REPEATS, frozenset({"gemini"}))
+        for runtime in ("claude", "codex", "cursor"):
+            with self.subTest(runtime=runtime):
+                self.fake.requests.clear()
+                self.fake.events.clear()
+                self.bind()
+                if runtime == "cursor":
+                    oi.set_consent("cursor", self.home, True)
+                self.assertEqual([self.cap("yes", runtime).status for _ in range(2)], ["posted", "posted"])
 
     # R4: the kill switch, env and file ------------------------------------------
     def test_kill_switch_env_and_file(self):
