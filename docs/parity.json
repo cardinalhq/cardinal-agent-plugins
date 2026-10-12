@@ -2431,7 +2431,7 @@
       "claude": "present",
       "codex": "present",
       "cursor": "limit:Cursor's hook payloads carry no rate-limit utilization; the plugin's plan_usage on Cursor is a context-window slice from preCompact (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#telemetry-scope).",
-      "gemini": "limit:no Gemini CLI hook payload the plugin reads carries subscription utilization (not checked against the gemini-cli bundle); plan_usage carries only PreCompress's compaction trigger, and Claude-specific plan fields stay empty (adapters/gemini/README.md#telemetry-scope)."
+      "gemini": "limit:gemini-cli reads subscription quota itself through the Code Assist retrieveUserQuota RPC (gemini-cli 0.63.0 chunk-IVQKNOQE.js:retrieveUserQuota) with the user's Google OAuth credentials and passes it to no hook; the plugin does not reuse the user's Google token against that internal API. plan_usage carries only the PreCompress compaction slice (adapters/gemini/README.md#telemetry-scope)"
     },
     "probes": {
       "claude": [
