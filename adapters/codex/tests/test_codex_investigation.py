@@ -21,14 +21,14 @@ class InvestigationTests(unittest.TestCase):
     run_hook = fixtures.CodexStoryboardTests.run_hook
     session_context = fixtures.CodexStoryboardTests.session_context
 
-    def setup_live(self, enabled=True, author=True):
+    def setup_live(self, enabled=True, author=True, owner_input=False):
         self.connect()
         self.fake.routes["ensure-session-investigation"] = (200, {
             "investigation_id": INV, "storyboard_id": SB,
             "view_url": f"{self.fake.origin}/storyboards/{SB}",
             "investigation_url": f"/storyboards/{SB}/investigation",
             "is_author": author, "capabilities": {"projection": {"enabled": enabled},
-                                                   "owner_input": {"enabled": False}}})
+                                                   "owner_input": {"enabled": owner_input}}})
 
     def start(self, **env):
         return self.session_context(CARDINAL_INVESTIGATION_POLLER="0", **env)
@@ -59,10 +59,30 @@ class InvestigationTests(unittest.TestCase):
         self.assertEqual(ensures[0]["headers"]["x-cardinal-client"], f"codex/{VERSION}")
         self.assertNotIn("prompt", ensures[0]["body"])
         self.assertNotIn("transcript", ensures[0]["body"])
+        # SessionStart itself records nothing; owner input is the prompt
+        # hook's (owner_input.capture), once the server enables it.
         self.assertNotIn("record-owner-input", str(self.fake.requests))
+        self.assertIn("Storyboard (private draft until published): ", first)
+        self.assertIn("Investigation timeline (shows the live record before any publish): ", first)
         linked = self.cli("link", "--json")
         self.assertEqual(linked.returncode, 0, linked.stderr)
         self.assertEqual(json.loads(linked.stdout)["storyboard_id"], SB)
+
+    def test_owner_input_is_recorded_from_the_prompt_hook_once_enabled(self):
+        self.setup_live(owner_input=True)
+        self.fake.routes["record-owner-input"] = (200, {"event": {
+            "investigation_id": INV, "seq": 3, "type": "owner_input.recorded"}, "duplicate": False})
+        self.start()
+        prompt = {**SESSION_START, "hook_event_name": "UserPromptSubmit", "turn_id": "t1",
+                  "prompt": "Why did checkout p99 regress?"}
+        first = json.loads(self.run_hook("UserPromptSubmit", prompt, CARDINAL_INVESTIGATION_POLLER="0").stdout)
+        self.assertIn("as owner input", first["systemMessage"])
+        self.assertNotIn("record-owner-input", str(self.fake.requests), "disclosed first, not captured")
+        self.run_hook("UserPromptSubmit", {**prompt, "prompt": "Check the cache layer first."},
+                      CARDINAL_INVESTIGATION_POLLER="0")
+        [record] = [r["body"] for r in self.fake.requests if r["path"].endswith("/record-owner-input")]
+        self.assertEqual(record["payload"]["text"], "Check the cache layer first.")
+        self.assertEqual(record["session_id"], SESSION)
 
     def test_bootstrap_uses_payload_cwd_and_honors_context_optout(self):
         self.setup_live()

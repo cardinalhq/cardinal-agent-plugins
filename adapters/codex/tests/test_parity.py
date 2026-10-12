@@ -418,7 +418,7 @@ class ConnectTests(unittest.TestCase):
         # PostToolUse: hook-side decision emission (exact "Bash" matcher)
         # and generic evidence capture (".*", every tool). No status message
         # on either: it would flash on every tool call.
-        group, evidence_group = hooks["hooks"]["PostToolUse"]
+        group, evidence_group, preview_group, authoring_group = hooks["hooks"]["PostToolUse"]
         self.assertEqual(group["matcher"], "Bash")
         (handler,) = group["hooks"]
         self.assertIn("--event PostToolUse", handler["command"])
@@ -430,6 +430,49 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("cardinal-codex-plugin", handler["command"])
         self.assertNotIn("statusMessage", handler)
         self.assertLessEqual(handler["timeout"], 5)
+        # Storyboard authoring in their own groups: the preview render gets
+        # the long timeout core asks for (storyboard_authoring
+        # PREVIEW_HOOK_TIMEOUT_S), publish + apply_patch share a 10 s one.
+        self.assertEqual(preview_group["matcher"], "^mcp__cardinal__storyboard__preview$")
+        (handler,) = preview_group["hooks"]
+        self.assertIn("--event StoryboardPreview", handler["command"])
+        self.assertEqual(handler["timeout"], 150)
+        self.assertEqual(authoring_group["matcher"], "^(mcp__cardinal__storyboard__publish|apply_patch)$")
+        (handler,) = authoring_group["hooks"]
+        self.assertIn("--event StoryboardAuthoring", handler["command"])
+        self.assertEqual(handler["timeout"], 10)
+        self.assertNotIn("statusMessage", handler)
+        for matcher, name in ((preview_group["matcher"], "mcp__cardinal__storyboard__preview"),
+                              (authoring_group["matcher"], "mcp__cardinal__storyboard__publish"),
+                              (authoring_group["matcher"], "apply_patch")):
+            self.assertRegex(name, matcher)
+        self.assertNotRegex("mcp__cardinal__storyboard__preview", authoring_group["matcher"])
+        # SubagentStart: the discovery block for subagents (no status message).
+        (sub_group,) = hooks["hooks"]["SubagentStart"]
+        (handler,) = sub_group["hooks"]
+        self.assertIn("--event SubagentStart", handler["command"])
+        self.assertNotIn("statusMessage", handler)
+        # The brainstorm custom agent, marked as managed.
+        agent = self.home / ".codex" / "agents" / "cardinal-brainstorm.toml"
+        text = agent.read_text()
+        self.assertTrue(text.startswith("# Managed by cardinal-codex-plugin"))
+        self.assertEqual(read_toml(agent)["name"], "cardinal-brainstorm")
+
+    def test_connect_agents_are_idempotent_and_never_clobber_the_users(self):
+        result = run_script(CONNECT, ["--host", self.stub.url()], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        agent = self.home / ".codex" / "agents" / "cardinal-brainstorm.toml"
+        before = agent.stat().st_mtime_ns
+        repaired = run_script(CONNECT, ["--repair-hooks"], self.home)
+        self.assertEqual(repaired.returncode, 0, repaired.stderr + repaired.stdout)
+        self.assertIn("Cardinal agent up to date", repaired.stdout)
+        self.assertEqual(agent.stat().st_mtime_ns, before)
+        # The user took the file over (marker line deleted): kept, and kept by disconnect.
+        own = 'name = "cardinal-brainstorm"\ndescription = "mine"\ndeveloper_instructions = "mine"\n'
+        agent.write_text(own)
+        repaired = run_script(CONNECT, ["--repair-hooks"], self.home)
+        self.assertIn("Kept your own", repaired.stdout)
+        self.assertEqual(agent.read_text(), own)
 
     def test_connect_mints_act_token_for_migrate_from_grafana(self):
         # migrate-from-grafana reads act_api_key / act_endpoint from the secrets
@@ -731,6 +774,15 @@ class StatusAndDisconnectTests(unittest.TestCase):
         config = read_toml(self.config)
         self.assertNotIn("cardinal", config.get("mcp_servers", {}))
         self.assertNotIn("cardinal-codex-plugin", self.hooks.read_text())
+        self.assertFalse((self.home / ".codex" / "agents" / "cardinal-brainstorm.toml").exists())
+
+    def test_disconnect_keeps_an_agent_file_the_user_took_over(self):
+        agent = self.home / ".codex" / "agents" / "cardinal-brainstorm.toml"
+        own = 'name = "cardinal-brainstorm"\ndescription = "mine"\ndeveloper_instructions = "mine"\n'
+        agent.write_text(own)
+        result = run_script(DISCONNECT, [], self.home)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(agent.read_text(), own)
 
 
 class LauncherTests(unittest.TestCase):

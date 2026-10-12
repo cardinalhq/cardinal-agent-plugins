@@ -208,6 +208,27 @@ def remove_hooks_config() -> bool:
     return changed
 
 
+# Custom agents cardinal-connect installed (its AGENT_FILES / AGENT_MARKER,
+# kept in lockstep): only a file that still starts with the marker is
+# removed; one the user took over (marker line deleted) is kept.
+AGENTS_DIR = CODEX_DIR / "agents"
+MANAGED_AGENTS = ("cardinal-brainstorm.toml",)
+AGENT_MARKER = "# Managed by cardinal-codex-plugin"
+
+
+def remove_managed_agents() -> list[Path]:
+    removed = []
+    for name in MANAGED_AGENTS:
+        path = AGENTS_DIR / name
+        try:
+            if path.read_text(encoding="utf-8").startswith(AGENT_MARKER):
+                path.unlink()
+                removed.append(path)
+        except (OSError, UnicodeDecodeError):
+            pass
+    return removed
+
+
 def revoke_key(host: str, key_id: str, plaintext: str | None) -> tuple[bool, str]:
     url = host.rstrip("/") + f"/api/maestro-keys/{key_id}/revoke"
     headers = {"content-type": "application/json"}
@@ -286,6 +307,9 @@ def main() -> int:
     removed_hooks = remove_hooks_config()
     if not removed_hooks:
         print(f"No managed Cardinal hooks found in {HOOKS_PATH}")
+
+    for agent in remove_managed_agents():
+        print(f"Removed {agent}")
 
     if SECRETS_PATH.exists():
         SECRETS_PATH.unlink()
