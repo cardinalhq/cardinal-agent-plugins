@@ -34,7 +34,10 @@ shared algorithms and the OTLP contract now come from `core/cardinal_core`.
 - `scripts/` — `cardinal-connect` (device flow + probes from
   `cardinal_core.deviceflow`; the parse-aware TOML managed-block writer
   and the Codex `hooks.json` writer stay adapter-side), `cardinal-status`,
-  `cardinal-disconnect`.
+  `cardinal-disconnect`, `cardinal-checks` and `cardinal-behavior` (see
+  Checks preview).
+- `checks/skill/` — the Checks preview's opt-in skill template (installed
+  into `skills/checks/` by `cardinal-checks on`, never shipped there).
 - `agents/brainstorm.toml` — the `cardinal-brainstorm` custom agent;
   `cardinal-connect` installs it in `~/.codex/agents/` (see Storyboard
   authoring).
@@ -376,6 +379,52 @@ servers without projection are described honestly as not automatically updating.
   Stop; their advisories wait for the next tool or turn boundary.
 - An advisory that arrives after a turn's last tool call is delivered at that
   turn's Stop (a block), or at the next tool boundary.
+
+## Checks preview (opt-in)
+
+Checks are reusable, evidence-backed decisions over telemetry (a contract the
+user approves, approved teaching examples, per-trace results with evidence),
+built on the `cardinal-behavior` MCP server. The preview is **off by
+default**; turn it on or off in your own terminal:
+
+```bash
+python3 scripts/cardinal-checks on       # install the checks skill; start a new Codex session
+python3 scripts/cardinal-checks off      # remove it
+python3 scripts/cardinal-checks status   # the setting, the installed skill, accepted checks
+```
+
+- **`cardinal-behavior` MCP server.** `cardinal-connect` registers it
+  as `[mcp_servers.cardinal-behavior]` inside the managed block of `~/.codex/config.toml` (through the stable launcher `~/.codex/cardinal/cardinal-behavior.py`, like the hooks, so a plugin upgrade does not dangle it; an unmanaged table of that name is left alone), launched as `scripts/cardinal-behavior --runtime codex`;
+  `cardinal-disconnect` removes it. It is a local stdio server that Codex
+  starts outside its sandbox, so it can write the Checks ledger and read
+  range runs that a sandboxed agent cannot. It reads this runtime's
+  connection (`~/.codex/cardinal.json` `mcp_url` + `cardinal-secrets.json`
+  `mcp_api_key`); `CARDINAL_MCP_URL` / `CARDINAL_MCP_API_KEY` in its
+  environment override them. No key is written into the MCP registration.
+- **The skill** (`cardinal-checks`, from `checks/skill/`: this plugin's
+  SKILL.md over the shared `common/checks/CORE.md`) is installed into
+  this plugin's `skills/checks/` (`plugin.json` `"skills": "./skills/"`) by `on` and removed by `off`. The SessionStart hook
+  reconciles that copy with the setting and, while the preview is on and
+  Cardinal is connected, adds the routing rule (answer with the query tools
+  first; a check only for per-trace judgments). Off: no text at all.
+- **Labels and reuse** go through MCP tools (`set_check_example`,
+  `approve_check_example`, `remove_check_example`, `get_check_draft`,
+  `lock_check_examples`, `list_accepted_checks`), never shell commands. The
+  ledger is `~/.codex/cardinal/checks/drafts/`; disconnect removes it.
+- **Range runs** (`execute_behavior_range`) run in a detached worker; the
+  agent follows one by polling `get_behavior_range` (each call waits up to
+  30 s for new events, and a completed run's summary comes back in it).
+  Claude Code listens with its Monitor tool instead; Codex has no
+  equivalent, so it polls.
+
+**Limit: a change takes effect at the next session; no skill reload or
+deny.** Claude Code's gate returns `reloadSkills` and denies its Skill tool
+while the preview is off. A Codex SessionStart hook can only add context
+(`hookSpecificOutput.additionalContext`; see the host-surface evidence above,
+https://learn.chatgpt.com/docs/hooks), and Codex has no skill tool call to
+deny: it lists the plugin's skills when the session starts and the model
+opens a SKILL.md itself. So `on` / `off` apply to sessions started
+afterwards; a running session keeps the skill list it started with.
 
 ## Storyboard associations
 

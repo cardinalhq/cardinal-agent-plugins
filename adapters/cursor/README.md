@@ -216,9 +216,58 @@ lists `"agents": "./agents/"`. Subagent frontmatter (`name`, `description`,
 If this directory isn't loaded as a Cursor plugin, copy the file to
 `~/.cursor/agents/` (user subagents) to use it.
 
+## Checks preview (opt-in)
+
+Checks are reusable, evidence-backed decisions over telemetry (a contract the
+user approves, approved teaching examples, per-trace results with evidence),
+built on the `cardinal-behavior` MCP server. The preview is **off by
+default**; turn it on or off in your own terminal:
+
+```bash
+python3 scripts/cardinal-checks on       # install the checks skill; start a new Cursor session
+python3 scripts/cardinal-checks off      # remove it
+python3 scripts/cardinal-checks status   # the setting, the installed skill, accepted checks
+```
+
+- **`cardinal-behavior` MCP server.** `cardinal-connect` registers it
+  as a `cardinalManaged` `mcpServers.cardinal-behavior` entry in `~/.cursor/mcp.json` (not in a `--project` `.cursor/mcp.json`: a cloud agent has no local plugin to run; an unmanaged entry of that name is left alone), launched as `scripts/cardinal-behavior --runtime cursor`;
+  `cardinal-disconnect` removes it. It is a local stdio server that Cursor
+  starts outside its sandbox, so it can write the Checks ledger and read
+  range runs that a sandboxed agent cannot. It reads this runtime's
+  connection (`~/.cursor/cardinal.json` `mcp_url` + `cardinal-secrets.json`
+  `mcp_api_key`); `CARDINAL_MCP_URL` / `CARDINAL_MCP_API_KEY` in its
+  environment override them. No key is written into the MCP registration.
+- **The skill** (`cardinal-checks`, from `checks/skill/`: this plugin's
+  SKILL.md over the shared `common/checks/CORE.md`) is installed into
+  this plugin's `skills/checks/` (`plugin.json` `"skills": "./skills/"`) by `on` and removed by `off`. The SessionStart hook
+  reconciles that copy with the setting and, while the preview is on and
+  Cardinal is connected, adds the routing rule (answer with the query tools
+  first; a check only for per-trace judgments). Off: no text at all.
+- **Labels and reuse** go through MCP tools (`set_check_example`,
+  `approve_check_example`, `remove_check_example`, `get_check_draft`,
+  `lock_check_examples`, `list_accepted_checks`), never shell commands. The
+  ledger is `~/.cursor/cardinal/checks/drafts/`; disconnect removes it.
+- **Range runs** (`execute_behavior_range`) run in a detached worker; the
+  agent follows one by polling `get_behavior_range` (each call waits up to
+  30 s for new events, and a completed run's summary comes back in it).
+  Claude Code listens with its Monitor tool instead; Cursor has no
+  equivalent, so it polls.
+
+Restart Cursor after `cardinal-connect` so it starts the new MCP server. Not
+checked against a live Cursor (not installed where this was written); the
+fixtures are `tests/test_cursor_checks.py`.
+
 ## Limits on Cursor
 
 Each of these is a property of Cursor, not of the plugin:
+
+- **Checks preview: a change takes effect at the next session; no skill
+  reload or deny.** Claude Code's gate returns `reloadSkills` and denies its
+  Skill tool while the preview is off. Cursor's `sessionStart` output is
+  `additional_context` (and `env`), with no skill-reload field, and no hook
+  event names a skill being used, so there is nothing to deny
+  ([hooks docs](https://cursor.com/docs/agent/hooks)). `cardinal-checks on` /
+  `off` apply to sessions started afterwards.
 
 - **No per-session owner-input disclosure.** Cursor has no user-visible,
   non-blocking hook message (see [Owner input](#owner-input-opt-in-consent)).
@@ -313,6 +362,7 @@ python3 scripts/cardinal-storyboard context --session-id <conversation id>
 python3 scripts/cardinal-storyboard investigation link --session <conversation id>
 python3 scripts/cardinal-disconnect
 python3 scripts/cardinal-disconnect --force
+python3 scripts/cardinal-checks on|off|status
 ```
 
 ## Known Cursor issues

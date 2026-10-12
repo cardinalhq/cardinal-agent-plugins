@@ -288,9 +288,14 @@ environment), or the connect state file `~/.claude/cardinal.json`.
   Code to reload skills when it changes), injects the routing rule (queries
   first, a check only for per-trace judgments) only while the preview is on
   and connected, and denies the Skill tool for it while the preview is off.
-  `cardinal-checks example …` / `accepted` are the skill's teaching-label
-  ledger and its list of accepted checks. The raw `cardinal-behavior` tools
-  stay registered for everyone; `execute_behavior_range` starts a detached
+  The skill records teaching labels and finds accepted checks through
+  `cardinal-behavior` MCP tools (`set_check_example`, `approve_check_example`,
+  `remove_check_example`, `get_check_draft`, `lock_check_examples`,
+  `list_accepted_checks`), the same ledger (`lib/behavior/checks_ledger.py`)
+  that `cardinal-checks example …` / `accepted` run for people. Its guided
+  flow is the shared `common/checks/CORE.md`; Codex, Cursor and Gemini CLI
+  have the preview too. The raw `cardinal-behavior` tools stay registered for
+  everyone; `execute_behavior_range` starts a detached
   worker (`common/behavior/range_runner.py`) that runs an accepted check over
   any range in one-hour windows with window-edge canonicalization and writes
   `ranges/<id>/events.jsonl`, `summary.json` and `result.json`;
