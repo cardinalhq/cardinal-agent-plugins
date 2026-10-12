@@ -234,6 +234,11 @@ Each of these is a property of Cursor, not of the plugin:
   `beforeSubmitPrompt`. If it does, that text reaches the owner-input capture
   like a typed prompt and could be recorded (with your consent on), since the
   payload does not say where the prompt came from.
+- **No storyboard discovery at a subagent's start.** `subagentStart` answers
+  `{permission, user_message}` only (`"ask"` counts as `"deny"`), with no
+  `additional_context`, so a subagent can't be handed the discovery block when
+  it starts ([hooks docs](https://cursor.com/docs/agent/hooks)). Staged items
+  still reach it at its first `postToolUse`.
 - **No automatic context stamping on storyboard tools.** `beforeMCPExecution`
   answers with a permission only and can't rewrite the call's input; the agent
   passes `cardinal-storyboard context` (see [Storyboard associations](#storyboard-associations)).

@@ -122,12 +122,12 @@ parity item (with reason).
 | Edit lookup | P | A | A | A |
 | Context stamping on storyboard tools | P | ~ (L: needs `allow`) | L (beforeMCPExecution can't rewrite input) | P |
 | Discovery re-look on prompt when branch/HEAD moved | P | A | A | A |
-| Discovery on subagent start | P | A (SubagentStart exists) | verify | L (no subagent events, W4:324340-324352) |
+| Discovery on subagent start | P | A (SubagentStart exists) | L (subagentStart has no context output) | L (no subagent events, W4:324340-324352) |
 | Connect hint + stray-key warning | P | A | A | A |
 | canvas skill | P | A | A | A |
 | decision skill | A | P | A | A |
-| connect/disconnect/status skills | P | P | A | verify that Gemini loads them |
-| brainstorm subagent | P | A (`[agents.<name>]` supported) | verify | A (`<ext>/agents` supported) |
+| connect/disconnect/status skills | P | P | A | P (installer fixed) |
+| brainstorm subagent | P | P (connect writes `~/.codex/agents/`) | P (`agents/` in the plugin) | P |
 | Checks preview + `cardinal-behavior` MCP | P | A | A | A |
 | Evidence capture on tool failure | P | L (no failure event; Bash non-zero exit covered) | P | P |
 | Invariant check | P | N/A | N/A | N/A |
