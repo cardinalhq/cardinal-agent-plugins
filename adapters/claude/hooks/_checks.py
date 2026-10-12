@@ -417,8 +417,8 @@ def format_range_event(event: dict, events_file: Path) -> str | None:
     if kind in ("window_rejected", "whole_rejected", "window_unreadable"):
         return f"{kind.replace('_', ' ')} {_window(event)}: {event.get('error') or 'results could not be read'}"
     if kind == "read_retry":
-        return (f"results read for {_window(event)} failed ({event.get('failures')}x): {event.get('error')}; "
-                "retrying")
+        then = "giving up on this execution" if event.get("final") else "retrying"
+        return f"results read for {_window(event)} failed ({event.get('failures')}x): {event.get('error')}; {then}"
     if kind == "needs_extents":
         return (f"needs_extents: {event.get('multi_window_trace_count', 0)} trace(s) seen in several windows, "
                 f"{len(event.get('boundaries') or [])} boundaries. Read the last line of {events_file}, measure "

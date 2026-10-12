@@ -189,7 +189,7 @@ class RangeRunner:
                 current['last_error'] = str(exc)[:300]
                 self.emit('read_retry', window=[fmt(t) for t in current['window']],
                           execution_id=current['execution_id'], failures=current['poll_failures'],
-                          error=current['last_error'])
+                          final=current['poll_failures'] >= MAX_POLL_FAILURES, error=current['last_error'])
                 if current['poll_failures'] >= MAX_POLL_FAILURES:
                     self.abandon(state, current)
                 else:

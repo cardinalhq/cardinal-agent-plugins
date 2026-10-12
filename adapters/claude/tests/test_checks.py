@@ -290,17 +290,19 @@ class RangeWatchTests(ChecksTestBase):
             {"event": "window_done", "window": ["a", "b"], "status": "COMPLETED",
              "verdicts": {"MATCH": 0, "NON_MATCH": 3589, "UNKNOWN": 1, "NOT_APPLICABLE": 243, "ERROR": 0},
              "progress": {"windows_done": 1, "windows_left": 23}},
+            {"event": "read_retry", "window": ["a", "b"], "failures": 3, "final": True, "error": "timed out"},
             {"event": "completed", "population": 3833, "counts": {"MATCH": 0}, "flagged": 0, "edge_traces": 0,
              "conflicts": 0, "coverage_holes": 0, "judge_calls": 0, "summary_file": "/x/summary.json"},
             {"event": "window_done", "window": ["c", "d"], "status": "COMPLETED"})
         proc = self.cli("range", "watch", self.RANGE)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         lines = proc.stdout.splitlines()
-        self.assertEqual(len(lines), 3)   # submitted is not a notification; nothing after completed
+        self.assertEqual(len(lines), 4)   # submitted is not a notification; nothing after completed
         self.assertIn("NON_MATCH 3589", lines[1])
         self.assertIn("1 done, 23 left", lines[1])
-        self.assertTrue(lines[2].startswith("completed:"))
-        self.assertIn("/x/summary.json", lines[2])
+        self.assertIn("giving up on this execution", lines[2])
+        self.assertTrue(lines[3].startswith("completed:"))
+        self.assertIn("/x/summary.json", lines[3])
 
     def test_watch_reports_a_stalled_worker(self):
         sys.path.insert(0, str(self.plugin / "hooks"))
