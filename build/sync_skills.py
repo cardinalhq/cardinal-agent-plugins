@@ -11,6 +11,8 @@ adapter ships as a self-contained plugin, so the core is copied — byte-identic
         -> adapters/<a>/skills/migrate-from-grafana/
     common/canvas/{CORE.md, exemplars/}
         -> adapters/<a>/skills/canvas/   (the renderer it uses ships with storyboard)
+    common/supervise/CORE.md
+        -> adapters/<a>/skills/supervise/
     common/checks/CORE.md
         -> adapters/<a>/checks/skill/    (an opt-in template: `cardinal-checks on`
                                           installs it into the skills directory)
@@ -41,6 +43,7 @@ SKILLS = {
     "canvas": ["CORE.md", "exemplars"],
     "migrate-from-grafana": ["CORE.md", "scripts", "references"],
     "checks": ["CORE.md"],
+    "supervise": ["CORE.md"],
 }
 # Where a skill lives in an adapter, when not skills/<skill>/ (relative to the adapter).
 DEST = {
