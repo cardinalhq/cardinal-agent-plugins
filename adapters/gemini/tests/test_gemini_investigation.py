@@ -30,6 +30,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -172,7 +173,16 @@ class GeminiInvestigationTests(unittest.TestCase):
     def tearDown(self):
         self._env.stop()
         self.fake.stop()
-        self.tmp.cleanup()
+        # The prompt hook's owner-input flush runs detached (owner_input.spawn_flush)
+        # and can still be writing under the temp home after the hook returned:
+        # retry the cleanup while it finishes, then drop whatever is left.
+        for _ in range(50):
+            try:
+                self.tmp.cleanup()
+                return
+            except OSError:
+                time.sleep(0.1)
+        shutil.rmtree(self.tmp.name, ignore_errors=True)
 
     # --- plumbing ------------------------------------------------------------
 
