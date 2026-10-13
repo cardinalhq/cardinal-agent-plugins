@@ -927,12 +927,9 @@ def gemini_cwd(files: List[Path]) -> Optional[str]:
 def resolve_gemini_resume_ident(sid: str, cwd: str) -> Optional[str]:
     """What `gemini --resume` is given for session `sid` started in `cwd`.
 
-    gemini-cli 0.63.0's --resume help names "latest" or an index; whether it
-    takes the session UUID is unproven. This passes the UUID. If it does
-    not, implement the fallback here: run `<gemini> --list-sessions` in
-    `cwd` (read-only), find the line naming `sid`, and return its index as
-    a string of digits; return None when it is not listed. Whatever this
-    returns is never an option (never starts with "-")."""
+    gemini-cli takes the full session UUID ("Resume by ID", its bundled
+    docs/cli/session-management.md, 0.63.0), so this is the UUID. Whatever
+    this returns is never an option (never starts with "-")."""
     return sid if UUID_RE.fullmatch(sid or "") else None
 
 

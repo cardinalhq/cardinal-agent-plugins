@@ -411,9 +411,8 @@ session id). `resume` takes its working directory only from Gemini's own
 project record for that chat (`~/.gemini/tmp/<project>/.project_root`),
 never from the Investigation binding, refuses if it is gone, and runs there
 `gemini --resume <session> "<wake prompt>"` (interactive, with your own
-settings and sandbox choice). Resuming by the session's UUID is not yet
-proven on gemini-cli 0.63.0, whose help names `latest` or an index; if it
-fails, pick the session from `gemini --list-sessions` yourself.
+settings and sandbox choice). gemini-cli documents resuming by the full
+session UUID ("Resume by ID").
 The wake prompt names the decision's number and Investigation (never its
 text) and is listed as a machine prompt, so the resumed turn is never
 recorded as owner input. The resumed session also receives the decision
