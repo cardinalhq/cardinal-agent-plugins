@@ -64,10 +64,9 @@ class SessionWakeReleaseTests(unittest.TestCase):
                 result = subprocess.run([sys.executable, "-c", PROBE, str(package), str(home), adapter],
                                         cwd=root, env=env, text=True, capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                if adapter == "codex":
-                    self.assertNotIn("Codex sessions are notify-only", result.stdout)
-                else:
-                    self.assertIn(f"{LABELS[adapter]} sessions are notify-only", result.stdout)
+                self.assertIn(f"{LABELS[adapter]} sessions are notify-only", result.stdout)
+                if adapter == "codex":   # shipped off (CODEX_LAUNCH_PROVEN): pending live verification
+                    self.assertIn("CODEX_LAUNCH_PROVEN = True", result.stdout)
                 self.assertIn("Cursor and Gemini CLI sessions", result.stdout)
                 self.assertTrue((home / ".cardinal/wake/lib/cardinal_core/session_wake.py").is_file())
 

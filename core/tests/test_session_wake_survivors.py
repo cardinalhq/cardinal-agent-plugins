@@ -1,14 +1,17 @@
-"""Survivor signal 2 and 3 (closing review 5's documented gap: `env -u
-TMPDIR setsid ...`). A process a woken run leaves behind is still in Codex's
-Seatbelt sandbox whatever its environment or process group, so the waker
-also asks macOS: sandbox_check(pid, NULL, 0) for the user's processes born
-after the wake, with their cwd / executable / open files in the workspace
-or the wake's TMPDIR, or orphaned during the wake. The same scan is a
-liveness signal before a claim.
+"""Finding a woken run's surviving processes through the sandbox itself
+(review 6, closing the `env -u TMPDIR setsid ...` gap). A process a woken
+Codex run starts cannot leave Codex's Seatbelt sandbox, and that sandbox has
+this wake's private TMPDIR as a writable root; nothing the agent does
+(clearing TMPDIR, setsid, chdir, re-exec) removes it. So a process is this
+wake's exactly when it is sandboxed AND its sandbox allows writing the wake's
+TMPDIR directory. macOS answers both through sandbox_check:
+  sandbox_check(pid, NULL, 0) -> 1 sandboxed;
+  sandbox_check(pid, "file-write-create", SANDBOX_FILTER_PATH|NO_REPORT, dir) -> 0 allowed.
 
 Fakes for the waker paths (World.sandboxed_procs); unit tests of
-sandboxed_procs with its OS calls mocked; one real macOS check that starts
-only /bin/sleep (plain and under sandbox-exec), never an agent.
+sandboxed_procs / wake_owned with the OS calls mocked; one real macOS check
+that starts only /bin/sleep (plain and under sandbox-exec with a profile
+whose only writable root is a temp dir).
 
 Run from core/:  python3 -m unittest tests.test_session_wake_survivors -v
 """
@@ -39,176 +42,208 @@ class Sweep(Base):
         self.tmp = self.child["env"]["TMPDIR"]
         self.world.events.append(ack(6, 5))
 
-    def exit_and_settle(self):
+    def exit_and_settle(self, **kw):
         self.append_turns(SID, turn())
         self.world.exit()
         self.world.t += 60
-        self.run_pass()
+        self.run_pass(**kw)
 
-    def test_a_survivor_that_cleared_tmpdir_and_left_the_group_is_stopped(self):
-        # No marker in its environment, another process group: only the sandbox signal sees it.
-        self.world.envrows = [(4242, 4242, "/bin/sleep 1000 PATH=/usr/bin HOME=/x")]
-        self.world.boxed = [(4242, 1)]
+    def test_a_survivor_is_stopped_and_the_run_judged_only_after(self):
+        self.world.boxed = [4242]
         self.exit_and_settle()
         self.assertEqual(self.world.killed, [(4242, signal.SIGTERM)])
-        self.assertEqual(self.state(5), w.ACKNOWLEDGED)
-        since, roots, until = self.world.boxed_calls[-1]
-        self.assertEqual(roots, [os.path.realpath(str(self.repo)), self.tmp])
+        since, dirs = self.world.boxed_calls[-1]
+        self.assertEqual(dirs, [self.tmp])                          # probed against the wake's TMPDIR
         self.assertEqual(since, self.world.starts[self.child["pid"]])
-        self.assertIsNotNone(until)                                  # the orphan window ends at the first sweep
+        self.assertEqual(self.state(5), w.ACKNOWLEDGED)
+        self.assertFalse(os.path.exists(self.tmp))                   # removed only once none is left
 
-    def test_its_children_are_stopped_too(self):
-        self.world.boxed = [(4242, 1), (4243, 4242)]
-        self.exit_and_settle()
-        self.assertEqual(sorted(p for p, _ in self.world.killed), [4242, 4243])
-
-    def test_a_sandboxed_process_under_a_live_parent_is_waited_for_never_signalled(self):
-        # The owner's own Codex, started in the same repository during the wake, runs a sandboxed command.
-        self.world.boxed = [(5555, 5000)]
+    def test_the_waker_itself_is_never_a_survivor(self):
+        self.world.boxed = [os.getpid()]
         self.exit_and_settle()
         self.assertEqual(self.world.killed, [])
-        self.assertEqual(self.state(5), w.RESUMING)                  # in flight: no concurrent wake
-        self.assertTrue(os.path.isdir(self.tmp))
-        self.world.boxed = []
-        self.world.t += 60
-        self.run_pass()
         self.assertEqual(self.state(5), w.ACKNOWLEDGED)
 
-    def test_an_unanswerable_sandbox_check_keeps_the_wake_in_flight(self):
+    def test_an_unanswerable_check_keeps_the_wake_in_flight(self):
         self.world.boxed = None
         self.exit_and_settle()
         self.assertEqual(self.state(5), w.RESUMING)
-        self.assertIn("could not be listed or checked", self.ledger()["5"]["lingering"])
+        self.assertIn("could not be checked", self.ledger()["5"]["lingering"])
+
+    def test_it_is_bounded_to_fail_after_the_timeout(self):
+        self.world.boxed = None
+        self.exit_and_settle()
+        self.world.t += w.WAKE_TIMEOUT + 10
+        self.run_pass()
+        self.assertEqual(self.state(5), w.FAILED)
+        self.assertTrue(os.path.isdir(self.tmp))                     # kept, path recorded
+        self.assertIn(self.tmp, self.ledger()["5"]["reason"])
 
 
 class PreClaim(Base):
-    def test_a_sandboxed_process_in_the_workspace_makes_the_session_live(self):
-        self.world.boxed = [(7777, 1)]
+    def wedge(self):
+        """Wake #5, then a survivor that will not clear: #5 wedges to FAILED after the timeout, its
+        TMPDIR kept. A later decision then meets the pre-claim survivor scan over that TMPDIR."""
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertIn("a sandboxed process is running in its working directory", self.notified_only())
-        since, roots, until = self.world.boxed_calls[0]
-        self.assertEqual((since, roots, until), (0.0, [os.path.realpath(str(self.repo))], None))
-
-    def test_since_is_the_sessions_last_wake(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        launched = self.ledger()["5"]["child"]["launched_at"]
+        tmp = self.world.launches[0]["env"]["TMPDIR"]
         self.append_turns(SID, turn())
-        self.world.events.append(ack(6, 5))
         self.world.exit()
         self.world.t += 60
+        self.world.boxed = None                                      # the sandbox can never be asked
         self.run_pass()
+        self.world.t += w.WAKE_TIMEOUT + 10
+        self.run_pass()
+        self.assertEqual(self.state(5), w.FAILED)
+        self.assertTrue(os.path.isdir(tmp))
+        return tmp
+
+    def test_a_process_of_an_earlier_wake_makes_the_session_live(self):
+        tmp = self.wedge()
+        self.world.boxed = [7777]                                    # a survivor of #5 is still running there
         self.world.events.append(decision(7))
         self.world.t += w.LIVE_WINDOW + 1
         self.world.boxed_calls.clear()
         self.run_pass()
-        self.assertEqual(self.world.boxed_calls[0][0], launched)
-        self.assertEqual(len(self.world.launches), 2)
+        self.assertTrue(any(tmp in dirs for _, dirs in self.world.boxed_calls))
+        self.assertEqual(len(self.world.launches), 1)                # #7 does not launch
+        self.assertIn("earlier wake is still running", self.ledger()["7"]["reason"])
 
     def test_an_unanswerable_check_is_live(self):
+        self.wedge()
         self.world.boxed = None
-        self.world.events = [decision(5)]
+        self.world.events.append(decision(7))
+        self.world.t += w.LIVE_WINDOW + 1
         self.run_pass()
-        self.assertIn("sandboxed processes could not be checked", self.notified_only())
+        self.assertEqual(len(self.world.launches), 1)
+        self.assertIn("could not be checked", self.ledger()["7"]["reason"])
+
+    def test_no_tmpdir_no_scan_and_the_session_can_launch(self):
+        # A session with no codex entry carrying a tmp_dir is not scanned; the first wake proceeds.
+        self.world.events = [decision(5)]
+        self.world.boxed = None   # would make it live IF it were scanned
+        self.run_pass()
+        self.assertEqual(len(self.world.launches), 1)
+        self.assertFalse(any(c for c in self.world.boxed_calls if c[1]))   # no non-empty scan before the claim
 
 
 class ScanUnit(unittest.TestCase):
-    """sandboxed_procs with its OS calls mocked."""
+    """sandboxed_procs / wake_owned with the macOS calls mocked."""
 
-    def run_scan(self, rows, boxed, paths, *, since=100.0, roots=("/ws",), until=None, now=1000.0):
+    def run_scan(self, rows, null, path, *, since=100.0, dirs=None, now=1000.0, exists=True):
         import ctypes
-        state = {}
 
-        def check(pid, op, kind):
-            ans, err = boxed.get(pid, (0, 0))
+        def check_null(pid, op, kind):
+            ans, err = null.get(pid, (0, 0))
             ctypes.set_errno(err)
             return ans
 
-        def proc_paths(pid, calls):
-            v = paths[pid]
-            if isinstance(v, BaseException):
-                raise v
-            return v
-        ps = "\n".join(f"{pid} {ppid} {uid} {etime} {comm}" for pid, ppid, uid, etime, comm in rows) + "\n"
+        def check_path(pid, op, t, p):
+            ans, err = path.get((pid, p.decode()), (1, 0))
+            ctypes.set_errno(err)
+            return ans
+        ps = "\n".join(f"{pid} {uid} {etime}" for pid, uid, etime in rows) + "\n"
         with patch.object(w.sys, "platform", "darwin"), \
-                patch.object(w, "_mac_calls", lambda: (check, None, None, None)), \
-                patch.object(w, "_proc_paths", proc_paths), patch.object(w.time, "time", lambda: now), \
-                patch.object(w.subprocess, "run",
-                             lambda *a, **k: subprocess.CompletedProcess(a, 0, ps, "")), \
+                patch.object(w, "_mac_calls", lambda: (check_null, check_path)), \
+                patch.object(w.time, "time", lambda: now), \
+                patch.object(w.os.path, "isdir", lambda d: exists), \
+                patch.object(w.os.path, "realpath", lambda d: d), \
+                patch.object(w.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, ps, "")), \
                 patch.object(w.os, "getuid", lambda: 501), patch.object(w.os, "getpid", lambda: 1):
-            state["out"] = w.sandboxed_procs(since, list(roots), until)
-        return state["out"]
+            return w.sandboxed_procs(since, dirs if dirs is not None else ["/t"])
 
-    def test_the_rules(self):
-        uid = 501
-        rows = [(10, 1, uid, "01:00", "/bin/sleep"),            # sandboxed, cwd in ws, started at 940
-                (11, 1, uid, "01:00", "/bin/sleep"),            # not sandboxed (the owner's editor)
-                (12, 1, 0, "01:00", "/bin/sleep"),              # another user
-                (13, 1, uid, "20:00", "/bin/sleep"),            # started before since (1000 - 1200 < 100)
-                (14, 9, uid, "01:00", "/bin/zsh"),              # sandboxed, elsewhere, has a parent
-                (15, 1, uid, "01:00", "/bin/sleep"),            # sandboxed, gone
-                (16, 1, uid, "01:00", "/usr/libexec/dmd"),      # sandboxed Apple service, EPERM
-                (17, 1, uid, "01:00", "/Applications/A.app/Contents/MacOS/A")]   # sandboxed app, elsewhere
-        boxed = {10: (1, 0), 13: (1, 0), 14: (1, 0), 15: (1, 0), 16: (1, 0), 17: (1, 0)}
-        paths = {10: ["/ws/sub", "/bin/sleep"], 14: ["/", "/bin/zsh"], 15: w._Gone(),
-                 16: OSError(errno.EPERM, "x"), 17: ["/", "/Applications/A.app/Contents/MacOS/A"]}
-        self.assertEqual(self.run_scan(rows, boxed, paths), [(10, 1)])
+    def test_sandboxed_and_allowed_the_tmpdir_is_ours(self):
+        rows = [(10, 501, "01:00"),    # sandboxed, allowed /t -> ours
+                (11, 501, "01:00"),    # sandboxed, denied /t -> not ours (another wake / Codex session)
+                (12, 501, "01:00"),    # not sandboxed, allowed everything (editor) -> not ours
+                (13, 0, "01:00"),      # another user
+                (14, 501, "20:00"),    # started before `since`
+                (15, 501, "01:00")]    # gone mid-check
+        null = {10: (1, 0), 11: (1, 0), 12: (0, 0), 14: (1, 0), 15: (1, 0)}
+        path = {(10, "/t"): (0, 0), (11, "/t"): (1, 0), (15, "/t"): (1, errno.ESRCH)}
+        self.assertEqual(self.run_scan(rows, null, path), [10])
 
-    def test_an_orphan_born_during_the_wake_is_found_wherever_it_is(self):
-        rows = [(20, 1, 501, "01:00", "/bin/sleep"), (21, 1, 501, "01:00", "/Applications/A.app/Contents/MacOS/A"),
-                (22, 1, 501, "01:00", "/bin/sleep")]
-        boxed = {20: (1, 0), 21: (1, 0), 22: (1, 0)}
-        paths = {20: ["/", "/bin/sleep"], 21: ["/", "/Applications/A.app/Contents/MacOS/A"],
-                 22: ["/", "/bin/sleep"]}
-        self.assertEqual(self.run_scan(rows, boxed, paths, until=990.0), [(20, 1), (22, 1)])
-        self.assertEqual(self.run_scan(rows, boxed, paths, until=900.0), [])     # born after the window
-        self.assertEqual(self.run_scan(rows, boxed, paths), [])                  # no window: only the workspace
+    def test_several_tmpdirs_any_match(self):
+        rows = [(20, 501, "01:00")]
+        null = {20: (1, 0)}
+        path = {(20, "/a"): (1, 0), (20, "/b"): (0, 0)}
+        self.assertEqual(self.run_scan(rows, null, path, dirs=["/a", "/b"]), [20])
 
-    def test_what_cannot_be_read_fails_closed(self):
-        rows = [(30, 1, 501, "01:00", "/opt/homebrew/bin/node")]
-        self.assertIsNone(self.run_scan(rows, {30: (1, 0)}, {30: OSError(errno.EPERM, "x")}))
-        self.assertIsNone(self.run_scan(rows, {30: (1, errno.EINVAL)}, {}))
-        self.assertIsNone(self.run_scan([(31, 1, 501, "garbage", "/bin/sleep")], {}, {}))
-        self.assertEqual(self.run_scan(rows, {30: (1, errno.ESRCH)}, {}), [])   # gone meanwhile
+    def test_missing_tmpdirs_are_dropped(self):
+        self.assertEqual(self.run_scan([(30, 501, "01:00")], {30: (1, 0)}, {}, exists=False), [])
 
-    def test_no_macos_or_no_calls_is_none(self):
+    def test_an_odd_sandbox_answer_fails_closed(self):
+        rows = [(40, 501, "01:00")]
+        self.assertIsNone(self.run_scan(rows, {40: (1, errno.EINVAL)}, {}))            # NULL check errored
+        self.assertIsNone(self.run_scan(rows, {40: (2, 0)}, {}))                        # neither 0 nor 1
+        self.assertIsNone(self.run_scan(rows, {40: (1, 0)}, {(40, "/t"): (-1, 0)}))     # path answer -1
+        self.assertIsNone(self.run_scan([(41, 501, "bad")], {41: (1, 0)}, {}))          # unreadable etime
+
+    def test_a_process_gone_at_the_null_check_is_skipped(self):
+        self.assertEqual(self.run_scan([(50, 501, "01:00")], {50: (1, errno.ESRCH)}, {}), [])
+
+    def test_wake_owned_direct(self):
+        import ctypes
+
+        def null(pid, op, kind):
+            ctypes.set_errno(0)
+            return 1 if pid != 9 else 0
+
+        def path(pid, op, t, p):
+            ctypes.set_errno(0)
+            return 0 if (pid, p) == (7, b"/t") else 1
+        calls = (null, path)
+        self.assertIs(w.wake_owned(7, ["/t"], calls), True)
+        self.assertIs(w.wake_owned(8, ["/t"], calls), False)   # sandboxed but not granted /t
+        self.assertIs(w.wake_owned(9, ["/t"], calls), False)   # not sandboxed
+
+    def test_not_macos_or_no_calls_is_none(self):
         with patch.object(w.sys, "platform", "linux"):
-            self.assertIsNone(w.sandboxed_procs(0.0, ["/ws"]))
-        with patch.object(w.sys, "platform", "darwin"), patch.object(w, "_mac_calls", lambda: None):
-            self.assertIsNone(w.sandboxed_procs(0.0, ["/ws"]))
+            self.assertIsNone(w.sandboxed_procs(0.0, ["/t"]))
+        with patch.object(w.sys, "platform", "darwin"), patch.object(w, "_mac_calls", lambda: None), \
+                patch.object(w.os.path, "isdir", lambda d: True):
+            self.assertIsNone(w.sandboxed_procs(0.0, ["/t"]))
 
     def test_etime(self):
         self.assertEqual(w._etime_seconds("01:02"), 62)
-        self.assertEqual(w._etime_seconds("03:01:02"), 3 * 3600 + 62)
         self.assertEqual(w._etime_seconds("2-03:01:02"), 2 * 86400 + 3 * 3600 + 62)
         self.assertIsNone(w._etime_seconds("x"))
 
 
 @unittest.skipUnless(sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec"), "macOS")
 class RealMac(unittest.TestCase):
-    """The real calls: /bin/sleep under sandbox-exec (allow-default profile) and plain."""
+    """The real sandbox_check (both ctypes forms) on /bin/sleep processes."""
 
-    def test_sandbox_check_and_the_workspace_signal(self):
-        ws = os.path.realpath(tempfile.mkdtemp())
-        self.addCleanup(lambda: __import__("shutil").rmtree(ws, ignore_errors=True))
-        since = time.time() - 1
-        sb = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)"]
-        boxed = subprocess.Popen(["/usr/bin/env", "-u", "TMPDIR"] + sb + ["/bin/sleep", "20"], cwd=ws,
-                                 start_new_session=True)
-        plain = subprocess.Popen(["/bin/sleep", "20"], cwd=ws)
+    def test_the_tmpdir_writable_root_probe_matrix(self):
+        # DIR_A is the only writable root of the sandboxed sleep; DIR_B is not. Both must exist
+        # (a missing path answers denied for everyone).
+        root = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        a, b = os.path.join(root, "a"), os.path.join(root, "b")
+        os.mkdir(a)
+        os.mkdir(b)
+        prof = f'(version 1)(allow default)(deny file-write*)(allow file-write* (subpath "{a}"))'
+        # A survivor's worst case: env cleared, new session, chdir elsewhere, re-exec python.
+        boxed = subprocess.Popen(["/usr/bin/env", "-u", "TMPDIR", "/usr/bin/sandbox-exec", "-p", prof,
+                                  "/bin/sleep", "20"], cwd="/", start_new_session=True)
+        plain = subprocess.Popen(["/bin/sleep", "20"], cwd=a)
         for p in (boxed, plain):
             self.addCleanup(p.wait)
             self.addCleanup(p.kill)
         time.sleep(1.0)
-        found = w.sandboxed_procs(since, [ws])
-        self.assertIsNotNone(found)
-        pids = {p for p, _ in found}
-        self.assertIn(boxed.pid, pids)
-        self.assertNotIn(plain.pid, pids)
         calls = w._mac_calls()
-        self.assertEqual(calls[0](boxed.pid, None, 0), 1)
-        self.assertEqual(calls[0](plain.pid, None, 0), 0)
+        self.assertIsNotNone(calls)
+        check_null, check_path = calls
+        T = w._SANDBOX_FILTER_PATH | w._SANDBOX_CHECK_NO_REPORT
+        self.assertEqual(check_null(boxed.pid, None, 0), 1)                              # (a)/(d) sandboxed
+        self.assertEqual(check_null(plain.pid, None, 0), 0)                              # (b) not
+        self.assertEqual(check_path(boxed.pid, w._SANDBOX_WRITE_OP, T, a.encode()), 0)   # (a) DIR_A allowed
+        self.assertEqual(check_path(boxed.pid, w._SANDBOX_WRITE_OP, T, b.encode()), 1)   # (a) DIR_B denied
+        self.assertEqual(check_path(plain.pid, w._SANDBOX_WRITE_OP, T, b.encode()), 0)   # (b) plain: allowed
+        # sandboxed_procs ties them together: the survivor is ours for DIR_A (d), not DIR_B.
+        self.assertIn(boxed.pid, w.sandboxed_procs(time.time() - 60, [a]))
+        self.assertNotIn(boxed.pid, w.sandboxed_procs(time.time() - 60, [b]) or [])
+        self.assertNotIn(plain.pid, w.sandboxed_procs(time.time() - 60, [a]))            # (b) not sandboxed
 
 
 if __name__ == "__main__":

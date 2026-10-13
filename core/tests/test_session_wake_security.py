@@ -462,11 +462,32 @@ class Lockdown(Base):
                 self.run_pass()
                 self.assertIn("cannot disable the feature", self.notified_only())
 
-    def test_a_probe_that_cannot_run_is_notify_only(self):
+    def test_a_probe_that_cannot_run_is_retried_then_notify_only(self):
+        # Review 6: a transient probe failure must not consume the decision. It is left unclaimed
+        # (reconsidered) for PROBE_RETRY_PASSES - 1 passes, then NOTIFIED.
         def boom(argv, path_env, cwd=None):
             raise OSError("no codex")
+        for _ in range(w.PROBE_RETRY_PASSES - 1):
+            self.run_pass(run_probe=boom)
+            self.assertEqual(self.ledger(), {})                     # no entry: the seq is not consumed
+            self.world.t += w.LIVE_WINDOW + 1
         self.run_pass(run_probe=boom)
-        self.assertIn("could not validate the lockdown", self.notified_only())
+        self.assertIn("could not be run to validate the lockdown", self.notified_only())
+
+    def test_a_probe_that_recovers_launches(self):
+        boom = [True]
+
+        def probe(argv, path_env, cwd=None):
+            if boom[0]:
+                raise OSError("no codex")
+            return self.world.probe(argv, path_env, cwd)
+        self.run_pass(run_probe=probe)
+        self.assertEqual((self.world.launches, self.ledger()), ([], {}))
+        boom[0] = False
+        self.world.t += w.LIVE_WINDOW + 1
+        self.run_pass(run_probe=probe)
+        self.assertEqual(len(self.world.launches), 1)
+        self.assertEqual(self.state(5), w.RESUMING)
 
     def test_a_new_codex_binary_is_probed_again(self):
         self.run_pass()

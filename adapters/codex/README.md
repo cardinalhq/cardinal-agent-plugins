@@ -495,11 +495,23 @@ never-pruned high-water mark per investigation and session refuses a seq it
 has handled. A decision older than 7 days gets one notification and never
 launches. A session gets at most 3 wakes a day, and the machine at most 10.
 
+**Codex unattended launch is built but shipped off.** Its lockdown and
+sandbox gates passed, but one gate (that a second decision can't start a
+concurrent run) depends on detecting the processes a woken run leaves
+behind, and two cases of that could not be verified live yet. So every
+Codex wake is a notification for now, exactly like Cursor and Gemini CLI.
+Turning it on is a reviewed code change (set `CODEX_LAUNCH_PROVEN = True`),
+not a setting. The rest of this section describes what a Codex wake will do
+once it is on.
+
 **Which sessions can launch.** A Codex CLI session (`codex` or `codex exec`)
 that meets all of these:
 - every turn ran `-s workspace-write` or `-s read-only` with network off,
   and could write only inside its working directory (its recorded
-  `writable_roots` and file-system policy are checked);
+  `writable_roots` and file-system policy are checked). Its **last** turn
+  must be `workspace-write`: a read-only session is notify-only, because the
+  survivor check needs a writable workspace to recognize the run's own
+  processes;
 - its working directory, taken from its rollout and resolved through
   symlinks, is a git work tree strictly inside your home directory, and
   neither in nor above a protected directory (`~/.cardinal`, `~/.codex`,
@@ -592,16 +604,21 @@ settles; the shared `/tmp` is not writable.
   `cardinal-wake enable --launch --relay-notes`, and then it is scrubbed of
   credential shapes first. It is never shown in a notification.
 - **The run ends when its last process does.** When codex exits, the waker
-  stops anything the run left behind (processes carrying the wake's
-  private `TMPDIR`, in its process group, or, whatever their environment,
-  still in Codex's sandbox and in your workspace or orphaned during the
-  wake, which macOS's `sandbox_check` tells apart from your editor or
-  apps): SIGTERM, then SIGKILL. A sandboxed process started in the
-  repository by your own Codex is never signalled, only waited for, and
-  while one runs the session counts as live. Until
-  none is left the wake stays in progress, so no second run starts for the
-  session and its temp dir is kept. Right before every launch, under the
-  session's lock, everything above is checked again.
+  stops anything the run left behind. It finds those by the sandbox itself:
+  everything the run starts stays in Codex's sandbox (it can't escape it),
+  and that sandbox lets it write the wake's private temp directory, so the
+  waker asks macOS (`sandbox_check`) which of your processes are both
+  sandboxed and allowed to write that directory — clearing a variable,
+  `setsid`, `cd`, or re-exec can't change either answer. Those get SIGTERM,
+  then SIGKILL. Your own editor and apps are not it (an editor isn't
+  sandboxed; another sandboxed program isn't granted *this* wake's temp
+  directory). Until none is left the wake stays in progress, so no second
+  run starts for the session and its temp dir is kept; if some process
+  can't be cleared or checked within two hours, the run is marked failed,
+  its temp dir left in place, and Codex launch is turned off. Right before
+  every launch, under the session's lock, everything above is checked
+  again; the same sandbox test also marks a session live if a process of an
+  earlier wake is still running.
 
 **Notify-only** (a macOS notification naming the runtime, the session, the
 Investigation and the state, never the decision's text):

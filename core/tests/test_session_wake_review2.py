@@ -309,13 +309,19 @@ class Drift(Cli):
                 self.run_pass()
                 self.assertIn("could not list its MCP servers", self.notified_only())
 
-    def test_mcp_list_that_cannot_run_is_notify_only(self):
+    def test_mcp_list_that_cannot_run_is_retried_then_notify_only(self):
+        # A malformed answer (above) is a hard refusal; an exception running the subcommand is
+        # transient, so the decision is reconsidered (review 6), not consumed.
         def probe(argv, path_env, cwd=None):
             if "mcp" in argv:
                 raise OSError("gone")
-            return self.world.probe(argv, path_env)
+            return self.world.probe(argv, path_env, cwd)
+        for _ in range(w.PROBE_RETRY_PASSES - 1):
+            self.run_pass(run_probe=probe)
+            self.assertEqual(self.ledger(), {})
+            self.world.t += w.LIVE_WINDOW + 1
         self.run_pass(run_probe=probe)
-        self.assertIn("could not list its MCP servers", self.notified_only())
+        self.assertIn("could not be run to list its MCP servers", self.notified_only())
 
     def test_a_changed_codex_config_is_probed_again(self):
         self.run_pass()

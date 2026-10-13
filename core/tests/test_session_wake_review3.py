@@ -13,6 +13,7 @@ Run from core/:  python3 -m unittest tests.test_session_wake_review3 -v
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import plistlib
 import signal
@@ -173,25 +174,25 @@ class Survivors(Cli):
         self.tmp = self.child["env"]["TMPDIR"]
         self.world.events.append(ack(6, 5))
 
-    def env_row(self, pid, pgid=1, tmp=None):
-        return (pid, pgid, f"/bin/sleep 1000 PATH=/usr/bin TMPDIR={tmp or self.tmp} HOME=/x")
-
     def test_a_survivor_is_stopped_and_the_run_judged_only_after(self):
-        self.world.envrows = [self.env_row(777)]
+        # Review 6: a survivor is any process the sandbox still grants this wake's TMPDIR
+        # (World.sandboxed_procs over the tmpdir), whatever its environment or group.
+        self.world.boxed = [777]
         self.exit_and_settle()
         self.assertEqual(self.world.killed, [(777, signal.SIGTERM)])
+        self.assertEqual(self.world.boxed_calls[-1][1], [self.tmp])   # probed against the wake's TMPDIR
         self.assertEqual(self.state(5), w.ACKNOWLEDGED)
         self.assertFalse(os.path.exists(self.tmp))
 
     def test_a_stubborn_survivor_gets_sigkill(self):
-        self.world.envrows = [self.env_row(778)]
+        self.world.boxed = [778]
         self.world.stubborn = {778}
         self.exit_and_settle()
         self.assertEqual(self.world.killed, [(778, signal.SIGTERM), (778, signal.SIGKILL)])
         self.assertEqual(self.state(5), w.ACKNOWLEDGED)
 
     def test_an_unkillable_survivor_keeps_the_wake_in_flight(self):
-        self.world.envrows = [self.env_row(779)]
+        self.world.boxed = [779]
         real_kill = self.world.kill
         self.world.kill = lambda pid, sig: self.world.killed.append((pid, sig))   # never goes away
         self.exit_and_settle()
@@ -203,36 +204,28 @@ class Survivors(Cli):
         self.run_pass()
         self.assertEqual(len(self.world.launches), 1)
         self.world.kill = real_kill
-        self.world.envrows = []
+        self.world.boxed = []
         self.world.t += 60
         self.run_pass()
         self.assertEqual(self.state(5), w.ACKNOWLEDGED)
 
-    def test_an_unreadable_process_list_keeps_the_wake_in_flight(self):
-        self.exit_and_settle_with(process_envs=lambda: None)
+    def test_an_unanswerable_sandbox_check_keeps_the_wake_in_flight(self):
+        self.world.boxed = None
+        self.exit_and_settle()
         self.assertEqual(self.state(5), w.RESUMING)
-        self.assertIn("could not be listed", self.ledger()["5"]["lingering"])
+        self.assertIn("could not be checked", self.ledger()["5"]["lingering"])
 
-    def exit_and_settle_with(self, **kw):
-        self.append_turns(SID, turn())
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass(**kw)
-
-    def test_a_process_group_member_without_the_marker_is_stopped_but_a_reused_pid_is_not(self):
-        pgid = self.child["pid"]
-        self.world.starts[880] = self.world.t + 5     # started after the child: part of the run
-        self.world.starts[881] = self.world.t - 500   # started before it: a reused group id, not ours
-        self.world.envrows = [(880, pgid, "/bin/sleep 1000 PATH=/usr/bin"), (881, pgid, "/usr/bin/other")]
+    def test_survivors_that_will_not_clear_fail_after_the_timeout(self):
+        self.world.boxed = None   # the sandbox can never be asked
         self.exit_and_settle()
-        self.assertEqual([p for p, _ in self.world.killed], [880])
-        self.assertEqual(self.state(5), w.ACKNOWLEDGED)
-
-    def test_another_wakes_marker_or_a_prefix_is_not_ours(self):
-        self.world.envrows = [self.env_row(990, tmp=self.tmp + "x"), self.env_row(991, tmp="/elsewhere")]
-        self.exit_and_settle()
-        self.assertEqual(self.world.killed, [])
-        self.assertEqual(self.state(5), w.ACKNOWLEDGED)
+        self.assertEqual(self.state(5), w.RESUMING)
+        self.world.t += w.WAKE_TIMEOUT + 10
+        self.run_pass()
+        self.assertEqual(self.state(5), w.FAILED)
+        self.assertIn("could not be cleared", self.ledger()["5"]["reason"])
+        self.assertTrue(os.path.isdir(self.tmp))                     # kept, and its path recorded
+        self.assertIn(self.tmp, self.ledger()["5"]["reason"])
+        self.assertTrue(w.disabled_reason(self.home, "codex"))
 
     def test_daemon_auto_start_is_disabled_and_probed(self):
         self.assertIn("daemon_auto_start", w.CODEX_DISABLED_FEATURES)
@@ -311,6 +304,19 @@ class McpForms(Cli):
                           '[features]\nplugins = false\n[mcp_servers.cardinal]\nurl = "https://x"\n')
         overrides, why = w.codex_mcp_overrides(self.home)
         self.assertIsNotNone(overrides, why)
+
+    def test_the_mcp_list_probe_is_the_enforcement_for_a_form_the_scan_passes(self):
+        # Review 6 #6: even if a declaration form slipped the text scan, codex resolves it and the
+        # `mcp list --json` probe reports it enabled, so the launch refuses. Here the scan passes
+        # (only the cardinal server) but the probe shows a second enabled server.
+        self.codex_config('[mcp_servers.cardinal]\nurl = "https://x"\n')
+        self.assertIsNotNone(w.codex_mcp_overrides(self.home)[0])        # the scan is content
+        self.world.events = [decision(5)]
+        self.world.mcp_answer = (0, json.dumps([{"name": "cardinal", "enabled": True},
+                                                {"name": "evil", "enabled": True}]))
+        self.run_pass()
+        self.assertEqual(self.world.launches, [])
+        self.assertIn("other than Cardinal stay enabled", self.notified_only())
 
 
 # ---------------------------------------------------------------------------

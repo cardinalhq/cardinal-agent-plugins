@@ -139,7 +139,7 @@ class World:
         self.probe_cwds = []
         self.envrows = []         # (pid, pgid, argv + environment): System.process_envs
         self.killed = []
-        self.boxed = []           # (pid, ppid) System.sandboxed_procs answers; None: cannot be checked
+        self.boxed = []           # pids System.sandboxed_procs answers (this wake's survivors); None: cannot tell
         self.boxed_calls = []
         self.wake_posts = []      # session.wake reports (System.post_wake)
         self.wake_error = None    # an exception, or state -> exception
@@ -176,8 +176,8 @@ class World:
         known = inspect.signature(w.System.__init__).parameters
         return w.System(**{k: v for k, v in args.items() if k in known})
 
-    def sandboxed_procs(self, since, roots, orphans_until=None):
-        self.boxed_calls.append((since, list(roots), orphans_until))
+    def sandboxed_procs(self, since, tmp_dirs):
+        self.boxed_calls.append((since, list(tmp_dirs)))
         return None if self.boxed is None else list(self.boxed)
 
     def post_wake(self, conn, inv, sid, payload, key, client):
@@ -196,7 +196,7 @@ class World:
         if sig == _signal.SIGKILL or pid not in getattr(self, "stubborn", set()):
             self.envrows = [r for r in self.envrows if r[0] != pid]
             if self.boxed:
-                self.boxed = [r for r in self.boxed if r[0] != pid]
+                self.boxed = [p for p in self.boxed if p != pid]
 
     def probe(self, argv, path_env, cwd=None):
         """A fake `codex <lockdown> features list`: every disabled feature
@@ -248,6 +248,12 @@ class Base(unittest.TestCase):
         temp = patch.object(w, "temp_dirs", lambda: ())   # the test HOME itself lives in a temp dir
         temp.start()
         self.addCleanup(temp.stop)
+        # Codex launch ships OFF (CODEX_LAUNCH_PROVEN; its survivor gate is not verified live). Most
+        # of these tests are about a launch, so they run with it proven; the gate is asserted off in
+        # LaunchGate (which does not use this fixture).
+        prov = patch.object(w.LAUNCHERS["codex"], "proven", True)
+        prov.start()
+        self.addCleanup(prov.stop)
         self.t0 = time.time()
         self.world = World(self.t0)
         self.codex = self.home / "bin" / "codex"
@@ -568,10 +574,19 @@ class Eligibility(Base):
         self.assertIn("malformed", self.notified_only())
 
     def test_the_last_turns_mode_is_pinned(self):
+        self.session(SID, turns=[turn("read-only"), turn("workspace-write")])
+        self.world.events = [decision(5)]
+        self.run_pass()
+        self.assertEqual(self.world.launches[0]["argv"][3], "workspace-write")
+
+    def test_a_read_only_last_turn_is_notify_only(self):
+        # Review 6 #2: the survivor check (the sandbox grants the wake's TMPDIR) cannot bound a
+        # read-only run, whose sandbox grants no writes; so it is notify-only.
         self.session(SID, turns=[turn("workspace-write"), turn("read-only")])
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertEqual(self.world.launches[0]["argv"][3], "read-only")
+        self.assertEqual(self.world.launches, [])
+        self.assertIn("read-only", self.notified_only())
 
     def test_only_session_records_are_parsed_and_long_lines_are_skipped(self):
         big = json.dumps({"type": "response_item", "payload": {"text": "x" * 5000 + " turn_context"}}) + "\n"
@@ -682,7 +697,7 @@ def _race_worker(home, t0, barrier, launches_file):
 
     system = world.system(launcher=launch, alive=lambda pid: pid == 4242, process_start=lambda pid: t0,
                           before_claim=lambda sid, seq: barrier.wait(60), out=lambda line: None)
-    with patch.object(w, "temp_dirs", lambda: ()):   # the test HOME lives in a temp dir
+    with patch.object(w, "temp_dirs", lambda: ()), patch.object(w.LAUNCHERS["codex"], "proven", True):
         w.run_once(Path(home), system)
 
 
@@ -1217,7 +1232,7 @@ class OtherRuntimes(Base):
         self.assertEqual(self.state(5), w.NOTIFIED)
 
     def test_no_active_launcher_for_them(self):
-        self.assertEqual([r for r in w.RUNTIMES if w.active_launcher(r)], ["codex"])
+        self.assertEqual([r for r in w.RUNTIMES if w.active_launcher(r)], ["codex"])   # codex proven in Base
         for runtime in ("claude", "cursor", "gemini"):
             self.assertIn(runtime, w.NOTIFY_ONLY_REASONS)
         for runtime, error in (("cursor", KeyError), ("claude", KeyError), ("gemini", ValueError)):
@@ -1382,6 +1397,47 @@ class CLI(Base):
         self.assertEqual(code, 0)
         self.assertIn("would launch", out)
         self.nothing()
+
+
+class LaunchGate(Base):
+    """Codex launch ships OFF (CODEX_LAUNCH_PROVEN False); its survivor gate is
+    not verified live. The notify path, wake intent and session.wake reports
+    stay active. (Base proves codex for its other tests; here it is turned
+    back off.)"""
+
+    def setUp(self):
+        super().setUp()
+        off = patch.object(w.LAUNCHERS["codex"], "proven", False)
+        off.start()
+        self.addCleanup(off.stop)
+
+    def test_the_shipped_default_is_off(self):
+        self.assertIs(w.CODEX_LAUNCH_PROVEN, False)
+        self.assertIsNone(w.active_launcher("codex"))
+        self.assertEqual([r for r in w.RUNTIMES if w.active_launcher(r)], [])
+
+    def test_an_eligible_codex_decision_with_wake_is_notify_only(self):
+        self.world.events = [decision(5)]   # verified, addressed, wake:true, eligible
+        self.run_pass()
+        self.assertEqual(self.world.launches, [])
+        self.assertIn("pending live verification", self.notified_only())
+
+    def test_enable_launch_says_codex_is_pending(self):
+        out = []
+        code = w.cli_main(["enable", "--launch"], runtime="codex", home=self.home,
+                          system=self.world.system(out=out.append), launchctl=lambda a: (0, ""),
+                          platform="darwin", environ={"PATH": f"{self.codex.parent}:/usr/bin:/bin"})
+        self.assertEqual(code, 0, "\n".join(out))
+        text = "\n".join(out)
+        self.assertIn("Codex sessions are notify-only", text)
+        self.assertIn("CODEX_LAUNCH_PROVEN = True", text)
+        self.assertIn("C-23/C-24", text)
+
+    def test_wake_intent_and_reports_still_work_off(self):
+        # A decision without wake:true is still notify-only for the right reason, not the gate.
+        self.world.events = [decision(5, wake=NOWAKE)]
+        self.run_pass()
+        self.assertEqual(self.notified_only(), w.WAKE_NOT_REQUESTED)
 
 
 class contextlib_suppress_file:

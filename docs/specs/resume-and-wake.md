@@ -248,6 +248,18 @@ never from the local inbox files, so a local file can't fake a decision.
 
 ### 5.3 Eligibility and launch
 
+**Codex launch is built and shipped OFF (`CODEX_LAUNCH_PROVEN = False`),
+exactly like Gemini.** The lockdown and sandbox gates passed (C-1..C-5,
+C-8, C-15..C-21), but gate 3 (duplicate decisions cannot start concurrent
+executions) rests on the survivor check of §5.4, two cases of which could
+not be demonstrated live in this session (C-23, C-24). While the constant
+is False, `active_launcher("codex")` is None and every Codex wake is
+notify-only; an owner turns it on by setting `CODEX_LAUNCH_PROVEN = True`
+in a reviewed change (there is no runtime flag). The wake intent (§5.2),
+the `session.wake` reports (§5.4) and the notifications for every runtime
+are active regardless. The eligibility and launch below describe what a
+Codex wake does **once the constant is flipped**.
+
 **Codex.** A session is eligible for unattended launch only when ALL of
 these hold:
 - a Codex rollout exists for it (`~/.codex/sessions/**/rollout-*-<sid>.jsonl`;
@@ -255,6 +267,10 @@ these hold:
 - **every** `turn_context` in it has `sandbox_policy.type` of
   `workspace-write` or `read-only`. One `danger-full-access` turn makes it
   ineligible: that agent could have tampered with local state;
+- its **last** turn ran `workspace-write`, not `read-only`. A read-only
+  sandbox grants no writes, so the survivor check of §5.4 (the sandbox
+  grants the wake's TMPDIR) could not tell its processes from any other
+  sandboxed process; a read-only session is notify-only (review 6);
 - its originator is not the Codex desktop app. The app's process outlives
   its threads, so it is notify-only;
 - `cwd` is taken from the rollout's `session_meta.cwd`, never from the
@@ -264,7 +280,16 @@ these hold:
   above a protected directory: `~/.cardinal`, `~/.codex`, `~/.claude`,
   `~/.gemini`, `~/.cursor`, `~/Library`, `~/.ssh`, `~/.config`, `~/.gnupg`,
   `~/.aws`, `~/.docker`, `~/.kube`, `~/.local`, shell setup dirs, and tool
-  homes such as `~/.npm`, `~/.nvm`, `~/.pyenv` and `~/.cargo`;
+  homes such as `~/.npm`, `~/.nvm`, `~/.pyenv` and `~/.cargo`. Each
+  protected directory and each shell / git dotfile (`~/.zshrc`,
+  `~/.zprofile`, `~/.bashrc`, `~/.profile`, `~/.gitconfig`, `~/.netrc`,
+  `~/.npmrc`, …) is also checked at its real location, so a symlink like
+  `~/.config -> ~/dotfiles/config` does not make `~/dotfiles` a writable
+  workspace (review 5 #3). **Limitation (review 6 #7c):** a `.zshrc` that
+  *sources* another file (`source ~/dotfiles/env`) rather than symlinking
+  is not covered — the waker does not parse shell source graphs. Do not arm
+  wakes for sessions whose working directory is a dotfiles repository that
+  your shell or git sources from;
 - every turn could write only inside the realpath of `cwd`. The waker checks
   `sandbox_policy.writable_roots`, every non-read entry of
   `file_system_sandbox_policy` and `permission_profile.file_system`
@@ -321,7 +346,12 @@ All flags go before `resume`.
     prompt asks for owner decisions only (`types ["owner.decided"]`, the
     gateway's parameter name) from `after` = seq - 1, and to read no other
     events (review 5 #5: an advisory is not the owner's, and could steer an
-    unattended agent).
+    unattended agent). **This is prompt guidance, not an enforced boundary
+    (review 6 #7a):** the run holds the Cardinal MCP key and could read
+    other events; the boundary is that the run acts in a no-network
+    workspace-write sandbox and that anything consequential still needs a
+    later owner decision. The scrubbed-note relay (below) is likewise
+    best-effort, not a boundary.
 - **notify is overridden (review 5 #1, live C-20).** A config `notify =
   [...]` program runs outside the sandbox at every turn end, with the
   turn's JSON as an argument, even with hooks disabled. `-c notify=[]` is
@@ -422,11 +452,18 @@ All flags go before `resume`.
   working directory (realpath), so they load the same project, managed and
   cloud layers the launch would, under the session lock right before the
   spawn.
+  - **A transient probe failure does not consume the decision (review 6).**
+    When codex cannot be run at all this pass (an exception launching the
+    `features list` or `mcp list` probe, as opposed to a hard refusal —
+    a rejected flag, a feature on, a server enabled), the decision is left
+    unclaimed, with a bounded retry counter in the ledger (no entry, so the
+    high-water mark is untouched and it is reconsidered next pass), up to
+    `PROBE_RETRY_PASSES`. Only then is it a notification.
   - The tested set is what stays on under the full lockdown on codex-cli
     0.162.1 (Homebrew cask, live, 2026-10-12): `api_key_model_discovery`,
     `auth_elicitation`, `browser_annotation_api`,
     `browser_use_full_cdp_access`, `code_mode_host`, `collaboration_modes`,
-    `compaction_image_budget`, `content_item_kinds`, `daemon_auto_start`,
+    `compaction_image_budget`, `content_item_kinds`,
     `enable_request_compression`, `fast_mode`, `goals`, `guardian_approval`,
     `guardian_reuse_parent_compaction`, `in_app_chat`, `in_app_dictation`,
     `in_app_local_automation`, `in_app_updates`, `in_app_voice`,
@@ -721,49 +758,55 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
   and it counts against the caps.
 - **The run ends when its last process does (review 5 #4).** The child
   starts in its own session, and a `nohup` / `setsid` process or a daemon
-  can outlive it (sandboxed, but alive). When the child exits the waker
-  looks for the run's processes: any with the wake's private
-  `TMPDIR=<dir>` in its environment (`ps -E`; everything the run starts
-  inherits it unless it clears it), and any in the child's process group
-  that started after the child. It sends SIGTERM, waits, sends SIGKILL,
-  waits. While any is left, or the process list cannot be read, the entry
-  stays in flight (no claim for the session, so no concurrent run; no
-  verification, relay or deletion of the TMPDIR under it) and is judged
-  again next pass.
-  - **Neither environment nor group can hide a survivor.** Everything a
-    woken run starts runs in Codex's Seatbelt sandbox, and a process cannot
-    leave its sandbox. So the waker also asks macOS, for the user's own
-    processes born after the child (`ps -A -o pid,ppid,uid,etime,comm`):
-    `sandbox_check(pid, NULL, 0)` (libsystem_sandbox: 1 = sandboxed) and,
-    for a sandboxed one, its cwd (`proc_pidinfo` PROC_PIDVNODEPATHINFO), its
-    executable (`proc_pidpath`) and its open files (PROC_PIDLISTFDS +
-    PROC_PIDFDVNODEPATHINFO), all through ctypes, one listing plus a few
-    calls per candidate (about 0.05 s on the owner's Mac). A survivor is a
-    sandboxed process with any of those inside the session's cwd or the
-    wake's TMPDIR, or an orphaned (ppid 1) sandboxed command-line process
-    born during the wake (between the child's start and the first sweep)
-    wherever it now is; apps and system services (an `.app` / `.xpc` /
-    framework executable, or one under /System, /Applications,
-    /usr/libexec, /usr/sbin) are never that. Orphans and their children are
-    stopped like the others. A sandboxed process in the workspace whose
-    parent is some other live process (the owner's own Codex, started in
-    the repository during the wake) is never signalled, only waited for.
-    The owner's editor or terminal is not sandboxed, and an App Store app
-    does not run in a workspace, so neither counts.
-  - **Fail closed.** Not macOS, the calls not loadable, or a candidate
-    that cannot be read: the entry stays in flight. Some Apple services
-    refuse inspection (EPERM: nsurlsessiond, routined, dmd); a sandboxed
-    process with such a binary under /System, /usr/libexec or /usr/sbin is
-    skipped, since it takes no code from an agent; any other unreadable
-    one fails closed. On the owner's Mac a scan over every process the
-    user has, with the orphan window from the beginning of time, found
-    nothing and no unreadable non-Apple process (no false positive).
-  - **Also before a claim.** The same scan of the session's cwd, for
-    processes born after the session's last wake (any time, if it was never
-    woken), is a liveness signal: a sandboxed process still working in the
-    workspace, or a scan that cannot be answered, makes the session live
-    (notify-only). The gap review 5 documented (`env -u TMPDIR setsid ...`)
-    is closed (C-22).
+  can outlive it (sandboxed, but alive). When the child exits, and only
+  then, the waker finds the run's surviving processes, sends SIGTERM,
+  waits, sends SIGKILL, waits. While any is left, or the sandbox cannot be
+  asked, the entry stays in flight (no claim for the session, so no
+  concurrent run; no verification, relay or deletion of the TMPDIR under
+  it) and is judged again next pass.
+  - **A survivor is identified by the sandbox itself (review 6).**
+    Everything a woken run starts runs in Codex's Seatbelt sandbox, which
+    has this wake's private TMPDIR as a writable root; a process cannot
+    leave its sandbox, and nothing the agent does — clearing the `TMPDIR`
+    variable, `setsid`, `chdir`, re-exec — removes that writable root. So a
+    process is this wake's exactly when it is sandboxed **and** its sandbox
+    allows writing the wake's TMPDIR directory. macOS answers both through
+    `sandbox_check` (libsystem_sandbox): `sandbox_check(pid, NULL, 0)` is
+    1 for a sandboxed process; `sandbox_check(pid, "file-write-create",
+    SANDBOX_FILTER_PATH|SANDBOX_CHECK_NO_REPORT, <the TMPDIR>)` is 0 when
+    the sandbox allows that write. The waker lists the user's own processes
+    born at or after the child (`ps -A -o pid,uid,etime`) and asks both of
+    each, one listing plus two calls per candidate. The path argument is
+    variadic: on arm64 the C ABI passes it on the stack, so ctypes must pad
+    x0..x7 with five register args (confirmed live, below).
+  - **Why those two, nothing else.** The path must EXIST and be the
+    directory itself — a missing path answers "denied" for everyone, so a
+    marker file inside the TMPDIR (which the agent can delete) would miss
+    survivors, while the directory can't be removed because its parent is
+    not writable. An unsandboxed process (editor, terminal) is allowed
+    every write, so the NULL check comes first. A different wake's run, the
+    owner's own interactive Codex, and a sandboxed App Store app are all
+    sandboxed but are not granted *this* wake's TMPDIR, so none is counted.
+    The earlier heuristics (process group, environment marker, cwd /
+    executable / open-file paths, the orphan window, app-path and EPERM
+    exemptions) are gone: this one test is exact and needs no guess about
+    ownership from paths or parentage.
+  - **Fail closed.** Not macOS, the calls not loadable, or a `sandbox_check`
+    that answers anything but the documented 0/1 (other than the process
+    having exited): the entry stays in flight. To bound the wedge, a run
+    whose survivors cannot be cleared or confirmed within `WAKE_TIMEOUT`
+    becomes FAILED (not retried); its TMPDIR is kept and its path recorded,
+    and Codex launch is disabled until the owner re-enables.
+  - **Also before a claim.** The same test over the TMPDIRs of the
+    session's in-flight and still-present finished entries is a liveness
+    signal: a process any earlier wake of this session left — whatever its
+    environment, group or location — still granted one of those TMPDIRs, or
+    a scan that cannot be answered, makes the session live (notify-only).
+    The gap review 5 documented (`env -u TMPDIR setsid ...`) is closed.
+  - **Read-only runs are notify-only (review 6).** A read-only sandbox
+    grants no writes at all, so its run's processes cannot be told from any
+    other sandboxed process by this test. A session whose last turn ran
+    read-only is therefore notify-only, not launched.
 - **Everything is checked again under the lock (review 5 #2).** Right
   before the spawn, under the session lock, the waker re-reads the
   runtime records and re-runs the full eligibility (the turns, the
@@ -917,7 +960,9 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-17 / N1-live | With `--disable hooks`, a woken Codex run still gets the decision and acknowledges it | Owner, live (codex-cli 0.162.1, 8654c45's exact flags incl. `--disable hooks` and the four sandbox pins, `env -i` allow-list, private 0700 `TMPDIR`, a throwaway workspace-write session) | Hooks off (the Cardinal evidence spool unchanged across the run); `storyboard__read_investigation_events` completes with `approval_mode=approve`; `touch /tmp/x` "Operation not permitted"; `touch "$TMPDIR/x"` ok; curl: no network; rollout `sandbox_policy` = `{type: workspace-write, network_access: false, writable_roots: None, exclude_slash_tmp: true, exclude_tmpdir_env_var: false}`. **Proven.** **But acknowledging failed:** the gateway's post refuses acknowledgments (schema: no `ack_of` / `disposition` / `note`), the CLI ack needs network → the acknowledgment relay (§5.3). The read returned 0 events (that investigation had none); an `owner.decided` in the read is for the owner's E2E. Relay end to end: **live pending** |
 | C-18 | The pre-launch probes see what a launch would load | Locally (0.162.1, the owner's real config, no session): `<codex> <flags> features list` and `<codex> <flags> mcp list --json` | features: rc 0, every disabled feature off, 45 features on (the tested set). mcp: rc 0, a JSON list of `{name, enabled, disabled_reason, transport, auth_status, startup_timeout_sec, tool_timeout_sec}`; only `cardinal` enabled (plugin servers vanish with `--disable plugins`). **Proven locally** |
 | C-21 | The full lockdown leaves a working `codex exec resume` and nothing behind | Owner, live (codex-cli 0.162.1, the full cf17aba argv incl. `--disable daemon_auto_start` and `-c notify=[]`) | The agent ran `echo ALIVE`, exit 0; 5 s after exit no new codex-named process existed and no process carried the wake's TMPDIR. **Proven** |
-| C-22 | macOS tells a sandboxed survivor from anything else, whatever its environment or group | Locally (this Mac, both Pythons): `sandbox-exec -p '(version 1)(allow default)' /bin/sleep` and a plain `/bin/sleep`; then `sandboxed_procs` on: a sandboxed sleep in the workspace; one started with `env -u TMPDIR` in a new session; one that `cd /` holding a file of the workspace open; one orphaned to launchd with `cd /` and nothing in the workspace; a sandboxed sleep elsewhere under a live parent; a plain sleep in the workspace (the owner's editor) | `sandbox_check` = 1 for the sandbox-exec sleep, 0 for the plain one. Found: the first three (workspace signal) and the orphan (orphan window); not found: the one elsewhere under a live parent and the plain one. A scan of every process of the user found no false positive. **Proven locally** |
+| C-22 | A woken run's process is told from any other by the sandbox's writable-root test (review 6 rewrite) | Locally (this Mac, both Pythons): a `/bin/sleep` under `sandbox-exec` whose only writable root is DIR_A, started `env -u TMPDIR`, new session, `cd /`; and a plain `/bin/sleep` in DIR_A. `sandbox_check(pid, NULL, 0)` and `sandbox_check(pid, "file-write-create", SANDBOX_FILTER_PATH\|NO_REPORT, <dir>)` via the arm64-padded ctypes prototype; then `sandboxed_procs(since, [DIR_A])` / `[DIR_B]` | **a/b matrix.** NULL check: 1 for the sandbox-exec sleep, 0 for the plain one. Path check (existing dirs): sandboxed → DIR_A **0 (allowed)**, DIR_B **1 (denied)**; plain → every dir **0** (unsandboxed is allowed everything, so the NULL check must gate it). A **missing** path answers **1** for everyone, so the probe must target the TMPDIR directory itself. `sandboxed_procs`: the env-cleared / setsid / `cd /` survivor is found for `[DIR_A]`, not for `[DIR_B]`; the plain sleep is never found. **Proven locally** (sandbox-exec profile; a process under Codex's **real** seatbelt is C-23) |
+| C-23 | The TMPDIR writable-root probe identifies a process under Codex's **real** seatbelt | Owner, live: a harmless command under `codex`'s own seatbelt with a workspace-write policy, then `sandboxed_procs` against that wake's TMPDIR | **Pending** (could not be run in this session). Blocks `CODEX_LAUNCH_PROVEN` |
+| C-24 | The same identifies an env-cleared, setsid, re-exec survivor of a real woken run | Owner, live: a woken Codex run that leaves `env -u TMPDIR setsid python -c 'chdir("/"); sleep'`; the sweep stops it and the session stays live until it ends | **Pending** (could not be run in this session). Blocks `CODEX_LAUNCH_PROVEN` |
 | C-20 | Codex `notify` cannot run outside the sandbox on a woken turn | Owner, live (codex-cli 0.162.1, the full lockdown argv incl. `--disable hooks`, `env -i` allow-list, private TMPDIR): `-c notify=["/bin/sh","-c","touch $HOME/probe"]`, then the same with `-c notify=[]` after it | Without the override the probe file **was created in $HOME**: notify runs outside the sandbox even with hooks off. With `-c notify=[]` after it: **absent**. **Proven** → `notify=[]` is the last `-c` of every launch (golden test); the owner's own notify is not refused |
 | C-19 | The sandbox pins hold | Locally: `-c sandbox_workspace_write.{network_access=false, writable_roots=[], exclude_slash_tmp=true, exclude_tmpdir_env_var=false}` through `features list`. Owner, live: a woken turn's `sandbox_policy` | All accepted (rc 0), **but so is a bogus key**; a wrong type is rc 1. So existence is proven only by the rollout: a woken `workspace-write` turn must record `exclude_slash_tmp: true` and no `writable_roots` (enforced post-run). End to end: **live pending** |
 
@@ -927,8 +972,10 @@ it resume, acknowledge, and stay in workspace-write. An agent can't perform
 this step, by design.
 
 Observed: the owner's recent Codex desktop session ran `danger-full-access`,
-so it would be notify-only on both counts (desktop app, unsandboxed). Wake
-applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
+so it would be notify-only on both counts (desktop app, unsandboxed). Once
+`CODEX_LAUNCH_PROVEN` is on, launch applies to Codex CLI sessions whose last
+turn ran `-s workspace-write` (a `read-only` last turn is notify-only, since
+the survivor check needs a writable TMPDIR to identify the run's processes).
 
 ## 7. Testing
 
@@ -1110,7 +1157,36 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
   for `payload.wake is True` (a release blocker found by that PR's review:
   before it, any verified addressed decision launched); lifecycle states
   are reported as `session.wake` events with fixed-vocabulary reasons.
-- **Survivor gap closed (owner: gate 3 is strict).** Survivors are also
-  found through the sandbox itself (`sandbox_check` + cwd / executable /
-  open files, and orphans born during the wake), and the same scan is a
-  liveness signal before every claim (C-21, C-22).
+- **Survivor gap closed (owner: gate 3 is strict).** Survivors are
+  identified through the sandbox itself (`sandbox_check` + the wake's
+  TMPDIR as a writable root), and the same test is a liveness signal
+  before every claim (C-21, C-22).
+- **Review 6 (focused review of PR #209 delta 72f7f4f..bd493df: BLOCK on
+  gate 3; gates 1 and 2 pass).** The path-based survivor scan missed
+  Python / jsc re-execs and could kill unrelated sandboxed orphans.
+  - 1/2/3: identify a wake's processes only by the sandbox granting the
+    wake's TMPDIR (`sandbox_check` path form, arm64-padded ctypes); the
+    cwd / executable / open-file paths, the process group, the environment
+    marker, the orphan heuristic and the app / EPERM exemptions are gone.
+    The sweep kills exactly those; pre-claim liveness is the same test over
+    the session's in-flight and still-present TMPDIRs.
+  - 2 (read-only): a read-only sandbox grants no writes, so its run cannot
+    be told apart → read-only sessions are notify-only.
+  - 4: the EPERM/`comm` exemption and all fd inspection are gone (not
+    needed without path scanning).
+  - 5: the fail-closed sweep is bounded — a run whose survivors cannot be
+    cleared or confirmed within `WAKE_TIMEOUT` is FAILED, its TMPDIR kept
+    and recorded, Codex launch disabled.
+  - 6: the `mcp list --json` probe, not the config text scan, is the
+    enforcement for an MCP declaration form the scan cannot read.
+  - 7: owner-decided-only reads and the `--relay-notes` scrub are prompt
+    guidance / best-effort, documented as such; sourced (non-symlinked)
+    dotfiles are a documented limitation.
+  - A transient probe failure no longer consumes the decision (bounded
+    retry).
+  - **(c)/(d) could not be verified live in this session** (a process
+    under Codex's real seatbelt; an env-cleared setsid survivor of a real
+    run). Per the owner's standing rule, **Codex launch ships OFF**
+    (`CODEX_LAUNCH_PROVEN = False`), gated exactly like Gemini; an owner
+    flips the constant in a reviewed change once C-23 and C-24 pass. The
+    a/b matrix is proven locally (C-22).

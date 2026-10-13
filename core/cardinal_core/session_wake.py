@@ -377,6 +377,12 @@ NOTIFY_ONLY_REASONS = {
     CLAUDE: "Claude Code sessions are notify-only: a resumed claude -p runs with your own settings, so its "
             "sandbox is not guaranteed",
     CURSOR: "Cursor sessions are notify-only: no unattended resume has been shown to pass the wake gates",
+    # Codex launch is built and shipped off (CODEX_LAUNCH_PROVEN): its lockdown and sandbox gates
+    # passed, but the survivor check (gate 3) could not be verified live in this session (§6 C-23,
+    # C-24). An owner turns it on by flipping the constant in a reviewed change.
+    CODEX: "Codex sessions are notify-only: unattended launch is pending live verification of survivor "
+           "detection (the TMPDIR writable-root probe against a real Codex seatbelt and an env-cleared "
+           "survivor; see docs/specs/resume-and-wake.md §6 C-23/C-24)",
     # Proof C-7 (2026-10-12, gemini-cli 0.63.0): its sandbox wraps the whole
     # CLI, hooks included, and every bundled macOS profile allows network.
     GEMINI: "Gemini CLI sessions are notify-only until its sandboxed launch (restrictive-proxied seatbelt behind "
@@ -889,31 +895,24 @@ def process_rows() -> Optional[List[Tuple[int, int, str]]]:
     return rows
 
 
-def process_envs() -> Optional[List[Tuple[int, int, str]]]:
-    """(pid, pgid, argv and environment as one string) for every process
-    (`ps -E`: the environment is readable for the user's own processes), or
-    None. Searched in memory for a wake's marker, never logged or stored."""
-    try:
-        r = subprocess.run([PS, "-E", "-A", "-ww", "-o", "pid=,pgid=,command="], capture_output=True, text=True,
-                           timeout=10, check=False, env={"LC_ALL": "C", "PATH": "/bin:/usr/bin"}, errors="replace")
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if r.returncode != 0:
-        return None
-    rows = []
-    for line in r.stdout.splitlines():
-        fields = line.split(None, 2)
-        with contextlib.suppress(ValueError, IndexError):
-            rows.append((int(fields[0]), int(fields[1]), fields[2] if len(fields) > 2 else ""))
-    return rows
-
-
-_MAC = None   # the macOS calls sandboxed_procs needs, loaded once: (sandbox_check, proc_pidinfo, proc_pidpath,
-#               proc_pidfdinfo), or False when they cannot be loaded
-_PROC_PIDLISTFDS, _PROC_PIDVNODEPATHINFO, _PROC_PIDFDVNODEPATHINFO = 1, 9, 2
-_VNODE_INFO_SIZE, _MAXPATHLEN, _PROC_FILEINFO_SIZE = 152, 1024, 24
-_PROX_FDTYPE_VNODE = 1
-MAX_SCAN_FDS = 1024
+# Identifying a woken run's processes by the sandbox itself (review 6).
+# Everything a woken Codex run starts runs in the same Seatbelt sandbox,
+# which has this wake's private TMPDIR as a writable root; the process
+# cannot leave the sandbox, and nothing the agent does (clearing TMPDIR,
+# setsid, chdir, re-exec) removes that writable root. So a process is this
+# wake's when it is sandboxed AND the sandbox allows it to write the wake's
+# TMPDIR directory. macOS answers both through sandbox_check (libsystem_sandbox):
+#   sandbox_check(pid, NULL, 0) -> 1 sandboxed, 0 not;
+#   sandbox_check(pid, "file-write-create", SANDBOX_FILTER_PATH|NO_REPORT, dir)
+#     -> 0 allowed, 1 denied. The path must EXIST and be the directory itself
+#     (a missing path answers 1 for everyone), and an unsandboxed process is
+#     allowed everything (hence the NULL check first). The path argument is
+#     variadic: on arm64 the C ABI passes it on the stack, so ctypes must pad
+#     x0..x7 with five extra register args (verified live, a/b matrix).
+_MAC = None   # (check_null, check_path), or False when the calls cannot be loaded
+_SANDBOX_FILTER_PATH = 1
+_SANDBOX_CHECK_NO_REPORT = 0x40000000
+_SANDBOX_WRITE_OP = b"file-write-create"
 
 
 def _mac_calls():
@@ -922,82 +921,56 @@ def _mac_calls():
         _MAC = False
         try:
             import ctypes
+            import platform
             sb = ctypes.CDLL("/usr/lib/system/libsystem_sandbox.dylib", use_errno=True)
-            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-            check = sb.sandbox_check
-            check.restype, check.argtypes = ctypes.c_int, [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-            info = libc.proc_pidinfo
-            info.restype = ctypes.c_int
-            info.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-            path = libc.proc_pidpath
-            path.restype, path.argtypes = ctypes.c_int, [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-            fdinfo = libc.proc_pidfdinfo
-            fdinfo.restype = ctypes.c_int
-            fdinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-            _MAC = (check, info, path, fdinfo)
-        except (OSError, AttributeError):
+            addr = ctypes.cast(sb.sandbox_check, ctypes.c_void_p).value
+            check_null = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int)(addr)
+            if platform.machine() == "arm64":
+                proto = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                                         *([ctypes.c_void_p] * 5), ctypes.c_char_p)(addr)
+                def check_path(pid, op, t, p):   # noqa: E306  (the first variadic arg spills to the stack)
+                    return proto(pid, op, t, None, None, None, None, None, p)
+            else:
+                proto = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                                         ctypes.c_char_p)(addr)
+                def check_path(pid, op, t, p):   # noqa: E306
+                    return proto(pid, op, t, p)
+            _MAC = (check_null, check_path)
+        except (OSError, AttributeError, ValueError):
             _MAC = False
     return _MAC or None
 
 
-class _Gone(Exception):
-    pass
-
-
-def _cstr(raw: bytes) -> str:
-    return raw.split(b"\0", 1)[0].decode("utf-8", "replace")
-
-
-def _proc_paths(pid: int, calls) -> List[str]:
-    """The cwd, the executable and every open file's path of `pid` (macOS
-    proc_pidinfo / proc_pidpath / proc_pidfdinfo). Raises _Gone when the
-    process exited, OSError when it cannot be read."""
+def wake_owned(pid: int, tmp_dirs: List[str], calls) -> Optional[bool]:
+    """True when `pid` is a woken run's process: sandboxed, and its sandbox
+    allows writing one of `tmp_dirs` (existing wake TMPDIR directories).
+    False when it is not. None when it cannot be told (the sandbox_check
+    answers something other than the documented 0/1, e.g. the process exited
+    mid-check): the caller fails closed. An unsandboxed process (editor,
+    terminal, an App Store app) answers 0 to the NULL check and is False."""
     import ctypes
     import errno
-    _, info, path, fdinfo = calls
-
-    def fail():
+    check_null, check_path = calls
+    ctypes.set_errno(0)
+    boxed = check_null(pid, None, 0)
+    err = ctypes.get_errno()
+    if err == errno.ESRCH:
+        return False
+    if boxed == 0 and not err:
+        return False
+    if boxed != 1 or err:
+        return None
+    for d in tmp_dirs:
+        ctypes.set_errno(0)
+        r = check_path(pid, _SANDBOX_WRITE_OP, _SANDBOX_FILTER_PATH | _SANDBOX_CHECK_NO_REPORT, d.encode())
         e = ctypes.get_errno()
         if e == errno.ESRCH:
-            raise _Gone()
-        raise OSError(e, "proc_pidinfo")
-    out = []
-    size = 2 * (_VNODE_INFO_SIZE + _MAXPATHLEN)
-    buf = ctypes.create_string_buffer(size)
-    ctypes.set_errno(0)
-    if info(pid, _PROC_PIDVNODEPATHINFO, 0, buf, size) != size:
-        fail()
-    out.append(_cstr(buf.raw[_VNODE_INFO_SIZE:_VNODE_INFO_SIZE + _MAXPATHLEN]))
-    exe = ctypes.create_string_buffer(4 * _MAXPATHLEN)
-    ctypes.set_errno(0)
-    if path(pid, exe, len(exe)) <= 0:
-        fail()
-    out.append(_cstr(exe.raw))
-    ctypes.set_errno(0)
-    need = info(pid, _PROC_PIDLISTFDS, 0, None, 0)
-    if need <= 0:
-        fail()
-    fds = ctypes.create_string_buffer(need + 8 * 32)   # room for fds opened since
-    ctypes.set_errno(0)
-    got = info(pid, _PROC_PIDLISTFDS, 0, fds, len(fds))
-    if got <= 0:
-        fail()
-    import struct
-    vsize = _PROC_FILEINFO_SIZE + _VNODE_INFO_SIZE + _MAXPATHLEN
-    vbuf = ctypes.create_string_buffer(vsize)
-    for i in range(min(got // 8, MAX_SCAN_FDS)):
-        fd, kind = struct.unpack_from("<iI", fds.raw, i * 8)
-        if kind != _PROX_FDTYPE_VNODE:
-            continue
-        ctypes.set_errno(0)
-        if fdinfo(pid, fd, _PROC_PIDFDVNODEPATHINFO, vbuf, vsize) != vsize:
-            e = ctypes.get_errno()
-            if e in (errno.EBADF, 0):   # closed since it was listed
-                continue
-            fail()
-        start = _PROC_FILEINFO_SIZE + _VNODE_INFO_SIZE
-        out.append(_cstr(vbuf.raw[start:start + _MAXPATHLEN]))
-    return out
+            return False
+        if r == 0 and not e:
+            return True
+        if r != 1 or e:
+            return None
+    return False
 
 
 def _etime_seconds(text: str) -> Optional[int]:
@@ -1009,90 +982,49 @@ def _etime_seconds(text: str) -> Optional[int]:
     return ((d * 24 + h) * 60 + mi) * 60 + se
 
 
-# Executables of apps and system services (sandboxed by design, launched by
-# launchd with ppid 1), never a woken run's command-line survivor.
-_APP_PATH_PREFIXES = ("/System/", "/Applications/", "/Library/Apple/", "/usr/libexec/", "/usr/sbin/")
-_APP_BUNDLE_MARKERS = (".app/", ".xpc/", ".appex/", ".framework/", ".bundle/", ".systemextension/")
-
-
-def _app_executable(path: str, home: str) -> bool:
-    return (path.startswith(_APP_PATH_PREFIXES) or path.startswith(os.path.join(home, "Applications") + "/")
-            or any(m in path for m in _APP_BUNDLE_MARKERS))
-
-
-def sandboxed_procs(since: float, roots: List[str],
-                    orphans_until: Optional[float] = None) -> Optional[List[Tuple[int, int]]]:
-    """The user's own processes started at or after `since` (epoch) that run
-    in a Seatbelt sandbox (sandbox_check(pid, NULL, 0) == 1) and whose cwd,
-    executable or an open file is inside one of `roots` (realpaths): a
-    woken run's process that cleared TMPDIR and left the process group
-    (review 5 follow-up: `env -u TMPDIR setsid ...`) still runs sandboxed,
-    and still where the run was. The owner's own editor or terminal is not
-    sandboxed; a sandboxed App Store app does not run in a workspace. None
-    when it cannot be determined (not macOS, the calls cannot be loaded, a
-    process cannot be read): the caller fails closed. Answers (pid, ppid)
-    pairs. orphans_until (a wake's sweep): also any such sandboxed process
-    started between `since` and `orphans_until` that is orphaned (ppid 1:
-    a survivor of the exited child is reparented to launchd) and is not an
-    app or system service (an app's or XPC service's executable, or one
-    under /System, /Applications, /usr/libexec...), wherever it now is: a
-    survivor that left the workspace entirely (cwd, executable and files)
-    is still found."""
-    import ctypes
-    import errno
+def sandboxed_procs(since: float, tmp_dirs: List[str]) -> Optional[List[int]]:
+    """The user's own processes started at or after `since` (epoch) that are
+    a woken run's by the sandbox test (wake_owned over `tmp_dirs`, the
+    existing wake TMPDIR directories). Neither the environment nor the
+    process group can hide one, and the owner's own unsandboxed processes
+    and sandboxed apps (whose sandbox does not grant this wake's TMPDIR) are
+    never counted. None when it cannot be determined (not macOS, the calls
+    cannot be loaded, a process cannot be told either way): the caller fails
+    closed. `tmp_dirs` that do not exist are dropped (a missing path answers
+    denied for everyone, so it could only miss, never misidentify)."""
     if sys.platform != "darwin":
         return None
     calls = _mac_calls()
     if calls is None:
         return None
+    dirs = [os.path.realpath(d) for d in tmp_dirs if isinstance(d, str) and d and os.path.isdir(d)]
+    if not dirs:
+        return []
     try:
-        r = subprocess.run([PS, "-A", "-o", "pid=,ppid=,uid=,etime=,comm="], capture_output=True, text=True, timeout=10,
+        r = subprocess.run([PS, "-A", "-o", "pid=,uid=,etime="], capture_output=True, text=True, timeout=10,
                            check=False, env={"LC_ALL": "C", "PATH": "/bin:/usr/bin"})
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode != 0:
         return None
     now, uid, me = time.time(), os.getuid(), os.getpid()
-    home = os.path.realpath(os.path.expanduser("~"))
-    roots = [os.path.realpath(x) for x in roots if isinstance(x, str) and os.path.isabs(x)]
     out = []
     for line in r.stdout.splitlines():
-        parts = line.split(None, 4)
-        if len(parts) < 4 or not all(x.isdigit() for x in parts[:3]):
+        parts = line.split()
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
             continue
-        pid, ppid, puid, age = int(parts[0]), int(parts[1]), int(parts[2]), _etime_seconds(parts[3])
-        comm = parts[4] if len(parts) > 4 else ""
+        pid, puid, age = int(parts[0]), int(parts[1]), _etime_seconds(parts[2])
         if puid != uid or pid in (me, 0, 1):
             continue
         if age is None:
             return None
         if now - age < since - 2.0:
             continue
-        ctypes.set_errno(0)
-        boxed = calls[0](pid, None, 0)
-        err = ctypes.get_errno()
-        if boxed == 0:
-            continue
-        if err == errno.ESRCH:
-            continue
-        if boxed != 1 or err:
+        owned = wake_owned(pid, dirs, calls)
+        if owned is None:
             return None
-        try:
-            found = _proc_paths(pid, calls)
-        except _Gone:
-            continue
-        except OSError as e:
-            # Some Apple services refuse inspection (EPERM: nsurlsessiond, routined, dmd...). Such a
-            # binary takes no code from a woken agent, so it is not counted; anything else that cannot
-            # be read fails closed.
-            if e.errno == errno.EPERM and comm.startswith(("/System/", "/usr/libexec/", "/usr/sbin/")):
-                continue
-            return None
-        if any(p and _within(p, root) for p in found for root in roots):
-            out.append((pid, ppid))
-        elif orphans_until is not None and ppid == 1 and now - age <= orphans_until + 2.0 \
-                and len(found) > 1 and not _app_executable(found[1], home):
-            out.append((pid, ppid))
+        if owned:
+            out.append(pid)
     return out
 
 
@@ -1290,10 +1222,10 @@ class System:
     process_rows() -> [(pid, ppid, argv)] | None; kill(pid, signal);
     sleep(seconds); port_busy(port) -> bool; run_probe(argv, path_env, cwd=)
     -> (rc, stdout); post_ack(conn, inv, sid, seq, disposition, note, client)
-    (the relayed acknowledgment; raises on failure); process_envs() ->
-    [(pid, pgid, argv + environment)] | None; post_wake(conn, inv, sid,
-    payload, idempotency_key, client) (a session.wake report; raises);
-    sandboxed_procs(since, roots, orphans_until=None) -> [(pid, ppid)] | None.
+    (the relayed acknowledgment; raises on failure); post_wake(conn, inv,
+    sid, payload, idempotency_key, client) (a session.wake report; raises);
+    sandboxed_procs(since, tmp_dirs) -> [pid] | None (a wake's surviving
+    processes, by the sandbox TMPDIR test).
     """
 
     def __init__(self, *, now: Optional[Callable[[], float]] = None, alive: Optional[Callable[[int], bool]] = None,
@@ -1312,11 +1244,9 @@ class System:
                  port_busy: Optional[Callable[[int], bool]] = None,
                  run_probe: Optional[Callable[..., Tuple[int, str]]] = None,
                  post_ack: Optional[Callable[..., dict]] = None,
-                 process_envs: Optional[Callable[[], Optional[list]]] = None,
                  post_wake: Optional[Callable[..., dict]] = None,
                  sandboxed_procs: Optional[Callable[..., Optional[list]]] = None):
         self.sandboxed_procs = sandboxed_procs or globals()["sandboxed_procs"]
-        self.process_envs = process_envs or globals()["process_envs"]
         self.post_wake = post_wake or (lambda conn, inv, sid, payload, key, client: post_wake_event(
             conn, inv, sid, payload, key, client, opener=opener))
         self.run_probe = run_probe or globals()["run_probe"]
@@ -1859,6 +1789,12 @@ def codex_eligibility(home: Path, sid: str, rt: Optional[Runtime] = None) -> Run
     if overrides is None:
         rt.reason = why + ": notify-only"
         return rt
+    if modes[-1] == "read-only":
+        # Review 6 #2 (strict): the survivor test is "the sandbox grants the wake's TMPDIR". A
+        # read-only sandbox grants no writes at all, so a read-only run's processes cannot be told
+        # from any other sandboxed process, and gate 3 cannot be enforced. Notify-only.
+        rt.reason = "the session's last turn ran read-only, which the survivor check cannot bound: notify-only"
+        return rt
     rt.eligible, rt.reason, rt.cwd, rt.sandbox = True, "eligible", real, modes[-1]
     rt.extra = {"mcp_overrides": overrides}
     return rt
@@ -1978,6 +1914,16 @@ def parse_features(text: str) -> dict:
     return out
 
 
+# A probe outcome that may be transient (codex could not be run this pass):
+# the decision is reconsidered, not consumed (claim_and_launch, _transient_probe).
+_TRANSIENT_PROBE = ("could not be run to validate the lockdown", "could not be run to list its MCP servers")
+PROBE_RETRY_PASSES = 3
+
+
+def _transient_probe(why: Any) -> bool:
+    return isinstance(why, str) and any(s in why for s in _TRANSIENT_PROBE)
+
+
 def codex_lockdown_problem(home: Path, config: dict, system: "System", rt: Optional[Runtime] = None) -> Optional[str]:
     """Why the lockdown cannot be trusted for this codex (fail closed: a
     notification, never a launch with a partial lockdown), or None. Runs
@@ -2006,7 +1952,7 @@ def codex_lockdown_problem(home: Path, config: dict, system: "System", rt: Optio
     try:
         rc, out = system.run_probe([codex, *flags, "features", "list"], config.get("path_env"), cwd=cwd)
     except Exception as e:
-        return f"codex could not validate the lockdown ({type(e).__name__})"
+        return f"codex could not be run to validate the lockdown ({type(e).__name__})"
     if rc != 0:
         return "codex rejected the lockdown flags (an unknown feature or config key): no launch"
     features = parse_features(out)
@@ -2024,13 +1970,18 @@ def codex_lockdown_problem(home: Path, config: dict, system: "System", rt: Optio
     try:
         rc, out = system.run_probe([codex, *flags, "mcp", "list", "--json"], config.get("path_env"), cwd=cwd)
     except Exception as e:
-        return f"codex could not list its MCP servers ({type(e).__name__})"
+        return f"codex could not be run to list its MCP servers ({type(e).__name__})"
     try:
         servers = json.loads(out) if rc == 0 else None
     except ValueError:
         servers = None
     if not isinstance(servers, list) or not all(isinstance(s, dict) for s in servers):
         return "codex could not list its MCP servers under the lockdown: no launch"
+    # Review 6 #6: this probe, not the config text scan, is the enforcement. codex resolves every
+    # layer (user, project, managed, cloud) and every TOML form here, so a server the scan cannot
+    # read off the text (an escaped or nested key, `["mcp_servers".evil]`) still shows as enabled
+    # and refuses the launch. The scan (codex_mcp_overrides) only builds the -c disables and fails
+    # closed on a form it cannot name; it is not the last word.
     others = sorted(str(s.get("name"))[:40] for s in servers
                     if s.get("enabled") is not False and s.get("name") != CARDINAL_MCP_SERVER)
     if others:
@@ -2689,17 +2640,29 @@ GEMINI_LAUNCH_TEXT = (
     "Gemini CLI sessions in an approved root (cardinal-wake enable --root PATH) that only ever ran in Gemini's "
     "sandbox, resumed with -s in the restrictive-proxied seatbelt profile behind an allow-list proxy.")
 
+# Codex launch is built and shipped OFF (CODEX_LAUNCH_PROVEN), like Gemini.
+# Its lockdown and sandbox gates passed (§6 C-1..C-5, C-8, C-15..C-21), but
+# gate 3 (duplicate decisions cannot start concurrent executions) rests on
+# the survivor check, and two cases of that could not be demonstrated live
+# in this session (§6 C-23, C-24: the TMPDIR writable-root probe against a
+# process under Codex's real seatbelt, and against an env-cleared setsid +
+# chdir Python survivor). Until an owner verifies both and flips this
+# constant in a reviewed change (no runtime flag), every Codex wake is
+# notify-only. The notify path, wake intent and session.wake reports are
+# all active regardless.
+CODEX_LAUNCH_PROVEN = False
+
 # The runtimes that may be launched unattended, an explicit allow-list.
-# Codex passed its gates (§6 C-1..C-5, C-8). Gemini CLI's launch is built
-# and off (GEMINI_LAUNCH_PROVEN) until its live gates pass. Claude Code did
-# not pass (C-6) and Cursor has no demonstrated launch: notify-only.
+# Gemini CLI's launch is built and off (GEMINI_LAUNCH_PROVEN) until its live
+# gates pass. Claude Code did not pass (C-6) and Cursor has no demonstrated
+# launch: notify-only.
 LAUNCHERS = {
     CODEX: Launcher(CODEX, "codex", lambda home, sid, rt, config: codex_eligibility(home, sid, rt),
                     lambda exe, rt, sid, seq: codex_argv(exe, rt.sandbox or "", sid, seq,
                                                          rt.extra.get("mcp_overrides") or (),
                                                          rt.extra.get("investigation_id", "")),
                     rollout_offsets, verify_after, LAUNCH_TEXT, preflight=codex_lockdown_problem,
-                    prepare=codex_prepare,
+                    prepare=codex_prepare, proven=CODEX_LAUNCH_PROVEN,
                     env=lambda environ, config, home, log, rt: child_env(
                         environ, config.get("path_env"), home=home, tmpdir=rt.extra.get("tmp_dir"),
                         extra=CODEX_AUTH_ENV)),
@@ -2753,16 +2716,18 @@ def live_signals(home: Path, sid: str, rt: Runtime, system: System, now: float,
                 break
     if any(now - ie.last_activity(h, sid) <= LIVE_WINDOW for h in homes):
         why.append("it used a tool in the last 2 minutes")
-    if isinstance(rt.cwd, str) and rt.cwd:
-        # Gate 3: a sandboxed process still working in the workspace (one an earlier run or the
-        # session left, whatever its environment or group) means the session is not stopped.
-        since = max([_num(e["child"].get("launched_at")) or 0.0 for e in led["entries"].values()
-                     if isinstance(e.get("child"), dict)] or [0.0])
-        found = system.sandboxed_procs(since, [os.path.realpath(rt.cwd)])
+    # Gate 3 (review 6): a process any earlier wake of this session left behind is this session's,
+    # whatever its environment or group, iff the sandbox grants it that wake's TMPDIR. The session
+    # is not stopped while one runs. The TMPDIRs of its in-flight and recently-finished entries are
+    # the ones still on disk (a settled entry's was removed once its sweep found none).
+    tmps = [e.get("tmp_dir") for e in led["entries"].values()
+            if isinstance(e.get("tmp_dir"), str) and e.get("runtime") == CODEX]
+    if tmps:
+        found = system.sandboxed_procs(0.0, tmps)
         if found is None:
-            why.append("sandboxed processes could not be checked")
+            why.append("its sandboxed processes could not be checked")
         elif found:
-            why.append("a sandboxed process is running in its working directory")
+            why.append("a process of an earlier wake is still running")
     return why
 
 
@@ -3301,6 +3266,20 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
         else:
             why = f"the session's runtime changed ({fresh.kind}) before the launch"
         if why:
+            # Review 6: a transient probe failure (codex could not be run to validate the lockdown
+            # or list its MCP servers) must not consume the decision. Leave it unclaimed, with a
+            # bounded retry counter in the ledger (no entry, so the high-water mark is untouched and
+            # the decision is reconsidered next pass), up to PROBE_RETRY_PASSES times.
+            if _transient_probe(why):
+                tries = led.setdefault("probe_retries", {})
+                key = entry_key(inv, seq)
+                n = int(tries.get(key) or 0) + 1
+                if n < PROBE_RETRY_PASSES:
+                    tries[key] = n
+                    write_ledger(home, sid, led, now)
+                    _report(system, report, sid, seq, "retry", f"{why} (attempt {n}; reconsidered next pass)")
+                    return "retry"
+                tries.pop(key, None)
             entry = {"seq": seq, "investigation_id": inv, "runtime": rt.kind, "reports": []}
             transition(entry, DECISION_SEEN, now)
             transition(entry, NOTIFIED, now, why)
@@ -3310,6 +3289,7 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
                     rt.kind, origin)
             _report(system, report, sid, seq, "notified", why)
             return "notified"
+        led.get("probe_retries", {}).pop(entry_key(inv, seq), None)
         rt = fresh
         with global_lock(home) as gotg:
             if not gotg:
@@ -3463,15 +3443,30 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
         return
     if entry.get("state") != ACK_RELAYED and "swept" not in entry:
         # Review 3 #4: the child exiting is not the run ending. A process it left (nohup, setsid,
-        # a background daemon) is stopped (SIGTERM, then SIGKILL); while any is left, or the
-        # process list cannot be read, the entry stays in flight (no claim for the session, no
-        # verification, relay or cleanup of the private TMPDIR under it) and is judged again.
-        if "sweep_started" not in entry:   # the end of the wake's window (survivor signal 3)
+        # a background daemon, even one that cleared TMPDIR and left the group) is this wake's iff
+        # its sandbox grants the wake's TMPDIR (review 6); it is stopped (SIGTERM, then SIGKILL).
+        # While any is left, or the sandbox cannot be asked, the entry stays in flight (no claim for
+        # the session, no verification, relay or cleanup of the TMPDIR under it) and is judged again.
+        if "sweep_started" not in entry:
             entry["sweep_started"] = now
             write_ledger(home, sid, led, now)
         left = end_wake_processes(entry, child, system)
         if left is None or left:
-            note = ("the woken run's processes could not be listed or checked; judged again next pass" if left is None
+            # Review 6 #5: bound the wedge. A sandbox that can never be asked (or a survivor that
+            # cannot be stopped) would otherwise hold the entry in flight forever and never free the
+            # TMPDIR. After WAKE_TIMEOUT it is FAILED; the TMPDIR is kept and its path recorded.
+            if now - (_num(entry.get("sweep_started")) or now) > WAKE_TIMEOUT:
+                transition(entry, FAILED, now, "the woken run's processes could not be cleared within 2 h; "
+                           f"not retried (its temp directory {entry.get('tmp_dir')} was left in place)")
+                entry["verified"] = False
+                write_ledger(home, sid, led, now)
+                _disable_launch(home, runtime, sid, binding, "a woken run left processes that could not be "
+                                "stopped or confirmed", system, report, now)
+                _notify(system, binding, sid, FAILED, f"owner decision #{seq}: the run left processes that could "
+                        "not be cleared (its temp directory was kept)", runtime)
+                _report(system, report, sid, seq, "failed", "survivors could not be cleared")
+                return
+            note = ("the woken run's processes could not be checked; judged again next pass" if left is None
                     else f"{len(left)} process(es) of the woken run outlived it; stopping them before judging the run")
             if entry.get("lingering") != note:
                 entry["lingering"] = note
@@ -3529,76 +3524,42 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
 KILL_GRACE = 2.0
 
 
-def wake_processes(entry: dict, child: dict, system: System) -> Optional[Tuple[List[int], List[int]]]:
-    """(the processes of this wake still running, to stop; sandboxed
-    processes in its workspace it may not stop, to wait for), or None when
-    that cannot be determined (fail closed). The child itself has exited.
-    Ours: any with this wake's private TMPDIR in its environment
-    (TMPDIR=<dir>, inherited by everything the run starts unless it clears
-    it); any in the child's process group (start_new_session: pgid = the
-    child's pid) that started after the child (a reused pid is never taken
-    for it); and any sandboxed process of the user started after the child
-    whose cwd, executable or an open file is in the session's cwd or the
-    TMPDIR (sandboxed_procs: neither environment nor group hides it) and
-    that is orphaned (ppid 1, as a survivor of the exited child is) or the
-    child of another such process; and any orphaned sandboxed command-line
-    process of the user born during the wake (between the child's start
-    and the first sweep), wherever it is. A sandboxed match whose parent is some
-    other live process (the owner's own Codex started in the same
-    repository during the wake) is never signalled, only waited for: the
-    entry stays in flight until it ends."""
-    rows = system.process_envs()
-    if rows is None:
-        return None
+def wake_processes(entry: dict, child: dict, system: System) -> Optional[List[int]]:
+    """The processes of this wake still running (the child itself has
+    exited), or None when it cannot be told (fail closed). A process is this
+    wake's exactly when the sandbox grants it this wake's private TMPDIR
+    (sandboxed_procs / wake_owned): everything the run starts inherits that
+    writable root, and nothing it does (clearing the TMPDIR variable,
+    setsid, chdir, re-exec) removes it; a different wake's run, the owner's
+    own Codex, an editor or an app is not granted it. Process group and
+    environment are not used (a reused pid or a cleared variable could
+    mislead them)."""
     tmp = entry.get("tmp_dir")
-    snap = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
-    roots = [x for x in (snap.get("cwd"), tmp) if isinstance(x, str) and x]
+    if not (isinstance(tmp, str) and tmp):
+        return []
     since = _num(child.get("start")) or _num(child.get("launched_at")) or _num(entry.get("claimed_at"))
-    until = _num(entry.get("sweep_started"))
-    boxed = system.sandboxed_procs(since if since is not None else 0.0, roots, until) if roots else []
-    if boxed is None:
+    found = system.sandboxed_procs(since if since is not None else 0.0, [tmp])
+    if found is None:
         return None
-    marker = re.compile(r"(?:^|\s)TMPDIR=" + re.escape(tmp) + r"(?:\s|$)") if isinstance(tmp, str) and tmp else None
-    pgid = child.get("pid") if isinstance(child.get("pid"), int) else None
-    started = _num(child.get("start"))
-    ours = set()
-    for pid, group, text in rows:
-        if pid == os.getpid() or pid == pgid:
-            continue
-        hit = bool(marker and marker.search(text))
-        if not hit and pgid is not None and group == pgid and started is not None:
-            st = system.process_start(pid)
-            hit = st is not None and st >= started - 2.0
-        if hit:
-            ours.add(pid)
-    parents = {pid: ppid for pid, ppid in boxed if pid not in (pgid, os.getpid())}
-    stop = {pid for pid, ppid in parents.items() if ppid in (1, pgid) or ppid in ours}
-    grew = True
-    while grew:   # the children of a stopped survivor are survivors too
-        more = {pid for pid, ppid in parents.items() if ppid in stop and pid not in stop}
-        stop |= more
-        grew = bool(more)
-    stop |= ours
-    wait = set(parents) - stop
-    return sorted(stop), sorted(wait)
+    return sorted(pid for pid in found if pid != os.getpid())
 
 
 def end_wake_processes(entry: dict, child: dict, system: System) -> Optional[List[int]]:
-    """Stop what wake_processes finds to stop: SIGTERM, a grace, SIGKILL, a
-    grace. Returns what is still left, stopped or waited for ([] when
-    nothing is), or None when that cannot be determined."""
-    found = wake_processes(entry, child, system)
+    """Stop this wake's surviving processes: SIGTERM, a grace, SIGKILL, a
+    grace. Returns what is still left ([] when none), or None when it cannot
+    be told."""
+    left = wake_processes(entry, child, system)
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        if found is None:
+        if left is None:
             return None
-        stop, wait = found
-        if not stop:
-            return wait
-        for pid in stop:
+        if not left:
+            return left
+        for pid in left:
             with contextlib.suppress(OSError):
                 system.kill(pid, sig)
         system.sleep(KILL_GRACE)
-        found = wake_processes(entry, child, system)
+        left = wake_processes(entry, child, system)
+    return left
     return None if found is None else sorted(set(found[0]) | set(found[1]))
 
 
@@ -3869,6 +3830,11 @@ def enable(home: Path, *, launch: bool, environ: Mapping[str, str], launchctl: C
     if runtime in NOTIFY_ONLY_REASONS and active_launcher(runtime) is None:
         out(f"{LABELS[runtime]} sessions are notify-only: an addressed decision shows a notification and never "
             f"resumes a {LABELS[runtime]} session" + (", with or without --launch." if launch else "."))
+        if runtime == CODEX:
+            out("  Codex unattended launch is built but pending live verification of survivor detection "
+                "(the TMPDIR writable-root probe against a real Codex seatbelt and an env-cleared survivor; "
+                "docs/specs/resume-and-wake.md §6 C-23/C-24). An owner turns it on by setting "
+                "CODEX_LAUNCH_PROVEN = True in a reviewed change (there is no runtime flag).")
     if roots:
         out("Approved roots (Gemini wakes): " + ", ".join(roots))
     if launch:
