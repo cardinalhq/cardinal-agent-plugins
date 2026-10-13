@@ -94,6 +94,8 @@ jobs:
           import cardinal_core.storyboard_authoring
           import cardinal_core.checks_install
           import cardinal_core.checks_cli
+          import cardinal_core.session_wake
+          import cardinal_core.allowlist_proxy
           print('ok: all core modules import under 3.9')
           "
 

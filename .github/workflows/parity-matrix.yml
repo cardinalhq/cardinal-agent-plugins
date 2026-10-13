@@ -17,6 +17,7 @@ on:
       - 'build/release.py'
       - 'tests/test_parity_matrix.py'
       - 'tests/test_session_repo_release.py'
+      - 'tests/test_session_wake_release.py'
       - '.github/workflows/parity-matrix.yml'
   push:
     branches: [main]
@@ -30,6 +31,7 @@ on:
       - 'build/release.py'
       - 'tests/test_parity_matrix.py'
       - 'tests/test_session_repo_release.py'
+      - 'tests/test_session_wake_release.py'
       - '.github/workflows/parity-matrix.yml'
   workflow_dispatch:
 
@@ -52,3 +54,5 @@ jobs:
       - name: Packaged multi-repository behavior across all adapters
         if: matrix.python-version != '3.9'
         run: python3 -m unittest discover -s tests -p test_session_repo_release.py -v
+      - name: Packaged cardinal-wake in every adapter (owner-woken sessions)
+        run: python3 -m unittest discover -s tests -p test_session_wake_release.py -v
