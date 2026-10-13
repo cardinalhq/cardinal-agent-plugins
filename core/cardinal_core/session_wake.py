@@ -46,10 +46,14 @@ notification (NOTIFIED, never reconsidered).
 The notification (never the decision's text) names the runtime, the
 session's short id and the investigation (its id and the connection's host,
 never a link the binding carries). For a live session it says to switch to
-that window; for a stopped one it gives `cardinal-wake resume <sid8>`, and
-with terminal-notifier installed (/opt/homebrew/bin or /usr/local/bin) a
-click opens Terminal on ~/.cardinal/wake/resume/<sid>.command, which execs
-the stable runner's `resume <sid>`. Otherwise osascript shows it. A decision
+that window; for a session of an unrecognized runtime it offers nothing;
+for a stopped one it gives `cardinal-wake resume <sid8>` (or, when the
+stable copy in ~/.cardinal/wake/lib is missing or out of date: run
+`cardinal-wake enable` again), and with terminal-notifier installed
+(/opt/homebrew/bin or /usr/local/bin) and the interpreter still vetted, a
+click opens Terminal on ~/.cardinal/wake/resume/<sid>.command (a real,
+user-owned directory), which execs the stable runner's `resume <sid>`.
+Otherwise osascript shows it. A decision
 older than DECISION_MAX_AGE (or undated) or posted without "Resume this
 session if it has stopped" (payload.wake) is notified the same way; the
 reason is kept in the ledger and the session.wake report.
@@ -58,9 +62,11 @@ reason is kept in the ledger and the session.wake report.
 runtime by its own records (RECORDS), the working directory only from those
 records (a Claude transcript's cwd, the Codex rollout's session_meta.cwd,
 Gemini's project root; Cursor's records when they carry one), never from the
-agent-writable binding; it must exist. Then os.chdir + os.execvp of the
-runtime's own resume with the decision's WAKE_PROMPT (a MACHINE_PROMPT on
-every runtime, so the turn is never owner input) as the first prompt:
+agent-writable binding; it must exist (no control characters). Then
+os.chdir + os.execvp of the runtime's own resume (its absolute path, from
+the absolute PATH entries) with the WAKE_PROMPT of a decision the session
+has not received yet (pending_prompt; a MACHINE_PROMPT on every runtime, so
+the turn is never owner input) as the first prompt:
   claude --resume <sid> "<prompt>"; codex resume <sid> "<prompt>" (a Codex
   Desktop session: /usr/bin/open codex://threads/<sid>); gemini --resume
   <ident> "<prompt>"; cursor-agent --resume <sid> "<prompt>" (experimental).
@@ -709,7 +715,9 @@ class System:
     hook, called right before the notification's lock); environ (`resume`
     looks its binary up on this PATH); out(line) (the report); post_wake(conn,
     inv, sid, payload, idempotency_key, client) (a session.wake report;
-    raises); exec(argv, cwd) (`resume`: replaces the process).
+    raises); exec(argv, cwd) (`resume`: replaces the process);
+    click_notifier() -> the notifier that can run a click action
+    (terminal-notifier) or None: a resume file is written only with one.
     """
 
     def __init__(self, *, now: Optional[Callable[[], float]] = None, alive: Optional[Callable[[int], bool]] = None,
@@ -722,7 +730,8 @@ class System:
                  environ: Optional[Mapping[str, str]] = None, opener=None,
                  out: Optional[Callable[[str], None]] = None,
                  post_wake: Optional[Callable[..., dict]] = None,
-                 exec: Optional[Callable[[List[str], Optional[str]], None]] = None):
+                 exec: Optional[Callable[[List[str], Optional[str]], None]] = None,
+                 click_notifier: Optional[Callable[[], Optional[str]]] = None):
         self.post_wake = post_wake or (lambda conn, inv, sid, payload, key, client: post_wake_event(
             conn, inv, sid, payload, key, client, opener=opener))
         self.now = now or time.time
@@ -737,6 +746,7 @@ class System:
         self.environ = os.environ if environ is None else environ
         self.out = out or (lambda line: print(line, flush=True))
         self.exec = exec or exec_attended
+        self.click_notifier = click_notifier or terminal_notifier
 
 
 # ---------------------------------------------------------------------------
@@ -880,8 +890,13 @@ def codex_session_meta(files: List[Path], sid: str) -> Optional[dict]:
     return None
 
 
+_CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f]")
+
+
 def _abs_dir(v: Any) -> Optional[str]:
-    return v if isinstance(v, str) and os.path.isabs(v) and "\n" not in v and "\0" not in v else None
+    """An absolute path from a runtime's record, or None: never one with a
+    control character (C0, DEL, C1: nothing raw reaches the terminal)."""
+    return v if isinstance(v, str) and os.path.isabs(v) and not _CONTROL_RE.search(v) else None
 
 
 def claude_project_dir_name(cwd: str) -> str:
@@ -915,8 +930,7 @@ def gemini_project_root(chat: Path) -> Optional[str]:
     data = _read_small(chat.parent.parent / ".project_root")
     if data is None:
         return None
-    text = data.decode("utf-8", "replace").strip()
-    return text if text and "\n" not in text and os.path.isabs(text) else None
+    return _abs_dir(data.decode("utf-8", "replace").strip())
 
 
 def gemini_cwd(files: List[Path]) -> Optional[str]:
@@ -970,12 +984,13 @@ class ResumePlan:
         return " ".join("<wake prompt>" if short and a == self.prompt else shlex.quote(a) for a in self.argv)
 
 
-def bound_sessions(home: Path) -> List[str]:
-    """Session ids bound under either state home (state_homes)."""
+def bound_sessions(home: Path, state: Optional[Path] = None) -> List[str]:
+    """Session ids bound under `state` (a state home), or under either
+    (state_homes)."""
     out = set()
-    for state in state_homes(home):
+    for h in ([state] if state is not None else state_homes(home)):
         try:
-            names = os.listdir(str(ie.sessions_dir(state)))
+            names = os.listdir(str(ie.sessions_dir(h)))
         except OSError:
             continue
         out.update(n[:-5] for n in names if n.endswith(".json") and ie.valid_session(n[:-5]))
@@ -984,14 +999,22 @@ def bound_sessions(home: Path) -> List[str]:
 
 def resolve_session(home: Path, arg: str) -> str:
     """The session `arg` names: a full UUID, or a unique prefix of at least
-    PREFIX_MIN hex characters among the bound sessions."""
+    PREFIX_MIN hex characters among the sessions bound under ~/.cardinal;
+    only when none matches there, among the relocated (agent-writable)
+    bindings, so a sandboxed agent cannot make a real prefix ambiguous or
+    shadow it."""
     arg = (arg or "").strip()
     if UUID_RE.fullmatch(arg):
         return arg
     hexes = arg.replace("-", "")
     if not re.fullmatch(r"[0-9a-fA-F][0-9a-fA-F-]*", arg) or len(hexes) < PREFIX_MIN:
         raise ResumeError(f"give the session id, or at least its first {PREFIX_MIN} hex characters")
-    matches = [s for s in bound_sessions(home) if UUID_RE.fullmatch(s) and s.lower().startswith(arg.lower())]
+    matches = []
+    for state in state_homes(home):
+        matches = [s for s in bound_sessions(home, state) if UUID_RE.fullmatch(s)
+                   and s.lower().startswith(arg.lower())]
+        if matches:
+            break
     if not matches:
         raise ResumeError(f"no bound session id starts with {arg}")
     if len(matches) > 1:
@@ -999,34 +1022,65 @@ def resolve_session(home: Path, arg: str) -> str:
     return matches[0]
 
 
-def pending_prompt(home: Path, sid: str) -> Optional[str]:
-    """The WAKE_PROMPT for the decision this session was last notified of:
-    the investigation of its newest NOTIFIED entry (the waker's own ledger,
-    never the binding), from its lowest NOTIFIED seq within DECISION_MAX_AGE
-    of that one. None: nothing was notified."""
+def session_binding(home: Path, sid: str) -> Optional[dict]:
+    """The session's binding: under ~/.cardinal, else the relocated one."""
+    for state in state_homes(home):
+        b = ie.read_binding(state, sid)
+        if b is not None:
+            return b
+    return None
+
+
+def pending_prompt(home: Path, sid: str, now: float, binding: Optional[dict] = None) -> Optional[str]:
+    """The WAKE_PROMPT for a decision this session has not received yet, or
+    None (resume then gives no first prompt). From the waker's own ledger:
+    NOTIFIED entries notified while the session was stopped (never live,
+    never an earlier version's), within DECISION_MAX_AGE of now; the lowest
+    seq in the investigation of the newest one. With a binding, only its
+    investigation and only seqs past read_from(binding) count: a decision
+    the session already consumed reaches it through its hooks anyway (the
+    binding is agent-writable, but it can only leave the prompt out)."""
     try:
-        entries = [e for e in read_ledger(home, sid)["entries"].values() if e.get("state") == NOTIFIED
-                   and ie.valid_investigation(e.get("investigation_id")) and isinstance(e.get("seq"), int)
-                   and not isinstance(e.get("seq"), bool) and e["seq"] > 0]
+        entries = read_ledger(home, sid)["entries"].values()
     except ValueError:
         return None
-    if not entries:
+    floor, inv_bound = 0, None
+    if binding is not None:
+        try:
+            floor, inv_bound = read_from(binding), binding.get("investigation_id")
+        except (KeyError, TypeError, ValueError):
+            return None
+    ok = []
+    for e in entries:
+        seq, t = e.get("seq"), _num(e.get("notified_at"))
+        if e.get("state") != NOTIFIED or e.get("live") is not False or t is None or not 0 <= now - t <= DECISION_MAX_AGE:
+            continue
+        if not ie.valid_investigation(e.get("investigation_id")) or not isinstance(seq, int) or isinstance(seq, bool) \
+                or seq < 1:
+            continue
+        if binding is not None and (e["investigation_id"] != inv_bound or seq <= floor):
+            continue
+        ok.append(e)
+    if not ok:
         return None
-    newest = max(entries, key=lambda e: (_num(e.get("updated_at")) or 0.0, e["seq"]))
-    inv, t = newest["investigation_id"], _num(newest.get("updated_at")) or 0.0
-    seq = min(e["seq"] for e in entries if e["investigation_id"] == inv
-              and t - (_num(e.get("updated_at")) or 0.0) <= DECISION_MAX_AGE)
+    newest = max(ok, key=lambda e: (_num(e.get("notified_at")) or 0.0, e["seq"]))
+    seq = min(e["seq"] for e in ok if e["investigation_id"] == newest["investigation_id"])
     try:
-        return wake_prompt(seq, inv)
+        return wake_prompt(seq, newest["investigation_id"])
     except ValueError:
         return None
 
 
 def _which(name: str, environ: Mapping[str, str]) -> Optional[str]:
-    return shutil.which(name, path=environ.get("PATH") or os.defpath)
+    """`name` on the owner's PATH, absolute: relative entries ("", ".") are
+    skipped, so nothing is resolved against the session's directory after
+    the chdir."""
+    dirs = [d for d in (environ.get("PATH") or os.defpath).split(os.pathsep) if d and os.path.isabs(d)]
+    found = shutil.which(name, path=os.pathsep.join(dirs)) if dirs else None
+    return os.path.abspath(found) if found else None
 
 
-def resume_plan(home: Path, sid: str, environ: Mapping[str, str]) -> ResumePlan:
+def resume_plan(home: Path, sid: str, environ: Mapping[str, str], now: Optional[float] = None) -> ResumePlan:
     """How to resume `sid` here (raises ResumeError when it cannot be): the
     runtime and the working directory from the runtime's own records only,
     the runtime's binary from the owner's PATH, the pending decision's
@@ -1036,8 +1090,8 @@ def resume_plan(home: Path, sid: str, environ: Mapping[str, str]) -> ResumePlan:
     rt = runtime_kind(home, sid)
     if rt.kind == UNKNOWN:
         raise ResumeError(f"cannot tell which runtime runs session {sid[:8]}: {rt.reason}")
-    prompt = pending_prompt(home, sid)
-    note = "" if prompt else "no owner decision was notified for it: resuming without a first prompt"
+    prompt = pending_prompt(home, sid, time.time() if now is None else now, session_binding(home, sid))
+    note = "" if prompt else "no undelivered owner decision was notified for it: resuming without a first prompt"
     if rt.kind == CODEX:
         meta = codex_session_meta(rt.files, sid)
         if meta is None:
@@ -1080,10 +1134,14 @@ def resume(home: Path, arg: str, system: System, *, print_only: bool = False) ->
     out = system.out
     try:
         sid = resolve_session(home, arg)
-        plan = resume_plan(home, sid, system.environ)
+        plan = resume_plan(home, sid, system.environ, system.now())
     except ResumeError as e:
         out(f"cardinal-wake: {e}")
         return 1
+    live = live_signals(home, sid, runtime_kind(home, sid), system, system.now())
+    if live:
+        out(f"cardinal-wake: warning: session {sid[:8]} looks live ({'; '.join(live)}); if its window is open, "
+            "switch to it instead")
     label = LABELS.get(plan.kind, plan.kind) + (" (experimental)" if plan.kind == CURSOR else "")
     if print_only:
         out(f"{label} session {sid}")
@@ -1107,21 +1165,65 @@ def resume_hint(sid: str) -> str:
     return f"~/.cardinal/wake/lib/cardinal-wake resume {sid[:8]}"
 
 
+def lib_problem(home: Path) -> Optional[str]:
+    """Why the stable copy in ~/.cardinal/wake/lib cannot run `resume` as
+    this version does, or None: not installed, or its runner, session_wake
+    or owner_input differ from this copy (a plugin updated since `enable`;
+    inside the daemon this module IS that copy)."""
+    lib = lib_dir(home)
+    here = Path(__file__).resolve().parent
+    try:
+        if runner_path(home).read_text(encoding="utf-8") != RUNNER:
+            return "the installed runner is out of date: run cardinal-wake enable again"
+        for name in ("session_wake.py", "owner_input.py"):
+            if (lib / "cardinal_core" / name).read_bytes() != (here / name).read_bytes():
+                return "the installed runner is out of date: run cardinal-wake enable again"
+    except OSError:
+        return "the stable runner is not installed: run cardinal-wake enable"
+    return None
+
+
+def _owned_dir(path: Path) -> bool:
+    """`path` is a real directory (never a symlink) owned by this user."""
+    try:
+        st = os.lstat(str(path))
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
+
+
+def safe_resume_dir(home: Path, *, create: bool = False) -> Optional[Path]:
+    """~/.cardinal/wake/resume when it and ~/.cardinal/wake are real
+    directories this user owns (created 0700 with create), else None."""
+    wake, d = wake_dir(home), resume_dir(home)
+    if create and not os.path.lexists(str(d)) and _owned_dir(wake):
+        with contextlib.suppress(OSError):
+            os.mkdir(str(d), 0o700)
+    if not (_owned_dir(wake) and _owned_dir(d)):
+        return None
+    with contextlib.suppress(OSError):
+        os.chmod(str(d), 0o700)
+    return d
+
+
 def write_resume_file(home: Path, sid: str, config: dict) -> Optional[str]:
     """~/.cardinal/wake/resume/<sid>.command (0700): execs the stable runner's
     `resume <sid>` with the vetted interpreter, so a click opens Terminal
-    on it and never points into a plugin directory. None when the runner is
-    not installed or sid is not a UUID."""
-    runner = runner_path(home)
-    if not UUID_RE.fullmatch(sid or "") or not runner.is_file():
+    on it and never points into a plugin directory. None (no click action)
+    when sid is not a UUID, the interpreter fails its vetting
+    (binaries_problem), the stable copy is missing or out of date
+    (lib_problem), or the resume directory is not a real one of this user's."""
+    if not UUID_RE.fullmatch(sid or "") or binaries_problem(config, home) or lib_problem(home):
         return None
-    python = config.get("python") or sys.executable
+    d = safe_resume_dir(home, create=True)
+    if d is None:
+        return None
     text = ("#!/bin/sh\n# cardinal-wake: resume this session in this terminal (written by the waker)\n"
-            f"exec {shlex.quote(python)} -I -S {shlex.quote(str(runner))} resume {shlex.quote(sid)}\n")
+            f"exec {shlex.quote(config['python'])} -I -S {shlex.quote(str(runner_path(home)))} resume "
+            f"{shlex.quote(sid)}\n")
+    path = d / f"{sid}.command"
+    tmp = d / f".{sid}.{os.getpid()}.tmp"
     try:
-        d = _private_dir(resume_dir(home))
-        path = d / f"{sid}.command"
-        tmp = d / f".{sid}.{os.getpid()}.tmp"
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o700)
@@ -1159,7 +1261,7 @@ def live_signals(home: Path, sid: str, rt: Runtime, system: System, now: float) 
     table = system.process_table()
     if table is None:
         why.append("the process table could not be read")
-    elif any(sid in args for pid, args in table if pid != os.getpid()):
+    elif any(sid in args for pid, args in table if pid not in (os.getpid(), os.getppid())):
         why.append("a running process names the session")
     for p in rt.files:
         with contextlib.suppress(OSError):
@@ -1312,14 +1414,19 @@ def _where(binding: Optional[dict], origin: Optional[str]) -> str:
 
 
 def notification_text(binding: Optional[dict], sid: str, runtime: str, origin: Optional[str], *,
-                      live: bool, click: bool = False) -> str:
+                      live: bool, click: bool = False, stale: Optional[str] = None) -> str:
     """The runtime, the session's short id, the investigation, and what to
-    do; never decision text."""
+    do; never decision text. A resume command only for a stopped session of
+    a known runtime with an up-to-date stable runner (stale: why not)."""
     where = _where(binding, origin)
     label = LABELS.get(runtime, LABELS[UNKNOWN])
     head = f"Owner decision for {label} session {sid[:8]}" + (f" ({where})." if where else ".")
     if live:
         return f"{head} It is still open: switch to that window."
+    if runtime not in RUNTIMES:
+        return f"{head} Its runtime is not recognized on this Mac: open the session yourself to see it."
+    if stale:
+        return f"{head} To resume it from here, {stale.split(': ', 1)[-1]} ({stale.split(':', 1)[0]})."
     return f"{head} Resume: {resume_hint(sid)}" + (" (or click to resume in Terminal)" if click else "")
 
 
@@ -1453,8 +1560,11 @@ def notify_decision(home: Path, sid: str, binding: dict, seq: int, kind: str, wh
                             "notification cap is reached; the rest follow later.")
         _report(system, report, sid, seq, "capped", "the daily notification cap is reached; reconsidered later")
         return "cap"
-    open_file = None if live else write_resume_file(home, sid, config)
-    _notify(system, notification_text(binding, sid, kind, origin, live=live, click=bool(open_file)), open_file)
+    offer = not live and kind in RUNTIMES   # resume_plan refuses an unknown runtime
+    stale = lib_problem(home) if offer else None
+    open_file = write_resume_file(home, sid, config) if offer and not stale and system.click_notifier() else None
+    _notify(system, notification_text(binding, sid, kind, origin, live=live, click=bool(open_file),
+                                      stale=stale), open_file)
     _report(system, report, sid, seq, "notified", why)
     return "notified"
 
@@ -1587,12 +1697,15 @@ def prune_files(home: Path, now: float) -> None:
             for n in files[:len(files) - WAKE_LOGS_KEEP]:
                 with contextlib.suppress(OSError):
                     (d / n).unlink()
-    r = resume_dir(home)
+    r = safe_resume_dir(home)
+    if r is None:
+        return
     with contextlib.suppress(OSError):
         for n in os.listdir(str(r)):
             p = r / n
             with contextlib.suppress(OSError):
-                if n.endswith(".command") and now - p.lstat().st_mtime > RESUME_FILE_KEEP:
+                st = p.lstat()
+                if n.endswith(".command") and stat.S_ISREG(st.st_mode) and now - st.st_mtime > RESUME_FILE_KEEP:
                     p.unlink()
 
 
@@ -1745,7 +1858,8 @@ def status(home: Path, system: System, out: Callable[[str], None]) -> int:
     if c["enabled"]:
         problem = binaries_problem(c, home)
         out("interpreter: " + (problem if problem else "unchanged since enable"))
-    notifier = terminal_notifier()
+    out("stable runner: " + (lib_problem(home) or f"{runner_path(home)} (up to date)"))
+    notifier = system.click_notifier()
     out("notifier: " + (f"{notifier} (click to resume)" if notifier else "osascript (no click action)"))
     rows = []
     for sid in ledger_sids(home):
@@ -1760,7 +1874,7 @@ def status(home: Path, system: System, out: Callable[[str], None]) -> int:
     out("candidate sessions:" if cands else "candidate sessions: none")
     for sid, b, _, _ in cands:
         try:
-            plan = resume_plan(home, sid, system.environ)
+            plan = resume_plan(home, sid, system.environ, now)
         except ResumeError as e:
             out(f"  {sid[:8]} {LABELS.get(runtime_kind(home, sid).kind, UNKNOWN)}: cannot resume here: {e}")
             continue

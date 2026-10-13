@@ -57,15 +57,32 @@ attended resume. What `cardinal-wake` does now:
   `open codex://threads/<sid>`), `gemini --resume <ident> "<WAKE_PROMPT>"`,
   or `cursor-agent --resume <sid> "<WAKE_PROMPT>"` (experimental; only a
   binary named `cursor-agent`). `--print` shows the command and directory.
-  The prompt is the decision this session was last notified of; it no
-  longer asks for an acknowledgment file (the resumed session has its hooks
-  and network and acknowledges as usual) and is an exact-match machine
-  prompt for all four runtimes.
+  The executable is resolved to an absolute path from the absolute entries
+  of the owner's PATH only, before the chdir; a recorded directory with a
+  control character is refused; a prefix resolves among `~/.cardinal`
+  bindings first and only then among relocated ones; a session that looks
+  live gets a one-line warning (never a block).
+  The prompt names a decision the session has not received yet, from the
+  waker's own ledger: NOTIFIED entries notified while the session was
+  stopped, within `DECISION_MAX_AGE` of now, with seq past the binding's
+  `read_from` (its investigation only; the agent-writable binding can only
+  leave the prompt out); the lowest such seq in the investigation of the
+  newest one. None qualifies: no first prompt. It no longer asks for an
+  acknowledgment file (the resumed session has its hooks and network and
+  acknowledges as usual) and is an exact-match machine prompt for all four
+  runtimes.
 - **Notification:** never the decision's text. A live session: switch to
-  that window. A stopped one: `Resume: ~/.cardinal/wake/lib/cardinal-wake
-  resume <sid8>`; with terminal-notifier installed, a click opens Terminal on
-  a 0700 `~/.cardinal/wake/resume/<sid>.command` that execs the stable
-  runner's `resume <sid>`; otherwise osascript.
+  that window. A session of an unrecognized runtime: notify-only (no resume
+  offered). A stopped one: `Resume: ~/.cardinal/wake/lib/cardinal-wake
+  resume <sid8>`, unless the stable copy in `~/.cardinal/wake/lib` is
+  missing or older than the running code (its runner, `session_wake.py` or
+  `owner_input.py` differ): then "run cardinal-wake enable again" and no
+  click file. With terminal-notifier installed, a vetted interpreter
+  (`binaries_problem` clear) and real, user-owned `~/.cardinal/wake` and
+  `resume` directories (never symlinks), a click opens Terminal on a 0700
+  `~/.cardinal/wake/resume/<sid>.command` that execs the stable runner's
+  `resume <sid>` with that interpreter, and only then does the text offer
+  the click; otherwise osascript.
 
 Why: unattended launch created a new trust boundary (it needed sandbox
 proofs and eight reviews, and was still off); an attended resume in the

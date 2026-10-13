@@ -501,6 +501,11 @@ your home directory, your repositories, temp dirs and version-manager shims,
 in isolated mode (`-I -S`), with a system-only PATH. `disable` removes the
 launchd agent.
 
+After updating the plugin, run `cardinal-wake enable` again: it refreshes the
+stable copy in `~/.cardinal/wake/lib/` (until then `status` says the
+installed runner is out of date, and notifications ask for it instead of
+naming the resume command).
+
 ## Storyboard associations
 
 Where a storyboard is written from (repo, branch, PR, HEAD, the files this

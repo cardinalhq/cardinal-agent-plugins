@@ -77,14 +77,24 @@ class Enable(Cli):
         self.assertIn("temporary directory", out)
 
     def test_enable_refuses_a_version_manager_shim(self):
-        shim = self.home / ".pyenv" / "shims" / "python3"
-        shim.parent.mkdir(parents=True)
-        shim.write_bytes(MACHO)
-        shim.chmod(0o755)
-        with patch.object(w.sys, "executable", str(shim)), patch.object(w, "system_python", lambda: None):
+        # Outside $HOME, so the home check cannot be what refuses it: shim_problem itself does.
+        opt = self.home.parent / "opt" / "bin"
+        opt.mkdir(parents=True)
+        mise = opt / "mise"
+        mise.write_bytes(MACHO)
+        mise.chmod(0o755)
+        link = opt / "python3"
+        os.symlink(str(mise), str(link))
+        self.assertIsNone(w.unsafe_location(str(link), self.home, allow_home=False))
+        with patch.object(w.sys, "executable", str(link)), patch.object(w, "system_python", lambda: None):
             python, why = w.pick_python(self.home)
+            code, out = self.cli("enable")
         self.assertIsNone(python)
-        self.assertTrue("home directory" in why or "shim" in why, why)
+        self.assertIn("is a version-manager shim", why)
+        self.assertEqual(code, 2, out)
+        self.assertIn("version-manager shim", out)
+        pyenv = self.home / ".pyenv" / "shims" / "python3"
+        self.assertIn("~/.pyenv", w.shim_problem(str(pyenv), self.home))
 
     def test_the_plist_runs_python_isolated_with_only_a_sanitized_path(self):
         workspace_bin = self.repo / "bin"

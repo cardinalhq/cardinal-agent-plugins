@@ -352,6 +352,9 @@ sessions"). `enable` copies the plugin's `cardinal_core` and a small runner
 into `~/.cardinal/wake/lib/` (run with a vetted Python, `-I -S`, and a
 system-only PATH) so the launchd agent and a notification's click never
 point into a versioned plugin directory; `disable` removes the agent.
+After updating the plugin, run `cardinal-wake enable` again: it refreshes that
+stable copy (until then `status` says the installed runner is out of date,
+and notifications ask for it instead of naming the resume command).
 
 ## Limits and parity
 

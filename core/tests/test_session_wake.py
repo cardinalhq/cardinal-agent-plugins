@@ -103,6 +103,7 @@ class World:
         self.wake_error = None    # an exception, or state -> exception
         self.execs = []           # (argv, cwd) `resume` ran
         self.exec_error = None
+        self.click = None         # System.click_notifier: terminal-notifier's path, or None
 
     def fetch(self, conn, inv, sid, after, client):
         assert conn == MEMBER
@@ -121,7 +122,8 @@ class World:
         args = dict(now=lambda: self.t, alive=lambda pid: pid in self.alive,
                     process_start=lambda pid: self.starts.get(pid), process_table=lambda: list(self.table),
                     notifier=self.notify, connection=lambda runtime, home: dict(MEMBER), fetch=self.fetch,
-                    environ=ENV, out=self.lines.append, post_wake=self.post_wake, exec=self.exec)
+                    environ=ENV, out=self.lines.append, post_wake=self.post_wake, exec=self.exec,
+                    click_notifier=lambda: self.click)
         args.update(kw)
         return w.System(**args)
 
@@ -151,6 +153,7 @@ class Base(unittest.TestCase):
         self.t0 = time.time()
         self.world = World(self.t0)
         self.config()
+        w.install_lib(self.home)   # the stable copy `enable` installs (lib_problem: up to date)
         self.repo = self.home / "work" / "repo"
         (self.repo / ".git").mkdir(parents=True)
         self.session(SID)
@@ -367,6 +370,8 @@ class Caps(Base):
 # ---------------------------------------------------------------------------
 
 class Notification(Base):
+    TN = "/opt/homebrew/bin/terminal-notifier"
+
     def test_a_stopped_session_gets_its_resume_command_never_the_decision_text(self):
         self.world.events = [decision(5)]
         self.run_pass()
@@ -374,24 +379,97 @@ class Notification(Base):
         self.assertEqual(title, "Cardinal wake")
         self.assertEqual(msg, f"Owner decision for Codex session {SID[:8]} ({INV} on test.invalid). "
                               f"Resume: ~/.cardinal/wake/lib/cardinal-wake resume {SID[:8]}")
-        self.assertIsNone(open_file)                  # no runner installed: nothing to click
+        self.assertIsNone(open_file)                  # no terminal-notifier: nothing to click
+        self.assertFalse(w.resume_dir(self.home).exists())
         self.assertNotIn("SECRET", msg)
         self.assertIn("stopped", self.notified())
 
-    def test_with_the_runner_installed_a_click_resumes_through_a_private_command_file(self):
-        runner = self.install_runner()
+    def test_with_terminal_notifier_a_click_resumes_through_a_private_command_file(self):
+        self.world.click = self.TN
         self.world.events = [decision(5)]
         self.run_pass()
         _, msg, open_file = self.world.notes[0]
-        self.assertIn("click to resume in Terminal", msg)
+        self.assertIn("(or click to resume in Terminal)", msg)
         p = Path(open_file)
         self.assertEqual(p, self.home / ".cardinal" / "wake" / "resume" / f"{SID}.command")
         self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(p.parent.stat().st_mode), 0o700)
         python = w.read_config(self.home)["python"]
         self.assertEqual(p.read_text().splitlines()[-1],
-                         f"exec {shlex.quote(python)} -I -S {shlex.quote(str(runner))} resume {SID}")
+                         f"exec {shlex.quote(python)} -I -S {shlex.quote(str(w.runner_path(self.home)))} "
+                         f"resume {SID}")
         self.assertNotIn("plugins", p.read_text())
+
+    def test_an_interpreter_that_fails_its_vetting_gets_no_click_file(self):
+        self.world.click = self.TN
+        for bad in (dict(binaries={}), dict(python=None), dict(path_env=None)):
+            with self.subTest(bad=bad):
+                self.setUp()
+                self.world.click = self.TN
+                self.config(**bad)
+                self.world.events = [decision(5)]
+                with patch.object(w.sys, "executable", "/should/never/be/used"):
+                    self.run_pass()
+                _, msg, open_file = self.world.notes[0]
+                self.assertIsNone(open_file)
+                self.assertNotIn("click", msg)
+                self.assertIn("Resume:", msg)
+                self.assertFalse(w.resume_dir(self.home).exists())
+
+    def test_an_out_of_date_stable_runner_is_named_instead_of_the_resume_command(self):
+        self.world.click = self.TN
+        stale = [lambda: w.runner_path(self.home).write_text("#!/usr/bin/env python3\n# 0.51.1\n"),
+                 lambda: (w.lib_dir(self.home) / "cardinal_core" / "session_wake.py").write_text("# old\n"),
+                 lambda: w.runner_path(self.home).unlink()]
+        for i, make_stale in enumerate(stale):
+            with self.subTest(i=i):
+                self.setUp()
+                self.world.click = self.TN
+                make_stale()
+                self.world.events = [decision(5)]
+                self.run_pass()
+                _, msg, open_file = self.world.notes[0]
+                self.assertIsNone(open_file)
+                self.assertNotIn("Resume:", msg)
+                self.assertIn("run cardinal-wake enable", msg)
+                self.assertFalse(w.resume_dir(self.home).exists())
+                out = []
+                w.status(self.home, self.world.system(), out.append)
+                self.assertIn("stable runner: the", "\n".join(out))
+
+    def test_an_unknown_runtime_is_notify_only(self):
+        self.world.click = self.TN
+        self.rollout_path(SID).unlink()
+        self.world.events = [decision(5)]
+        self.run_pass()
+        _, msg, open_file = self.world.notes[0]
+        self.assertIsNone(open_file)
+        self.assertNotIn("Resume:", msg)
+        self.assertIn("runtime is not recognized", msg)
+        self.assertTrue(msg.startswith(f"Owner decision for Unknown-runtime session {SID[:8]}"))
+
+    def test_a_symlinked_resume_dir_is_refused(self):
+        self.world.click = self.TN
+        target = self.home.parent / "elsewhere"
+        target.mkdir()
+        os.symlink(str(target), str(w.resume_dir(self.home)))
+        self.world.events = [decision(5)]
+        self.run_pass()
+        _, msg, open_file = self.world.notes[0]
+        self.assertIsNone(open_file)
+        self.assertNotIn("click", msg)
+        self.assertEqual(os.listdir(str(target)), [])
+        old = target / f"{SID}.command"
+        old.write_text("x")
+        w.prune_files(self.home, self.t0 + w.RESUME_FILE_KEEP + 100)
+        self.assertTrue(old.exists())                 # pruning never follows it either
+
+    def test_a_symlinked_wake_dir_is_refused(self):
+        real = self.home.parent / "realwake"
+        os.rename(str(w.wake_dir(self.home)), str(real))
+        os.symlink(str(real), str(w.wake_dir(self.home)))
+        self.assertIsNone(w.safe_resume_dir(self.home, create=True))
+        self.assertFalse((real / "resume").exists())
 
     def test_a_live_session_is_told_to_switch_to_its_window(self):
         self.install_runner()
@@ -404,6 +482,14 @@ class Notification(Base):
         self.assertIsNone(open_file)
         self.assertIn("the session is live", self.notified())
         self.assertFalse((self.home / ".cardinal" / "wake" / "resume").exists())
+
+    def test_the_click_text_needs_terminal_notifier_and_the_file(self):
+        self.world.events = [decision(5)]
+        self.world.click = self.TN
+        with patch.object(w, "write_resume_file", lambda *a: None):
+            self.run_pass()
+        self.assertNotIn("click", self.world.notes[0][1])
+        self.assertIsNone(self.world.notes[0][2])
 
     def test_old_and_unrequested_decisions_are_notified_the_same_way(self):
         self.world.events = [decision(5, created=self.t0 - 8 * 86400), decision(6, wake=NOWAKE)]
@@ -770,7 +856,7 @@ class Resume(Base):
         self.run_pass()
 
     def plan(self, sid=SID):
-        return w.resume_plan(self.home, sid, self.environ)
+        return w.resume_plan(self.home, sid, self.environ, self.world.t)
 
     # -- the session ------------------------------------------------------
     def test_a_unique_prefix_of_eight_hex_characters(self):
@@ -796,6 +882,12 @@ class Resume(Base):
         gsid = "8a6e4964-0d1f-4c55-9f0e-2b7c1d3a4e5f"
         ie.write_binding(paths.sandboxed_home(self.home), gsid, binding())
         self.assertEqual(w.resolve_session(self.home, gsid[:8]), gsid)
+
+    def test_a_real_binding_wins_a_prefix_over_a_relocated_one(self):
+        from cardinal_core import paths
+        twin = SID[:8] + "-0000-0000-0000-000000000000"
+        ie.write_binding(paths.sandboxed_home(self.home), twin, binding())   # agent-writable
+        self.assertEqual(w.resolve_session(self.home, SID[:8]), SID)
 
     def test_an_unbound_prefix(self):
         with self.assertRaises(w.ResumeError):
@@ -842,6 +934,7 @@ class Resume(Base):
         d.mkdir(parents=True)
         lines = [{"type": "user", "sessionId": SID, "cwd": c, "message": {"content": "x"}} for c in cwds]
         (d / f"{SID}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+        self.age(d / f"{SID}.jsonl")
 
     def test_claude_code(self):
         self.claude_transcript(str(self.repo))
@@ -872,6 +965,7 @@ class Resume(Base):
         p = self.home / ".cursor" / "projects" / "Users-x-repo" / "agent-transcripts" / f"{SID}.jsonl"
         p.parent.mkdir(parents=True)
         p.write_text(json.dumps(rec) + "\n")
+        self.age(p)
 
     def test_cursor_agent_experimental(self):
         self.cursor_transcript({"workspace_roots": [str(self.repo)]})
@@ -895,6 +989,84 @@ class Resume(Base):
         code, out = self.resume()
         self.assertEqual(code, 1)
         self.assertIn("Reopen it in Cursor", out)
+
+    # -- records: cwd only from what the runtime itself wrote ------------------
+    def test_a_long_line_before_the_session_record_is_skipped(self):
+        p = self.rollout_path(SID)
+        with patch.object(w, "MAX_LINE", 4096):
+            p.write_text(json.dumps({"type": "session_meta", "pad": "x" * 10000}) + "\n" + p.read_text())
+            self.assertEqual(self.plan().cwd, str(self.repo))
+
+    def test_an_overlong_session_record_is_never_parsed(self):
+        p = self.rollout_path(SID)
+        rec = meta(SID, str(self.repo))
+        rec["payload"]["pad"] = "x" * 10000
+        with patch.object(w, "MAX_LINE", 4096):
+            p.write_text(json.dumps(rec) + "\n")
+            with self.assertRaises(w.ResumeError):
+                self.plan()
+
+    def test_a_symlinked_record_is_refused(self):
+        p = self.rollout_path(SID)
+        real = self.home.parent / "planted.jsonl"
+        os.replace(str(p), str(real))
+        os.symlink(str(real), str(p))
+        code, out = self.resume()
+        self.assertEqual(code, 1)
+        self.assertIn("no session record", out)
+        self.assertEqual(self.world.execs, [])
+
+    def test_max_record_scan_is_honoured(self):
+        p = self.rollout_path(SID)
+        pad = "".join(json.dumps({"type": "event", "n": i, "pad": "y" * 200}) + "\n" for i in range(50))
+        p.write_text(pad + p.read_text())
+        with patch.object(w, "MAX_RECORD_SCAN", 4096):
+            with self.assertRaises(w.ResumeError):
+                self.plan()
+        self.assertEqual(self.plan().cwd, str(self.repo))
+
+    def test_control_characters_in_a_recorded_directory_are_refused(self):
+        for bad in ("\x1b[31m", "\x07", "\x9b", "\x7f", "\n"):
+            with self.subTest(bad=repr(bad)):
+                self.session(SID, cwd=str(self.repo) + bad + "x")
+                with self.assertRaises(w.ResumeError) as e:
+                    self.plan()
+                self.assertNotIn(bad, str(e.exception))
+        self.rollout_path(SID).unlink()
+        chat = self.home / ".gemini" / "tmp" / "h" / "chats" / f"session-2026-10-12T10-00-{SID[:8]}.jsonl"
+        chat.parent.mkdir(parents=True)
+        chat.write_text(json.dumps({"sessionId": SID}) + "\n")
+        (chat.parent.parent / ".project_root").write_text(str(self.repo) + "\x1b]0;x\x07\n")
+        self.assertIsNone(w.gemini_project_root(chat))
+        self.assertIsNone(w.cursor_cwd([self._cursor_file({"cwd": str(self.repo) + "\x9b2J"})]))
+
+    def _cursor_file(self, rec):
+        p = self.home.parent / "cursor.jsonl"
+        p.write_text(json.dumps(rec) + "\n")
+        return p
+
+    def test_relative_path_entries_are_skipped_and_the_binary_is_absolute(self):
+        here = Path(self.tmp.name) / "cwd"
+        here.mkdir()
+        planted = here / "codex"
+        planted.write_text("#!/bin/sh\n")
+        planted.chmod(0o755)
+        old = os.getcwd()
+        os.chdir(str(here))
+        self.addCleanup(os.chdir, old)
+        for path in (".", "", ":.", "bin"):
+            with self.subTest(path=path), self.assertRaises(w.ResumeError):
+                w.resume_plan(self.home, SID, {"PATH": path})
+        plan = w.resume_plan(self.home, SID, {"PATH": f".::{self.bin}"})
+        self.assertEqual(plan.argv[0], str(self.bin / "codex"))
+        self.assertTrue(os.path.isabs(plan.argv[0]))
+
+    def test_a_live_session_is_warned_about_and_still_resumed(self):
+        self.world.table = [(4242, f"codex resume {SID}")]
+        code, out = self.resume()
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"warning: session {SID[:8]} looks live", out)
+        self.assertEqual(len(self.world.execs), 1)
 
     # -- refusals ---------------------------------------------------------
     def test_a_missing_working_directory_is_refused(self):
@@ -932,6 +1104,54 @@ class Resume(Base):
         self.world.t += 600
         self.run_pass()
         self.assertEqual(self.plan().prompt, oi.wake_prompt(3, INV2))
+
+    def entry(self, seq, t, *, live=False, inv=INV, state=w.NOTIFIED, **extra):
+        led = w.read_ledger(self.home, SID)
+        e = {"seq": seq, "investigation_id": inv, "runtime": "codex", "reports": [], "notified_at": t, "live": live}
+        e.update(extra)
+        w.transition(e, w.DECISION_SEEN, t)
+        w.transition(e, state, t, "seeded")
+        w.add_entry(led, e)
+        w.write_ledger(self.home, SID, led, t)
+
+    def test_the_prompt_never_names_a_decision_notified_while_live_or_already_received(self):
+        # Reviewer's repro: #5 notified while live (and acknowledged in that window), #12 two days
+        # later while stopped -> the prompt is #12, never "#5 after 4".
+        now = self.t0
+        self.entry(5, now - 2 * 86400, live=True)
+        self.entry(12, now)
+        self.assertEqual(w.pending_prompt(self.home, SID, now), oi.wake_prompt(12, INV))
+        self.assertEqual(self.plan().prompt, oi.wake_prompt(12, INV))
+
+    def test_the_prompt_rule(self):
+        now = self.t0
+        cases = {
+            "only live": [dict(seq=5, t=now, live=True)],
+            "too old": [dict(seq=5, t=now - w.DECISION_MAX_AGE - 10)],
+            "an earlier version's entry (no live flag)": [dict(seq=5, t=now, live=None)],
+            "a legacy state": [dict(seq=5, t=now, state="FAILED")],
+            "not yet notified by the clock": [dict(seq=5, t=now + 3600)],
+        }
+        for name, entries in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                for e in entries:
+                    self.entry(e.pop("seq"), e.pop("t"), **e)
+                self.assertIsNone(w.pending_prompt(self.home, SID, now))
+                self.assertIsNone(self.plan().prompt)
+        self.setUp()
+        self.entry(5, now - 3 * 86400)
+        self.entry(7, now - 86400)
+        self.entry(9, now)
+        self.assertEqual(w.pending_prompt(self.home, SID, now), oi.wake_prompt(5, INV))
+        # the binding: a consumed decision (seq <= read_from) is left out; another investigation too
+        self.assertEqual(w.pending_prompt(self.home, SID, now, binding(cursor=6)), oi.wake_prompt(7, INV))
+        self.assertEqual(w.pending_prompt(self.home, SID, now, binding(cursor=6, pending_decisions=[{"seq": 5}])),
+                         oi.wake_prompt(5, INV))
+        self.assertIsNone(w.pending_prompt(self.home, SID, now, binding(cursor=9)))
+        self.assertIsNone(w.pending_prompt(self.home, SID, now, binding(inv=INV2)))
+        ie.write_binding(self.home, SID, binding(cursor=8))
+        self.assertEqual(self.plan().prompt, oi.wake_prompt(9, INV))
 
     def test_print_shows_the_quoted_command_and_runs_nothing(self):
         odd = self.home / "work" / "it's a repo"
