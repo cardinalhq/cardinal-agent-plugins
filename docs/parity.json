@@ -2699,7 +2699,7 @@
     "notes": {
       "claude": "notify-only: a resumed claude -p runs with the user's own settings, so the wake sandbox is not guaranteed (docs/specs/resume-and-wake.md §6, C-6 not demonstrated); claude --remote-control reaches a running session",
       "cursor": "notify-only: no unattended Cursor resume has been shown to pass the wake gates (docs/specs/resume-and-wake.md §5.3)",
-      "gemini": "notify-only: Gemini CLI's sandbox wraps the harness, so the plugin's hooks cannot keep Cardinal state without the agent being able to tamper with it, and every bundled macOS profile allows network (docs/specs/resume-and-wake.md §6, C-7)"
+      "gemini": "notify-only for now: the Gemini CLI launch (restrictive-proxied seatbelt behind an allow-list proxy, approved roots, relocated hook state, runtime sandbox check) is built but off (GEMINI_LAUNCH_PROVEN) until its live gates pass; the open profiles fail (docs/specs/resume-and-wake.md §5.3, §6 C-7, C-9 proven, C-10..C-14 pending)"
     },
     "outside_matrix": {
       "opencode": "na:the OpenCode adapter has no Investigation binding layer (no session binding, poller or owner-decision delivery; adapters/opencode is telemetry, MCP and evidence capture), so there is no addressed decision to notify about",
@@ -2774,6 +2774,15 @@
           "kind": "grep",
           "path": "../../core/cardinal_core/session_wake.py",
           "pattern": "GEMINI: gemini_chats"
+        },
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/allowlist_proxy.py"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-gemini-telemetry.py",
+          "pattern": "ie\\.record_sandbox_turn\\("
         }
       ]
     }

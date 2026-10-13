@@ -495,8 +495,9 @@ switches are cleared for the woken run, so its hooks and poller are on.
 Investigation and the state, never the decision's text):
 - Claude Code sessions (see the Claude plugin's README; use
   `claude --remote-control` to reach a running one), Cursor and Gemini CLI
-  sessions (Gemini CLI's sandbox wraps its hooks too and allows network,
-  proof C-7), and sessions whose runtime is not recognized;
+  sessions (a Gemini CLI launch behind an allow-list proxy is built and off
+  until its live proofs pass; see the Gemini plugin's README), and sessions
+  whose runtime is not recognized;
 - Codex desktop app sessions (its process outlives its threads), subagent
   threads, and any originator the waker does not recognize;
 - a repository that carries its own Codex config: a `.codex/` with any

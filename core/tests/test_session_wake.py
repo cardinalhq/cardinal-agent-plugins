@@ -969,7 +969,7 @@ class OtherRuntimes(Base):
 
     def test_gemini_is_notify_only_with_launch_on(self):
         self.gemini_chat()
-        self.assert_notified("gemini", "Gemini CLI", "sandbox wraps the harness")
+        self.assert_notified("gemini", "Gemini CLI", "until its sandboxed launch")
         self.assertEqual(self.calls[0], "gemini")   # its own plugin's key first
 
     def test_a_legacy_gemini_json_chat(self):
@@ -1016,14 +1016,15 @@ class OtherRuntimes(Base):
         self.assertEqual(self.calls[:2], ["gemini", "codex"])
         self.assertEqual(self.state(5), w.NOTIFIED)
 
-    def test_no_launcher_for_them(self):
-        self.assertEqual(sorted(w.LAUNCHERS), ["codex"])
+    def test_no_active_launcher_for_them(self):
+        self.assertEqual([r for r in w.RUNTIMES if w.active_launcher(r)], ["codex"])
         for runtime in ("claude", "cursor", "gemini"):
             self.assertIn(runtime, w.NOTIFY_ONLY_REASONS)
-        with self.assertRaises(KeyError):
-            w.claim_and_launch(self.home, SID, binding(), 5, w.Runtime("gemini", [], eligible=True,
-                                                                       sandbox="workspace-write", cwd="/"),
-                               w.read_config(self.home), self.world.system(), [])
+        for runtime, error in (("cursor", KeyError), ("claude", KeyError), ("gemini", ValueError)):
+            with self.subTest(runtime), self.assertRaises(error):
+                w.claim_and_launch(self.home, SID, binding(), 5, w.Runtime(runtime, [], eligible=True,
+                                                                           sandbox="workspace-write", cwd="/"),
+                                   w.read_config(self.home), self.world.system(), [])
         self.assertEqual(self.world.attempts, 0)
 
     def test_status_names_the_runtime(self):

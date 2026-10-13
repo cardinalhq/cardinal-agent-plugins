@@ -6,7 +6,8 @@ Status: APPROVED v3 (2026-10-12).
   before unattended wake (§6).
 - Amended later on 2026-10-12, with the owner's approval:
   - notify-only for every adapter with the Investigation layer (§2, §5.3);
-  - Gemini CLI fails the gates (C-7);
+  - Gemini CLI: the open sandbox profiles fail (C-7); a proxied launch is built and shipped off
+    until its live gates pass (C-9 proven, C-10..C-14 pending; §5.3);
   - a guard against Codex project config (C-8);
   - §4 hold wording matched to the implementation in PR #208.
 
@@ -69,7 +70,8 @@ Non-goals
 - **Treating a wake as authorization for consequential actions** such as
   deploys, reverts or merges (§5.6).
 - **Unattended launch on other runtimes.** Only Codex launches. Claude
-  Code, Cursor and Gemini CLI sessions are notify-only (§5.3). OpenCode
+  Code and Cursor sessions are notify-only. Gemini CLI sessions are
+  notify-only until its proxied launch passes its live gates (§5.3). OpenCode
   and Pi have no Investigation binding layer, and Devin runs in the cloud
   (waking it would be a server-side feature), so all three are out of
   scope. A cloud waker is out of scope too.
@@ -287,20 +289,90 @@ decision gets a notification.
 - Records of no runtime, or of more than one, make the session "unknown".
   It is still notified.
 - Launch is an explicit allow-list of per-runtime launchers. Each launcher
-  defines eligibility, the pinned argv, a pre-launch snapshot and post-run
-  verification. Only Codex is on the list.
-- **Gemini CLI fails the gates** (proof C-7). Its sandbox wraps the whole
-  CLI, Cardinal's hooks included. That leaves two options:
-  - Cardinal's hooks cannot keep their binding and inbox state, so the
-    decision can't be delivered or acknowledged;
-  - or `~/.cardinal` is made writable, and the agent can then tamper with
-    the wake state, which fails gate 1 locally.
-  - Every bundled macOS profile also allows network, and the Codex bar is
-    no network.
+  defines eligibility, the pinned argv, the environment, a preflight, a
+  pre-launch snapshot, a post-spawn check and post-run verification, plus a
+  `proven` switch. Codex launches. Gemini CLI's launcher is built and
+  ships off (`GEMINI_LAUNCH_PROVEN = False`).
 - **Cursor** has no demonstrated unattended resume.
 
 Adding a runtime later is one launcher entry, after its gates are
 demonstrated.
+
+**Gemini CLI: built, off until its live gates pass.** The open profiles
+fail (proof C-7). Gemini's `-s` sandbox wraps the whole CLI, Cardinal's
+hooks included, and every `*-open` profile allows network. The launch path
+is designed around that:
+- **Network lock (C-9, proven).** The `restrictive-proxied` seatbelt
+  profile denies every outbound connection except `localhost:8877`. Gemini
+  starts `GEMINI_SANDBOX_PROXY_COMMAND` itself before entering the sandbox.
+  The waker sets that command to its own `allowlist_proxy.py`, copied into
+  `~/.cardinal/wake/lib`:
+  - CONNECT only, port 443 only, exact host names only;
+  - the hosts are the Gemini API, plus the Code Assist and OAuth token
+    hosts for "Sign in with Google", plus the Cardinal hosts of the Gemini
+    plugin's connection;
+  - it refuses non-loopback peers, logs each ALLOW and DENY to the wake's
+    log, and exits with its parent.
+  - Only one Gemini wake runs machine-wide (the port), enforced under the
+    global lock. If 8877 is already bound, the result is notify-only.
+- **Hook state.** Inside the sandbox (`SANDBOX=sandbox-exec`), the hooks
+  keep their per-session Cardinal state under
+  `~/.cache/cardinal/sandboxed/.cardinal`, which the profile allows them
+  to write: binding, inbox, cursor, `.active`, poller files and the
+  evidence spool (a separate spool). This is decided in one place,
+  `paths.state_home`. `~/.cardinal/wake` is never relocated and never
+  written by hooks. The waker reads relocated bindings as the untrusted
+  hints all bindings are. The hooks' HTTP openers honor `HTTPS_PROXY`,
+  which is tested.
+- **Pinned launch.** `gemini --resume <ident> -s --approval-mode yolo
+  --skip-trust -p "<wake prompt>"`, with this environment:
+  - set: `GEMINI_SANDBOX=sandbox-exec`, `SEATBELT_PROFILE=restrictive-proxied`
+    and the proxy command;
+  - stripped: everything that changes the sandbox, the proxy, the settings
+    location or the debugger, including `SANDBOX` (which makes Gemini skip
+    its sandbox), `SANDBOX_FLAGS`, `GEMINI_SANDBOX_IMAGE`, `BUILD_SANDBOX`,
+    `SEATBELT_*`, `GEMINI_CLI_HOME`, `*_PROXY`, `NODE_OPTIONS`, `DEBUG` and
+    `CARDINAL_*`;
+  - never passed: `--yolo` or `-y` without `-s`, `--sandbox-image`,
+    `--include-directories`.
+  - yolo acts inside the sandbox: the sandbox plus the proxy is the
+    boundary, as workspace-write with approval never is for Codex.
+- **Eligibility** (all of these, checked before every launch):
+  - a UUID session id;
+  - an approved root (`cardinal-wake enable --root PATH`, realpath'd, never
+    `$HOME` or above it) containing the realpath of the cwd from Gemini's
+    project record, which must be a git work tree and not `$HOME` or an
+    ancestor of it;
+  - every recorded turn sandboxed (below), and no binding under `~/.cardinal`;
+  - a supported auth type, with an API key readable inside the sandbox via
+    `~/.gemini/.env` (the sandbox can't reach the keychain);
+  - the Gemini project guard (fail closed). It refuses any of:
+    - a `.gemini` from cwd to the git root that is not a plain directory or
+      can't be read;
+    - a custom `sandbox-macos-*.sb`, `sandbox.Dockerfile` or
+      `sandbox.bashrc`;
+    - a settings file setting `tools.sandbox*`, `security.*`,
+      `context.includeDirectories`, or the command keys (`mcpServers`,
+      `hooks`, `tools.discoveryCommand` / `callCommand`, `mcp.serverCommand`;
+      pending C-13);
+    - any env file Gemini may load setting a sandbox, proxy or settings
+      variable. That covers `.gemini/.env` and `.env` from cwd up to `/`,
+      `~/.gemini/.env` and `~/.env`. Dotenv only fills unset variables, so
+      a stripped `SANDBOX` could otherwise come back;
+    - user or system settings that widen the sandbox;
+  - a resume identifier (`resolve_gemini_resume_ident`; the UUID, with a
+    marked hook for an index fallback, pending C-10).
+- **Runtime check.** Within 20 s of the spawn, the child's process tree
+  must run `sandbox-exec -f <…restrictive-proxied….sb>`. If it doesn't,
+  the waker kills the whole tree, writes `~/.cardinal/wake/disabled/gemini`
+  and notifies. There is no fallback. After the run, any unsandboxed turn
+  recorded, or no sandboxed turn recorded, also disables Gemini launch.
+- **History is weaker than Codex's.** Gemini records no sandbox per turn.
+  The plugin's prompt hook counts each turn as sandboxed or not in the
+  session's Cardinal state. That record is agent-writable (a sandboxed
+  agent can write `~/.cache`), so it is a hint, weaker than Codex's
+  rollout. What bounds a Gemini wake is the approved roots, the proxy and
+  the runtime sandbox check.
 
 **Wake prompt** (fixed except for the seq): "Cardinal resumed this session
 for owner decision #<seq> in its Investigation. Read the investigation
@@ -377,8 +449,14 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-4 | Hooks run on a headless resume (the delivery path exists) | `codex exec resume` with Cardinal hooks on | SessionStart bound the session (`source auto`, `is_author true`, `owner_decision` enabled in prod) |
 | C-5 | Duplicate decisions can't start concurrent executions | Unit and multi-process tests in the C PR: two wakers racing the same seq; two decisions for one session; spawn error vs. child started | See the PR's test output |
 | C-6 | Claude enforces a wake sandbox | Not attempted. User settings apply to `claude -p --resume`, and bypass or allow lists can't be excluded without dropping the plugin | **Not demonstrated → Claude notify-only** |
-| C-7 | Gemini CLI enforces a wake sandbox that leaves Cardinal's state intact (gemini-cli 0.63.0) | Gemini's `-s` (macOS seatbelt) wraps the whole CLI process, hooks included. Its bundled profiles (`sandbox-macos-{permissive,restrictive,strict}-open.sb`, `TARGET_DIR` = workspace) were run directly: `touch ~/.cardinal/investigations/<probe>`; a write in the workspace; `curl https://example.com`. Inside the sandbox it also can't read its API key from the macOS keychain (exit 41) | Outside write "Operation not permitted" in all three (the hooks couldn't keep state, or `~/.cardinal` would have to be writable by the agent); inside write ok; `curl` 200 in all three. **Fails → Gemini CLI notify-only** |
+| C-7 | Gemini CLI enforces a wake sandbox that leaves Cardinal's state intact (gemini-cli 0.63.0) | Gemini's `-s` (macOS seatbelt) wraps the whole CLI process, hooks included. Its bundled profiles (`sandbox-macos-{permissive,restrictive,strict}-open.sb`, `TARGET_DIR` = workspace) were run directly: `touch ~/.cardinal/investigations/<probe>`; a write in the workspace; `curl https://example.com`. Inside the sandbox it also can't read its API key from the macOS keychain (exit 41) | Outside write "Operation not permitted" in all three (the hooks couldn't keep state, or `~/.cardinal` would have to be writable by the agent); inside write ok; `curl` 200 in all three. **The open profiles fail.** The launch is redesigned around the proxied profile and relocated hook state (§5.3 Gemini) |
 | C-8 | Codex project config can't run unsandboxed code on a wake | A `.codex/config.toml` in the session's cwd declaring `[mcp_servers.x] command="/bin/sh"` that touches `~/probe`, under `codex exec -s workspace-write resume <sid>`. Inside workspace-write: `mkdir .codex`, `git config …` (`.git/config`) and `mkdir .agents` | The project MCP server ran **outside** the sandbox (`~/probe` created). A project `.codex/hooks.json` SessionStart hook did not run. The agent can't create any of these ("Operation not permitted"), but a cloned repo or another tool can. **So the waker refuses any session whose repo carries Codex project config (§5.3)** |
+| C-9 | Gemini's proxied profiles lock the network to an allow-list proxy | Gemini's own `sandbox-macos-{permissive,restrictive}-proxied.sb` run directly, with a CONNECT allow-list proxy listening on `[::]:8877` | Direct internet blocked; a host the proxy denies blocked; `generativelanguage.googleapis.com` through the proxy reachable; other localhost ports blocked. **Proven** (the network lock of §5.3 Gemini) |
+| C-10 | `gemini --resume <UUID> -s -p …` resumes the session headless (else the index fallback in `resolve_gemini_resume_ident`) | Owner, live | **Pending live proof** |
+| C-11 | Inside the proxied sandbox, the hooks write the relocated state, and the woken session receives the decision and acknowledges it through the proxy | Owner, live: a woken run with `GEMINI_LAUNCH_PROVEN` flipped locally | **Pending live proof** |
+| C-12 | The runtime check sees `sandbox-exec -f …restrictive-proxied….sb` in the child's tree, and the agent can't write `~/.cardinal` or reach a non-allow-listed host | Owner, live | **Pending live proof** |
+| C-13 | Gemini's outer, unsandboxed process runs no project-defined command (MCP server, hook, tool discovery) before it enters the sandbox | Owner, live (until then the project guard refuses those settings) | **Pending live proof** |
+| C-14 | Duplicate decisions and a second Gemini session can't start concurrent Gemini executions (port 8877 and the global lock) | Unit tests in the C PR; owner, live | Unit tests pass; **live pending** |
 
 Still owed: an end-to-end manual run, in which the owner posts an addressed
 decision from the web for a stopped, sandboxed Codex CLI session and watches
@@ -428,7 +506,7 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
 - Waking on anything but a verified owner decision addressed to the session.
 - Agent-triggered or chained wakes.
 - Waking the Codex desktop app or any session that ever ran unsandboxed.
-- Claude, Cursor or Gemini CLI unattended launch (notify-only).
+- Claude or Cursor unattended launch (notify-only); Gemini CLI launch until its live gates pass.
 - Launching a Codex session whose repository carries Codex project config.
 - A cloud waker; Linux/Windows service managers (launchd only).
 - Injecting into a live TUI.

@@ -8,15 +8,16 @@ Run it in your own terminal (not through the agent):
     cardinal-wake run [--once] [--dry-run]
     cardinal-wake reenable codex      after a failed post-run sandbox check
 
-Gemini CLI sessions are notify-only: when you post an owner decision on an
-Investigation page addressed to a stopped Gemini CLI session, the waker
-shows a macOS notification and never resumes it, with or without --launch.
-Gemini CLI's sandbox wraps the whole CLI, hooks included, so the plugin's
-hooks cannot keep Cardinal state without the agent being able to tamper with
-it, and every bundled macOS sandbox profile allows network
-(docs/specs/resume-and-wake.md §5.3, proof C-7). The same waker serves every
-plugin; Codex CLI sessions that only ever ran sandboxed can be resumed
-(--launch).
+    cardinal-wake enable --launch --root PATH   approve a directory for Gemini wakes (repeatable)
+
+Gemini CLI sessions are notify-only for now: when you post an owner decision
+on an Investigation page addressed to a stopped Gemini CLI session, the
+waker shows a macOS notification. An unattended Gemini launch (Gemini's
+restrictive-proxied seatbelt sandbox behind an allow-list proxy, in an
+approved root, verified at runtime) is built and ships off until its live
+proofs pass (docs/specs/resume-and-wake.md §5.3 Gemini, §6 C-9..C-14). The
+same waker serves every plugin; Codex CLI sessions that only ever ran
+sandboxed can be resumed (--launch).
 
 The waker reads the investigation events with the Cardinal key of the
 plugin whose session it is (this plugin's: ~/.gemini/cardinal.json mcp_url +
