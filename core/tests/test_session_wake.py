@@ -176,8 +176,8 @@ class World:
         known = inspect.signature(w.System.__init__).parameters
         return w.System(**{k: v for k, v in args.items() if k in known})
 
-    def sandboxed_procs(self, since, tmp_dirs):
-        self.boxed_calls.append((since, list(tmp_dirs)))
+    def sandboxed_procs(self, since, tmp_dirs, canary):
+        self.boxed_calls.append((since, list(tmp_dirs), canary))
         return None if self.boxed is None else list(self.boxed)
 
     def post_wake(self, conn, inv, sid, payload, key, client):
@@ -1438,6 +1438,72 @@ class LaunchGate(Base):
         self.world.events = [decision(5, wake=NOWAKE)]
         self.run_pass()
         self.assertEqual(self.notified_only(), w.WAKE_NOT_REQUESTED)
+
+
+class DecisionOrdering(Base):
+    """Review 7 F2: a later decision must not silently drop an earlier one.
+    Decisions are handled in ascending seq and the pass stops at the first
+    one that launches or cannot be claimed, so notifying a higher decision
+    never raises the high-water mark past a lower pending decision that has
+    no entry yet. (Base proves codex, so a wake decision launches.)"""
+
+    def hwm(self, inv=INV):
+        return w.read_ledger(self.home, SID)["hwm"].get(inv, 0)
+
+    def test_a_later_no_wake_decision_does_not_drop_an_earlier_wake_one(self):
+        self.world.events = [decision(5), decision(6, wake=NOWAKE)]
+        self.run_pass()
+        self.assertEqual(len(self.world.launches), 1)                 # #5 launched
+        self.assertEqual(self.state(5), w.RESUMING)
+        self.assertNotIn("6", self.ledger())                          # #6 not handled this pass
+        self.assertEqual(self.hwm(), 5)                               # not raised past #6
+        # #6 is handled only after the run settles.
+        self.append_turns(SID, turn())
+        self.world.events.append(ack(7, 5))
+        self.world.exit()
+        self.world.t += 60
+        self.run_pass()
+        self.world.t += w.LIVE_WINDOW + 1
+        self.run_pass()
+        self.assertEqual(self.state(6), w.NOTIFIED)
+        self.assertEqual(self.ledger()["6"]["reason"], w.WAKE_NOT_REQUESTED)
+
+    def test_a_lower_no_wake_and_a_higher_wake_are_both_handled(self):
+        self.world.events = [decision(5, wake=NOWAKE), decision(6)]
+        self.run_pass()
+        self.assertEqual(self.state(5), w.NOTIFIED)                   # notified (records an entry)
+        self.assertEqual(self.ledger()["5"]["reason"], w.WAKE_NOT_REQUESTED)
+        self.assertEqual(self.state(6), w.RESUMING)                  # then the wake one launched
+        self.assertEqual(len(self.world.launches), 1)
+
+    def test_an_old_lower_and_a_fresh_wake_higher_are_both_handled(self):
+        self.world.events = [decision(5, created=self.t0 - 8 * 86400), decision(6)]
+        self.run_pass()
+        self.assertEqual(self.state(5), w.NOTIFIED)
+        self.assertIn("older than 7 days", self.ledger()["5"]["reason"])
+        self.assertEqual(self.state(6), w.RESUMING)
+
+    def test_a_transient_probe_failure_on_the_wake_one_defers_the_later_no_wake(self):
+        # Cross-pass: #5 wake returns "retry" (no entry) -> the pass stops; #6 is not consumed.
+        def boom(argv, path_env, cwd=None):
+            raise OSError("no codex")
+        self.world.events = [decision(5), decision(6, wake=NOWAKE)]
+        self.run_pass(run_probe=boom)
+        self.assertEqual(self.ledger(), {})                           # neither #5 nor #6 recorded
+        self.assertEqual(self.hwm(), 0)
+        self.assertEqual(w.read_ledger(self.home, SID)["probe_retries"], {w.entry_key(INV, 5): 1})
+        # Recover: #5 launches, #6 still deferred, and #5's retry counter is cleared.
+        self.world.t += w.LIVE_WINDOW + 1
+        self.run_pass()
+        self.assertEqual(self.state(5), w.RESUMING)
+        self.assertNotIn("6", self.ledger())
+        self.assertEqual(w.read_ledger(self.home, SID)["probe_retries"], {})
+
+    def test_read_ledger_normalizes_probe_retries(self):
+        led = w.read_ledger(self.home, SID)
+        led["probe_retries"] = {INV + ":5": 2, "bad": "x", INV + ":6": 0, INV + ":7": True}
+        w.write_ledger(self.home, SID, led, self.t0)
+        self.assertEqual(w.read_ledger(self.home, SID)["probe_retries"], {INV + ":5": 2})
 
 
 class contextlib_suppress_file:

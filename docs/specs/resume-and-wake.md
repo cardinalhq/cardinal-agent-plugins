@@ -769,31 +769,48 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
     has this wake's private TMPDIR as a writable root; a process cannot
     leave its sandbox, and nothing the agent does — clearing the `TMPDIR`
     variable, `setsid`, `chdir`, re-exec — removes that writable root. So a
-    process is this wake's exactly when it is sandboxed **and** its sandbox
-    allows writing the wake's TMPDIR directory. macOS answers both through
-    `sandbox_check` (libsystem_sandbox): `sandbox_check(pid, NULL, 0)` is
-    1 for a sandboxed process; `sandbox_check(pid, "file-write-create",
-    SANDBOX_FILTER_PATH|SANDBOX_CHECK_NO_REPORT, <the TMPDIR>)` is 0 when
-    the sandbox allows that write. The waker lists the user's own processes
-    born at or after the child (`ps -A -o pid,uid,etime`) and asks both of
-    each, one listing plus two calls per candidate. The path argument is
-    variadic: on arm64 the C ABI passes it on the stack, so ctypes must pad
-    x0..x7 with five register args (confirmed live, below).
-  - **Why those two, nothing else.** The path must EXIST and be the
-    directory itself — a missing path answers "denied" for everyone, so a
-    marker file inside the TMPDIR (which the agent can delete) would miss
-    survivors, while the directory can't be removed because its parent is
-    not writable. An unsandboxed process (editor, terminal) is allowed
-    every write, so the NULL check comes first. A different wake's run, the
-    owner's own interactive Codex, and a sandboxed App Store app are all
-    sandboxed but are not granted *this* wake's TMPDIR, so none is counted.
-    The earlier heuristics (process group, environment marker, cwd /
-    executable / open-file paths, the orphan window, app-path and EPERM
-    exemptions) are gone: this one test is exact and needs no guess about
-    ownership from paths or parentage.
-  - **Fail closed.** Not macOS, the calls not loadable, or a `sandbox_check`
-    that answers anything but the documented 0/1 (other than the process
-    having exited): the entry stays in flight. To bound the wedge, a run
+    process is this wake's when it is sandboxed, its sandbox **allows**
+    writing the wake's TMPDIR directory, **and** its sandbox **denies**
+    writing the canary — the parent `~/.cardinal/wake/tmp`, which no Codex
+    wake sandbox grants (its writable roots are the cwd and the per-wake
+    TMPDIR only). macOS answers all three through `sandbox_check`
+    (libsystem_sandbox): `sandbox_check(pid, NULL, 0)` is 1 for a sandboxed
+    process; `sandbox_check(pid, "file-write-create",
+    SANDBOX_FILTER_PATH|SANDBOX_CHECK_NO_REPORT, <dir>)` is 0 allowed / 1
+    denied. The waker lists the user's own processes born at or after the
+    child (`ps -A -o pid,uid,etime`) and asks each, one listing plus a few
+    calls per candidate. The path argument is variadic: on arm64 the C ABI
+    passes it on the stack, so ctypes must pad x0..x7 with five register
+    args (confirmed live, below).
+  - **Why the canary (review 7 F1).** Several of the owner's own Apple
+    agents run sandboxed with a profile that allows `file-write-create`
+    broadly under `$HOME` (the reviewer saw AMPDeviceDiscoveryAgent,
+    NotificationCenter, icdd, voicebankingd, TrustedPeersHelper, neagent,
+    com.apple.Virtualization.VirtualMachine and secinitd). Each is allowed
+    on the TMPDIR too, so "sandboxed AND allowed on the TMPDIR" alone would
+    match them — and the sweep would SIGTERM/SIGKILL whichever started after
+    the child, launchd would respawn them, every wake would run to
+    `WAKE_TIMEOUT` and fail, and the kept TMPDIR would then keep the session
+    reporting live for good. The canary removes them: a wake run is denied
+    on `~/.cardinal/wake/tmp` (above its only writable roots), while every
+    one of those agents is *allowed* on it, so none counts. Verified live.
+  - **Why those operands.** Both the TMPDIR and the canary must EXIST and be
+    the directories themselves — a missing path answers "denied" for
+    everyone, so a marker file inside the TMPDIR (which the agent can
+    delete) would miss survivors, and a missing canary would match
+    everyone; the TMPDIR directory can't be removed because its parent is
+    not writable. An unsandboxed process (editor, terminal) is allowed every
+    write, so the NULL check comes first. The earlier heuristics (process
+    group, environment marker, cwd / executable / open-file paths, the
+    orphan window, app-path and EPERM exemptions) are gone: this test is
+    exact and needs no guess about ownership from paths or parentage.
+  - **Fail closed.** Not macOS, the calls not loadable, the canary
+    directory missing, or a `sandbox_check` that answers anything but the
+    documented 0/1 (other than the process having exited): the entry stays
+    in flight. To bound the wedge, a run whose survivors cannot be cleared
+    or confirmed within `WAKE_TIMEOUT` becomes FAILED (not retried); its
+    TMPDIR is kept and its path recorded, and Codex launch is disabled until
+    the owner re-enables. To bound the wedge, a run
     whose survivors cannot be cleared or confirmed within `WAKE_TIMEOUT`
     becomes FAILED (not retried); its TMPDIR is kept and its path recorded,
     and Codex launch is disabled until the owner re-enables.
@@ -960,9 +977,10 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-17 / N1-live | With `--disable hooks`, a woken Codex run still gets the decision and acknowledges it | Owner, live (codex-cli 0.162.1, 8654c45's exact flags incl. `--disable hooks` and the four sandbox pins, `env -i` allow-list, private 0700 `TMPDIR`, a throwaway workspace-write session) | Hooks off (the Cardinal evidence spool unchanged across the run); `storyboard__read_investigation_events` completes with `approval_mode=approve`; `touch /tmp/x` "Operation not permitted"; `touch "$TMPDIR/x"` ok; curl: no network; rollout `sandbox_policy` = `{type: workspace-write, network_access: false, writable_roots: None, exclude_slash_tmp: true, exclude_tmpdir_env_var: false}`. **Proven.** **But acknowledging failed:** the gateway's post refuses acknowledgments (schema: no `ack_of` / `disposition` / `note`), the CLI ack needs network → the acknowledgment relay (§5.3). The read returned 0 events (that investigation had none); an `owner.decided` in the read is for the owner's E2E. Relay end to end: **live pending** |
 | C-18 | The pre-launch probes see what a launch would load | Locally (0.162.1, the owner's real config, no session): `<codex> <flags> features list` and `<codex> <flags> mcp list --json` | features: rc 0, every disabled feature off, 45 features on (the tested set). mcp: rc 0, a JSON list of `{name, enabled, disabled_reason, transport, auth_status, startup_timeout_sec, tool_timeout_sec}`; only `cardinal` enabled (plugin servers vanish with `--disable plugins`). **Proven locally** |
 | C-21 | The full lockdown leaves a working `codex exec resume` and nothing behind | Owner, live (codex-cli 0.162.1, the full cf17aba argv incl. `--disable daemon_auto_start` and `-c notify=[]`) | The agent ran `echo ALIVE`, exit 0; 5 s after exit no new codex-named process existed and no process carried the wake's TMPDIR. **Proven** |
-| C-22 | A woken run's process is told from any other by the sandbox's writable-root test (review 6 rewrite) | Locally (this Mac, both Pythons): a `/bin/sleep` under `sandbox-exec` whose only writable root is DIR_A, started `env -u TMPDIR`, new session, `cd /`; and a plain `/bin/sleep` in DIR_A. `sandbox_check(pid, NULL, 0)` and `sandbox_check(pid, "file-write-create", SANDBOX_FILTER_PATH\|NO_REPORT, <dir>)` via the arm64-padded ctypes prototype; then `sandboxed_procs(since, [DIR_A])` / `[DIR_B]` | **a/b matrix.** NULL check: 1 for the sandbox-exec sleep, 0 for the plain one. Path check (existing dirs): sandboxed → DIR_A **0 (allowed)**, DIR_B **1 (denied)**; plain → every dir **0** (unsandboxed is allowed everything, so the NULL check must gate it). A **missing** path answers **1** for everyone, so the probe must target the TMPDIR directory itself. `sandboxed_procs`: the env-cleared / setsid / `cd /` survivor is found for `[DIR_A]`, not for `[DIR_B]`; the plain sleep is never found. **Proven locally** (sandbox-exec profile; a process under Codex's **real** seatbelt is C-23) |
-| C-23 | The TMPDIR writable-root probe identifies a process under Codex's **real** seatbelt | Owner, live: a harmless command under `codex`'s own seatbelt with a workspace-write policy, then `sandboxed_procs` against that wake's TMPDIR | **Pending** (could not be run in this session). Blocks `CODEX_LAUNCH_PROVEN` |
-| C-24 | The same identifies an env-cleared, setsid, re-exec survivor of a real woken run | Owner, live: a woken Codex run that leaves `env -u TMPDIR setsid python -c 'chdir("/"); sleep'`; the sweep stops it and the session stays live until it ends | **Pending** (could not be run in this session). Blocks `CODEX_LAUNCH_PROVEN` |
+| C-22 | A woken run's process is told from any other by the sandbox's TMPDIR-vs-canary test (review 6 / review 7) | Locally (this Mac, both Pythons): under `sandbox-exec`, a Codex-like `/bin/sleep` whose only writable root is DIR_A (this wake's TMPDIR), started `env -u TMPDIR`, new session, `cd /`; an Apple-like `/bin/sleep` whose profile allows writes under the whole parent tree (DIR_A **and** the canary); and a plain `/bin/sleep`. `sandbox_check(pid, NULL, 0)` and `sandbox_check(pid, "file-write-create", SANDBOX_FILTER_PATH\|NO_REPORT, <dir>)` via the arm64-padded ctypes prototype; then `sandboxed_procs(since, [DIR_A], canary=parent)` | **a/b matrix.** NULL: 1 Codex-like / Apple-like, 0 plain. Path (existing dirs): Codex-like → DIR_A **0**, sibling **1**, canary **1**; plain → every dir **0** (so the NULL check must gate it); Apple-like → DIR_A **0** AND canary **0**. A **missing** path answers **1** for everyone. `sandboxed_procs(since,[DIR_A],parent)` is **exactly `[codex-like pid]`**: the Apple-like one is filtered by the canary, the plain one by the NULL check, a sibling wake by the grant. **Proven locally** (sandbox-exec profiles; a process under Codex's **real** seatbelt is C-23) |
+| C-25 / F1 | Unrelated sandboxed Apple agents are not swept as survivors | Reviewer, live read-only: `sandboxed_procs(0.0, [fresh dir under ~/.x/.cardinal/wake/tmp/...])` **before** the canary filter returned 8 of their own processes (AMPDeviceDiscoveryAgent, NotificationCenter, icdd, voicebankingd, TrustedPeersHelper, neagent, com.apple.Virtualization.VirtualMachine, secinitd); each is also allowed on a sibling canary | Without the canary the sweep would SIGTERM/SIGKILL whichever started after the child; launchd respawns them, so every wake would hit `WAKE_TIMEOUT`, end FAILED and disable launch, and the kept TMPDIR would keep the session live for good. The canary (deny on `~/.cardinal/wake/tmp`) removes **all 8** (ScanUnit covers it; the owner's E2E must show the sweep targets exactly the run's processes) |
+| C-23 | The TMPDIR-vs-canary probe identifies **exactly** the processes of a run under Codex's **real** seatbelt (no false positive, no miss) | Owner, live: a harmless command under `codex`'s own seatbelt with a workspace-write policy whose TMPDIR is a wake-style dir, then `sandboxed_procs` against that TMPDIR with the `~/.cardinal/wake/tmp` canary — the result must be exactly that run's processes and nothing else on the machine | **Pending** (could not be run in this session). Blocks `CODEX_LAUNCH_PROVEN` |
+| C-24 | The same identifies an env-cleared, setsid, re-exec survivor of a real woken run, and only it | Owner, live: a woken Codex run that leaves `env -u TMPDIR setsid python -c 'chdir("/"); sleep'`; the sweep stops exactly that process (nothing else), and the session stays live until it ends | **Pending** (could not be run in this session). Blocks `CODEX_LAUNCH_PROVEN` |
 | C-20 | Codex `notify` cannot run outside the sandbox on a woken turn | Owner, live (codex-cli 0.162.1, the full lockdown argv incl. `--disable hooks`, `env -i` allow-list, private TMPDIR): `-c notify=["/bin/sh","-c","touch $HOME/probe"]`, then the same with `-c notify=[]` after it | Without the override the probe file **was created in $HOME**: notify runs outside the sandbox even with hooks off. With `-c notify=[]` after it: **absent**. **Proven** → `notify=[]` is the last `-c` of every launch (golden test); the owner's own notify is not refused |
 | C-19 | The sandbox pins hold | Locally: `-c sandbox_workspace_write.{network_access=false, writable_roots=[], exclude_slash_tmp=true, exclude_tmpdir_env_var=false}` through `features list`. Owner, live: a woken turn's `sandbox_policy` | All accepted (rc 0), **but so is a bogus key**; a wrong type is rc 1. So existence is proven only by the rollout: a woken `workspace-write` turn must record `exclude_slash_tmp: true` and no `writable_roots` (enforced post-run). End to end: **live pending** |
 
@@ -1158,9 +1176,9 @@ the survivor check needs a writable TMPDIR to identify the run's processes).
   before it, any verified addressed decision launched); lifecycle states
   are reported as `session.wake` events with fixed-vocabulary reasons.
 - **Survivor gap closed (owner: gate 3 is strict).** Survivors are
-  identified through the sandbox itself (`sandbox_check` + the wake's
-  TMPDIR as a writable root), and the same test is a liveness signal
-  before every claim (C-21, C-22).
+  identified through the sandbox itself (`sandbox_check`: allowed on the
+  wake's TMPDIR, denied on the parent canary), and the same test is a
+  liveness signal before every claim (C-21, C-22, C-25).
 - **Review 6 (focused review of PR #209 delta 72f7f4f..bd493df: BLOCK on
   gate 3; gates 1 and 2 pass).** The path-based survivor scan missed
   Python / jsc re-execs and could kill unrelated sandboxed orphans.
@@ -1190,3 +1208,22 @@ the survivor check needs a writable TMPDIR to identify the run's processes).
     (`CODEX_LAUNCH_PROVEN = False`), gated exactly like Gemini; an owner
     flips the constant in a reviewed change once C-23 and C-24 pass. The
     a/b matrix is proven locally (C-22).
+- **Review 7 (review of e409fa8: BLOCK).**
+  - F1: the TMPDIR-only survivor probe also matched 8 of the owner's own
+    sandboxed Apple agents (their profiles allow writes broadly under
+    `$HOME`, so they are allowed on the TMPDIR too). Unfixed, every wake
+    would sweep whichever started after the child, run to `WAKE_TIMEOUT`,
+    fail and disable launch, and the kept TMPDIR would keep the session
+    live for good. Fix: a process counts only if its sandbox is allowed on
+    the TMPDIR **and denied on the canary** (the parent `~/.cardinal/wake/
+    tmp`, which no wake sandbox grants); a missing canary fails closed. The
+    canary removes all 8. Applied in wake_owned, sandboxed_procs,
+    wake_processes and end_wake_processes (C-25).
+  - F2: a later decision without wake could raise the high-water mark past
+    an earlier wake decision that recorded no entry (notified, old, busy,
+    retry…), dropping it silently. Fix: handle pending decisions in
+    ascending seq and stop at the first that launches or cannot be claimed;
+    stale `probe_retries` keys are cleared and normalized in read_ledger.
+  - Nits: dead `return` after `return left` removed; the "--launch allows
+    Codex CLI sessions to resume" help text corrected; the sweep-timeout
+    test asserts launch is disabled.

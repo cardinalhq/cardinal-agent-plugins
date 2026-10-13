@@ -760,6 +760,9 @@ def read_ledger(home: Path, sid: str) -> dict:
     hwm = data.get("hwm")
     data["hwm"] = {k: v for k, v in hwm.items() if ie.valid_investigation(k) and isinstance(v, int)
                    and not isinstance(v, bool)} if isinstance(hwm, dict) else {}
+    pr = data.get("probe_retries")
+    data["probe_retries"] = {k: v for k, v in pr.items() if isinstance(k, str) and isinstance(v, int)
+                             and not isinstance(v, bool) and v > 0} if isinstance(pr, dict) else {}
     return data
 
 
@@ -941,13 +944,37 @@ def _mac_calls():
     return _MAC or None
 
 
-def wake_owned(pid: int, tmp_dirs: List[str], calls) -> Optional[bool]:
-    """True when `pid` is a woken run's process: sandboxed, and its sandbox
-    allows writing one of `tmp_dirs` (existing wake TMPDIR directories).
-    False when it is not. None when it cannot be told (the sandbox_check
-    answers something other than the documented 0/1, e.g. the process exited
-    mid-check): the caller fails closed. An unsandboxed process (editor,
-    terminal, an App Store app) answers 0 to the NULL check and is False."""
+def _sandbox_allows(pid: int, directory: str, check_path) -> Optional[bool]:
+    """True when `pid`'s sandbox allows file-write-create in `directory`
+    (which must exist), False when it denies it, None when the answer is
+    neither the documented 0/1 (other than the process having exited:
+    False)."""
+    import ctypes
+    import errno
+    ctypes.set_errno(0)
+    r = check_path(pid, _SANDBOX_WRITE_OP, _SANDBOX_FILTER_PATH | _SANDBOX_CHECK_NO_REPORT, directory.encode())
+    e = ctypes.get_errno()
+    if e == errno.ESRCH:
+        return False   # the process exited: not ours
+    if r == 0 and not e:
+        return True
+    if r == 1 and not e:
+        return False
+    return None
+
+
+def wake_owned(pid: int, tmp_dirs: List[str], canary: str, calls) -> Optional[bool]:
+    """True when `pid` is a woken run's process: it is sandboxed, its sandbox
+    allows writing one of `tmp_dirs` (existing wake TMPDIR directories), AND
+    its sandbox DENIES writing `canary` (the parent `~/.cardinal/wake/tmp`,
+    which no Codex wake sandbox ever grants: its writable roots are the cwd
+    and the TMPDIR only). The canary is what rules out an unrelated sandboxed
+    process whose profile allows writing broadly under $HOME (several Apple
+    agents do, review 7 F1): it is allowed on the TMPDIR too, but also on the
+    canary, so it is not ours. False when it is not this wake's. None when it
+    cannot be told (a sandbox_check answers neither 0 nor 1, or the process
+    exited mid-check): the caller fails closed. An unsandboxed process
+    (editor, terminal) answers 0 to the NULL check and is False."""
     import ctypes
     import errno
     check_null, check_path = calls
@@ -960,17 +987,20 @@ def wake_owned(pid: int, tmp_dirs: List[str], calls) -> Optional[bool]:
         return False
     if boxed != 1 or err:
         return None
+    granted = False
     for d in tmp_dirs:
-        ctypes.set_errno(0)
-        r = check_path(pid, _SANDBOX_WRITE_OP, _SANDBOX_FILTER_PATH | _SANDBOX_CHECK_NO_REPORT, d.encode())
-        e = ctypes.get_errno()
-        if e == errno.ESRCH:
-            return False
-        if r == 0 and not e:
-            return True
-        if r != 1 or e:
+        allowed = _sandbox_allows(pid, d, check_path)
+        if allowed is None:
             return None
-    return False
+        if allowed:
+            granted = True
+            break
+    if not granted:
+        return False
+    denied_canary = _sandbox_allows(pid, canary, check_path)
+    if denied_canary is None:
+        return None
+    return denied_canary is False
 
 
 def _etime_seconds(text: str) -> Optional[int]:
@@ -982,16 +1012,20 @@ def _etime_seconds(text: str) -> Optional[int]:
     return ((d * 24 + h) * 60 + mi) * 60 + se
 
 
-def sandboxed_procs(since: float, tmp_dirs: List[str]) -> Optional[List[int]]:
+def sandboxed_procs(since: float, tmp_dirs: List[str], canary: str) -> Optional[List[int]]:
     """The user's own processes started at or after `since` (epoch) that are
     a woken run's by the sandbox test (wake_owned over `tmp_dirs`, the
-    existing wake TMPDIR directories). Neither the environment nor the
-    process group can hide one, and the owner's own unsandboxed processes
-    and sandboxed apps (whose sandbox does not grant this wake's TMPDIR) are
-    never counted. None when it cannot be determined (not macOS, the calls
-    cannot be loaded, a process cannot be told either way): the caller fails
-    closed. `tmp_dirs` that do not exist are dropped (a missing path answers
-    denied for everyone, so it could only miss, never misidentify)."""
+    existing wake TMPDIR directories, with `canary` the parent
+    `~/.cardinal/wake/tmp` that no wake sandbox grants). Neither the
+    environment nor the process group can hide one, and an unrelated
+    sandboxed process — an Apple agent whose profile allows writing broadly
+    under $HOME, the owner's own interactive Codex in another repo, an
+    editor — is not counted, because it is either unsandboxed or also
+    allowed on the canary. None when it cannot be determined (not macOS, the
+    calls cannot be loaded, the canary directory is missing, or a process
+    cannot be told either way): the caller fails closed. `tmp_dirs` that do
+    not exist are dropped (a missing path answers denied for everyone, so it
+    could only miss, never misidentify)."""
     if sys.platform != "darwin":
         return None
     calls = _mac_calls()
@@ -1000,6 +1034,11 @@ def sandboxed_procs(since: float, tmp_dirs: List[str]) -> Optional[List[int]]:
     dirs = [os.path.realpath(d) for d in tmp_dirs if isinstance(d, str) and d and os.path.isdir(d)]
     if not dirs:
         return []
+    # The canary must exist: a missing path answers "denied" for everyone, which would make every
+    # candidate look like ours. Fail closed if it is not a directory.
+    if not (isinstance(canary, str) and canary and os.path.isdir(canary)):
+        return None
+    canary = os.path.realpath(canary)
     try:
         r = subprocess.run([PS, "-A", "-o", "pid=,uid=,etime="], capture_output=True, text=True, timeout=10,
                            check=False, env={"LC_ALL": "C", "PATH": "/bin:/usr/bin"})
@@ -1020,12 +1059,19 @@ def sandboxed_procs(since: float, tmp_dirs: List[str]) -> Optional[List[int]]:
             return None
         if now - age < since - 2.0:
             continue
-        owned = wake_owned(pid, dirs, calls)
+        owned = wake_owned(pid, dirs, canary, calls)
         if owned is None:
             return None
         if owned:
             out.append(pid)
     return out
+
+
+def wake_tmp_root(home: Path) -> Path:
+    """The parent of every wake's private TMPDIR, `~/.cardinal/wake/tmp`: the
+    survivor probe's canary (no Codex wake sandbox grants writes here, only
+    the per-wake subdirectory below it)."""
+    return wake_dir(home) / "tmp"
 
 
 def port_busy(port: int) -> bool:
@@ -1224,8 +1270,8 @@ class System:
     -> (rc, stdout); post_ack(conn, inv, sid, seq, disposition, note, client)
     (the relayed acknowledgment; raises on failure); post_wake(conn, inv,
     sid, payload, idempotency_key, client) (a session.wake report; raises);
-    sandboxed_procs(since, tmp_dirs) -> [pid] | None (a wake's surviving
-    processes, by the sandbox TMPDIR test).
+    sandboxed_procs(since, tmp_dirs, canary) -> [pid] | None (a wake's
+    surviving processes, by the sandbox TMPDIR-vs-canary test).
     """
 
     def __init__(self, *, now: Optional[Callable[[], float]] = None, alive: Optional[Callable[[int], bool]] = None,
@@ -2026,7 +2072,7 @@ def private_wake_dir(home: Path, log: Path) -> str:
     this wake's own temp dir, removed when the wake settles (remove_tmpdir).
     Raises OSError."""
     import tempfile
-    base = wake_dir(home) / "tmp"
+    base = wake_tmp_root(home)
     _private_dir(wake_dir(home))
     _private_dir(base)
     d = tempfile.mkdtemp(prefix=log.stem + "-", dir=str(base))
@@ -2048,7 +2094,7 @@ def remove_tmpdir(home: Path, path: Any) -> None:
     """Remove a finished wake's private TMPDIR (only one under ~/.cardinal/wake/tmp)."""
     if not (isinstance(path, str) and os.path.isabs(path)):
         return
-    base = os.path.realpath(str(wake_dir(home) / "tmp"))
+    base = os.path.realpath(str(wake_tmp_root(home)))
     if os.path.dirname(os.path.realpath(path)) == base:
         shutil.rmtree(path, ignore_errors=True)
 
@@ -2723,7 +2769,7 @@ def live_signals(home: Path, sid: str, rt: Runtime, system: System, now: float,
     tmps = [e.get("tmp_dir") for e in led["entries"].values()
             if isinstance(e.get("tmp_dir"), str) and e.get("runtime") == CODEX]
     if tmps:
-        found = system.sandboxed_procs(0.0, tmps)
+        found = system.sandboxed_procs(0.0, tmps, str(wake_tmp_root(home)))
         if found is None:
             why.append("its sandboxed processes could not be checked")
         elif found:
@@ -3127,41 +3173,42 @@ def consider(home: Path, sid: str, binding: dict, system: System, config: dict, 
     if not complete:
         _report(system, report, sid, None, "skip", "the investigation's events could not all be read this pass")
         return
-    pending = [e for e in wake_decisions(events, sid, binding) if not decision_seen(led, inv, e["seq"])]
+    pending = sorted((e for e in wake_decisions(events, sid, binding) if not decision_seen(led, inv, e["seq"])),
+                     key=lambda e: e["seq"])
     if not pending:
         return
-    fresh = []
-    for e in pending:   # an old decision is notified once (its seq then counts as handled), never launched
+    launcher = active_launcher(rt.kind)   # None: notify-only (no launch has passed, or is proven for, its gates)
+    # Review 7 F2: handle decisions in ascending seq and stop at the first one that is launched or
+    # cannot be claimed this pass. A notification records a ledger entry (which raises the
+    # high-water mark), so an old or no-wake decision must never be notified ahead of a lower
+    # pending wake decision that has no entry yet, or that wake decision would be skipped for good.
+    for e in pending:
+        seq = e["seq"]
         created = created_epoch(e)
         if created is None or now - created > DECISION_MAX_AGE:
-            _notify_only(home, sid, binding, e["seq"], rt.kind, "the decision is older than 7 days (or undated): "
+            _notify_only(home, sid, binding, seq, rt.kind, "the decision is older than 7 days (or undated): "
                          "post a new one to resume the session", system, report, dry_run=dry_run,
                          origin=conn.get("origin"))
-        else:
-            fresh.append(e)
-    wants = []
-    for e in fresh:   # conductor#2110: only a decision that asks for it may resume the session
-        if decision_requests_wake(e):
-            wants.append(e)
-        else:
-            _notify_only(home, sid, binding, e["seq"], rt.kind, WAKE_NOT_REQUESTED, system, report,
+            continue   # an old decision records an entry; a lower pending seq was handled first
+        if not decision_requests_wake(e):   # conductor#2110: only a decision that asks for it may resume
+            _notify_only(home, sid, binding, seq, rt.kind, WAKE_NOT_REQUESTED, system, report,
                          dry_run=dry_run, origin=conn.get("origin"))
-    fresh = wants
-    if not fresh:
-        return
-    launcher = active_launcher(rt.kind)   # None: notify-only (no launch has passed, or is proven for, its gates)
-    if launcher is not None:
-        rt = launcher.eligibility(home, sid, rt, config)
-    # The probes (preflight) run once, under the session lock right before the spawn
-    # (claim_and_launch re-checks everything there); a dry run runs them here.
-    why = launch_problem(home, sid, rt, launcher, config, system, now, led, state, probes=dry_run)
-    if why:
-        for e in fresh:
-            _notify_only(home, sid, binding, e["seq"], rt.kind, why, system, report, dry_run=dry_run,
+            continue
+        # A wake decision: at most one run per session, so attempt this lowest one and stop. Higher
+        # pending decisions wait for a later pass (or are delivered inside the run), so the
+        # high-water mark never passes this seq while it is unhandled.
+        if launcher is not None:
+            rt = launcher.eligibility(home, sid, rt, config)
+        # The probes (preflight) run once, under the session lock right before the spawn
+        # (claim_and_launch re-checks everything there); a dry run runs them here.
+        why = launch_problem(home, sid, rt, launcher, config, system, now, led, state, probes=dry_run)
+        if why:
+            _notify_only(home, sid, binding, seq, rt.kind, why, system, report, dry_run=dry_run,
                          origin=conn.get("origin"))
-        return
-    claim_and_launch(home, sid, binding, fresh[0]["seq"], rt, config, system, report, dry_run=dry_run,
-                     state=state, origin=conn.get("origin"))
+        else:
+            claim_and_launch(home, sid, binding, seq, rt, config, system, report, dry_run=dry_run,
+                             state=state, origin=conn.get("origin"))
+        break
 
 
 def launch_problem(home: Path, sid: str, rt: Runtime, launcher: Optional["Launcher"], config: dict, system: System,
@@ -3202,6 +3249,8 @@ def _notify_only(home, sid, binding, seq, kind, why, system, report, *, dry_run=
         transition(entry, DECISION_SEEN, now)
         transition(entry, NOTIFIED, now, why)
         add_entry(led, entry)
+        if isinstance(led.get("probe_retries"), dict):   # this seq is settled now; drop any retry counter
+            led["probe_retries"].pop(entry_key(inv, seq), None)
         write_ledger(home, sid, led, now)
     _notify(system, binding, sid, NOTIFIED, f"owner decision #{seq} waits for you ({why.split(':')[0]})", kind,
             origin)
@@ -3527,18 +3576,20 @@ KILL_GRACE = 2.0
 def wake_processes(entry: dict, child: dict, system: System) -> Optional[List[int]]:
     """The processes of this wake still running (the child itself has
     exited), or None when it cannot be told (fail closed). A process is this
-    wake's exactly when the sandbox grants it this wake's private TMPDIR
-    (sandboxed_procs / wake_owned): everything the run starts inherits that
-    writable root, and nothing it does (clearing the TMPDIR variable,
-    setsid, chdir, re-exec) removes it; a different wake's run, the owner's
-    own Codex, an editor or an app is not granted it. Process group and
+    wake's exactly when the sandbox grants it this wake's private TMPDIR and
+    denies the parent canary (sandboxed_procs / wake_owned): everything the
+    run starts inherits that writable root, and nothing it does (clearing
+    the TMPDIR variable, setsid, chdir, re-exec) removes it; a different
+    wake's run, the owner's own Codex, an editor, or an Apple agent allowed
+    to write broadly under $HOME is not this wake's. Process group and
     environment are not used (a reused pid or a cleared variable could
     mislead them)."""
     tmp = entry.get("tmp_dir")
     if not (isinstance(tmp, str) and tmp):
         return []
+    canary = os.path.dirname(tmp)   # ~/.cardinal/wake/tmp: the TMPDIR's parent, which the wake sandbox denies
     since = _num(child.get("start")) or _num(child.get("launched_at")) or _num(entry.get("claimed_at"))
-    found = system.sandboxed_procs(since if since is not None else 0.0, [tmp])
+    found = system.sandboxed_procs(since if since is not None else 0.0, [tmp], canary)
     if found is None:
         return None
     return sorted(pid for pid in found if pid != os.getpid())
@@ -3560,7 +3611,6 @@ def end_wake_processes(entry: dict, child: dict, system: System) -> Optional[Lis
         system.sleep(KILL_GRACE)
         left = wake_processes(entry, child, system)
     return left
-    return None if found is None else sorted(set(found[0]) | set(found[1]))
 
 
 def relay_ack(home, sid, led, entry, conn, client, system, now, *, relay_notes: bool = False) -> Optional[bool]:
@@ -3852,8 +3902,8 @@ def enable(home: Path, *, launch: bool, environ: Mapping[str, str], launchctl: C
             if reason:
                 out(f"{LABELS[r]} launch is disabled: {reason}. Run cardinal-wake reenable {r} after checking.")
     else:
-        out("Unattended launch is off: every eligible decision is a notification only (cardinal-wake enable "
-            "--launch allows Codex CLI sessions to resume).")
+        out("Unattended launch is off: every eligible decision is a notification only. (No runtime launches "
+            "unattended yet; Codex and Gemini CLI launch are built but shipped off pending their live gates.)")
     out(NOTIFY_ONLY_TEXT)
     return 0
 

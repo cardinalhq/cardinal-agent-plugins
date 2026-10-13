@@ -606,17 +606,19 @@ settles; the shared `/tmp` is not writable.
 - **The run ends when its last process does.** When codex exits, the waker
   stops anything the run left behind. It finds those by the sandbox itself:
   everything the run starts stays in Codex's sandbox (it can't escape it),
-  and that sandbox lets it write the wake's private temp directory, so the
-  waker asks macOS (`sandbox_check`) which of your processes are both
-  sandboxed and allowed to write that directory — clearing a variable,
-  `setsid`, `cd`, or re-exec can't change either answer. Those get SIGTERM,
-  then SIGKILL. Your own editor and apps are not it (an editor isn't
-  sandboxed; another sandboxed program isn't granted *this* wake's temp
-  directory). Until none is left the wake stays in progress, so no second
-  run starts for the session and its temp dir is kept; if some process
-  can't be cleared or checked within two hours, the run is marked failed,
-  its temp dir left in place, and Codex launch is turned off. Right before
-  every launch, under the session's lock, everything above is checked
+  and that sandbox lets it write the wake's private temp directory but not
+  the parent `~/.cardinal/wake/tmp`. So the waker asks macOS
+  (`sandbox_check`) which of your processes are sandboxed, allowed to write
+  that temp directory, **and** denied on the parent — clearing a variable,
+  `setsid`, `cd`, or re-exec can't change any of those answers. Those get
+  SIGTERM, then SIGKILL. Your own editor and apps are not it: an editor
+  isn't sandboxed, and the macOS agents that are sandboxed with broad
+  write access under your home are allowed on the parent too, so the parent
+  check rules them out. Until none is left the wake stays in progress, so no
+  second run starts for the session and its temp dir is kept; if some
+  process can't be cleared or checked within two hours, the run is marked
+  failed, its temp dir left in place, and Codex launch is turned off. Right
+  before every launch, under the session's lock, everything above is checked
   again; the same sandbox test also marks a session live if a process of an
   earlier wake is still running.
 
