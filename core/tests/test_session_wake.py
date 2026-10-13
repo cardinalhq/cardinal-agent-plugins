@@ -750,6 +750,29 @@ class Launch(Base):
         self.assertEqual(env["PATH"], ENV["PATH"])
         self.assertEqual(env["LANG"], ENV["LANG"])
 
+    def test_a_launch_holds_the_sessions_evidence(self):
+        from cardinal_core import evidence
+        root = self.home / ".cardinal" / "evidence"
+        (root / SID).mkdir(parents=True)
+        self.world.events = [decision(5)]
+        self.run_pass()
+        hold = evidence.read_hold(root, SID, now=self.t0 + 1)
+        self.assertEqual(hold["reason"], "wake")
+
+    def test_no_wake_hold_without_a_spool_or_with_capture_off(self):
+        from cardinal_core import evidence
+        root = self.home / ".cardinal" / "evidence"
+        self.world.events = [decision(5)]
+        self.run_pass()
+        self.assertFalse((root / SID).exists())            # nothing to protect: no directory created
+        self.setUp()
+        (root / SID).mkdir(parents=True)
+        (root / evidence.DISABLED_FLAG).write_text("")
+        self.world.events = [decision(5)]
+        self.run_pass()
+        self.assertEqual(len(self.world.launches), 1)
+        self.assertIsNone(evidence.read_hold(root, SID, now=self.t0 + 1))
+
     def test_the_disabled_marker_blocks_launch(self):
         w.disable_runtime(self.home, "codex", "test", self.t0)
         self.world.events = [decision(5)]

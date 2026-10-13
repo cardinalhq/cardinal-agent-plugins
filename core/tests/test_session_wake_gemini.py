@@ -514,6 +514,26 @@ class StateRelocation(unittest.TestCase):
             self.assertEqual(ie.sessions_dir(home), home / ".cardinal" / "investigations" / "sessions")
             self.assertEqual(evidence.default_root(home), home / ".cardinal" / "evidence")
 
+    def test_checkpoint_holds_land_in_the_sandboxed_spool(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t)
+            boxed_root = paths.sandboxed_home(home) / ".cardinal" / "evidence"
+            (boxed_root / GSID).mkdir(parents=True)
+            with patch.dict(os.environ, BOXED):
+                evidence.hold_after_checkpoint(home, GSID, env={})
+            self.assertEqual(evidence.read_hold(boxed_root, GSID)["reason"], "checkpoint")
+            self.assertFalse((home / ".cardinal" / "evidence").exists())
+
+    def test_the_waker_sets_no_hold_in_a_sandboxed_spool(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t)
+            boxed = paths.sandboxed_home(home)
+            (boxed / ".cardinal" / "evidence" / GSID).mkdir(parents=True)
+            w.wake_hold(home, GSID, boxed)
+            self.assertIsNone(evidence.read_hold(boxed / ".cardinal" / "evidence", GSID))
+
     def test_the_users_evidence_opt_out_reaches_the_sandboxed_spool(self):
         import tempfile
         with tempfile.TemporaryDirectory() as t:

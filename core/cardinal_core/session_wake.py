@@ -1777,6 +1777,25 @@ def _notify_only(home, sid, binding, seq, kind, why, system, report, *, dry_run=
     _report(system, report, sid, seq, "notified", why)
 
 
+def wake_hold(home: Path, sid: str, state: Path) -> None:
+    """Before a launch: hold the session's local evidence (evidence.set_hold,
+    reason "wake"; resume-and-wake.md §4) so the woken run's captures
+    survive size eviction while space allows. Only the user's own spool
+    (~/.cardinal/evidence) and only an existing session directory; never a
+    relocated sandboxed spool, which the agent can write (the waker writes
+    nothing there). Nothing while capture is off. Fail open."""
+    from . import evidence
+    try:
+        if paths.is_sandboxed_home(Path(state)):
+            return
+        root = Path(paths.unsandboxed_home(Path(home))) / ".cardinal" / "evidence"
+        if evidence.capture_disabled(root):
+            return
+        evidence.set_hold(root, sid, reason="wake")
+    except Exception:
+        return
+
+
 def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime, config: dict, system: System,
                      report: list, *, dry_run: bool = False, state: Optional[Path] = None) -> str:
     """Claim #seq for `sid` and launch its runtime's pinned resume
@@ -1825,10 +1844,7 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
             transition(entry, CLAIMED, now)
             led["entries"][str(seq)] = entry
             write_ledger(home, sid, led, now)
-        # TODO(feat/storyboard-continuation, Workstream B of resume-and-wake.md
-        # §4): once that PR's evidence hold lands, set it here for sid
-        # (reason "wake") so the woken run's local evidence survives size
-        # eviction while space allows. Not implemented in this PR.
+        wake_hold(home, sid, state or home)
         offsets = launcher.snapshot(home, sid)
         log = logs_dir(home) / f"{sid}-{seq}-{int(now)}.log"
         env = launcher.env(system.environ, config, home, log, rt)
