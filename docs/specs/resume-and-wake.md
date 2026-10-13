@@ -1,6 +1,9 @@
 # Picking up stopped work: storyboard continuation, evidence hold, owner-woken sessions
 
-Status: APPROVED v3 (2026-10-12); amended v4 (2026-10-13): deliver, never launch
+Status (2026-10-13, v5): workstream C WITHDRAWN; `cardinal-wake` removed
+(see "v5" below). A and B stand.
+
+Earlier status: APPROVED v3 (2026-10-12); amended v4 (2026-10-13): deliver, never launch
 (see "v4" below).
 - The owner approved A, B and a simplified C (§5): existing Cardinal
   authentication, no passkey or signing, three gates proven per runtime
@@ -19,6 +22,31 @@ The history:
 - C reverses three items in `investigation-v1-consolidation.md` §5 "Not
   doing": idle wake, Phase 4 delivery fixes, and Codex adapters. The owner
   approved that on 2026-10-12.
+
+## v5 (2026-10-13): workstream C withdrawn
+
+The owner withdrew workstream C, and `cardinal-wake` was removed from every
+adapter (claude 0.53.0 / codex 0.31.0 / cursor 0.26.0 / gemini 0.26.0):
+`core/cardinal_core/session_wake.py`, each adapter's `cardinal-wake` entry
+point, `owner_input.WAKE_PROMPT` and its machine-prompt entries, the
+`session_wake` parity row, and their tests. Why:
+
+- The storyboard's Sessions panel in the Cardinal web app (conductor#2112)
+  already gives each session's resume command and a prompt to continue it,
+  so `cardinal-wake resume` duplicated it.
+- After v4 the waker only posted a macOS notification telling the owner
+  about an owner decision they had just posted themselves.
+
+Owner decisions addressed to a session (`to_session_id`) are still
+delivered by the investigation hooks at tool boundaries; that was never
+part of the waker. The relocated hook state for seatbelt-sandboxed sessions
+(`paths.state_home`) stays, since the hooks use it under `gemini -s`.
+Workstreams A (storyboard continuation) and B (evidence hold) stand. The
+sections below are kept as history. Anyone who ran `cardinal-wake enable`
+removes it by hand:
+`launchctl bootout gui/$(id -u)/io.cardinalhq.wake`,
+`rm ~/Library/LaunchAgents/io.cardinalhq.wake.plist`,
+`rm -rf ~/.cardinal/wake`.
 
 ## v4 (2026-10-13): deliver, never launch
 
