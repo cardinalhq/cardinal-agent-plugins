@@ -195,7 +195,7 @@ class Launch(GeminiBase):
         x = self.gstate()
         tmp = got["argv"][got["argv"].index("TMP_DIR=" + got["env"]["TMPDIR"])].split("=", 1)[1]
         self.assertEqual(got["argv"], [
-            real(sys.executable), "-I", str(w.proxy_script(self.home)), "--log", str(got["log"]), "--port", "8877",
+            real(sys.executable), "-I", "-S", str(w.proxy_script(self.home)), "--log", str(got["log"]), "--port", "8877",
             "generativelanguage.googleapis.com", "app.cardinalhq.io", "otel.cardinalhq.io", "--",
             str(self.sandbox_exec),
             "-D", "TARGET_DIR=" + real(str(self.grepo)), "-D", "TMP_DIR=" + tmp,

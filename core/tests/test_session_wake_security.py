@@ -31,7 +31,8 @@ from cardinal_core import owner_input as oi
 from cardinal_core import paths
 from cardinal_core import session_wake as w
 
-from tests.test_session_wake import (DISABLES, INV, INV2, MACHO, MEMBER, PINS, PROMPT5, SID, Base, ack, binding,
+from tests.test_session_wake import (DISABLES, INV, INV2, MACHO, MEMBER, NOTIFY_OFF, PINS, PROMPT5, SID, Base, ack,
+                                     binding,
                                      decision, meta, turn)
 
 
@@ -58,7 +59,7 @@ class Enable(Base):
         fake = venv / "python3"
         fake.write_text("#!/bin/sh\n")
         fake.chmod(0o755)
-        with patch.object(w.sys, "executable", str(fake)), patch.object(w, "SYSTEM_PYTHON", "/nonexistent/python3"):
+        with patch.object(w.sys, "executable", str(fake)), patch.object(w, "system_python", lambda: None):
             code, out = self.cli("enable", "--launch")
         self.assertEqual(code, 2, out)
         self.assertIn("no Python the daemon may run", out)
@@ -71,7 +72,7 @@ class Enable(Base):
                              environ={"PATH": f"{workspace_bin}:{self.codex.parent}:/opt/evil/bin:/usr/bin:/bin"})
         self.assertEqual(code, 0, out)
         plist = plistlib.loads(w.plist_path(self.home).read_bytes())
-        self.assertEqual(plist["ProgramArguments"][1], "-I")
+        self.assertEqual(plist["ProgramArguments"][1:3], ["-I", "-S"])
         path = plist["EnvironmentVariables"]["PATH"].split(":")
         self.assertNotIn(str(workspace_bin), path)
         self.assertNotIn("/opt/evil/bin", path)
@@ -366,7 +367,7 @@ class McpRestriction(Base):
             "-c", "mcp_servers.node_repl.enabled=false",
             "-c", 'mcp_servers."slack bot".enabled=false',
             "-c", 'plugins."browser@openai-bundled".enabled=false',
-            *DISABLES, "resume", SID, PROMPT5]
+            *NOTIFY_OFF, *DISABLES, "resume", SID, PROMPT5]
         self.assertEqual(self.world.launches[0]["argv"], expected)
         # The same lockdown was validated first, with no session: `codex <flags> features list`, then
         # `codex <flags> mcp list --json` (N4).
@@ -440,8 +441,8 @@ class Lockdown(Base):
         self.world.t += w.LIVE_WINDOW + 1
         self.run_pass()
         self.assertEqual(len(self.world.launches), 2)
-        self.assertEqual(len(self.feature_probes()), 1)   # cached for this codex binary, flag set and config
-        self.assertEqual(len(self.world.probes), 3)       # the mcp list is never cached
+        self.assertEqual(len(self.feature_probes()), 2)   # review 3: never cached, run before every launch
+        self.assertEqual(len(self.world.probes), 4)
 
     def test_a_rejected_flag_or_key_is_notify_only(self):
         self.world.probe_answer = (1, "")
@@ -462,7 +463,7 @@ class Lockdown(Base):
                 self.assertIn("cannot disable the feature", self.notified_only())
 
     def test_a_probe_that_cannot_run_is_notify_only(self):
-        def boom(argv, path_env):
+        def boom(argv, path_env, cwd=None):
             raise OSError("no codex")
         self.run_pass(run_probe=boom)
         self.assertIn("could not validate the lockdown", self.notified_only())

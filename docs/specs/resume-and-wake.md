@@ -288,7 +288,9 @@ codex exec -s <the session's own sandbox: workspace-write|read-only> \
   -c 'plugins."<every non-Cardinal plugin>".enabled=false' \
   --disable apps --disable plugins --disable remote_plugin --disable image_generation \
   --disable computer_use --disable browser_use --disable browser_use_external --disable in_app_browser \
+  -c notify=[] \
   --disable multi_agent --disable tool_suggest --disable skill_mcp_dependency_install --disable hooks \
+  --disable daemon_auto_start \
   resume <sid> "<wake prompt>"
 ```
 All flags go before `resume`.
@@ -303,11 +305,21 @@ All flags go before `resume`.
     reminder. The decision is not delivered by a hook any more: the wake
     prompt names the investigation and the read tool, and the agent reads
     the decision with `storyboard__read_investigation_events`, the one MCP
-    tool the run keeps (Codex calls it itself; it is not a hook). With no
-    `class` or `types` the read returns every class the key may read,
-    owner decisions included (the gateway's schema: "Omit for every class
-    you may read"), and the prompt passes `after` = seq - 1 so the first
-    page starts at the decision.
+    tool the run keeps (Codex calls it itself; it is not a hook). The
+    prompt asks for owner decisions only (`types ["owner.decided"]`, the
+    gateway's parameter name) from `after` = seq - 1, and to read no other
+    events (review 5 #5: an advisory is not the owner's, and could steer an
+    unattended agent).
+- **notify is overridden (review 5 #1, live C-20).** A config `notify =
+  [...]` program runs outside the sandbox at every turn end, with the
+  turn's JSON as an argument, even with hooks disabled. `-c notify=[]` is
+  always passed, as the last `-c`, so it is the value that wins; the
+  owner's own notify is not refused (the override is proven). The rollout
+  cannot show notify, so the golden-argv test pins it.
+- **daemon_auto_start is off (review 5 #4).** Codex 0.162.1 can start, or
+  hand a turn to, a background daemon ("existing_daemon", "auto_start" in
+  the binary), which could outlive the run. It is disabled and probed off
+  (live check pending: `codex exec resume` still works without it).
 - **Acknowledgment relay (live N1 on 8654c45).** The acknowledgment can't
   come from inside the run: the gateway's `post_investigation_event` takes
   only cue / question / challenge ("Acknowledgments come only from the
@@ -333,7 +345,15 @@ All flags go before `resume`.
     and is tried again on the next pass;
   - the relay never posts anything else, never for a run that failed
     verification, and never puts the note in a notification or the
-    ledger. A missing or invalid file is FAILED ("ended without
+    ledger;
+  - **the note is dropped by default (review 5 #5).** Only the disposition
+    is relayed: an advisory could have steered the agent into putting
+    secrets in the note, which would land where others read. The owner can
+    opt in with `cardinal-wake enable --relay-notes` (each enable decides
+    again); the note is then scrubbed with the owner-input scrubber
+    (`evidence_capture.scrub_prompt`: token shapes, credential key=value
+    pairs) before it is posted. The prompt tells the agent the note may not
+    be passed on. A missing or invalid file is FAILED ("ended without
     acknowledging the decision (<why>)").
   - The acknowledgment is the agent's statement, carried out by the
     waker: it reports what the session said, as any acknowledgment does.
@@ -385,8 +405,11 @@ All flags go before `resume`.
   exit 0, every feature above must be listed, not "removed", and off, and
   **every feature still on must be in the tested set** (review 4 N4,
   `CODEX_TESTED_ON`): a default-on feature the lockdown was not tested with
-  makes the decision a notification until it is reviewed. A success is
-  cached per codex binary fingerprint, flag set and Codex config contents.
+  makes the decision a notification until it is reviewed. **Nothing is
+  cached (review 5):** both probes run before every launch, in the launch's
+  working directory (realpath), so they load the same project, managed and
+  cloud layers the launch would, under the session lock right before the
+  spawn.
   - The tested set is what stays on under the full lockdown on codex-cli
     0.162.1 (Homebrew cask, live, 2026-10-12): `api_key_model_discovery`,
     `auth_elicitation`, `browser_annotation_api`,
@@ -448,10 +471,15 @@ All flags go before `resume`.
 
 **The daemon's own executables (B1).** launchd runs the waker unattended
 every pass, so nothing it runs may be agent-writable:
-- **Interpreter:** `enable` picks this Python or `/usr/bin/python3`, resolved
-  outside `$HOME`, git work trees under `$HOME`, approved roots and temp
-  dirs. The plist runs it with `-I`, so `PYTHON*`, user site-packages and
-  the script's directory are ignored.
+- **Interpreter:** `enable` picks this Python or the real interpreter behind
+  `/usr/bin/python3` (`xcrun -f python3` with a clean environment), resolved
+  outside `$HOME`, git work trees under `$HOME`, approved roots, temp dirs
+  and shims, and never a binary in the system PATH directories (the
+  `/usr/bin/python3` xcrun shim picks its target from the environment;
+  review 5 #7). The plist runs it with `-I -S`, so `PYTHON*`, user and
+  system site-packages, `.pth` files, `sitecustomize` and the script's
+  directory are all ignored (the waker is standard library only). The
+  Gemini proxy runs the same way.
 - **Launch binaries:** `codex`, `gemini`, and `node` when one of them is a
   node script must resolve outside git work trees under `$HOME`, approved
   roots, temp dirs and version-manager shim dirs (`~/.asdf`,
@@ -638,10 +666,11 @@ is designed around that:
 investigation id): "Cardinal resumed this session for owner decision
 #<seq> in Investigation <inv_id>. Read it with the
 storyboard__read_investigation_events tool (investigation_id <inv_id>,
-after <seq - 1>) and act on it. When done, write your answer to
-$TMPDIR/cardinal-wake-ack.json as {"ack_of": <seq>, "disposition":
-"accepted", "declined" or "noted", "note": "what you did or why"}. Every
-other event is advisory." The decision text is never in the prompt. Since
+types ["owner.decided"], after <seq - 1>) and act on it; read no other
+events. When done, write your answer to $TMPDIR/cardinal-wake-ack.json as
+{"ack_of": <seq>, "disposition": "accepted", "declined" or "noted",
+"note": "what you did or why"}. The note may not be passed on; put no
+secrets in it." The decision text is never in the prompt. Since
 review 4 a woken Codex run has no hooks and no network, so the prompt
 carries the way in (the investigation id, `inv_` + 24 hex, validated, and
 the read tool) and the way out (the file the waker relays). The prompt is
@@ -663,6 +692,7 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
       │                   └─spawn error─▶ (≤2 retries, then FAILED)
       │                                        └─running > WAKE_TIMEOUT (2 h)─▶ TIMED_OUT (left running, owner notified)
       │                                                                          └─child exits─▶ verified, then ACKNOWLEDGED | FAILED
+      │   (every "child exits" first stops and waits out the run's surviving processes, below)
       └─not eligible / live session / decision older than 7 days─▶ NOTIFIED
 ```
 
@@ -677,6 +707,28 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
   inside it by the hooks; a woken Codex run has none, so it never sees one.
   A decision still unacknowledged after the run ends is considered again,
   and it counts against the caps.
+- **The run ends when its last process does (review 5 #4).** The child
+  starts in its own session, and a `nohup` / `setsid` process or a daemon
+  can outlive it (sandboxed, but alive). When the child exits the waker
+  looks for the run's processes: any with the wake's private
+  `TMPDIR=<dir>` in its environment (`ps -E`; everything the run starts
+  inherits it unless it clears it), and any in the child's process group
+  that started after the child. It sends SIGTERM, waits, sends SIGKILL,
+  waits. While any is left, or the process list cannot be read, the entry
+  stays in flight (no claim for the session, so no concurrent run; no
+  verification, relay or deletion of the TMPDIR under it) and is judged
+  again next pass. Residual: a process that both clears `TMPDIR` and
+  leaves the group (`env -u TMPDIR setsid ...`) is not found; it is still
+  inside Codex's sandbox (no network, writes only in the workspace and
+  the private TMPDIR) and is documented, not hidden.
+- **Everything is checked again under the lock (review 5 #2).** Right
+  before the spawn, under the session lock, the waker re-reads the
+  runtime records and re-runs the full eligibility (the turns, the
+  project-config walk, the Codex config scans), liveness, the vetted
+  executables' fingerprints and both probes (in the launch's cwd). A
+  failure there is a notification (NOTIFIED, the seq handled); the launch
+  uses this fresh view, never the one from earlier in the pass. After the
+  run, project config in the repository disables Codex launch too.
 - **ACK_RELAYED** is written once the waker has posted the relayed
   acknowledgment; the next read that shows it makes the entry
   ACKNOWLEDGED. A post that failed leaves the entry RESUMING (retried); a
@@ -802,6 +854,7 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-16 | The waker's own `sandbox-exec -f <copy of restrictive-proxied>` around `gemini` (no `-s`, `SANDBOX` set) runs Gemini, delivers and acknowledges through the proxy, and Gemini starts no second sandbox | Locally: the shipped profile parses with the wake parameters (`/usr/bin/true` under it), and a nested `sandbox-exec` fails. Owner, live: a woken run | Profile and nesting: **proven locally**. End to end: **live pending** |
 | C-17 / N1-live | With `--disable hooks`, a woken Codex run still gets the decision and acknowledges it | Owner, live (codex-cli 0.162.1, 8654c45's exact flags incl. `--disable hooks` and the four sandbox pins, `env -i` allow-list, private 0700 `TMPDIR`, a throwaway workspace-write session) | Hooks off (the Cardinal evidence spool unchanged across the run); `storyboard__read_investigation_events` completes with `approval_mode=approve`; `touch /tmp/x` "Operation not permitted"; `touch "$TMPDIR/x"` ok; curl: no network; rollout `sandbox_policy` = `{type: workspace-write, network_access: false, writable_roots: None, exclude_slash_tmp: true, exclude_tmpdir_env_var: false}`. **Proven.** **But acknowledging failed:** the gateway's post refuses acknowledgments (schema: no `ack_of` / `disposition` / `note`), the CLI ack needs network → the acknowledgment relay (§5.3). The read returned 0 events (that investigation had none); an `owner.decided` in the read is for the owner's E2E. Relay end to end: **live pending** |
 | C-18 | The pre-launch probes see what a launch would load | Locally (0.162.1, the owner's real config, no session): `<codex> <flags> features list` and `<codex> <flags> mcp list --json` | features: rc 0, every disabled feature off, 45 features on (the tested set). mcp: rc 0, a JSON list of `{name, enabled, disabled_reason, transport, auth_status, startup_timeout_sec, tool_timeout_sec}`; only `cardinal` enabled (plugin servers vanish with `--disable plugins`). **Proven locally** |
+| C-20 | Codex `notify` cannot run outside the sandbox on a woken turn | Owner, live (codex-cli 0.162.1, the full lockdown argv incl. `--disable hooks`, `env -i` allow-list, private TMPDIR): `-c notify=["/bin/sh","-c","touch $HOME/probe"]`, then the same with `-c notify=[]` after it | Without the override the probe file **was created in $HOME**: notify runs outside the sandbox even with hooks off. With `-c notify=[]` after it: **absent**. **Proven** → `notify=[]` is the last `-c` of every launch (golden test); the owner's own notify is not refused |
 | C-19 | The sandbox pins hold | Locally: `-c sandbox_workspace_write.{network_access=false, writable_roots=[], exclude_slash_tmp=true, exclude_tmpdir_env_var=false}` through `features list`. Owner, live: a woken turn's `sandbox_policy` | All accepted (rc 0), **but so is a bogus key**; a wrong type is rc 1. So existence is proven only by the rollout: a woken `workspace-write` turn must record `exclude_slash_tmp: true` and no `writable_roots` (enforced post-run). End to end: **live pending** |
 
 Still owed: an end-to-end manual run, in which the owner posts an addressed
@@ -969,3 +1022,25 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
     pins proven live, but no acknowledgment was possible from inside the
     run → the waker relays the one the agent writes to its private
     `TMPDIR` after the run; the MCP post tool is off.
+- **Review 5 (third independent security review of PR #209 at 72f7f4f:
+  APPROVE-WITH-CHANGES; Codex launch blocked on 1, 2, 4).**
+  - 1: a config `notify` program runs outside the sandbox (live C-20) →
+    `-c notify=[]`, always, last.
+  - 2: eligibility was checked before the session lock, and the probes ran
+    from `/` → everything re-checked under the lock right before the
+    spawn; both probes in the launch's cwd; project config re-checked
+    after the run.
+  - 3: protected paths were not resolved through symlinks → each protected
+    directory and shell / git dotfile is checked where it really is.
+  - 4: processes could outlive the woken codex → the run's processes are
+    found (TMPDIR marker, process group), stopped, and the entry stays in
+    flight until none is left; `daemon_auto_start` disabled and probed.
+  - 5: the acknowledgment note could carry secrets out → the prompt reads
+    owner decisions only; only the disposition is relayed unless
+    `enable --relay-notes`, and then the note is scrubbed.
+  - 6: MCP servers or plugins declared with quoted or nested keys slipped
+    the scan → any key-position mention outside the strict headers refuses.
+  - 7: `-I` still runs site / `.pth` → `-I -S`; never the xcrun shim.
+  - 8: a turn in another cwd was not seen without `permission_profile` →
+    every turn's cwd must be the session's (realpath).
+  - The probe cache is gone: both probes run before every launch.

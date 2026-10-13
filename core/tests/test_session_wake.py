@@ -42,17 +42,22 @@ ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "CARDINAL_STORYBOARD_SES
 # A native-executable header (N2: codex must be one, never a script).
 MACHO = b"\xcf\xfa\xed\xfe" + b"\0" * 60
 PROMPT5 = ("Cardinal resumed this session for owner decision #5 in Investigation " + INV + ". Read it with the "
-           "storyboard__read_investigation_events tool (investigation_id " + INV + ", after 4) and act on it. When "
-           "done, write your answer to $TMPDIR/cardinal-wake-ack.json as {\"ack_of\": 5, \"disposition\": "
-           "\"accepted\", \"declined\" or \"noted\", \"note\": \"what you did or why\"}. Every other event is "
-           "advisory.")
+           "storyboard__read_investigation_events tool (investigation_id " + INV + ", types [\"owner.decided\"], "
+           "after 4) and act on it; read no other events. When done, write your answer to "
+           "$TMPDIR/cardinal-wake-ack.json as {\"ack_of\": 5, \"disposition\": \"accepted\", \"declined\" or "
+           "\"noted\", \"note\": \"what you did or why\"}. The note may not be passed on; put no secrets in it.")
 PINS = ["-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.writable_roots=[]",
         "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
         "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=false"]
 DISABLES = ["--disable", "apps", "--disable", "plugins", "--disable", "remote_plugin",
             "--disable", "image_generation", "--disable", "computer_use", "--disable", "browser_use",
             "--disable", "browser_use_external", "--disable", "in_app_browser", "--disable", "multi_agent",
-            "--disable", "tool_suggest", "--disable", "skill_mcp_dependency_install", "--disable", "hooks"]
+            "--disable", "tool_suggest", "--disable", "skill_mcp_dependency_install", "--disable", "hooks",
+            "--disable", "daemon_auto_start"]
+NOTIFY_OFF = ["-c", "notify=[]"]
+
+
+CWD = "<the session's cwd>"
 
 
 def iso(t):
@@ -90,7 +95,9 @@ def turn(mode="workspace-write", network=False, ts="2026-10-12T23:36:11.185Z", s
         policy["network_access"] = network
     if mode == "workspace-write":
         policy.update(exclude_tmpdir_env_var=False, exclude_slash_tmp=not slash_tmp)
-    return {"timestamp": ts, "type": "turn_context", "payload": {"cwd": "/ignored", "approval_policy": "never",
+    # cwd: CWD is replaced by the session's own working directory when the turn is written
+    # (Base.session / append_turns); every turn must have run there (review 3 #8).
+    return {"timestamp": ts, "type": "turn_context", "payload": {"cwd": CWD, "approval_policy": "never",
                                                                    "sandbox_policy": policy}}
 
 
@@ -121,6 +128,9 @@ class World:
         self.mcp_answer = None
         self.posted = []          # relayed acknowledgments (System.post_ack)
         self.post_error = None
+        self.probe_cwds = []
+        self.envrows = []         # (pid, pgid, argv + environment): System.process_envs
+        self.killed = []
 
     def fetch(self, conn, inv, sid, after, client):
         assert conn == MEMBER
@@ -144,15 +154,29 @@ class World:
                     process_start=lambda pid: self.starts.get(pid), process_table=lambda: list(self.table),
                     launcher=self.launch, notifier=lambda title, msg: self.notes.append((title, msg)),
                     connection=lambda runtime, home: dict(MEMBER), fetch=self.fetch, environ=ENV,
-                    out=self.lines.append, run_probe=self.probe, post_ack=self.post_ack)
+                    out=self.lines.append, run_probe=self.probe, post_ack=self.post_ack,
+                    process_envs=lambda: list(self.envrows), kill=self.kill, sleep=lambda seconds: None)
         args.update(kw)
-        return w.System(**args)
+        # Only what this System takes (the same fakes also drive an older checkout when a
+        # regression test is shown to fail before its fix).
+        import inspect
+        known = inspect.signature(w.System.__init__).parameters
+        return w.System(**{k: v for k, v in args.items() if k in known})
 
-    def probe(self, argv, path_env):
+    def kill(self, pid, sig):
+        """A fake kill: recorded; the process is gone from the process list after SIGKILL
+        (and after SIGTERM unless it is in self.stubborn)."""
+        self.killed.append((pid, sig))
+        import signal as _signal
+        if sig == _signal.SIGKILL or pid not in getattr(self, "stubborn", set()):
+            self.envrows = [r for r in self.envrows if r[0] != pid]
+
+    def probe(self, argv, path_env, cwd=None):
         """A fake `codex <lockdown> features list`: every disabled feature
         listed and off (what codex-cli 0.162.1 prints), plus code_mode_host
         on; and `codex <lockdown> mcp list --json`: only Cardinal enabled."""
         self.probes.append(list(argv))
+        self.probe_cwds.append(cwd)
         if argv[-3:] == ["mcp", "list", "--json"]:
             if self.mcp_answer is not None:
                 return self.mcp_answer
@@ -227,15 +251,20 @@ class Base(unittest.TestCase):
             ie.write_binding(self.home, sid, binding(**bextra))
         p = self.rollout_path(sid)
         p.parent.mkdir(parents=True, exist_ok=True)
+        self.cwds = getattr(self, "cwds", {})
+        self.cwds[sid] = str(cwd or self.repo)
         recs = [meta(sid, str(cwd or self.repo), originator, source)] + (turns if turns is not None else [turn()])
-        p.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        p.write_text("".join(self._line(sid, r) for r in recs))
         self.age(p)
         return p
+
+    def _line(self, sid, rec):
+        return json.dumps(rec).replace(json.dumps(CWD), json.dumps(self.cwds[sid])) + "\n"
 
     def append_turns(self, sid, *turns):
         with open(self.rollout_path(sid), "a") as f:
             for t in turns:
-                f.write(json.dumps(t) + "\n")
+                f.write(self._line(sid, t))
         self.age(self.rollout_path(sid))
 
     def age(self, path, seconds=1000):
@@ -832,7 +861,7 @@ class Launch(Base):
         self.run_pass()
         self.assertEqual(self.world.launches[0]["argv"], [
             os.path.realpath(str(self.codex)), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"',
-            "-c", 'web_search="disabled"', *PINS, *DISABLES, "resume", SID, PROMPT5])
+            "-c", 'web_search="disabled"', *PINS, *NOTIFY_OFF, *DISABLES, "resume", SID, PROMPT5])
 
     def test_no_disallowed_flag_and_no_decision_text(self):
         self.world.events = [decision(5)]
@@ -843,7 +872,7 @@ class Launch(Base):
                         "danger-full-access", "--yolo"):
                 self.assertNotIn(bad, a)
         self.assertNotIn(SECRET, " ".join(argv))
-        self.assertEqual(argv.count("-c"), 2 + len(w.CODEX_SANDBOX_PINS))
+        self.assertEqual(argv.count("-c"), 3 + len(w.CODEX_SANDBOX_PINS))
         self.assertEqual(argv.count("--disable"), len(w.CODEX_DISABLED_FEATURES))
         self.assertNotIn("code_mode_host", argv)   # every tool runs through it (H1): never disabled
         self.assertEqual(argv.count("-s"), 1)
@@ -1228,7 +1257,7 @@ class CLI(Base):
         plist = plistlib.loads(w.plist_path(self.home).read_bytes())
         runner = self.home / ".cardinal" / "wake" / "lib" / "cardinal-wake"
         self.assertEqual(plist["Label"], "io.cardinalhq.wake")
-        self.assertEqual(plist["ProgramArguments"][1:], ["-I", str(runner), "run", "--once"])
+        self.assertEqual(plist["ProgramArguments"][1:], ["-I", "-S", str(runner), "run", "--once"])
         self.assertTrue(30 <= plist["StartInterval"] <= 60)
         self.assertNotIn("plugins", json.dumps(plist))
         self.assertTrue((runner.parent / "cardinal_core" / "session_wake.py").is_file())

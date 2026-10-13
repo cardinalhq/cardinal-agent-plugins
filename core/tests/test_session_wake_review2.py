@@ -310,7 +310,7 @@ class Drift(Cli):
                 self.assertIn("could not list its MCP servers", self.notified_only())
 
     def test_mcp_list_that_cannot_run_is_notify_only(self):
-        def probe(argv, path_env):
+        def probe(argv, path_env, cwd=None):
             if "mcp" in argv:
                 raise OSError("gone")
             return self.world.probe(argv, path_env)

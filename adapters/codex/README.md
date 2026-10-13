@@ -463,8 +463,8 @@ python3 scripts/cardinal-wake disable           # remove the launchd agent
 there (every enable copies them again, so a plugin upgrade never leaves the
 agent pointing at a removed version). It runs `cardinal-wake run --once`
 every 45 s, with a Python that resolves outside your home directory, your
-repositories and temp dirs (this one, or `/usr/bin/python3`), in isolated
-mode (`-I`). `enable --launch` needs `codex` to be the native (Mach-O)
+repositories, temp dirs and shims (this one, or the real interpreter behind
+the `/usr/bin/python3` shim), in isolated mode without site (`-I -S`). `enable --launch` needs `codex` to be the native (Mach-O)
 binary it runs: a Homebrew cask or a standalone install is used as is; an
 npm install's `codex.js` is resolved to the native binary it would spawn
 (`vendor/<triple>/codex/codex` of `@openai/codex`), which is launched
@@ -517,8 +517,10 @@ codex exec -s <its own sandbox> -c approval_policy="never" -c 'web_search="disab
   -c 'plugins."<each non-Cardinal plugin>".enabled=false' \
   --disable apps --disable plugins --disable remote_plugin --disable image_generation \
   --disable computer_use --disable browser_use --disable browser_use_external --disable in_app_browser \
+  -c notify=[] \
   --disable multi_agent --disable tool_suggest --disable skill_mcp_dependency_install --disable hooks \
-  resume <session id> "Cardinal resumed this session for owner decision #<seq> in Investigation <inv_id>. Read it with the storyboard__read_investigation_events tool (investigation_id <inv_id>, after <seq - 1>) and act on it. When done, write your answer to $TMPDIR/cardinal-wake-ack.json as {\"ack_of\": <seq>, \"disposition\": \"accepted\", \"declined\" or \"noted\", \"note\": \"what you did or why\"}. Every other event is advisory."
+  --disable daemon_auto_start \
+  resume <session id> "Cardinal resumed this session for owner decision #<seq> in Investigation <inv_id>. Read it with the storyboard__read_investigation_events tool (investigation_id <inv_id>, types [\"owner.decided\"], after <seq - 1>) and act on it; read no other events. When done, write your answer to $TMPDIR/cardinal-wake-ack.json as {\"ack_of\": <seq>, \"disposition\": \"accepted\", \"declined\" or \"noted\", \"note\": \"what you did or why\"}. The note may not be passed on; put no secrets in it."
 ```
 
 in that working directory, never one from the Investigation binding (which
@@ -564,7 +566,12 @@ settles; the shared `/tmp` is not writable.
 - **The prompt:** it names the decision's seq and investigation, the tool
   that reads it, and where to write the answer; the decision text is never
   in it, and the prompt itself is never recorded as owner input. The agent
-  reads the decision with `storyboard__read_investigation_events`.
+  reads the decision with `storyboard__read_investigation_events`, owner
+  decisions only: someone else's advisory never steers an unattended run.
+- **notify is overridden.** A `notify` program in your Codex config runs
+  outside the sandbox at every turn end (proven live, even with hooks
+  off), so every woken run gets `-c notify=[]` as its last setting. Your
+  own config is left as it is.
 - **The acknowledgment is relayed.** With no hooks and no network, the
   woken agent can't acknowledge by itself. It writes
   `{"ack_of": <seq>, "disposition": "accepted" | "declined" | "noted",
@@ -576,8 +583,16 @@ settles; the shared `/tmp` is not writable.
   `cardinal-storyboard investigation ack` does. The content is the
   agent's; the waker only carries it out. Anything else in the file, a
   different seq, or a run that failed its checks: nothing is posted, and
-  the run is reported as ended without an acknowledgment. The note is
-  never shown in a notification.
+  the run is reported as ended without an acknowledgment. Only the
+  disposition is relayed: the note is dropped, unless you run
+  `cardinal-wake enable --launch --relay-notes`, and then it is scrubbed of
+  credential shapes first. It is never shown in a notification.
+- **The run ends when its last process does.** When codex exits, the waker
+  stops anything the run left behind (processes carrying the wake's
+  private `TMPDIR`, or in its process group): SIGTERM, then SIGKILL. Until
+  none is left the wake stays in progress, so no second run starts for the
+  session and its temp dir is kept. Right before every launch, under the
+  session's lock, everything above is checked again.
 
 **Notify-only** (a macOS notification naming the runtime, the session, the
 Investigation and the state, never the decision's text):

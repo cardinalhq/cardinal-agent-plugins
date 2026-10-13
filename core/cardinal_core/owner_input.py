@@ -812,18 +812,20 @@ REPEAT_WINDOW = 30.0
 # id. The decision text is never in it. A woken Codex run has no hooks and
 # no network (§5.3, review 4 N1), so the prompt carries the way in and out:
 # read the decision with storyboard__read_investigation_events (the one
-# Cardinal MCP tool the run keeps; with no class or types it returns every
-# class the key may read, owner.decided included, and `after` = seq - 1
-# starts the page at the decision), and write the answer to
-# $TMPDIR/cardinal-wake-ack.json, which the waker relays as the
-# acknowledgment once the run has exited (session_wake.read_ack_file).
+# Cardinal MCP tool the run keeps), owner decisions only (types
+# ["owner.decided"]: review 3 #5, an advisory from someone else could steer
+# an unattended agent; `after` = seq - 1 starts the page at the decision),
+# and write the answer to $TMPDIR/cardinal-wake-ack.json, which the waker
+# relays as the acknowledgment once the run has exited
+# (session_wake.read_ack_file; the note only when the owner opted in).
 # Listed in MACHINE_PROMPTS for Claude, Codex and Gemini (an exact match;
 # both seqs must be the same number) so a woken turn is never owner input.
 WAKE_PROMPT = ("Cardinal resumed this session for owner decision #{seq} in Investigation {investigation}. "
                "Read it with the storyboard__read_investigation_events tool (investigation_id {investigation}, "
-               "after {after}) and act on it. When done, write your answer to $TMPDIR/cardinal-wake-ack.json as "
+               'types ["owner.decided"], after {after}) and act on it; read no other events. When done, write your '
+               "answer to $TMPDIR/cardinal-wake-ack.json as "
                '{{"ack_of": {seq}, "disposition": "accepted", "declined" or "noted", '
-               '"note": "what you did or why"}}. Every other event is advisory.')
+               '"note": "what you did or why"}}. The note may not be passed on; put no secrets in it.')
 _WAKE_SEQ_RE = "[1-9][0-9]{0,17}"
 _WAKE_INV_RE = "inv_[0-9a-f]{24}"
 

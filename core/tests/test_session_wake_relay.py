@@ -61,8 +61,9 @@ class Relay(Base):
         note = "rebased the branch and reran the suite; SECRET-NOTE"
         self.write({"ack_of": 5, "disposition": "accepted", "note": note})
         self.exit_and_settle()
+        # Review 3 #5: only the disposition is relayed unless the owner opted in (enable --relay-notes).
         self.assertEqual(self.world.posted, [{"inv": INV, "sid": SID, "seq": 5, "disposition": "accepted",
-                                              "note": note, "client": self.world.posted[0]["client"]}])
+                                              "note": None, "client": self.world.posted[0]["client"]}])
         self.assertEqual(self.state(5), w.ACKNOWLEDGED)
         self.assertEqual(self.ledger()["5"]["disposition"], "accepted")
         self.assertIn(w.ACK_RELAYED, [h["state"] for h in self.ledger()["5"]["history"]])
@@ -83,7 +84,7 @@ class Relay(Base):
                 self.write(doc)
                 self.exit_and_settle()
                 self.assertEqual(self.world.posted[0]["disposition"], doc["disposition"])
-                self.assertEqual(self.world.posted[0]["note"], doc.get("note"))
+                self.assertIsNone(self.world.posted[0]["note"])
                 self.assertEqual(self.ledger()["5"]["disposition"], doc["disposition"])
 
     def test_nothing_is_relayed_while_the_child_runs(self):
