@@ -1023,6 +1023,17 @@ def post_ack_event(conn: dict, investigation_id: str, sid: str, seq: int, dispos
         raise
 
 
+WAKE_REPORT_TIMEOUT = 10.0
+
+
+def post_wake_event(conn: dict, investigation_id: str, sid: str, payload: dict, key: str, client: str,
+                    opener=None) -> dict:
+    """append-investigation-event of one session.wake report (conductor#2110):
+    session_id = the woken session, never to_session_id; a bounded timeout."""
+    return ie.append_event(conn, investigation_id, ie.SESSION_WAKE, payload, idempotency_key=key, client=client,
+                           session_id=sid, producer_client=client, opener=opener, timeout=WAKE_REPORT_TIMEOUT)
+
+
 def read_ack_file(tmp_dir: Any, seq: int) -> Tuple[Optional[dict], str]:
     """({"disposition", "note"?}, "") from <tmp_dir>/ACK_FILE, the answer the
     woken agent wrote, or (None, why it is not one). The directory must be
@@ -1092,7 +1103,8 @@ class System:
     sleep(seconds); port_busy(port) -> bool; run_probe(argv, path_env, cwd=)
     -> (rc, stdout); post_ack(conn, inv, sid, seq, disposition, note, client)
     (the relayed acknowledgment; raises on failure); process_envs() ->
-    [(pid, pgid, argv + environment)] | None.
+    [(pid, pgid, argv + environment)] | None; post_wake(conn, inv, sid,
+    payload, idempotency_key, client) (a session.wake report; raises).
     """
 
     def __init__(self, *, now: Optional[Callable[[], float]] = None, alive: Optional[Callable[[int], bool]] = None,
@@ -1111,8 +1123,11 @@ class System:
                  port_busy: Optional[Callable[[int], bool]] = None,
                  run_probe: Optional[Callable[..., Tuple[int, str]]] = None,
                  post_ack: Optional[Callable[..., dict]] = None,
-                 process_envs: Optional[Callable[[], Optional[list]]] = None):
+                 process_envs: Optional[Callable[[], Optional[list]]] = None,
+                 post_wake: Optional[Callable[..., dict]] = None):
         self.process_envs = process_envs or globals()["process_envs"]
+        self.post_wake = post_wake or (lambda conn, inv, sid, payload, key, client: post_wake_event(
+            conn, inv, sid, payload, key, client, opener=opener))
         self.run_probe = run_probe or globals()["run_probe"]
         self.post_ack = post_ack or (lambda conn, inv, sid, seq, disposition, note, client: post_ack_event(
             conn, inv, sid, seq, disposition, note, client, opener=opener))
@@ -2617,6 +2632,18 @@ def read_from(binding: dict) -> int:
     return max(0, min([int(binding["cursor"])] + [s - 1 for s in seqs]))
 
 
+WAKE_NOT_REQUESTED = "decision posted without resume requested"
+
+
+def decision_requests_wake(e: Any) -> bool:
+    """The owner asked for the session to be resumed (conductor#2110: the
+    Composer's "Resume this session if it has stopped" sets payload.wake,
+    which the server allows only with to_session_id). Exactly the JSON true:
+    a missing, false, "true" or 1 wake is a notification only."""
+    p = e.get("payload") if isinstance(e, dict) else None
+    return isinstance(p, dict) and p.get("wake") is True
+
+
 def wake_decisions(events: list, sid: str, binding: dict) -> List[dict]:
     """The decisions in `events` that may wake `sid` (§5.2, before the
     ledger, caps, liveness and eligibility): verified, addressed to it, and
@@ -2745,6 +2772,8 @@ def run_once(home: Path, system: Optional[System] = None, *, dry_run: bool = Fal
         with contextlib.suppress(OSError):
             prune_logs(home)
     if not config["enabled"]:
+        if not dry_run:
+            report_all_wake_states(home, system, config)
         _report(system, report, "-", None, "skip", "wake is not enabled (cardinal-wake enable)")
         return report
     now = system.now()
@@ -2762,7 +2791,150 @@ def run_once(home: Path, system: Optional[System] = None, *, dry_run: bool = Fal
             _private_dir(wake_dir(home))
             ie.write_json(poll_state_path(home), {k: v for k, v in polls.items()
                                                    if isinstance(v, (int, float)) and now - v < CANDIDATE_WINDOW})
+        report_all_wake_states(home, system, config)
     return report
+
+
+# ---------------------------------------------------------------------------
+# session.wake reports (conductor#2110)
+# ---------------------------------------------------------------------------
+
+WAKE_REPORT_STATES = {NOTIFIED: "notified", CLAIMED: "claimed", RESUMING: "resuming", TIMED_OUT: "timed_out",
+                      ACKNOWLEDGED: "acknowledged", FAILED: "failed"}   # ACK_RELAYED: no report
+WAKE_REPORT_TRIES = 3
+WAKE_RUNTIMES = ("codex", "claude", "gemini", "cursor")
+# The only reasons a report may carry: readable by every org member and read
+# grantee, so a fixed vocabulary, never the waker's own words (which can name
+# paths under $HOME, binaries or config), decision text, an ack note or a key.
+# (substring of the history note, reason), first match wins.
+_WAKE_REASON_RULES = (
+    (WAKE_NOT_REQUESTED, WAKE_NOT_REQUESTED),
+    ("older than 7 days", "decision older than 7 days"),
+    ("the session is live", "session is live"),
+    ("unattended launch is off", "unattended launch is off"),
+    ("launch is disabled", "launch is disabled on this machine"),
+    ("its own Codex config", "repository has its own Codex config"),
+    ("changed since cardinal-wake enable", "launch binaries changed since enable"),
+    ("not vetted", "launch binaries not vetted"),
+    ("lockdown", "lockdown could not be verified"),
+    ("MCP servers", "lockdown could not be verified"),
+    ("features on that", "lockdown could not be verified"),
+    ("ended without acknowledging", "no acknowledgment"),
+    ("acknowledgment could not be read", "acknowledgment could not be read"),
+    ("could not prepare", "launch failed"),
+    ("could not start", "launch failed"),
+    ("stopped during the launch", "launch interrupted"),
+    ("still running after 2 h", "still running after 2 hours"),
+    ("relayed by the waker", "acknowledgment relayed by the waker"),
+    ("acknowledged the decision", "acknowledged"),
+    ("resumed in", "resumed"),
+    ("recovered", "resumed"),
+    ("notify-only", "session cannot be resumed unattended"),
+)
+WAKE_REASONS = frozenset(r for _, r in _WAKE_REASON_RULES) | {"session cannot be resumed unattended", "failed"}
+
+
+def wake_reason(state: str, note: Any) -> Optional[str]:
+    """The fixed-vocabulary reason for a report of `state`, from the waker's
+    history note (never the note itself), or None."""
+    text = note if isinstance(note, str) else ""
+    for needle, reason in _WAKE_REASON_RULES:
+        if needle in text:
+            return reason
+    if state == NOTIFIED:
+        return "session cannot be resumed unattended"
+    if state == FAILED:
+        return "failed"
+    return None
+
+
+def wake_report_key(investigation_id: str, sid: str, seq: int, state: str) -> str:
+    """wake:<sha256(investigation:sid:seq)[:40]>:<state>: one report per
+    decision, session and state (A-Za-z0-9._:-, at most 128, never a
+    server-reserved prefix)."""
+    import hashlib
+    h = hashlib.sha256(f"{investigation_id}:{sid}:{seq}".encode()).hexdigest()[:40]
+    return f"wake:{h}:{state}"
+
+
+def report_all_wake_states(home: Path, system: System, config: dict) -> None:
+    for sid in ledger_sids(home):
+        with contextlib.suppress(Exception):   # reporting never stops or changes a pass
+            report_wake_states(home, sid, system, config)
+
+
+def report_wake_states(home: Path, sid: str, system: System, config: dict) -> None:
+    """Post the session.wake reports this session's entries still owe
+    (best effort): one per lifecycle state an entry reached (NOTIFIED,
+    CLAIMED, RESUMING, TIMED_OUT, ACKNOWLEDGED, FAILED), in order, only for
+    entries this version created, only when the binding advertises
+    session_wake, with the plugin connection whose org is the binding's.
+    Never changes the lifecycle. An older server (400 unknown_event_type),
+    a missing route (404), a refusal (403) or the limit (409
+    event_limit_reached) stops reports for that investigation (recorded in
+    the ledger); a decision the server cannot match (404
+    wake_decision_not_found, 422, 400 invalid_event) ends that entry's
+    reports; 409 idempotency_conflict counts as reported; anything else is
+    retried on later passes, WAKE_REPORT_TRIES times per entry."""
+    with session_lock(home, sid, wait=0.5) as got:
+        if not got:
+            return
+        led = read_ledger(home, sid)
+        off = led.get("wake_reports_off") if isinstance(led.get("wake_reports_off"), dict) else {}
+        plain_home, boxed_home = state_homes(home)
+        changed = False
+        for entry in led["entries"].values():
+            reports = entry.get("reports")
+            inv, seq = entry.get("investigation_id"), entry.get("seq")
+            if not isinstance(reports, list) or entry.get("reports_ended") or inv in off \
+                    or not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+                continue
+            states = []
+            for line in entry.get("history") or []:
+                st = WAKE_REPORT_STATES.get(line.get("state")) if isinstance(line, dict) else None
+                if st and st not in reports and st not in [s for s, _ in states]:
+                    states.append((st, wake_reason(line.get("state"), line.get("note"))))
+            if not states:
+                continue
+            binding = ie.read_binding(boxed_home if entry.get("sandboxed_state") else plain_home, sid)
+            if not binding or binding.get("investigation_id") != inv or not ie.capability(binding, "session_wake"):
+                continue
+            runtime = entry.get("runtime") if entry.get("runtime") in WAKE_RUNTIMES else "unknown"
+            conn, conn_runtime = _connection_for(home, binding, runtime, system)
+            if not conn:
+                continue
+            client = _client(conn_runtime, config)
+            for st, reason in states:
+                payload = {"decision_seq": seq, "state": st, "runtime": runtime}
+                if reason in WAKE_REASONS:
+                    payload["reason"] = reason
+                changed = True
+                try:
+                    system.post_wake(conn, inv, sid, payload, wake_report_key(inv, sid, seq, st), client)
+                except sync.ServerError as e:
+                    body = e.body if isinstance(getattr(e, "body", None), dict) else {}
+                    err, status = body.get("error"), getattr(e, "status", None)
+                    if err == "idempotency_conflict":
+                        reports.append(st)
+                        continue
+                    if err in ("unknown_event_type", "event_limit_reached") or status == 403 \
+                            or (status == 404 and err != "wake_decision_not_found"):
+                        off[inv] = str(err or status)[:60]
+                        break
+                    if status in (400, 404, 422):
+                        entry["reports_ended"] = str(err or status)[:60]
+                        break
+                    entry["report_tries"] = int(entry.get("report_tries") or 0) + 1
+                    break
+                except Exception:
+                    entry["report_tries"] = int(entry.get("report_tries") or 0) + 1
+                    break
+                reports.append(st)
+            if int(entry.get("report_tries") or 0) >= WAKE_REPORT_TRIES and not entry.get("reports_ended"):
+                entry["reports_ended"] = "gave up after retries"
+        if changed:
+            led["wake_reports_off"] = off
+            write_ledger(home, sid, led, system.now())
 
 
 def consider(home: Path, sid: str, binding: dict, system: System, config: dict, report: list, *,
@@ -2801,6 +2973,14 @@ def consider(home: Path, sid: str, binding: dict, system: System, config: dict, 
                          origin=conn.get("origin"))
         else:
             fresh.append(e)
+    wants = []
+    for e in fresh:   # conductor#2110: only a decision that asks for it may resume the session
+        if decision_requests_wake(e):
+            wants.append(e)
+        else:
+            _notify_only(home, sid, binding, e["seq"], rt.kind, WAKE_NOT_REQUESTED, system, report,
+                         dry_run=dry_run, origin=conn.get("origin"))
+    fresh = wants
     if not fresh:
         return
     launcher = active_launcher(rt.kind)   # None: notify-only (no launch has passed, or is proven for, its gates)
@@ -2852,7 +3032,7 @@ def _notify_only(home, sid, binding, seq, kind, why, system, report, *, dry_run=
         led = read_ledger(home, sid)
         if decision_seen(led, inv, seq):
             return
-        entry = {"seq": seq, "investigation_id": inv, "runtime": kind}
+        entry = {"seq": seq, "investigation_id": inv, "runtime": kind, "reports": []}
         transition(entry, DECISION_SEEN, now)
         transition(entry, NOTIFIED, now, why)
         add_entry(led, entry)
@@ -2920,7 +3100,7 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
         else:
             why = f"the session's runtime changed ({fresh.kind}) before the launch"
         if why:
-            entry = {"seq": seq, "investigation_id": inv, "runtime": rt.kind}
+            entry = {"seq": seq, "investigation_id": inv, "runtime": rt.kind, "reports": []}
             transition(entry, DECISION_SEEN, now)
             transition(entry, NOTIFIED, now, why)
             add_entry(led, entry)
@@ -2945,7 +3125,7 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
                             rt.kind, origin)
                 _report(system, report, sid, seq, "capped", "the daily wake cap is reached; reconsidered later")
                 return "cap"
-            entry = {"seq": seq, "investigation_id": inv, "runtime": rt.kind, "sandbox": rt.sandbox,
+            entry = {"seq": seq, "investigation_id": inv, "runtime": rt.kind, "sandbox": rt.sandbox, "reports": [],
                      "claimed_at": now, "spawn_errors": 0, "sandboxed_state": paths.is_sandboxed_home(state or home),
                      "snapshot": launcher.snapshot(home, sid, rt)}
             transition(entry, DECISION_SEEN, now)
@@ -3451,7 +3631,7 @@ def enable(home: Path, *, launch: bool, environ: Mapping[str, str], launchctl: C
         return 1
     out(f"Wake is on: launchd runs {runner} every {RUN_INTERVAL} s ({plist}).")
     out("It wakes a session only for an owner decision you post on its Investigation page, addressed to that "
-        "session. Agents cannot post one.")
+        "session with \"Resume this session if it has stopped\" checked. Agents cannot post one.")
     if runtime in NOTIFY_ONLY_REASONS and active_launcher(runtime) is None:
         out(f"{LABELS[runtime]} sessions are notify-only: an addressed decision shows a notification and never "
             f"resumes a {LABELS[runtime]} session" + (", with or without --launch." if launch else "."))

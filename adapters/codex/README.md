@@ -479,7 +479,11 @@ are checked again before every launch; if one changed, the decision is a
 notification until you run `enable` again.
 
 **What wakes a session.** Only a decision you post on the Investigation page
-from your signed-in Cardinal web session, addressed to that session. A
+from your signed-in Cardinal web session, addressed to that session, with
+"Resume this session if it has stopped" checked; without it the decision
+is a notification only. Each step of a wake also shows on the
+Investigation timeline (a `session.wake` event, with a short fixed reason
+and never your decision's text). A
 broadcast decision, a cue, a question, a challenge or a ruling never wakes
 anything, and neither does anything an agent posts: Cardinal refuses an
 owner decision from the plugin's API key, the only Cardinal credential an

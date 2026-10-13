@@ -221,6 +221,18 @@ A decision `e` wakes session `sid` only when all of these hold:
   `owner_decision` authority, user principal, investigation author, no
   `session_id`, no `granted_by`);
 - `e.to_session_id == sid`. Broadcast decisions never wake anything;
+- **the owner asked for it: `e.payload.wake is True`** (conductor#2110: the
+  Composer's "Resume this session if it has stopped" checkbox; the server
+  accepts `wake` only with `to_session_id`, 400
+  `wake_requires_to_session_id`, and refuses it to a session that is not
+  the author's, 422). Exactly the JSON `true`: a missing, `false`, `"true"`
+  or `1` is a notification only ("decision posted without resume
+  requested"), so an addressed decision never wakes a session by surprise.
+  On a server older than conductor#2110 no decision carries `wake: true`
+  unless a client sent it unvalidated; the waker still requires
+  `to_session_id == sid`, the author and every other condition itself, so
+  that is no wider. **#209 ships after conductor#2110 is deployed** (until
+  then every addressed decision is a notification);
 - `e` is still deliverable to `sid`: `deliverable()` with the binding, so
   the `owner_decision` capability is on, the session is the author, and the
   decision is unacknowledged;
@@ -780,8 +792,27 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
     in the session's name, so an acknowledgment reports what the session
     said, not proof that it acted.
   - Launching a process is never reported as success.
-  - A `session.wake` Storyboard state needs a conductor event type and is
-    a follow-up.
+  - **Server-side reports (conductor#2110).** Each lifecycle state an
+    entry reaches (NOTIFIED, CLAIMED, RESUMING, TIMED_OUT, ACKNOWLEDGED,
+    FAILED; never ACK_RELAYED) is posted once as a `session.wake` event
+    through `append-investigation-event` with the plugin connection:
+    `session_id` = the woken session (never `to_session_id`), payload
+    `{decision_seq, state, runtime, reason?}`, idempotency key
+    `wake:<sha256(investigation:sid:seq)[:40]>:<state>`. Only when the
+    binding advertises `session_wake: {enabled: true}`; best effort, after
+    the pass, under the session lock, with a 10 s timeout; it never changes
+    the lifecycle. `reason` is a fixed vocabulary (`WAKE_REASONS`, mapped
+    from the waker's own notes, never the notes themselves): every org
+    member and read grantee can read it, so never decision text, an ack
+    note, a path or a key. Responses: `idempotency_conflict` counts as
+    reported; `unknown_event_type` (an older server), 404 without
+    `wake_decision_not_found`, 403 and `event_limit_reached` stop reports
+    for that investigation (kept in the ledger); 404
+    `wake_decision_not_found`, 422 and 400 `invalid_event` end that entry's
+    reports; anything else is retried on later passes, 3 times. Only
+    entries created by this version are reported. Readers never deliver
+    or render it: class `wake` is not a read class (the cursor moves past
+    it).
 
 ### 5.5 Wake authorization is not action authorization
 
@@ -911,9 +942,7 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
    The CLI `ack` and `cardinal-evidence promote` need network; the MCP
    tools work because the MCP server runs outside the sandbox. Should the
    wake prompt steer the agent to the MCP tools?
-2. A `session.wake` event type and a Storyboard "waiting / resuming /
-   failed" state (a conductor follow-up).
-3. Claude unattended wake: is there a launch mode that enforces a sandbox
+2. Claude unattended wake: is there a launch mode that enforces a sandbox
    while keeping the plugin loaded? Revisit if Claude Code adds one.
 
 ## 9. Not doing
@@ -1044,3 +1073,7 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
   - 8: a turn in another cwd was not seen without `permission_profile` →
     every turn's cwd must be the session's (realpath).
   - The probe cache is gone: both probes run before every launch.
+- **Wake intent and reports (conductor#2110).** The waker launches only
+  for `payload.wake is True` (a release blocker found by that PR's review:
+  before it, any verified addressed decision launched); lifecycle states
+  are reported as `session.wake` events with fixed-vocabulary reasons.

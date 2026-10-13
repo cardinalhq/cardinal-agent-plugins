@@ -64,12 +64,20 @@ def iso(t):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
-def decision(seq, to=SID, inv=INV, created=None, **producer):
+def decision(seq, to=SID, inv=INV, created=None, wake=True, **producer):
+    """An owner.decided event; wake: payload.wake (conductor#2110), the
+    Composer's "Resume this session if it has stopped" (NOWAKE: absent)."""
     p = {"principal": {"kind": "user", "id": "owner"}, "session_id": None, "is_investigation_author": True}
     p.update(producer)
+    payload = {"text": SECRET}
+    if wake is not NOWAKE:
+        payload["wake"] = wake
     return {"investigation_id": inv, "seq": seq, "class": "owner", "type": "owner.decided",
             "authority": "owner_decision", "created_at": iso(time.time() if created is None else created),
-            "to_session_id": to, "payload": {"text": SECRET}, "producer": p}
+            "to_session_id": to, "payload": payload, "producer": p}
+
+
+NOWAKE = object()
 
 
 def ack(seq, ack_of, sid=SID, inv=INV, author=True):
@@ -131,6 +139,8 @@ class World:
         self.probe_cwds = []
         self.envrows = []         # (pid, pgid, argv + environment): System.process_envs
         self.killed = []
+        self.wake_posts = []      # session.wake reports (System.post_wake)
+        self.wake_error = None    # an exception, or state -> exception
 
     def fetch(self, conn, inv, sid, after, client):
         assert conn == MEMBER
@@ -155,13 +165,22 @@ class World:
                     launcher=self.launch, notifier=lambda title, msg: self.notes.append((title, msg)),
                     connection=lambda runtime, home: dict(MEMBER), fetch=self.fetch, environ=ENV,
                     out=self.lines.append, run_probe=self.probe, post_ack=self.post_ack,
-                    process_envs=lambda: list(self.envrows), kill=self.kill, sleep=lambda seconds: None)
+                    process_envs=lambda: list(self.envrows), kill=self.kill, sleep=lambda seconds: None,
+                    post_wake=self.post_wake)
         args.update(kw)
         # Only what this System takes (the same fakes also drive an older checkout when a
         # regression test is shown to fail before its fix).
         import inspect
         known = inspect.signature(w.System.__init__).parameters
         return w.System(**{k: v for k, v in args.items() if k in known})
+
+    def post_wake(self, conn, inv, sid, payload, key, client):
+        assert conn == MEMBER
+        err = self.wake_error.get(payload["state"]) if isinstance(self.wake_error, dict) else self.wake_error
+        if err is not None:
+            raise err
+        self.wake_posts.append({"inv": inv, "sid": sid, "payload": dict(payload), "key": key, "client": client})
+        return {"event": {}}
 
     def kill(self, pid, sig):
         """A fake kill: recorded; the process is gone from the process list after SIGKILL
