@@ -428,7 +428,14 @@ gemini --resume <id> --approval-mode yolo --skip-trust -p "<wake prompt>"`:
   (`allowlist_proxy.py`, copied into `~/.cardinal/wake/lib`) owns that port
   exclusively before Gemini starts. It tunnels HTTPS to the Gemini API and
   your Cardinal hosts and refuses everything else. Each verdict goes to the
-  wake's log.
+  wake's log. Gemini CLI's own OTLP exporter (above) reaches the ingest host
+  through it but has no key there: the profile denies reading `.env` files,
+  where `cardinal-connect` keeps the exporter's header.
+- **Acknowledgment:** as for Codex, the wake prompt asks the agent to write
+  its answer to `$TMPDIR/cardinal-wake-ack.json` (its private temp dir);
+  after the run has exited the waker checks it and posts that one
+  acknowledgment for the session, unless the session already acknowledged
+  the decision itself.
 - **Runtime check:** within 20 s the waker must also see `sandbox-exec` with
   that profile in the process tree. If it doesn't, it kills the process tree
   and turns Gemini launch off until you run `cardinal-wake reenable gemini`.
