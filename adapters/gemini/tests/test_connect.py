@@ -133,7 +133,9 @@ class ConnectHookRegistrationTest(unittest.TestCase):
             with self.subTest(event=event):
                 self.assertGreaterEqual(handler["timeout"], 10000)
                 self.assertIn(f"--event {event}", handler["command"])
-        self.assertTrue(settings["telemetry"]["cardinalManaged"])
+        # Gemini CLI's own exporter is opt-in; nothing carries a marker.
+        self.assertNotIn("telemetry", settings)
+        self.assertNotIn("cardinalManaged", json.dumps(settings))
 
     def test_extension_hooks_json_shape(self):
         self.connect.install_extension_bundle(None, None)
@@ -381,8 +383,8 @@ class ConnectWithoutIngestTest(unittest.TestCase):
             (self.home / ".gemini" / "extensions" / "cardinal" / "gemini-extension.json").read_text()
         )
         self.assertEqual(manifest["mcpServers"]["cardinal"]["url"], self.MCP["url"])
-        settings = json.loads(self.settings_path.read_text())
-        self.assertNotIn("telemetry", settings)
+        # Nothing for settings.json: the extension carries MCP, telemetry is off.
+        self.assertFalse(self.settings_path.exists())
 
         state = json.loads(self.state_path.read_text())
         self.assertEqual(state["mode"], "mcp-only")

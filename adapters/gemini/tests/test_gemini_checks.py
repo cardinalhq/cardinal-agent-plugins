@@ -103,12 +103,16 @@ class RegistrationTests(PluginCopy):
     def test_no_extension_settings_entry_is_managed_and_stripped(self):
         settings = self.home / ".gemini" / "settings.json"
         settings.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}))
-        self.connect.apply_settings(None, "https://c.example/mcp", "ck_1", include_hooks=True)
+        result = self.connect.apply_settings(None, "https://c.example/mcp", "ck_1", include_hooks=True)
         servers = json.loads(settings.read_text())["mcpServers"]
-        self.assertTrue(servers["cardinal-behavior"]["cardinalManaged"])
+        # Gemini CLI rejects unknown keys in an mcpServers entry: ownership
+        # is recorded for cardinal.json (settings_owned) instead of a marker.
+        self.assertNotIn("cardinalManaged", servers["cardinal-behavior"])
         self.assertEqual(servers["cardinal-behavior"]["args"][1:], ["--runtime", "gemini"])
+        owned = result["settings_owned"]
+        self.assertEqual(set(owned["mcp_servers"]), {"cardinal", "cardinal-behavior"})
         disconnect = load(self.plugin / "scripts" / "cardinal-disconnect", f"gemini_disconnect_{id(self)}")
-        stripped, changed = disconnect.strip_managed_settings(json.loads(settings.read_text()))
+        stripped, changed = disconnect.strip_managed_settings(json.loads(settings.read_text()), owned)
         self.assertTrue(changed)
         self.assertEqual(stripped["mcpServers"], {"mine": {"command": "x"}})
 
@@ -129,10 +133,11 @@ class RegistrationTests(PluginCopy):
         self.connect.apply_settings(None, "https://c.example/mcp", "ck_1", include_hooks=True)
         data = json.loads(settings.read_text())
         del data["mcpServers"]["cardinal-behavior"]
+        data["mcpServers"]["cardinal"]["cardinalManaged"] = True   # how plugin <= 0.22.1 tagged it
         settings.write_text(json.dumps(data))
         self.assertEqual(self.connect.repair_hook_registration(), [str(settings)])
         entry = json.loads(settings.read_text())["mcpServers"]["cardinal-behavior"]
-        self.assertTrue(entry["cardinalManaged"])
+        self.assertEqual(entry, self.connect.behavior_server())
         self.assertEqual(self.connect.repair_hook_registration(), [], "repair must be idempotent")
 
     def test_a_users_own_settings_behavior_entry_is_kept(self):
