@@ -139,6 +139,8 @@ class World:
         self.probe_cwds = []
         self.envrows = []         # (pid, pgid, argv + environment): System.process_envs
         self.killed = []
+        self.boxed = []           # (pid, ppid) System.sandboxed_procs answers; None: cannot be checked
+        self.boxed_calls = []
         self.wake_posts = []      # session.wake reports (System.post_wake)
         self.wake_error = None    # an exception, or state -> exception
 
@@ -166,13 +168,17 @@ class World:
                     connection=lambda runtime, home: dict(MEMBER), fetch=self.fetch, environ=ENV,
                     out=self.lines.append, run_probe=self.probe, post_ack=self.post_ack,
                     process_envs=lambda: list(self.envrows), kill=self.kill, sleep=lambda seconds: None,
-                    post_wake=self.post_wake)
+                    post_wake=self.post_wake, sandboxed_procs=self.sandboxed_procs)
         args.update(kw)
         # Only what this System takes (the same fakes also drive an older checkout when a
         # regression test is shown to fail before its fix).
         import inspect
         known = inspect.signature(w.System.__init__).parameters
         return w.System(**{k: v for k, v in args.items() if k in known})
+
+    def sandboxed_procs(self, since, roots, orphans_until=None):
+        self.boxed_calls.append((since, list(roots), orphans_until))
+        return None if self.boxed is None else list(self.boxed)
 
     def post_wake(self, conn, inv, sid, payload, key, client):
         assert conn == MEMBER
@@ -189,6 +195,8 @@ class World:
         import signal as _signal
         if sig == _signal.SIGKILL or pid not in getattr(self, "stubborn", set()):
             self.envrows = [r for r in self.envrows if r[0] != pid]
+            if self.boxed:
+                self.boxed = [r for r in self.boxed if r[0] != pid]
 
     def probe(self, argv, path_env, cwd=None):
         """A fake `codex <lockdown> features list`: every disabled feature

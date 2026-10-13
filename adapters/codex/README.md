@@ -593,7 +593,12 @@ settles; the shared `/tmp` is not writable.
   credential shapes first. It is never shown in a notification.
 - **The run ends when its last process does.** When codex exits, the waker
   stops anything the run left behind (processes carrying the wake's
-  private `TMPDIR`, or in its process group): SIGTERM, then SIGKILL. Until
+  private `TMPDIR`, in its process group, or, whatever their environment,
+  still in Codex's sandbox and in your workspace or orphaned during the
+  wake, which macOS's `sandbox_check` tells apart from your editor or
+  apps): SIGTERM, then SIGKILL. A sandboxed process started in the
+  repository by your own Codex is never signalled, only waited for, and
+  while one runs the session counts as live. Until
   none is left the wake stays in progress, so no second run starts for the
   session and its temp dir is kept. Right before every launch, under the
   session's lock, everything above is checked again.

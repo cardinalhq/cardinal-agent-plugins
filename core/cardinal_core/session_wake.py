@@ -908,6 +908,194 @@ def process_envs() -> Optional[List[Tuple[int, int, str]]]:
     return rows
 
 
+_MAC = None   # the macOS calls sandboxed_procs needs, loaded once: (sandbox_check, proc_pidinfo, proc_pidpath,
+#               proc_pidfdinfo), or False when they cannot be loaded
+_PROC_PIDLISTFDS, _PROC_PIDVNODEPATHINFO, _PROC_PIDFDVNODEPATHINFO = 1, 9, 2
+_VNODE_INFO_SIZE, _MAXPATHLEN, _PROC_FILEINFO_SIZE = 152, 1024, 24
+_PROX_FDTYPE_VNODE = 1
+MAX_SCAN_FDS = 1024
+
+
+def _mac_calls():
+    global _MAC
+    if _MAC is None:
+        _MAC = False
+        try:
+            import ctypes
+            sb = ctypes.CDLL("/usr/lib/system/libsystem_sandbox.dylib", use_errno=True)
+            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            check = sb.sandbox_check
+            check.restype, check.argtypes = ctypes.c_int, [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            info = libc.proc_pidinfo
+            info.restype = ctypes.c_int
+            info.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+            path = libc.proc_pidpath
+            path.restype, path.argtypes = ctypes.c_int, [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+            fdinfo = libc.proc_pidfdinfo
+            fdinfo.restype = ctypes.c_int
+            fdinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+            _MAC = (check, info, path, fdinfo)
+        except (OSError, AttributeError):
+            _MAC = False
+    return _MAC or None
+
+
+class _Gone(Exception):
+    pass
+
+
+def _cstr(raw: bytes) -> str:
+    return raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+
+
+def _proc_paths(pid: int, calls) -> List[str]:
+    """The cwd, the executable and every open file's path of `pid` (macOS
+    proc_pidinfo / proc_pidpath / proc_pidfdinfo). Raises _Gone when the
+    process exited, OSError when it cannot be read."""
+    import ctypes
+    import errno
+    _, info, path, fdinfo = calls
+
+    def fail():
+        e = ctypes.get_errno()
+        if e == errno.ESRCH:
+            raise _Gone()
+        raise OSError(e, "proc_pidinfo")
+    out = []
+    size = 2 * (_VNODE_INFO_SIZE + _MAXPATHLEN)
+    buf = ctypes.create_string_buffer(size)
+    ctypes.set_errno(0)
+    if info(pid, _PROC_PIDVNODEPATHINFO, 0, buf, size) != size:
+        fail()
+    out.append(_cstr(buf.raw[_VNODE_INFO_SIZE:_VNODE_INFO_SIZE + _MAXPATHLEN]))
+    exe = ctypes.create_string_buffer(4 * _MAXPATHLEN)
+    ctypes.set_errno(0)
+    if path(pid, exe, len(exe)) <= 0:
+        fail()
+    out.append(_cstr(exe.raw))
+    ctypes.set_errno(0)
+    need = info(pid, _PROC_PIDLISTFDS, 0, None, 0)
+    if need <= 0:
+        fail()
+    fds = ctypes.create_string_buffer(need + 8 * 32)   # room for fds opened since
+    ctypes.set_errno(0)
+    got = info(pid, _PROC_PIDLISTFDS, 0, fds, len(fds))
+    if got <= 0:
+        fail()
+    import struct
+    vsize = _PROC_FILEINFO_SIZE + _VNODE_INFO_SIZE + _MAXPATHLEN
+    vbuf = ctypes.create_string_buffer(vsize)
+    for i in range(min(got // 8, MAX_SCAN_FDS)):
+        fd, kind = struct.unpack_from("<iI", fds.raw, i * 8)
+        if kind != _PROX_FDTYPE_VNODE:
+            continue
+        ctypes.set_errno(0)
+        if fdinfo(pid, fd, _PROC_PIDFDVNODEPATHINFO, vbuf, vsize) != vsize:
+            e = ctypes.get_errno()
+            if e in (errno.EBADF, 0):   # closed since it was listed
+                continue
+            fail()
+        start = _PROC_FILEINFO_SIZE + _VNODE_INFO_SIZE
+        out.append(_cstr(vbuf.raw[start:start + _MAXPATHLEN]))
+    return out
+
+
+def _etime_seconds(text: str) -> Optional[int]:
+    """`ps -o etime` ([[dd-]hh:]mm:ss) in seconds, or None."""
+    m = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", text.strip())
+    if not m:
+        return None
+    d, h, mi, se = (int(x) if x else 0 for x in m.groups())
+    return ((d * 24 + h) * 60 + mi) * 60 + se
+
+
+# Executables of apps and system services (sandboxed by design, launched by
+# launchd with ppid 1), never a woken run's command-line survivor.
+_APP_PATH_PREFIXES = ("/System/", "/Applications/", "/Library/Apple/", "/usr/libexec/", "/usr/sbin/")
+_APP_BUNDLE_MARKERS = (".app/", ".xpc/", ".appex/", ".framework/", ".bundle/", ".systemextension/")
+
+
+def _app_executable(path: str, home: str) -> bool:
+    return (path.startswith(_APP_PATH_PREFIXES) or path.startswith(os.path.join(home, "Applications") + "/")
+            or any(m in path for m in _APP_BUNDLE_MARKERS))
+
+
+def sandboxed_procs(since: float, roots: List[str],
+                    orphans_until: Optional[float] = None) -> Optional[List[Tuple[int, int]]]:
+    """The user's own processes started at or after `since` (epoch) that run
+    in a Seatbelt sandbox (sandbox_check(pid, NULL, 0) == 1) and whose cwd,
+    executable or an open file is inside one of `roots` (realpaths): a
+    woken run's process that cleared TMPDIR and left the process group
+    (review 5 follow-up: `env -u TMPDIR setsid ...`) still runs sandboxed,
+    and still where the run was. The owner's own editor or terminal is not
+    sandboxed; a sandboxed App Store app does not run in a workspace. None
+    when it cannot be determined (not macOS, the calls cannot be loaded, a
+    process cannot be read): the caller fails closed. Answers (pid, ppid)
+    pairs. orphans_until (a wake's sweep): also any such sandboxed process
+    started between `since` and `orphans_until` that is orphaned (ppid 1:
+    a survivor of the exited child is reparented to launchd) and is not an
+    app or system service (an app's or XPC service's executable, or one
+    under /System, /Applications, /usr/libexec...), wherever it now is: a
+    survivor that left the workspace entirely (cwd, executable and files)
+    is still found."""
+    import ctypes
+    import errno
+    if sys.platform != "darwin":
+        return None
+    calls = _mac_calls()
+    if calls is None:
+        return None
+    try:
+        r = subprocess.run([PS, "-A", "-o", "pid=,ppid=,uid=,etime=,comm="], capture_output=True, text=True, timeout=10,
+                           check=False, env={"LC_ALL": "C", "PATH": "/bin:/usr/bin"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    now, uid, me = time.time(), os.getuid(), os.getpid()
+    home = os.path.realpath(os.path.expanduser("~"))
+    roots = [os.path.realpath(x) for x in roots if isinstance(x, str) and os.path.isabs(x)]
+    out = []
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 4 or not all(x.isdigit() for x in parts[:3]):
+            continue
+        pid, ppid, puid, age = int(parts[0]), int(parts[1]), int(parts[2]), _etime_seconds(parts[3])
+        comm = parts[4] if len(parts) > 4 else ""
+        if puid != uid or pid in (me, 0, 1):
+            continue
+        if age is None:
+            return None
+        if now - age < since - 2.0:
+            continue
+        ctypes.set_errno(0)
+        boxed = calls[0](pid, None, 0)
+        err = ctypes.get_errno()
+        if boxed == 0:
+            continue
+        if err == errno.ESRCH:
+            continue
+        if boxed != 1 or err:
+            return None
+        try:
+            found = _proc_paths(pid, calls)
+        except _Gone:
+            continue
+        except OSError as e:
+            # Some Apple services refuse inspection (EPERM: nsurlsessiond, routined, dmd...). Such a
+            # binary takes no code from a woken agent, so it is not counted; anything else that cannot
+            # be read fails closed.
+            if e.errno == errno.EPERM and comm.startswith(("/System/", "/usr/libexec/", "/usr/sbin/")):
+                continue
+            return None
+        if any(p and _within(p, root) for p in found for root in roots):
+            out.append((pid, ppid))
+        elif orphans_until is not None and ppid == 1 and now - age <= orphans_until + 2.0 \
+                and len(found) > 1 and not _app_executable(found[1], home):
+            out.append((pid, ppid))
+    return out
+
+
 def port_busy(port: int) -> bool:
     """Something on this machine accepts connections on `port` (IPv4 or IPv6
     loopback)."""
@@ -1104,7 +1292,8 @@ class System:
     -> (rc, stdout); post_ack(conn, inv, sid, seq, disposition, note, client)
     (the relayed acknowledgment; raises on failure); process_envs() ->
     [(pid, pgid, argv + environment)] | None; post_wake(conn, inv, sid,
-    payload, idempotency_key, client) (a session.wake report; raises).
+    payload, idempotency_key, client) (a session.wake report; raises);
+    sandboxed_procs(since, roots, orphans_until=None) -> [(pid, ppid)] | None.
     """
 
     def __init__(self, *, now: Optional[Callable[[], float]] = None, alive: Optional[Callable[[int], bool]] = None,
@@ -1124,7 +1313,9 @@ class System:
                  run_probe: Optional[Callable[..., Tuple[int, str]]] = None,
                  post_ack: Optional[Callable[..., dict]] = None,
                  process_envs: Optional[Callable[[], Optional[list]]] = None,
-                 post_wake: Optional[Callable[..., dict]] = None):
+                 post_wake: Optional[Callable[..., dict]] = None,
+                 sandboxed_procs: Optional[Callable[..., Optional[list]]] = None):
+        self.sandboxed_procs = sandboxed_procs or globals()["sandboxed_procs"]
         self.process_envs = process_envs or globals()["process_envs"]
         self.post_wake = post_wake or (lambda conn, inv, sid, payload, key, client: post_wake_event(
             conn, inv, sid, payload, key, client, opener=opener))
@@ -2562,6 +2753,16 @@ def live_signals(home: Path, sid: str, rt: Runtime, system: System, now: float,
                 break
     if any(now - ie.last_activity(h, sid) <= LIVE_WINDOW for h in homes):
         why.append("it used a tool in the last 2 minutes")
+    if isinstance(rt.cwd, str) and rt.cwd:
+        # Gate 3: a sandboxed process still working in the workspace (one an earlier run or the
+        # session left, whatever its environment or group) means the session is not stopped.
+        since = max([_num(e["child"].get("launched_at")) or 0.0 for e in led["entries"].values()
+                     if isinstance(e.get("child"), dict)] or [0.0])
+        found = system.sandboxed_procs(since, [os.path.realpath(rt.cwd)])
+        if found is None:
+            why.append("sandboxed processes could not be checked")
+        elif found:
+            why.append("a sandboxed process is running in its working directory")
     return why
 
 
@@ -3265,9 +3466,12 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
         # a background daemon) is stopped (SIGTERM, then SIGKILL); while any is left, or the
         # process list cannot be read, the entry stays in flight (no claim for the session, no
         # verification, relay or cleanup of the private TMPDIR under it) and is judged again.
+        if "sweep_started" not in entry:   # the end of the wake's window (survivor signal 3)
+            entry["sweep_started"] = now
+            write_ledger(home, sid, led, now)
         left = end_wake_processes(entry, child, system)
         if left is None or left:
-            note = ("the woken run's processes could not be listed; judged again next pass" if left is None
+            note = ("the woken run's processes could not be listed or checked; judged again next pass" if left is None
                     else f"{len(left)} process(es) of the woken run outlived it; stopping them before judging the run")
             if entry.get("lingering") != note:
                 entry["lingering"] = note
@@ -3325,21 +3529,39 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
 KILL_GRACE = 2.0
 
 
-def wake_processes(entry: dict, child: dict, system: System) -> Optional[List[int]]:
-    """The processes of this wake still running (the child itself excluded,
-    it has exited), or None when the process list cannot be read: any with
-    this wake's private TMPDIR in its environment (TMPDIR=<dir>, inherited
-    by everything the run starts unless it clears it), and any in the
-    child's process group (start_new_session: pgid = the child's pid) that
-    started after the child (a reused pid is never taken for it)."""
+def wake_processes(entry: dict, child: dict, system: System) -> Optional[Tuple[List[int], List[int]]]:
+    """(the processes of this wake still running, to stop; sandboxed
+    processes in its workspace it may not stop, to wait for), or None when
+    that cannot be determined (fail closed). The child itself has exited.
+    Ours: any with this wake's private TMPDIR in its environment
+    (TMPDIR=<dir>, inherited by everything the run starts unless it clears
+    it); any in the child's process group (start_new_session: pgid = the
+    child's pid) that started after the child (a reused pid is never taken
+    for it); and any sandboxed process of the user started after the child
+    whose cwd, executable or an open file is in the session's cwd or the
+    TMPDIR (sandboxed_procs: neither environment nor group hides it) and
+    that is orphaned (ppid 1, as a survivor of the exited child is) or the
+    child of another such process; and any orphaned sandboxed command-line
+    process of the user born during the wake (between the child's start
+    and the first sweep), wherever it is. A sandboxed match whose parent is some
+    other live process (the owner's own Codex started in the same
+    repository during the wake) is never signalled, only waited for: the
+    entry stays in flight until it ends."""
     rows = system.process_envs()
     if rows is None:
         return None
     tmp = entry.get("tmp_dir")
+    snap = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
+    roots = [x for x in (snap.get("cwd"), tmp) if isinstance(x, str) and x]
+    since = _num(child.get("start")) or _num(child.get("launched_at")) or _num(entry.get("claimed_at"))
+    until = _num(entry.get("sweep_started"))
+    boxed = system.sandboxed_procs(since if since is not None else 0.0, roots, until) if roots else []
+    if boxed is None:
+        return None
     marker = re.compile(r"(?:^|\s)TMPDIR=" + re.escape(tmp) + r"(?:\s|$)") if isinstance(tmp, str) and tmp else None
     pgid = child.get("pid") if isinstance(child.get("pid"), int) else None
     started = _num(child.get("start"))
-    out = []
+    ours = set()
     for pid, group, text in rows:
         if pid == os.getpid() or pid == pgid:
             continue
@@ -3348,24 +3570,36 @@ def wake_processes(entry: dict, child: dict, system: System) -> Optional[List[in
             st = system.process_start(pid)
             hit = st is not None and st >= started - 2.0
         if hit:
-            out.append(pid)
-    return out
+            ours.add(pid)
+    parents = {pid: ppid for pid, ppid in boxed if pid not in (pgid, os.getpid())}
+    stop = {pid for pid, ppid in parents.items() if ppid in (1, pgid) or ppid in ours}
+    grew = True
+    while grew:   # the children of a stopped survivor are survivors too
+        more = {pid for pid, ppid in parents.items() if ppid in stop and pid not in stop}
+        stop |= more
+        grew = bool(more)
+    stop |= ours
+    wait = set(parents) - stop
+    return sorted(stop), sorted(wait)
 
 
 def end_wake_processes(entry: dict, child: dict, system: System) -> Optional[List[int]]:
-    """Stop what wake_processes finds: SIGTERM, a grace, SIGKILL, a grace.
-    Returns what is still left ([] when nothing is), or None when the
-    process list cannot be read."""
-    left = wake_processes(entry, child, system)
+    """Stop what wake_processes finds to stop: SIGTERM, a grace, SIGKILL, a
+    grace. Returns what is still left, stopped or waited for ([] when
+    nothing is), or None when that cannot be determined."""
+    found = wake_processes(entry, child, system)
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        if not left:
-            return left
-        for pid in left:
+        if found is None:
+            return None
+        stop, wait = found
+        if not stop:
+            return wait
+        for pid in stop:
             with contextlib.suppress(OSError):
                 system.kill(pid, sig)
         system.sleep(KILL_GRACE)
-        left = wake_processes(entry, child, system)
-    return left
+        found = wake_processes(entry, child, system)
+    return None if found is None else sorted(set(found[0]) | set(found[1]))
 
 
 def relay_ack(home, sid, led, entry, conn, client, system, now, *, relay_notes: bool = False) -> Optional[bool]:

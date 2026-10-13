@@ -729,10 +729,41 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
   waits. While any is left, or the process list cannot be read, the entry
   stays in flight (no claim for the session, so no concurrent run; no
   verification, relay or deletion of the TMPDIR under it) and is judged
-  again next pass. Residual: a process that both clears `TMPDIR` and
-  leaves the group (`env -u TMPDIR setsid ...`) is not found; it is still
-  inside Codex's sandbox (no network, writes only in the workspace and
-  the private TMPDIR) and is documented, not hidden.
+  again next pass.
+  - **Neither environment nor group can hide a survivor.** Everything a
+    woken run starts runs in Codex's Seatbelt sandbox, and a process cannot
+    leave its sandbox. So the waker also asks macOS, for the user's own
+    processes born after the child (`ps -A -o pid,ppid,uid,etime,comm`):
+    `sandbox_check(pid, NULL, 0)` (libsystem_sandbox: 1 = sandboxed) and,
+    for a sandboxed one, its cwd (`proc_pidinfo` PROC_PIDVNODEPATHINFO), its
+    executable (`proc_pidpath`) and its open files (PROC_PIDLISTFDS +
+    PROC_PIDFDVNODEPATHINFO), all through ctypes, one listing plus a few
+    calls per candidate (about 0.05 s on the owner's Mac). A survivor is a
+    sandboxed process with any of those inside the session's cwd or the
+    wake's TMPDIR, or an orphaned (ppid 1) sandboxed command-line process
+    born during the wake (between the child's start and the first sweep)
+    wherever it now is; apps and system services (an `.app` / `.xpc` /
+    framework executable, or one under /System, /Applications,
+    /usr/libexec, /usr/sbin) are never that. Orphans and their children are
+    stopped like the others. A sandboxed process in the workspace whose
+    parent is some other live process (the owner's own Codex, started in
+    the repository during the wake) is never signalled, only waited for.
+    The owner's editor or terminal is not sandboxed, and an App Store app
+    does not run in a workspace, so neither counts.
+  - **Fail closed.** Not macOS, the calls not loadable, or a candidate
+    that cannot be read: the entry stays in flight. Some Apple services
+    refuse inspection (EPERM: nsurlsessiond, routined, dmd); a sandboxed
+    process with such a binary under /System, /usr/libexec or /usr/sbin is
+    skipped, since it takes no code from an agent; any other unreadable
+    one fails closed. On the owner's Mac a scan over every process the
+    user has, with the orphan window from the beginning of time, found
+    nothing and no unreadable non-Apple process (no false positive).
+  - **Also before a claim.** The same scan of the session's cwd, for
+    processes born after the session's last wake (any time, if it was never
+    woken), is a liveness signal: a sandboxed process still working in the
+    workspace, or a scan that cannot be answered, makes the session live
+    (notify-only). The gap review 5 documented (`env -u TMPDIR setsid ...`)
+    is closed (C-22).
 - **Everything is checked again under the lock (review 5 #2).** Right
   before the spawn, under the session lock, the waker re-reads the
   runtime records and re-runs the full eligibility (the turns, the
@@ -885,6 +916,8 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-16 | The waker's own `sandbox-exec -f <copy of restrictive-proxied>` around `gemini` (no `-s`, `SANDBOX` set) runs Gemini, delivers and acknowledges through the proxy, and Gemini starts no second sandbox | Locally: the shipped profile parses with the wake parameters (`/usr/bin/true` under it), and a nested `sandbox-exec` fails. Owner, live: a woken run | Profile and nesting: **proven locally**. End to end: **live pending** |
 | C-17 / N1-live | With `--disable hooks`, a woken Codex run still gets the decision and acknowledges it | Owner, live (codex-cli 0.162.1, 8654c45's exact flags incl. `--disable hooks` and the four sandbox pins, `env -i` allow-list, private 0700 `TMPDIR`, a throwaway workspace-write session) | Hooks off (the Cardinal evidence spool unchanged across the run); `storyboard__read_investigation_events` completes with `approval_mode=approve`; `touch /tmp/x` "Operation not permitted"; `touch "$TMPDIR/x"` ok; curl: no network; rollout `sandbox_policy` = `{type: workspace-write, network_access: false, writable_roots: None, exclude_slash_tmp: true, exclude_tmpdir_env_var: false}`. **Proven.** **But acknowledging failed:** the gateway's post refuses acknowledgments (schema: no `ack_of` / `disposition` / `note`), the CLI ack needs network → the acknowledgment relay (§5.3). The read returned 0 events (that investigation had none); an `owner.decided` in the read is for the owner's E2E. Relay end to end: **live pending** |
 | C-18 | The pre-launch probes see what a launch would load | Locally (0.162.1, the owner's real config, no session): `<codex> <flags> features list` and `<codex> <flags> mcp list --json` | features: rc 0, every disabled feature off, 45 features on (the tested set). mcp: rc 0, a JSON list of `{name, enabled, disabled_reason, transport, auth_status, startup_timeout_sec, tool_timeout_sec}`; only `cardinal` enabled (plugin servers vanish with `--disable plugins`). **Proven locally** |
+| C-21 | The full lockdown leaves a working `codex exec resume` and nothing behind | Owner, live (codex-cli 0.162.1, the full cf17aba argv incl. `--disable daemon_auto_start` and `-c notify=[]`) | The agent ran `echo ALIVE`, exit 0; 5 s after exit no new codex-named process existed and no process carried the wake's TMPDIR. **Proven** |
+| C-22 | macOS tells a sandboxed survivor from anything else, whatever its environment or group | Locally (this Mac, both Pythons): `sandbox-exec -p '(version 1)(allow default)' /bin/sleep` and a plain `/bin/sleep`; then `sandboxed_procs` on: a sandboxed sleep in the workspace; one started with `env -u TMPDIR` in a new session; one that `cd /` holding a file of the workspace open; one orphaned to launchd with `cd /` and nothing in the workspace; a sandboxed sleep elsewhere under a live parent; a plain sleep in the workspace (the owner's editor) | `sandbox_check` = 1 for the sandbox-exec sleep, 0 for the plain one. Found: the first three (workspace signal) and the orphan (orphan window); not found: the one elsewhere under a live parent and the plain one. A scan of every process of the user found no false positive. **Proven locally** |
 | C-20 | Codex `notify` cannot run outside the sandbox on a woken turn | Owner, live (codex-cli 0.162.1, the full lockdown argv incl. `--disable hooks`, `env -i` allow-list, private TMPDIR): `-c notify=["/bin/sh","-c","touch $HOME/probe"]`, then the same with `-c notify=[]` after it | Without the override the probe file **was created in $HOME**: notify runs outside the sandbox even with hooks off. With `-c notify=[]` after it: **absent**. **Proven** → `notify=[]` is the last `-c` of every launch (golden test); the owner's own notify is not refused |
 | C-19 | The sandbox pins hold | Locally: `-c sandbox_workspace_write.{network_access=false, writable_roots=[], exclude_slash_tmp=true, exclude_tmpdir_env_var=false}` through `features list`. Owner, live: a woken turn's `sandbox_policy` | All accepted (rc 0), **but so is a bogus key**; a wrong type is rc 1. So existence is proven only by the rollout: a woken `workspace-write` turn must record `exclude_slash_tmp: true` and no `writable_roots` (enforced post-run). End to end: **live pending** |
 
@@ -1077,3 +1110,7 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
   for `payload.wake is True` (a release blocker found by that PR's review:
   before it, any verified addressed decision launched); lifecycle states
   are reported as `session.wake` events with fixed-vocabulary reasons.
+- **Survivor gap closed (owner: gate 3 is strict).** Survivors are also
+  found through the sandbox itself (`sandbox_check` + cwd / executable /
+  open files, and orphans born during the wake), and the same scan is a
+  liveness signal before every claim (C-21, C-22).
