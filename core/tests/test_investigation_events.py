@@ -227,15 +227,15 @@ class EventClass(unittest.TestCase):
         self.assertEqual([e["seq"] for e in ie.deliverable(evs, SID, INV)], [1])
         self.assertEqual(ie.deliverable([classed(event(1), "control"), classed(ack(2, 1), "control")], SID, INV), [])
 
-    def test_a_session_wake_report_is_never_delivered_or_rendered(self):
-        """cardinal-wake's lifecycle reports (conductor#2110, class "wake", type
-        session.wake) are written by the waker only: unknown to every reader."""
-        self.assertNotIn(ie.WAKE, ie.READ_CLASSES)
-        self.assertIn(ie.SESSION_WAKE, ie.WRITE_ONLY_TYPES)
-        report = event(2, ie.SESSION_WAKE,
-                       payload={"decision_seq": 1, "state": "resuming", "runtime": "codex", "text": "x"},
+    def test_an_unknown_class_or_type_is_never_delivered_or_rendered(self):
+        """Rows of a class or type no reader knows (e.g. the retired waker's
+        class "wake" / type "session.wake" reports still on the server) are
+        unknown to every reader."""
+        self.assertNotIn("wake", ie.READ_CLASSES)
+        report = event(2, "session.wake",
+                       payload={"decision_seq": 1, "state": "notified", "runtime": "codex", "text": "x"},
                        text="a reason")
-        for e in (classed(report, ie.WAKE), report, classed(dict(report, type="cue.added"), ie.WAKE)):
+        for e in (classed(report, "wake"), report, classed(dict(report, type="cue.added"), "wake")):
             self.assertIsNone(ie.event_class(e))
             self.assertEqual(ie.deliverable([e], SID, INV), [])
             self.assertNotIn("#2", ie.render([classed(event(1, text="advice"), "control"), e], SID, INV) or "")
@@ -521,9 +521,9 @@ class Check(Base):
         self.assertNotIn("SECRET OWNER TEXT", out)
         self.assertEqual(self.cursor(), 3)
 
-    def test_a_session_wake_report_is_never_delivered_and_the_cursor_moves_past_it(self):
-        self.fake.events = [classed(event(1, ie.SESSION_WAKE, "a reason",
-                                          payload={"decision_seq": 1, "state": "notified", "text": "x"}), ie.WAKE)]
+    def test_an_unknown_class_row_is_never_delivered_and_the_cursor_moves_past_it(self):
+        self.fake.events = [classed(event(1, "session.wake", "a reason",
+                                          payload={"decision_seq": 1, "state": "notified", "text": "x"}), "wake")]
         ie.bind(self.home, SID, INV, "auto")
         self.assertIsNone(self.check())
         self.assertEqual(self.cursor(), 1)
