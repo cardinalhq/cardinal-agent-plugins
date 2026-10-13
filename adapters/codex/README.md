@@ -261,7 +261,7 @@ changed (a bootstrap the poller completed after SessionStart, refreshed
 capabilities, owner input turned on or off); otherwise prompts carry no
 guidance.
 
-`scripts/cardinal-storyboard investigation link|question|checkpoint|events|ack
+`scripts/cardinal-storyboard investigation link|question|checkpoint|events|ack|mode|on|off
 --session SID` uses the shared Investigation transport, evidence promotion,
 validation and idempotency. `checkpoint --help` lists the event types and fields;
 checkpoint input is a JSON array on stdin. The session id is passed explicitly.
@@ -291,6 +291,7 @@ delivered as model context, never as owner input:
 - **At the next prompt**: what was staged (for example a storyboard re-look's
   block) goes into `additionalContext`.
 
+`scripts/cardinal-storyboard investigation mode off` (in `~/.cardinal/investigation-mode.json`, shared by every agent on the machine) stops creating them for new sessions; `investigation off` / `investigation on` stop or resume recording for one session, whatever the mode (nothing is deleted).
 `CARDINAL_STORYBOARD_SESSION_START=0` disables automatic bootstrap/guidance;
 `CARDINAL_INVESTIGATION_POLLER=0` disables polling.
 

@@ -649,6 +649,34 @@ class SessionStartBootstrap(Base):
         self.start(cwd=checkout)
         self.assertEqual(self.ensures()[0]["context"]["repo"], "acme/widgets")
 
+    def test_investigation_mode_off_skips_the_bootstrap_and_says_how_to_turn_it_on(self):
+        mode = self.home / ".cardinal" / "investigation-mode.json"
+        mode.parent.mkdir(parents=True, exist_ok=True)
+        mode.write_text('{"mode": "off"}\n')
+        ctx = self.start()
+        self.assertEqual(self.ensures(), [])
+        self.assertTrue(ctx.startswith(f"Cardinal session id for this session: {SID}."), ctx)
+        self.assertIn("recording is off for this session (your investigation mode)", ctx)
+        self.assertIn("`cardinal-storyboard investigation on`", ctx)
+        self.assertNotIn("checkpoint --session", ctx)
+        # `investigation on` records this one session anyway.
+        res = subprocess.run([sys.executable, str(CLI), "investigation", "on"], capture_output=True, text=True,
+                             timeout=60, env=dict(self.env, CLAUDE_CODE_SESSION_ID=SID, CARDINAL_INVESTIGATION_POLLER="0"),
+                             cwd=str(self.base))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(INV, res.stdout)
+        self.assertIn("Cardinal already created", self.start(source="resume"))
+
+    def test_investigation_off_for_this_session_survives_resume(self):
+        self.start()
+        res = subprocess.run([sys.executable, str(CLI), "investigation", "off"], capture_output=True, text=True,
+                             timeout=60, env=dict(self.env, CLAUDE_CODE_SESSION_ID=SID), cwd=str(self.base))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        before = len(self.ensures())
+        ctx = self.start(source="resume")
+        self.assertIn("recording is off for this session (this session)", ctx)
+        self.assertEqual(len(self.ensures()), before)
+
     def test_a_fresh_session_gets_an_investigation_storyboard_and_url(self):
         ctx = self.start()
         b = self.binding()

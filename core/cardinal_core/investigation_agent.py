@@ -21,6 +21,7 @@ from typing import Optional
 from . import investigation_bootstrap as boot
 from . import investigation_events as ie
 from . import investigation_grants as grants
+from . import investigation_mode
 from . import investigation_poller as poller
 from . import investigation_text as text
 from . import investigation_turn as turn
@@ -72,6 +73,10 @@ def start(wiring, sid: str, source: Optional[str] = None, *, cwd: Optional[str] 
     conn = wiring.connection()
     if not conn:
         return None
+    if not investigation_mode.recording(home(wiring), sid):
+        # No bootstrap, no request: the session is told it does not record.
+        return investigation_mode.off_line(home(wiring), sid, cmd=command(wiring),
+                                           target=f"--session {shlex.quote(sid)}")
     wanted = wiring.environ.get("CARDINAL_INVESTIGATION_ID") or None
     # Invalid explicit targets fail closed; never silently create another investigation.
     if wanted and not ie.valid_investigation(wanted):

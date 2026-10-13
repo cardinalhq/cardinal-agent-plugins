@@ -52,6 +52,7 @@ from typing import Callable, Optional
 
 from . import investigation_bootstrap as boot
 from . import investigation_events as ie
+from . import investigation_mode
 from . import investigation_state_sync as sync
 
 try:
@@ -225,6 +226,8 @@ def _loop(home, sid, connection, client, anchor, connected, interval, idle, max_
             return "anchor"
         if now - started > max_lifetime:
             return "lifetime"
+        if not investigation_mode.recording(home, sid):
+            return "off"
         bound = ie.read_binding(home, sid) is not None
         if not bound and boot.read_pending(home, sid) is None:
             return "unbound"

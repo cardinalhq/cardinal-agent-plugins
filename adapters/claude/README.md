@@ -114,7 +114,12 @@ git-state, usage
   and to give the URL when asked; nobody starts a storyboard. A failed
   request never blocks the session: it adds one short clause, is retried in
   the background with back-off, and `cardinal-storyboard investigation link`
-  retries at once. `CARDINAL_INVESTIGATION_ID=inv_…` at launch joins an
+  retries at once. `cardinal-storyboard investigation mode off` (in
+  `~/.cardinal/investigation-mode.json`, shared by every agent on this
+  machine) stops creating them for new sessions; `investigation off` and
+  `investigation on` stop or resume recording for one session, whatever the
+  mode (nothing is deleted; off, the session gets no checkpoints, advisory
+  delivery or owner-input capture). `CARDINAL_INVESTIGATION_ID=inv_…` at launch joins an
   existing investigation instead; joining someone else's, the session is told
   it is not the author (it gets the links and the advisory events, but cannot
   edit or publish that storyboard or acknowledge events). Nothing is uploaded
@@ -251,6 +256,9 @@ environment), or the connect state file `~/.claude/cardinal.json`.
   and for debugging. Always exits 0.
 - `cardinal-storyboard investigation link`: this session's private live
   Storyboard URL and Investigation URL (from the binding; no network).
+- `cardinal-storyboard investigation mode [record|off]`: print or set
+  whether sessions record (record, the default; off: no automatic
+  Investigation). `investigation off|on`: this session only.
 - `cardinal-storyboard investigation question "<text>"`: record what the
   investigation asks (the agent's statement, not owner authority).
 - `cardinal-storyboard investigation checkpoint [--session SID]` (events on

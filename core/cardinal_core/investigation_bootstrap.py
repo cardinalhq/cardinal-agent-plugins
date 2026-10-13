@@ -248,10 +248,14 @@ def ensure(home: Path, sid: str, conn: dict, client: str, *, wanted: Optional[st
       unsupported  the server has no such route (an older Maestro)
       busy         another process is bootstrapping this session
       invalid      no session id / no connection
+      off          the session does not record (investigation_mode); no request
 
     `binding` is the session's binding afterwards (None when unbound).
     Never raises."""
     try:
+        from . import investigation_mode
+        if ie.valid_session(sid) and not investigation_mode.recording(home, sid):
+            return {"status": "off", "binding": None, "error": None}
         return _ensure(home, sid, conn, client, wanted, started_at, context, opener, timeout, force,
                        time.time() if now is None else now)
     except Exception as e:  # fail open

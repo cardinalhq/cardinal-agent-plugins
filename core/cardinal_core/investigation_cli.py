@@ -13,6 +13,7 @@ from . import investigation_state_sync as sync
 from . import investigation_bootstrap as boot
 from . import investigation_consumer as consumer
 from . import investigation_grants as gr
+from . import investigation_mode as mode
 from . import investigation_text
 
 EXIT_USAGE = 2
@@ -435,6 +436,10 @@ class CLI:
         if not self.legacy or not ok or (b.get("storyboard_id") and (not b.get("view_url"))):
             res = boot.ensure(home, sid, conn, client, wanted=wanted, timeout=15.0, force=True)
             b = res.get("binding") or b
+            if res["status"] == "off":
+                sys.stderr.write(f"investigation recording is off for this session ({mode.why_off(home, sid)}); "
+                                 "`investigation on` turns it on\n")
+                return 1
             if res["status"] == "invalid":
                 sys.stderr.write("not connected to Cardinal (run /cardinal:connect)\n")
                 if not b:
@@ -497,6 +502,43 @@ class CLI:
             return 1
         self._print_link(b, args.json)
         return 0
+
+    def cmd_mode(self, args: argparse.Namespace) -> int:
+        """`mode`: print the user's investigation mode; `mode record|off`: set it."""
+        home = self._home()
+        if args.value:
+            mode.set_user_mode(home, args.value)
+        current = mode.user_mode(home)
+        if args.json:
+            print(json.dumps({"mode": current or mode.DEFAULT, "default": current is None}))
+        elif current is None:
+            print(f"investigation mode: {mode.DEFAULT} (the default; not set)")
+        else:
+            print(f"investigation mode: {current}"
+                  + (" (sessions get no Investigation; `investigation on` records one session)"
+                     if current == mode.OFF else ""))
+        return 0
+
+    def cmd_off(self, args: argparse.Namespace) -> int:
+        """This session stops recording: no checkpoints, advisory delivery or
+        owner-input capture. Nothing is deleted."""
+        sid = self._session_arg(args)
+        if not sid:
+            return EXIT_USAGE
+        mode.set_session_mode(self._home(), sid, mode.OFF)
+        print("Cardinal investigation recording is off for this session: no checkpoints, advisory input or "
+              "owner-input capture from now on. Its Investigation, if it has one, stays as it was. "
+              "`investigation on` turns it back on.")
+        return 0
+
+    def cmd_on(self, args: argparse.Namespace) -> int:
+        """This session records again (whatever the user's mode): its
+        Investigation is set up or picked up again, then its links printed."""
+        sid = self._session_arg(args)
+        if not sid:
+            return EXIT_USAGE
+        mode.set_session_mode(self._home(), sid, mode.RECORD)
+        return self.cmd_link(args)
 
     def cmd_question(self, args: argparse.Namespace) -> int:
 
@@ -933,6 +975,9 @@ def build_parser(wiring, session_env=()):
         "reviewed",
         "show",
         "verify",
+        "mode",
+        "on",
+        "off",
     ):
         p = sub.add_parser(
             action,
@@ -1045,6 +1090,9 @@ def build_parser(wiring, session_env=()):
             p.add_argument("--exclude-self", action="store_true", default=None)
             p.add_argument("--include-self", dest="exclude_self", action="store_false")
             p.add_argument("--fields", choices=("full", "compact"), default="full")
+        elif action == "mode":
+            p.add_argument("value", nargs="?", choices=mode.MODES,
+                           help="record (the default): every session gets its Investigation; off: none do")
         elif action == "verify":
             p.add_argument("target", help="event seq or semantic_id")
             p.add_argument("--root", type=Path)
@@ -1100,7 +1148,7 @@ def cli_main(argv, wiring, session_env=(), *, legacy=False):
     args = build_parser(wiring, session_env).parse_args(normalize_argv(argv))
     cli = CLI(wiring, args, legacy)
     try:
-        if cli.scoped and args.action not in ("events", "post", "show", "reviewed", "verify", "rule"):
+        if cli.scoped and args.action not in ("events", "post", "show", "reviewed", "verify", "rule", "mode"):
             return EXIT_USAGE if not cli._author_only("not recorded") else 0
         if args.action == "post" and (args.type is None or args.text is None):
             raise ValueError("post requires type and text (positional or --type/--text)")
