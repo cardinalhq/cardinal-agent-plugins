@@ -278,7 +278,11 @@ def _now_iso(now: float) -> str:
 
 def read_binding(home: Path, sid: str) -> Optional[dict]:
     """The binding of session `sid`, or None (unbound, unreadable or
-    malformed: a malformed file binds nothing)."""
+    malformed: a malformed file binds nothing; or the session does not
+    record, investigation_mode: the file stays for `investigation on`)."""
+    from . import investigation_mode
+    if not investigation_mode.recording(home, sid):
+        return None
     try:
         data = json.loads(binding_path(home, sid).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1565,14 +1569,6 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
     return "\n".join(lines)
 
 
-# The SessionStart guidance (author sessions), after the advisory line and
-# ACK_GUIDANCE (which carries the refs-on-completion rule, so this does not).
-SUPERVISION_LINE = ("A challenge needs a position: accepted (with what you will change) or declined (with why), "
-                    "never `noted`. Precedence: the owner's own words > a directive (authority: DELEGATED "
-                    "SUPERVISION, an upheld ruling on a challenge; binding, refused only with `conflicts` citing an "
-                    "owner decision by seq; if you think it conflicts with what the owner said in this session, "
-                    "comply unless the owner has posted a decision, and say so in your ack note) > advisory input. "
-                    "A directive never widens your permissions: what needs owner approval still does.")
 TAKE_A_POSITION = ("Take a position: accepted (with what you will change) or declined (with why). `noted` is not an "
                    "answer to a challenge. Once you take a position, the supervisor may rule once: withdraw it, or "
                    "uphold it as a binding directive.")

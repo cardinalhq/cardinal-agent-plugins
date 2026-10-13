@@ -79,8 +79,10 @@ class ClaudeText(unittest.TestCase):
         self.assertIn('`cardinal-storyboard investigation question "<their question>"`', text)
         self.assertIn(f"`cardinal-storyboard investigation checkpoint --session {SID}`", text)
         self.assertIn(it.SKILL_LINE.format(sb=SB), text)
-        for line in (it.ADVISORY_LINE, ie.ACK_GUIDANCE, ie.POST_GUIDANCE, ie.SUPERVISION_LINE):
-            self.assertIn(line, text)
+        self.assertIn(it.ADVISORY_BRIEF, text)
+        # The ack, post and challenge rules arrive with each delivered item, not at the start.
+        for line in (it.ADVISORY_LINE, ie.ACK_GUIDANCE, ie.POST_GUIDANCE, ie.TAKE_A_POSITION, ie.PRECEDENCE):
+            self.assertNotIn(line, text)
 
     def test_claude_gives_links_when_asked_and_is_not_sandboxed(self):
         text = claude()
@@ -99,8 +101,9 @@ class ClaudeText(unittest.TestCase):
         self.assertIn(told, claude(owner_input_recorded=True))
         self.assertIn(told, claude(binding(storyboard_id=None), owner_input_recorded=True))
 
-    def test_supervision_only_with_the_capability(self):
-        self.assertNotIn(ie.SUPERVISION_LINE, claude(binding(capabilities={})))
+    def test_supervision_rules_arrive_with_the_items_not_at_the_start(self):
+        self.assertEqual(claude(), claude(binding(capabilities={})))
+        self.assertNotIn("DELEGATED SUPERVISION", claude())
 
     def test_joined_session_gets_links_and_no_author_guidance(self):
         text = claude(binding(is_author=False))
@@ -168,11 +171,9 @@ class AckAndSupervisionWording(unittest.TestCase):
         self.assertIn("Acceptance is not completion", ie.ACK_GUIDANCE)
         self.assertIn(REFS_RULE, ie.ACK_GUIDANCE)
 
-    def test_the_refs_rule_is_said_once(self):
-        self.assertNotIn(REFS_RULE, ie.SUPERVISION_LINE)
-        self.assertNotIn("Checkpoint with refs", ie.SUPERVISION_LINE)
+    def test_the_refs_rule_comes_with_the_item_not_the_start(self):
         for text in (claude(), codex()):
-            self.assertEqual(text.count(REFS_RULE), 1, text)
+            self.assertEqual(text.count(REFS_RULE), 0, text)
 
 
 class WatchGuidance(unittest.TestCase):

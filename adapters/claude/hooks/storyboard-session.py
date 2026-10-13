@@ -41,7 +41,11 @@ Contract:
     no request (its capabilities are refreshed afterwards by the background
     poller, for the next start); otherwise one ensure-session-investigation request (3 s;
     idempotent per session, so concurrent hooks and resumes get the same
-    pair). CARDINAL_INVESTIGATION_ID=inv_... at launch is an explicit join
+    pair). A session that does not record (cardinal_core.investigation_mode:
+    the user's `investigation mode off`, or this session's `investigation
+    off`) is never bootstrapped: no request, no poller, one sentence saying
+    recording is off and that `investigation on` turns it on.
+    CARDINAL_INVESTIGATION_ID=inv_... at launch is an explicit join
     of that investigation instead (never creates one). The binding:
     ~/.cardinal/investigations/sessions/<session_id>.json. Then the
     session's background poller (investigation-poller.py) is started,
@@ -168,8 +172,12 @@ def investigation_line(sid: str | None, source=None) -> str | None:
         return None
     from cardinal_core import investigation_bootstrap as boot
     from cardinal_core import investigation_events as ie
+    from cardinal_core import investigation_mode
     import _storyboard_discovery
     home = Path(os.environ.get("HOME") or str(Path.home()))
+    if not investigation_mode.recording(home, sid):
+        # `investigation mode off` or `investigation off`: no bootstrap, no poller.
+        return investigation_mode.off_line(home, sid)
     wanted = (os.environ.get(INVESTIGATION_ENV) or "").strip()
     wanted = wanted if ie.valid_investigation(wanted) else None
     conn = _storyboard_discovery.connection()

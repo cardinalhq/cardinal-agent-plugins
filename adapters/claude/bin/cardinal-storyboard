@@ -33,6 +33,20 @@ Commands:
   Nobody needs to create, bind or start anything; the commands below read
   that binding or are for explicit, optional use.
 
+  investigation mode [record|off] [--json]
+      Print, or set, whether sessions record (~/.cardinal/investigation-mode.json,
+      shared by every agent on this machine). record, the default: every
+      connected session gets its Investigation and live Storyboard. off: no
+      session does (no request at session start, no poller, no owner-input
+      capture); `investigation on` still records one session.
+
+  investigation off [--session SID]
+  investigation on [--session SID]
+      This session only, whatever the mode. off: stop recording from now on
+      (no checkpoints, advisory delivery or owner-input capture; nothing is
+      deleted, the Investigation stays as it was). on: record again, setting
+      up or picking up its Investigation, then print its links (as `link`).
+
   investigation link [--session SID] [--json]
       Print this session's private live Storyboard URL and its
       Investigation URL (and ids), from the binding: no network. Missing
@@ -890,11 +904,19 @@ def build_parser() -> argparse.ArgumentParser:
     inv = sub.add_parser("investigation", help="this session's Investigation on Cardinal (created automatically)")
     inv_sub = inv.add_subparsers(dest="investigation_command",
                                  metavar="{link,question,checkpoint,create,attach,show,bind,ack,events,post,"
-                                         "grant,grants,revoke,rule}")
+                                         "grant,grants,revoke,rule,mode,on,off}")
     link = inv_sub.add_parser("link", help="print this session's live Storyboard and Investigation URLs")
     link.add_argument("--session", help="the session id (default $CLAUDE_CODE_SESSION_ID)")
     link.add_argument("--json", action="store_true", help="ids and URLs as JSON")
     link.set_defaults(func=cmd_investigation_link)
+    # Documentation only, like `events`: `investigation …` runs the shared core parser.
+    mode = inv_sub.add_parser("mode", help="print or set whether sessions record: record (default) or off")
+    mode.add_argument("value", nargs="?", choices=("record", "off"))
+    mode.add_argument("--json", action="store_true")
+    for action, what in (("off", "stop recording this session (nothing is deleted)"),
+                         ("on", "record this session again, whatever the mode, and print its links")):
+        p = inv_sub.add_parser(action, help=what)
+        p.add_argument("--session", help="the session id (default $CLAUDE_CODE_SESSION_ID)")
     question = inv_sub.add_parser("question", help="record what the investigation asks (your statement of it)")
     question.add_argument("text", help="the question (1 to 1000 characters)")
     qwho = question.add_mutually_exclusive_group()

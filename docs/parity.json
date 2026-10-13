@@ -61,6 +61,45 @@
       ]
     }
   },
+  "investigation_mode": {
+    "title": "Investigation mode: record or off, per user and per session",
+    "group": "investigation",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "present",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "grep",
+          "path": "hooks/storyboard-session.py",
+          "pattern": "investigation_mode\\.recording\\("
+        },
+        {
+          "kind": "grep",
+          "path": "bin/cardinal-storyboard",
+          "pattern": "investigation mode \\[record\\|off\\]"
+        }
+      ],
+      "codex": {
+        "kind": "grep",
+        "path": "hooks/cardinal-codex-telemetry.py",
+        "pattern": "investigation_agent\\.start\\("
+      },
+      "cursor": {
+        "kind": "grep",
+        "path": "hooks/cardinal-cursor-telemetry.py",
+        "pattern": "investigation_agent\\.start\\("
+      },
+      "gemini": {
+        "kind": "grep",
+        "path": "hooks/cardinal-gemini-telemetry.py",
+        "pattern": "investigation_agent\\.start\\("
+      }
+    }
+  },
   "investigation_poller": {
     "title": "Background poller and capability refresh",
     "group": "investigation",

@@ -492,15 +492,15 @@ class GrantAndEvents(Base):
 
 
 class AgentGuidance(Base):
-    def test_session_start_names_the_precedence_only_with_the_capability(self):
-        # The shared guidance (investigation_text) gives the author's
-        # guidance to a binding with a storyboard, as Claude's always did.
+    def test_session_start_leaves_the_precedence_to_the_directive(self):
+        # The precedence ladder and the challenge rule arrive with the
+        # directive / challenge itself (render_ruling, render_event), so the
+        # start is the same with or without the capability.
         live = {**self.binding, "storyboard_id": "sb_" + "b" * 24, "bootstrap": {"status": "ok"}}
         with_cap = agent.describe(self.wiring, SID, live)
-        self.assertIn(ie.SUPERVISION_LINE, with_cap)
-        self.assertIn("never widens your permissions", ie.SUPERVISION_LINE)
-        without = agent.describe(self.wiring, SID, {**live, "capabilities": {}})
-        self.assertNotIn("DELEGATED SUPERVISION", without)
+        self.assertNotIn("DELEGATED SUPERVISION", with_cap)
+        self.assertEqual(with_cap, agent.describe(self.wiring, SID, {**live, "capabilities": {}}))
+        self.assertIn("never widens your permissions", ie.PRECEDENCE)
 
     def test_codex_delivery_counts_and_resurfaces(self):
         self.arrive(challenge(1))
@@ -520,9 +520,8 @@ class ReviewFixes(Base):
     def test_conflicts_cite_an_owner_decision_never_owner_input(self):
         self.assertNotIn("owner_input", ie._PLAIN["conflict_ref_not_owner"])
         self.assertIn("--class owner", ie._PLAIN["conflict_ref_not_owner"])
-        for text in (ie.PRECEDENCE, ie.SUPERVISION_LINE):
-            self.assertIn("comply unless the owner has posted a decision", text)
-            self.assertNotIn("owner_input", text)
+        self.assertIn("comply unless the owner has posted a decision", ie.PRECEDENCE)
+        self.assertNotIn("owner_input", ie.PRECEDENCE)
 
     def test_an_accepted_challenge_can_be_upheld_and_the_text_says_so(self):
         self.assertIn("Once you take a position, the supervisor may rule once", ie.TAKE_A_POSITION)
