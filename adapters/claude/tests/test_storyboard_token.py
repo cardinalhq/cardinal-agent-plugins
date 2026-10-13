@@ -73,7 +73,12 @@ class AddActTokenTests(_HomeCase):
 
     def test_hook_tools_list_names_add_act(self):
         text = (PLUGIN_ROOT / "hooks" / "storyboard-token.py").read_text()
-        self.assertIn('TOOLS = ("storyboard__create", "storyboard__preview", "storyboard__add_act")', text)
+        self.assertIn('TOOLS = ("storyboard__create", "storyboard__preview", "storyboard__add_act", '
+                      '"storyboard__checkpoint")', text)
+        # The same set storyboard_authoring acts on.
+        from cardinal_core import storyboard_authoring as sa
+        self.assertEqual(sa.OBSERVED_TOOLS, ("storyboard__create", "storyboard__preview", "storyboard__add_act",
+                                             "storyboard__checkpoint"))
 
 
 if __name__ == "__main__":

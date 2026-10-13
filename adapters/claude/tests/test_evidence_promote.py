@@ -278,7 +278,8 @@ class StoryboardTokenHookTests(_HomeCase):
         self.assertFalse(entry.get("async"))
         self.assertLessEqual(entry["timeout"], 3)
         for name in ("mcp__plugin_cardinal_cardinal__storyboard__create", "mcp__cardinal__storyboard__create",
-                     "mcp__plugin_cardinal_cardinal__storyboard__preview", "mcp__cardinal__storyboard__preview"):
+                     "mcp__plugin_cardinal_cardinal__storyboard__preview", "mcp__cardinal__storyboard__preview",
+                     "mcp__plugin_cardinal_cardinal__storyboard__checkpoint", "mcp__cardinal__storyboard__checkpoint"):
             self.assertRegex(name, "^(?:" + matcher + ")$")
         for name in ("mcp__evil__storyboard__create", "mcp__plugin_cardinal_cardinal__storyboard__publish",
                      "mcp__x_cardinal__storyboard__create", "Bash"):
