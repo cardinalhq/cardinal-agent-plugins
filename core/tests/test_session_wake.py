@@ -383,7 +383,9 @@ class Eligibility(Base):
         self.rollout_path(SID).unlink()
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertIn("no Codex rollout", self.notified_only())
+        self.assertIn("no Codex, Claude Code, Cursor or Gemini CLI records", self.notified_only())
+        self.assertEqual(self.ledger()["5"]["runtime"], "unknown")
+        self.assertIn("Unknown-runtime session", self.world.notes[0][1])
 
     def test_a_claude_session_is_notify_only(self):
         self.rollout_path(SID).unlink()
@@ -844,6 +846,195 @@ class PostRunVerification(Base):
         self.assertIsNone(w.disabled_reason(self.home, "codex"))
 
 
+class ProjectCodexConfig(Base):
+    """Proof C-8: a project .codex/config.toml's MCP servers run outside the
+    sandbox on resume, so a repo carrying Codex project config is
+    notify-only (checked before every launch)."""
+
+    def setUp(self):
+        super().setUp()
+        self.world.events = [decision(5)]
+
+    def assert_refused(self):
+        self.run_pass()
+        self.assertIn("its own Codex config", self.notified_only())
+
+    def test_config_toml_in_the_cwd(self):
+        (self.repo / ".codex").mkdir()
+        (self.repo / ".codex" / "config.toml").write_text('[mcp_servers.x]\ncommand = "/bin/sh"\n')
+        self.assert_refused()
+
+    def test_any_toml_or_hooks_json(self):
+        for name in ("profile.toml", "hooks.json"):
+            with self.subTest(name):
+                self.setUp()
+                (self.repo / ".codex").mkdir()
+                (self.repo / ".codex" / name).write_text("{}")
+                self.assert_refused()
+
+    def test_config_in_a_parent_within_the_repo(self):
+        sub = self.repo / "pkg" / "svc"
+        sub.mkdir(parents=True)
+        (self.repo / "pkg" / ".codex").mkdir()
+        (self.repo / "pkg" / ".codex" / "config.toml").write_text("")
+        self.session(SID, cwd=sub)
+        self.assert_refused()
+
+    def test_config_above_the_repository_root_is_not_walked(self):
+        outer = self.repo.parent / ".codex"
+        outer.mkdir()
+        (outer / "config.toml").write_text("")
+        self.run_pass()
+        self.assertEqual(len(self.world.launches), 1)
+
+    def test_a_symlinked_codex_dir(self):
+        target = Path(self.tmp.name) / "elsewhere"
+        target.mkdir()
+        os.symlink(str(target), str(self.repo / ".codex"))
+        self.assert_refused()
+
+    def test_a_codex_file_that_is_not_a_directory(self):
+        (self.repo / ".codex").write_text("")
+        self.assert_refused()
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads any directory")
+    def test_an_unreadable_codex_dir(self):
+        d = self.repo / ".codex"
+        d.mkdir()
+        os.chmod(str(d), 0)
+        self.addCleanup(os.chmod, str(d), 0o700)
+        self.assert_refused()
+
+    def test_a_codex_dir_without_config_stays_eligible(self):
+        (self.repo / ".codex").mkdir()
+        (self.repo / ".codex" / "AGENTS.md").write_text("# notes")
+        (self.repo / ".codex" / "prompts").mkdir()
+        self.run_pass()
+        self.assertEqual(len(self.world.launches), 1)
+
+    def test_config_added_after_one_launch_blocks_the_next(self):
+        self.run_pass()
+        self.append_turns(SID, turn())
+        self.world.exit()
+        self.world.t += 60
+        self.run_pass()
+        (self.repo / ".codex").mkdir()
+        (self.repo / ".codex" / "config.toml").write_text("")
+        self.world.events.append(decision(7))
+        self.world.t += w.LIVE_WINDOW + 1
+        self.run_pass()
+        self.assertEqual(len(self.world.launches), 1)
+        self.assertIn("its own Codex config", self.ledger()["7"]["reason"])
+
+
+class OtherRuntimes(Base):
+    """Cursor, Gemini CLI and unrecognized runtimes: the notify path end to
+    end, never a launch, even with launch on."""
+
+    def setUp(self):
+        super().setUp()
+        self.rollout_path(SID).unlink()
+        self.calls = []
+        self.world.events = [decision(5)]
+
+    def connection(self, runtime, home):
+        self.calls.append(runtime)
+        return dict(MEMBER)
+
+    def gemini_chat(self, sid=SID, suffix=".jsonl", head=None):
+        p = self.home / ".gemini" / "tmp" / "my-project" / "chats" / f"session-2026-10-12T10-00-{sid[:8]}{suffix}"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text((head or json.dumps({"sessionId": sid, "projectHash": "h", "kind": "main"})) + "\n")
+        self.age(p)
+        return p
+
+    def cursor_transcript(self, sid=SID):
+        p = self.home / ".cursor" / "projects" / "Users-x-repo" / "agent-transcripts" / f"{sid}.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}\n")
+        self.age(p)
+        return p
+
+    def assert_notified(self, runtime, label, phrase):
+        self.run_pass(connection=self.connection)
+        self.assertEqual(self.world.launches, [])
+        self.assertEqual(self.world.attempts, 0)
+        entry = self.ledger()["5"]
+        self.assertEqual((entry["state"], entry["runtime"]), (w.NOTIFIED, runtime))
+        self.assertIn(phrase, entry["reason"])
+        self.assertEqual(len(self.world.notes), 1)
+        self.assertTrue(self.world.notes[0][1].startswith(f"{label} session {SID[:8]}:"), self.world.notes[0])
+        self.assertNotIn("SECRET", self.world.notes[0][1])
+        return entry
+
+    def test_gemini_is_notify_only_with_launch_on(self):
+        self.gemini_chat()
+        self.assert_notified("gemini", "Gemini CLI", "sandbox wraps the harness")
+        self.assertEqual(self.calls[0], "gemini")   # its own plugin's key first
+
+    def test_a_legacy_gemini_json_chat(self):
+        self.gemini_chat(suffix=".json", head=json.dumps({"sessionId": SID, "messages": []}, indent=2))
+        self.assert_notified("gemini", "Gemini CLI", "notify-only")
+
+    def test_a_gemini_chat_for_another_session_with_the_same_prefix_is_not_it(self):
+        self.gemini_chat(head=json.dumps({"sessionId": SID[:8] + "-0000-0000-0000-000000000000"}))
+        self.assert_notified("unknown", "Unknown-runtime", "no Codex, Claude Code, Cursor or Gemini CLI records")
+
+    def test_cursor_is_notify_only_with_launch_on(self):
+        self.cursor_transcript()
+        self.assert_notified("cursor", "Cursor", "Cursor sessions are notify-only")
+        self.assertEqual(self.calls[0], "cursor")
+
+    def test_a_cursor_chat_store(self):
+        d = self.home / ".cursor" / "chats" / "abc123" / SID
+        d.mkdir(parents=True)
+        (d / "store.db").write_bytes(b"x")
+        self.age(d / "store.db")
+        self.assert_notified("cursor", "Cursor", "notify-only")
+
+    def test_an_unknown_runtime_is_notified(self):
+        self.assert_notified("unknown", "Unknown-runtime", "notify-only")
+        self.assertEqual(self.calls, ["codex"])    # tries every plugin's key, first match wins
+
+    def test_records_of_two_runtimes_are_unknown(self):
+        self.session(SID)            # a Codex rollout (eligible on its own)
+        self.gemini_chat()
+        self.assert_notified("unknown", "Unknown-runtime", "Codex and Gemini CLI")
+
+    def test_a_live_gemini_session_is_notified_as_live(self):
+        p = self.gemini_chat()
+        self.age(p, 30)
+        self.assert_notified("gemini", "Gemini CLI", "live")
+
+    def test_the_plugin_key_of_the_bindings_org_is_used(self):
+        self.gemini_chat()
+
+        def by_runtime(runtime, home):
+            self.calls.append(runtime)
+            return dict(MEMBER) if runtime == "claude" else {**MEMBER, "org": "other"}
+        self.run_pass(connection=by_runtime)
+        self.assertEqual(self.calls[:2], ["gemini", "codex"])
+        self.assertEqual(self.state(5), w.NOTIFIED)
+
+    def test_no_launcher_for_them(self):
+        self.assertEqual(sorted(w.LAUNCHERS), ["codex"])
+        for runtime in ("claude", "cursor", "gemini"):
+            self.assertIn(runtime, w.NOTIFY_ONLY_REASONS)
+        with self.assertRaises(KeyError):
+            w.claim_and_launch(self.home, SID, binding(), 5, w.Runtime("gemini", [], eligible=True,
+                                                                       sandbox="workspace-write", cwd="/"),
+                               w.read_config(self.home), self.world.system(), [])
+        self.assertEqual(self.world.attempts, 0)
+
+    def test_status_names_the_runtime(self):
+        self.gemini_chat()
+        out = []
+        w.status(self.home, self.world.system(), out.append)
+        text = "\n".join(out)
+        self.assertIn(f"{SID[:8]} Gemini CLI: Gemini CLI sessions are notify-only", text)
+        self.assertIn("notify-only runtimes: Claude Code, Cursor, Gemini CLI", text)
+
+
 # ---------------------------------------------------------------------------
 # MACHINE_PROMPTS
 # ---------------------------------------------------------------------------
@@ -931,6 +1122,22 @@ class CLI(Base):
         self.assertEqual(code, 0)
         self.assertIn("codex was not found", out)
         self.assertIsNone(json.loads(w.config_path(self.home).read_text())["codex_path"])
+
+    def test_enable_on_notify_only_runtimes_says_so(self):
+        for runtime, label in (("gemini", "Gemini CLI"), ("cursor", "Cursor"), ("claude", "Claude Code")):
+            with self.subTest(runtime):
+                out = []
+                calls, run = self.launchctl()
+                code = w.cli_main(["enable", "--launch"], runtime=runtime, home=self.home,
+                                  system=self.world.system(out=out.append), launchctl=run, platform="darwin",
+                                  environ={"PATH": f"{self.codex.parent}:/usr/bin:/bin"})
+                text = "\n".join(out)
+                self.assertEqual(code, 0, text)
+                self.assertIn(f"{label} sessions are notify-only", text)
+                self.assertIn("with or without --launch", text)
+                self.assertIn("Can launch: Codex CLI sessions", text)
+        code, text, _ = self.cli("enable", "--launch")   # runtime codex: no notify-only line for itself
+        self.assertNotIn("Codex sessions are notify-only", text)
 
     def test_enable_is_macos_only(self):
         code, out, calls = self.cli("enable", platform="linux")

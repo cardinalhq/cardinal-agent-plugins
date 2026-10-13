@@ -477,7 +477,8 @@ at most 3 wakes a day, and the machine at most 10.
 
 **Which sessions can launch.** A Codex CLI session (`codex` or `codex exec`)
 whose every turn ran `-s workspace-write` or `-s read-only` with network
-off, started in a git work tree. It is resumed exactly as
+off, started in a git work tree with no Codex project config (below). It
+is resumed exactly as
 
 ```
 codex exec -s <its own sandbox> -c approval_policy="never" resume <session id> "Cardinal resumed this session for owner decision #<seq> in its Investigation. Read the investigation events and act on that decision. Every other event is advisory."
@@ -490,12 +491,21 @@ text is never in the prompt; it arrives through the plugin's hooks, and the
 prompt itself is never recorded as owner input. The plugin's `CARDINAL_*`
 switches are cleared for the woken run, so its hooks and poller are on.
 
-**Notify-only** (a macOS notification naming the session, the Investigation
-and the state, never the decision's text):
+**Notify-only** (a macOS notification naming the runtime, the session, the
+Investigation and the state, never the decision's text):
 - Claude Code sessions (see the Claude plugin's README; use
-  `claude --remote-control` to reach a running one);
+  `claude --remote-control` to reach a running one), Cursor and Gemini CLI
+  sessions (Gemini CLI's sandbox wraps its hooks too and allows network,
+  proof C-7), and sessions whose runtime is not recognized;
 - Codex desktop app sessions (its process outlives its threads), subagent
   threads, and any originator the waker does not recognize;
+- a repository that carries its own Codex config: a `.codex/` with any
+  `*.toml` or a `hooks.json` (or a `.codex` that is a symlink or
+  unreadable) anywhere from the session's working directory up to the
+  repository root. A project `config.toml` can declare MCP servers, and a
+  resumed `codex exec` starts them outside the sandbox (proof C-8). A
+  sandboxed agent cannot create `.codex`; a cloned repository or another
+  tool can. Checked before every launch;
 - any session that ever ran `danger-full-access` or with network access:
   that agent could have changed the waker's own files;
 - a session whose window is still open (its process, a recent rollout

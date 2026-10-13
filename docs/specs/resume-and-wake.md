@@ -4,6 +4,11 @@ Status: APPROVED v3 (2026-10-12).
 - The owner approved A, B and a simplified C (§5): existing Cardinal
   authentication, no passkey or signing, three gates proven per runtime
   before unattended wake (§6).
+- Amended later on 2026-10-12, with the owner's approval:
+  - notify-only for every adapter with the Investigation layer (§2, §5.3);
+  - Gemini CLI fails the gates (C-7);
+  - a guard against Codex project config (C-8);
+  - §4 hold wording matched to the implementation in PR #208.
 
 The history:
 - v1 had two independent reviews and a peer review (§10).
@@ -63,8 +68,11 @@ Non-goals
 - **Waking a session whose window is still open.**
 - **Treating a wake as authorization for consequential actions** such as
   deploys, reverts or merges (§5.6).
-- **Other runtimes.** Cursor, Gemini, OpenCode, Pi and Devin are out of
-  scope; a cloud waker is out of scope too.
+- **Unattended launch on other runtimes.** Only Codex launches. Claude
+  Code, Cursor and Gemini CLI sessions are notify-only (§5.3). OpenCode
+  and Pi have no Investigation binding layer, and Devin runs in the cloud
+  (waking it would be a server-side feature), so all three are out of
+  scope. A cloud waker is out of scope too.
 
 ## 3. Workstream A: continue a past session's storyboard (guidance only)
 
@@ -124,10 +132,13 @@ pinned receipt. All user-facing text says "protected while space allows".
 - **No `GC_INDEX` change.** Older adapter cores share `~/.cardinal/evidence`
   and keep only 5-field index rows (`_gc_index_load`, `:1835`). The size
   pass (`:1772`) reads `.hold` only for the sessions it is about to evict.
-  When the spool is over the cap, it first evicts all unheld sessions, least
-  recently active first. Only then does it start on held sessions, oldest
-  `set_at` first, once held bytes exceed `HOLD_MAX_FRACTION = 0.5` of the
-  cap. The `index[name] = [-1,0,0,0.0,0.0]` reset (`:1792`) stays as it is.
+  When the spool is over the cap, the eviction walk keeps its
+  least-recently-active order and skips held sessions. The held sessions it
+  has reached may keep at most `HOLD_MAX_FRACTION = 0.5` of the cap. Past
+  that, the hold with the oldest `set_at` loses its oldest entries first.
+  If every unheld session is gone and the spool is still over the cap,
+  holds go too. The `index[name] = [-1,0,0,0.0,0.0]` reset (`:1792`) stays
+  as it is.
 - **Who sets it.**
   - `investigation_events.checkpoint()` on success (`:1089`, which has
     `home`). The MCP `storyboard__checkpoint` path bypasses it. The
@@ -233,7 +244,14 @@ these hold:
 - its originator is not the Codex desktop app. The app's process outlives
   its threads, so it is notify-only;
 - `cwd` is taken from the rollout's `session_meta.cwd`, never from the
-  binding.
+  binding;
+- no directory from `cwd` up to and including the git work-tree root holds
+  Codex project config. That means a `.codex/` containing any `*.toml`
+  (`config.toml` can declare MCP servers) or a `hooks.json`. A `.codex`
+  that is a symlink (never followed) or can't be read also counts (fail
+  closed). A resumed `codex exec` starts a project's MCP servers outside
+  the sandbox (proof C-8). This is checked before every launch, and the
+  notification says "the project has its own Codex config".
 
 Launch, with the argv pinned and covered by a golden test:
 ```
@@ -256,6 +274,33 @@ codex exec -s <the session's own sandbox: workspace-write|read-only> \
 
 Remote Control (C0) is the Claude path. A Claude session with an addressed
 decision gets a notification.
+
+**Other runtimes: notify-only.**
+- Every adapter with the Investigation layer ships `cardinal-wake`: Claude
+  Code, Codex, Cursor and Gemini CLI. Their sessions get the notify path
+  end to end, and the notification names the runtime.
+- The waker recognizes a session by the runtime's own records:
+  - a Gemini CLI chat at `~/.gemini/tmp/*/chats/session-*-<sid[:8]>.json[l]`
+    whose head names the `sessionId`;
+  - Cursor's `~/.cursor/projects/*/agent-transcripts/<sid>.*` or
+    `~/.cursor/chats/*/<sid>/` (best effort).
+- Records of no runtime, or of more than one, make the session "unknown".
+  It is still notified.
+- Launch is an explicit allow-list of per-runtime launchers. Each launcher
+  defines eligibility, the pinned argv, a pre-launch snapshot and post-run
+  verification. Only Codex is on the list.
+- **Gemini CLI fails the gates** (proof C-7). Its sandbox wraps the whole
+  CLI, Cardinal's hooks included. That leaves two options:
+  - Cardinal's hooks cannot keep their binding and inbox state, so the
+    decision can't be delivered or acknowledged;
+  - or `~/.cardinal` is made writable, and the agent can then tamper with
+    the wake state, which fails gate 1 locally.
+  - Every bundled macOS profile also allows network, and the Codex bar is
+    no network.
+- **Cursor** has no demonstrated unattended resume.
+
+Adding a runtime later is one launcher entry, after its gates are
+demonstrated.
 
 **Wake prompt** (fixed except for the seq): "Cardinal resumed this session
 for owner decision #<seq> in its Investigation. Read the investigation
@@ -332,6 +377,8 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-4 | Hooks run on a headless resume (the delivery path exists) | `codex exec resume` with Cardinal hooks on | SessionStart bound the session (`source auto`, `is_author true`, `owner_decision` enabled in prod) |
 | C-5 | Duplicate decisions can't start concurrent executions | Unit and multi-process tests in the C PR: two wakers racing the same seq; two decisions for one session; spawn error vs. child started | See the PR's test output |
 | C-6 | Claude enforces a wake sandbox | Not attempted. User settings apply to `claude -p --resume`, and bypass or allow lists can't be excluded without dropping the plugin | **Not demonstrated → Claude notify-only** |
+| C-7 | Gemini CLI enforces a wake sandbox that leaves Cardinal's state intact (gemini-cli 0.63.0) | Gemini's `-s` (macOS seatbelt) wraps the whole CLI process, hooks included. Its bundled profiles (`sandbox-macos-{permissive,restrictive,strict}-open.sb`, `TARGET_DIR` = workspace) were run directly: `touch ~/.cardinal/investigations/<probe>`; a write in the workspace; `curl https://example.com`. Inside the sandbox it also can't read its API key from the macOS keychain (exit 41) | Outside write "Operation not permitted" in all three (the hooks couldn't keep state, or `~/.cardinal` would have to be writable by the agent); inside write ok; `curl` 200 in all three. **Fails → Gemini CLI notify-only** |
+| C-8 | Codex project config can't run unsandboxed code on a wake | A `.codex/config.toml` in the session's cwd declaring `[mcp_servers.x] command="/bin/sh"` that touches `~/probe`, under `codex exec -s workspace-write resume <sid>`. Inside workspace-write: `mkdir .codex`, `git config …` (`.git/config`) and `mkdir .agents` | The project MCP server ran **outside** the sandbox (`~/probe` created). A project `.codex/hooks.json` SessionStart hook did not run. The agent can't create any of these ("Operation not permitted"), but a cloned repo or another tool can. **So the waker refuses any session whose repo carries Codex project config (§5.3)** |
 
 Still owed: an end-to-end manual run, in which the owner posts an addressed
 decision from the web for a stopped, sandboxed Codex CLI session and watches
@@ -381,7 +428,8 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
 - Waking on anything but a verified owner decision addressed to the session.
 - Agent-triggered or chained wakes.
 - Waking the Codex desktop app or any session that ever ran unsandboxed.
-- Claude unattended launch (notify-only).
+- Claude, Cursor or Gemini CLI unattended launch (notify-only).
+- Launching a Codex session whose repository carries Codex project config.
 - A cloud waker; Linux/Windows service managers (launchd only).
 - Injecting into a live TUI.
 - Uploading uncited evidence; a new `adopt` command.

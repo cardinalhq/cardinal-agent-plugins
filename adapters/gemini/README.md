@@ -367,7 +367,31 @@ python3 scripts/cardinal-status
 python3 scripts/cardinal-disconnect
 python3 scripts/cardinal-disconnect --force
 python3 scripts/cardinal-checks on|off|status
+python3 scripts/cardinal-wake enable|disable|status|run --dry-run
 ```
+
+## Owner-woken sessions (notify-only)
+
+`python3 scripts/cardinal-wake enable` (macOS; a per-user launchd agent)
+watches for owner decisions you post on an Investigation page addressed to
+a stopped session on this machine. For a Gemini CLI session the result is
+always a macOS notification naming the session (short id), the
+Investigation and the state, never the decision's text. The waker never
+resumes a Gemini CLI session, with or without `--launch`. Gemini CLI's
+sandbox (`-s`, macOS seatbelt) wraps the whole CLI, this plugin's hooks
+included: either the hooks cannot write their Cardinal state (so a woken
+session could not receive or acknowledge the decision), or `~/.cardinal`
+is made writable and the agent could tamper with the waker's state. Every
+bundled macOS profile also allows outbound network
+([`docs/specs/resume-and-wake.md`](../../docs/specs/resume-and-wake.md)
+§5.3, proof C-7). Only a decision posted from your signed-in Cardinal web
+session counts; the waker reads it from Cardinal with this plugin's key,
+never from local files. It recognizes a Gemini CLI session by its chat file
+(`~/.gemini/tmp/*/chats/session-*-<first 8 of the id>.json[l]` naming the
+session id). The same waker resumes eligible Codex CLI sessions; the Codex
+plugin's README ("Owner-woken sessions") has the rules and the trust
+boundary. `disable` removes the agent; `status` shows recent wakes, never
+decision text.
 
 ## Requirements
 

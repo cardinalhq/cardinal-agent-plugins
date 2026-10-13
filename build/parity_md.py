@@ -21,6 +21,8 @@ PARITY_JSON = ROOT / "docs" / "parity.json"
 PARITY_MD = ROOT / "docs" / "parity.md"
 ADAPTERS = ("claude", "codex", "cursor", "gemini")
 ADAPTER_NAMES = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "gemini": "Gemini CLI"}
+# Adapters outside the matrix (a feature's optional `outside_matrix` cells).
+OUTSIDE_NAMES = {"opencode": "OpenCode", "pi": "Pi", "devin": "Devin"}
 # group id -> heading, in document order
 GROUPS = {
     "investigation": "Investigation and supervision",
@@ -77,6 +79,14 @@ def render(data: dict) -> str:
                 cells.append(k)
                 if k in ("L", "N/A"):
                     notes.append(f"- **{f['title']}**, {ADAPTER_NAMES[a]} ({k}): {cell.split(':', 1)[1].strip()}")
+                elif (f.get("notes") or {}).get(a):
+                    # a present cell's qualifier (e.g. notify-only)
+                    notes.append(f"- **{f['title']}**, {ADAPTER_NAMES[a]} (P): {f['notes'][a]}")
+            # The native and API adapters (opencode, pi, devin) are not matrix
+            # columns; a feature may still say why they do not have it.
+            for a, cell in (f.get("outside_matrix") or {}).items():
+                notes.append(f"- **{f['title']}**, {OUTSIDE_NAMES.get(a, a)} (outside the matrix, "
+                             f"{_kind(cell)}): {cell.split(':', 1)[1].strip()}")
             lines.append(f"| {f['title']} (`{fid}`) | " + " | ".join(cells) + " |")
         if notes:
             lines += [""] + notes

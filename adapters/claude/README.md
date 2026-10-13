@@ -328,8 +328,9 @@ your settings would drop this plugin and with it the decision's delivery.
 So the sandbox an unattended wake needs cannot be guaranteed
 ([`docs/specs/resume-and-wake.md`](../../docs/specs/resume-and-wake.md)
 §5.3, proof C-6 not demonstrated). The same waker resumes eligible Codex CLI
-sessions (`enable --launch`); the Codex plugin's README ("Owner-woken
-sessions") has the eligibility rules and the trust boundary. The waker reads
+sessions (`enable --launch`) and notifies for Cursor and Gemini CLI
+sessions; the Codex plugin's README ("Owner-woken sessions") has the
+eligibility rules and the trust boundary. The waker reads
 the events with this plugin's key (`CARDINAL_MCP_URL` /
 `CARDINAL_MCP_API_KEY` in `~/.claude/settings.json` `env`; nothing after
 `/cardinal:disconnect`), straight from Cardinal; only a decision posted from

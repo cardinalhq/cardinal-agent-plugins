@@ -40,6 +40,9 @@ authority and privacy rules behind the turn-end and owner-input rows).
    `<file>.md#anchor`, or a gemini-cli `chunk-*.js:<line>`) or
    `na:<reason>`. A present cell on one adapter with a missing or unknown
    cell on another fails the test.
+   Optionally, `notes.<adapter>` qualifies a present cell (for example
+   "notify-only"), and `outside_matrix.<opencode|pi|devin>` (`na:` or
+   `limit:`) records why a native or API adapter lacks the feature.
 4. Run `python3 build/parity_md.py` to regenerate the matrix below, then
    `python3 -m unittest discover -s tests -p test_parity_matrix.py`.
 
@@ -51,9 +54,9 @@ authority and privacy rules behind the turn-end and owner-input rows).
 
 | | Claude Code | Codex | Cursor | Gemini CLI |
 |---|---|---|---|---|
-| P | 55 | 50 | 41 | 46 |
+| P | 55 | 50 | 42 | 47 |
 | L | 0 | 4 | 13 | 7 |
-| N/A | 1 | 2 | 2 | 3 |
+| N/A | 1 | 2 | 1 | 2 |
 
 ### Investigation and supervision
 
@@ -75,7 +78,7 @@ authority and privacy rules behind the turn-end and owner-input rows).
 | A recording command that could not reach Cardinal is reported (`investigation_failures_observe`) | P | P | P | P |
 | Supervisor watch guidance (events --follow, --exclude-self, --fields compact) (`supervisor_watch_guidance`) | P | P | P | P |
 | Additive repository provenance, saved-edit backfill and parent-workspace sessions (`session_repository_provenance`) | P | P | P | P |
-| Owner-woken sessions: cardinal-wake (Codex CLI launch, Claude notify-only) (`session_wake`) | P | P | N/A | N/A |
+| Owner-woken sessions: cardinal-wake (Codex CLI launch; every other runtime notify-only) (`session_wake`) | P | P | P | P |
 
 - **Owner-input disclosure, per session, before the first capture**, Cursor (L): Cursor has no user-visible, non-blocking hook message: beforeSubmitPrompt's user_message shows only when the prompt is blocked, and the other outputs are model context (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#owner-input-opt-in-consent). Compensated by the connect-time, versioned consent (owner_input_consent).
 - **Owner-input consent given in the user's terminal (cardinal-connect --owner-input)**, Claude Code (N/A): capture follows the per-session disclosure (plan R3); no separate consent is required
@@ -85,8 +88,12 @@ authority and privacy rules behind the turn-end and owner-input rows).
 - **A subagent's tool call does not consume the main thread's advisories**, Gemini CLI (L): AfterTool carries no agent id and subagents run tools through the same hooks; Gemini CLI has no subagent hook events (gemini-cli 0.50.0 HookEventName, chunk-W4YMYD53.js:324340-324352; adapters/gemini/README.md#limits).
 - **Turn-end deliveries block the stop in the same turn (else staged for the next boundary)**, Cursor (L): stop's followup_message is submitted as the next user message, so advisory text would become owner input (plan R1; https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#limits-on-cursor). Staged for the next postToolUse or sessionStart instead.
 - **Turn-end deliveries block the stop in the same turn (else staged for the next boundary)**, Gemini CLI (L): an AfterAgent block re-enters the model as plain user-role text and re-fires BeforeAgent with the reason as the prompt (gemini-cli 0.50.0 chunk-W4YMYD53.js:335749-335757; adapters/gemini/README.md#limits). Staged for the next BeforeAgent or AfterTool instead.
-- **Owner-woken sessions: cardinal-wake (Codex CLI launch, Claude notify-only)**, Cursor (N/A): out of scope for owner-woken sessions (docs/specs/resume-and-wake.md §2 non-goals: Cursor, Gemini, OpenCode, Pi and Devin); its sessions are not resumed or notified
-- **Owner-woken sessions: cardinal-wake (Codex CLI launch, Claude notify-only)**, Gemini CLI (N/A): out of scope for owner-woken sessions (docs/specs/resume-and-wake.md §2 non-goals: Cursor, Gemini, OpenCode, Pi and Devin); its sessions are not resumed or notified
+- **Owner-woken sessions: cardinal-wake (Codex CLI launch; every other runtime notify-only)**, Claude Code (P): notify-only: a resumed claude -p runs with the user's own settings, so the wake sandbox is not guaranteed (docs/specs/resume-and-wake.md §6, C-6 not demonstrated); claude --remote-control reaches a running session
+- **Owner-woken sessions: cardinal-wake (Codex CLI launch; every other runtime notify-only)**, Cursor (P): notify-only: no unattended Cursor resume has been shown to pass the wake gates (docs/specs/resume-and-wake.md §5.3)
+- **Owner-woken sessions: cardinal-wake (Codex CLI launch; every other runtime notify-only)**, Gemini CLI (P): notify-only: Gemini CLI's sandbox wraps the harness, so the plugin's hooks cannot keep Cardinal state without the agent being able to tamper with it, and every bundled macOS profile allows network (docs/specs/resume-and-wake.md §6, C-7)
+- **Owner-woken sessions: cardinal-wake (Codex CLI launch; every other runtime notify-only)**, OpenCode (outside the matrix, N/A): the OpenCode adapter has no Investigation binding layer (no session binding, poller or owner-decision delivery; adapters/opencode is telemetry, MCP and evidence capture), so there is no addressed decision to notify about
+- **Owner-woken sessions: cardinal-wake (Codex CLI launch; every other runtime notify-only)**, Pi (outside the matrix, N/A): the Pi adapter has no Investigation binding layer (no session binding, poller or owner-decision delivery; adapters/pi is telemetry, MCP and evidence capture), so there is no addressed decision to notify about
+- **Owner-woken sessions: cardinal-wake (Codex CLI launch; every other runtime notify-only)**, Devin (outside the matrix, N/A): Devin runs in Cognition's cloud sandbox and this adapter is a server-side telemetry poller with no local session or Investigation binding; waking a Devin session would be a server-side feature, out of scope for a local waker
 
 ### Storyboard authoring and discovery
 

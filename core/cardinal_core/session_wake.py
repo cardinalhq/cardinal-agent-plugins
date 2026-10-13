@@ -27,8 +27,8 @@ RUN_INTERVAL seconds from the stable copy in ~/.cardinal/wake/lib/):
   2. with the opt-in on, every candidate session: a binding in
      ~/.cardinal/investigations/sessions touched within CANDIDATE_WINDOW,
      is_author true, the owner_decision capability on. Its events are read
-     straight from Cardinal (read-investigation-events with the plugin's key
-     for that runtime, the binding's org), never from the local inbox, so a
+     straight from Cardinal (read-investigation-events with the plugin's key,
+     that runtime's first, the binding's org), never from the local inbox, so a
      local file cannot fake a decision. A decision e wakes sid only when
      (§5.2): verified_owner_decision(e) (server-stamped fields);
      e.to_session_id == sid (a broadcast never wakes); e is still
@@ -48,11 +48,25 @@ network_access true (one danger-full-access turn: that agent could have
 tampered with local state); the session id is a UUID (never an argv option);
 cwd comes from session_meta.cwd (never the binding, which the agent can
 write) and is a git work tree (`codex exec` refuses anything else without
---skip-git-repo-check, which is never passed). A Claude transcript
-(~/.claude/projects/*/<sid>.jsonl): notify-only, gate C-6 is not
-demonstrated (a resumed `claude -p` runs with the user's own settings,
-bypass modes and allow lists included; Remote Control is the Claude path).
-Anything else: notify-only. Rollouts are streamed line by line, bounded
+--skip-git-repo-check, which is never passed); no directory from cwd up to
+the work-tree root holds Codex project config (.codex/*.toml or
+.codex/hooks.json, a .codex that is a symlink or unreadable: its MCP
+servers would start outside the sandbox on resume, proof C-8). Checked
+again before every launch.
+
+Other runtimes are notify-only. Each is recognized by its own records
+(RECORDS, a glob): a Claude transcript (~/.claude/projects/*/<sid>.jsonl;
+gate C-6 not demonstrated: a resumed `claude -p` runs with the user's own
+settings; Remote Control is the Claude path); a Gemini CLI chat
+(~/.gemini/tmp/*/chats/session-*-<sid[:8]>.json[l] whose head names the
+sessionId; proof C-7: its sandbox wraps the harness and allows network);
+Cursor's records (~/.cursor/projects/*/agent-transcripts/<sid>.*,
+~/.cursor/chats/*/<sid>/, best effort). Records of none or of several
+runtimes: unknown, still notified. Notifications name the runtime. The
+only runtimes that may launch are LAUNCHERS, an explicit allow-list (one
+Launcher per runtime: eligibility, pinned argv, snapshot, post-run
+verify); adding one is that entry, after its gates are demonstrated.
+Rollouts are streamed line by line, bounded
 (MAX_ROLLOUT_BYTES, MAX_LINE), and only their session_meta / turn_context
 records are parsed; nothing of their contents is logged.
 
@@ -119,6 +133,7 @@ import os
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -169,8 +184,21 @@ NOTIFY_STATES = (NOTIFIED, RESUMING, ACKNOWLEDGED, FAILED)
 
 CODEX = "codex"
 CLAUDE = "claude"
+CURSOR = "cursor"
+GEMINI = "gemini"
 UNKNOWN = "unknown"
-RUNTIMES = (CODEX, CLAUDE)
+RUNTIMES = (CODEX, CLAUDE, CURSOR, GEMINI)   # every adapter with the Investigation layer (all notify)
+LABELS = {CODEX: "Codex", CLAUDE: "Claude Code", CURSOR: "Cursor", GEMINI: "Gemini CLI", UNKNOWN: "Unknown-runtime"}
+# Why a runtime without a launcher (LAUNCHERS, below) is notify-only.
+NOTIFY_ONLY_REASONS = {
+    CLAUDE: "Claude Code sessions are notify-only: a resumed claude -p runs with your own settings, so its "
+            "sandbox is not guaranteed",
+    CURSOR: "Cursor sessions are notify-only: no unattended resume has been shown to pass the wake gates",
+    # Proof C-7 (2026-10-12, gemini-cli 0.63.0): its sandbox wraps the whole
+    # CLI, hooks included, and every bundled macOS profile allows network.
+    GEMINI: "Gemini CLI sessions are notify-only: its sandbox wraps the harness, so the plugin's hooks cannot "
+            "keep Cardinal state without the agent being able to tamper with it, and the sandbox allows network",
+}
 SANDBOX_MODES = ("workspace-write", "read-only")
 # Originators of Codex's own CLI (codex exec, the TUI). An allow-list: the
 # desktop app ("Codex Desktop") and anything unrecognized are notify-only.
@@ -188,9 +216,9 @@ LAUNCHCTL = "/bin/launchctl"
 
 NOTIFY_ONLY_TEXT = (
     "Notify-only (a notification, never a launch): Claude Code sessions (a resumed `claude -p` runs with your "
-    "own settings, so its sandbox cannot be guaranteed; use `claude --remote-control` instead), Codex desktop "
-    "app sessions, any session that ever ran danger-full-access or with network access, and a session whose "
-    "window is still open.")
+    "own settings, so its sandbox cannot be guaranteed; use `claude --remote-control` instead), Cursor and "
+    "Gemini CLI sessions, sessions whose runtime is not recognized, Codex desktop app sessions, any session that "
+    "ever ran danger-full-access or with network access, and a session whose window is still open.")
 LAUNCH_TEXT = (
     "Can launch: Codex CLI sessions (codex / codex exec) that only ever ran -s workspace-write or -s read-only, "
     "resumed in that same sandbox with approvals off (`codex exec -s <mode> -c approval_policy=\"never\" "
@@ -308,11 +336,13 @@ def global_lock(home: Path, wait: float = 10.0):
 
 def read_config(home: Path) -> dict:
     c = _read_json(config_path(home))
-    codex = c.get("codex_path")
-    return {"enabled": c.get("enabled") is True, "launch": c.get("launch") is True,
-            "codex_path": codex if isinstance(codex, str) and os.path.isabs(codex) else None,
-            "enabled_at": c.get("enabled_at"), "python": c.get("python"),
-            "versions": c.get("versions") if isinstance(c.get("versions"), dict) else {}}
+    out = {"enabled": c.get("enabled") is True, "launch": c.get("launch") is True,
+           "enabled_at": c.get("enabled_at"), "python": c.get("python"),
+           "versions": c.get("versions") if isinstance(c.get("versions"), dict) else {}}
+    for launcher in LAUNCHERS.values():   # <runtime>_path: an absolute executable, or None
+        exe = c.get(launcher.executable)
+        out[launcher.executable] = exe if isinstance(exe, str) and os.path.isabs(exe) else None
+    return out
 
 
 def write_config(home: Path, config: dict) -> None:
@@ -482,17 +512,6 @@ def reap() -> None:
         _CHILDREN.remove(p)
 
 
-def codex_connection(home: Path) -> dict:
-    """The Codex plugin's connection: ~/.codex/cardinal.json mcp_url and
-    cardinal-secrets.json mcp_api_key (never the environment)."""
-    from .evidence_promote import agent_paths_connection
-    from .paths import AgentPaths
-    try:
-        return agent_paths_connection(AgentPaths(home=home / ".codex"))(home, {}) or {}
-    except Exception:
-        return {}
-
-
 def claude_connection(home: Path) -> dict:
     """The Claude plugin's connection: CARDINAL_MCP_URL / CARDINAL_MCP_API_KEY
     in ~/.claude/settings.json `env` (where /cardinal:connect writes them);
@@ -509,8 +528,22 @@ def claude_connection(home: Path) -> dict:
         return {}
 
 
+def agent_connection(runtime: str, home: Path) -> dict:
+    """A plugin's connection from its managed files under ~/.<runtime>
+    (cardinal.json mcp_url + cardinal-secrets.json mcp_api_key; Codex,
+    Cursor and Gemini CLI), never the environment."""
+    from .evidence_promote import agent_paths_connection
+    from .paths import AgentPaths
+    try:
+        return agent_paths_connection(AgentPaths(home=home / f".{runtime}"))(home, {}) or {}
+    except Exception:
+        return {}
+
+
 def runtime_connection(runtime: str, home: Path) -> dict:
-    return codex_connection(home) if runtime == CODEX else claude_connection(home) if runtime == CLAUDE else {}
+    if runtime == CLAUDE:
+        return claude_connection(home)
+    return agent_connection(runtime, home) if runtime in RUNTIMES else {}
 
 
 def fetch_events(conn: dict, investigation_id: str, sid: str, after: int, client: str,
@@ -591,19 +624,60 @@ def claude_transcripts(home: Path, sid: str) -> List[Path]:
     return sorted(Path(p) for p in glob.glob(str(home / ".claude" / "projects" / "*" / f"{glob.escape(sid)}.jsonl")))
 
 
+GEMINI_HEAD = 64 * 1024   # bytes of a Gemini CLI chat file read to find its sessionId
+
+
+def gemini_chats(home: Path, sid: str) -> List[Path]:
+    """Gemini CLI's chat records for `sid`:
+    ~/.gemini/tmp/<project>/chats/session-<time>-<sid[:8]>.json[l] whose
+    head names sessionId == sid (only GEMINI_HEAD bytes are read)."""
+    if not ie.valid_session(sid) or len(sid) < 8:
+        return []
+    pattern = str(home / ".gemini" / "tmp" / "*" / "chats" / f"session-*-{glob.escape(sid[:8])}.json*")
+    want = re.compile(rb'"sessionId"\s*:\s*"' + re.escape(sid.encode()) + rb'"')
+    out = []
+    for p in sorted(glob.glob(pattern)):
+        if not p.endswith((".json", ".jsonl")):
+            continue
+        with contextlib.suppress(OSError):
+            with open(p, "rb") as f:
+                if want.search(f.read(GEMINI_HEAD)):
+                    out.append(Path(p))
+    return out
+
+
+def cursor_records(home: Path, sid: str) -> List[Path]:
+    """Cursor's records for `sid` (best effort: Cursor documents no stable
+    store): ~/.cursor/projects/*/agent-transcripts/<sid>.* and the files of
+    ~/.cursor/chats/*/<sid>/. Not found: the runtime is unknown (still a
+    notification)."""
+    if not ie.valid_session(sid):
+        return []
+    s = glob.escape(sid)
+    found = glob.glob(str(home / ".cursor" / "projects" / "*" / "agent-transcripts" / f"{s}.*"))
+    found += glob.glob(str(home / ".cursor" / "chats" / "*" / s / "*"))
+    return sorted(Path(p) for p in found if os.path.isfile(p))
+
+
+# Each runtime's own records of a session (cheap: a glob; Gemini reads a
+# file head). The records name the runtime and their mtimes are a liveness
+# signal; nothing here makes a session launchable (LAUNCHERS does).
+RECORDS = {CODEX: codex_rollouts, CLAUDE: claude_transcripts, CURSOR: cursor_records, GEMINI: gemini_chats}
+
+
 def runtime_kind(home: Path, sid: str) -> Runtime:
-    """The runtime by its own records (cheap: no file is read)."""
-    rollouts, transcripts = codex_rollouts(home, sid), claude_transcripts(home, sid)
-    if rollouts and transcripts:
-        return Runtime(UNKNOWN, rollouts + transcripts, reason="both a Codex rollout and a Claude transcript "
-                                                                "carry this session id: notify-only")
-    if transcripts:
-        return Runtime(CLAUDE, transcripts, reason="Claude Code sessions are notify-only: a resumed claude -p runs "
-                                                   "with your own settings, so its sandbox is not guaranteed")
-    if rollouts:
-        return Runtime(CODEX, rollouts, reason="not yet checked")
-    return Runtime(UNKNOWN, [], reason="no Codex rollout or Claude transcript for this session on this machine: "
-                                       "notify-only")
+    """The runtime by its own records. None found, or records of more than
+    one runtime: unknown (notify-only)."""
+    found = {r: files for r, files in ((r, find(home, sid)) for r, find in RECORDS.items()) if files}
+    if len(found) > 1:
+        return Runtime(UNKNOWN, [p for files in found.values() for p in files],
+                       reason=f"records of {' and '.join(LABELS[r] for r in found)} carry this session id: "
+                              "notify-only")
+    if not found:
+        return Runtime(UNKNOWN, [], reason="no Codex, Claude Code, Cursor or Gemini CLI records for this session "
+                                           "on this machine: notify-only")
+    (kind, files), = found.items()
+    return Runtime(kind, files, reason=NOTIFY_ONLY_REASONS.get(kind, "not yet checked"))
 
 
 class Unverifiable(Exception):
@@ -664,12 +738,52 @@ def _turn(rec: dict) -> Tuple[Any, Any]:
     return policy.get("type"), policy.get("network_access")
 
 
-def _git_work_tree(cwd: str) -> bool:
+def _git_root(cwd: str) -> Optional[Path]:
+    """The git work tree's root containing `cwd` (the nearest directory with
+    a .git entry, cwd included), or None."""
     p = Path(cwd)
     for d in (p, *p.parents):
-        if (d / ".git").exists():
-            return True
-    return False
+        if os.path.lexists(str(d / ".git")):
+            return d
+    return None
+
+
+def _git_work_tree(cwd: str) -> bool:
+    return _git_root(cwd) is not None
+
+
+def codex_project_config(cwd: str) -> Optional[str]:
+    """Where Codex project config sits between `cwd` and its git work-tree
+    root (both included), or None. A .codex/ holding any *.toml (config.toml
+    can declare MCP servers, which a resumed `codex exec` starts OUTSIDE its
+    sandbox: proof C-8) or hooks.json counts; so does a .codex that is not a
+    plain directory (a symlink is never followed) or cannot be read (fail
+    closed). A sandboxed agent cannot create .codex inside workspace-write;
+    a cloned repo or an unsandboxed tool can."""
+    root = _git_root(cwd)
+    if root is None:
+        return "no git work tree"
+    d = Path(cwd)
+    for current in (d, *d.parents):
+        entry = current / ".codex"
+        try:
+            st = os.lstat(str(entry))
+        except FileNotFoundError:
+            st = None
+        except OSError:
+            return str(entry)
+        if st is not None:
+            if not stat.S_ISDIR(st.st_mode):
+                return str(entry)
+            try:
+                names = os.listdir(str(entry))
+            except OSError:
+                return str(entry)
+            if any(n.endswith(".toml") or n == "hooks.json" for n in names):
+                return str(entry)
+        if current == root:
+            return None
+    return None
 
 
 def codex_eligibility(home: Path, sid: str, rt: Optional[Runtime] = None) -> Runtime:
@@ -725,12 +839,22 @@ def codex_eligibility(home: Path, sid: str, rt: Optional[Runtime] = None) -> Run
         rt.reason = ("the session's working directory is not a git work tree (codex exec would need "
                      "--skip-git-repo-check, which is never passed): notify-only")
         return rt
+    found = codex_project_config(cwd)
+    if found:
+        rt.reason = ("the project has its own Codex config (a .codex with config or hooks between the working "
+                     "directory and the repository root; its MCP servers would run outside the sandbox): "
+                     "notify-only")
+        return rt
     rt.eligible, rt.reason, rt.cwd, rt.sandbox = True, "eligible", cwd, turns[-1][0]
     return rt
 
 
 def resolve(home: Path, sid: str) -> Runtime:
-    return codex_eligibility(home, sid)
+    """The session's runtime and, for a runtime with a launcher, whether it
+    is eligible; any other runtime is notify-only."""
+    rt = runtime_kind(home, sid)
+    launcher = LAUNCHERS.get(rt.kind)
+    return launcher.eligibility(home, sid, rt) if launcher else rt
 
 
 def rollout_offsets(home: Path, sid: str) -> dict:
@@ -784,6 +908,40 @@ def child_env(environ: Mapping[str, str]) -> dict:
     switch may turn the plugin's hooks, poller or storyboard off, or join
     another investigation), CODEX_HOME or a parent session's id."""
     return {k: v for k, v in environ.items() if not k.startswith("CARDINAL_") and k not in STRIPPED_ENV}
+
+
+class Launcher:
+    """How the waker may launch one runtime, which passed all three gates of
+    §6 (cannot arm itself, sandbox enforced on resume, one execution per
+    decision). Everything runtime-specific about a launch is here:
+
+      executable: the config key of its absolute path (resolved on PATH at
+        enable time; `binary` is the name looked up);
+      eligibility(home, sid, rt) -> rt with eligible / reason / cwd / sandbox;
+      argv(executable, rt, sid, seq) -> the pinned argv (golden-tested);
+      snapshot(home, sid) -> what verify needs from before the launch;
+      verify(home, sid, snapshot, pinned, require_turn) -> None, or why the
+        woken run did not stay in the pinned sandbox (that disables the
+        runtime: ~/.cardinal/wake/disabled/<runtime>).
+
+    Adding a runtime is one Launcher in LAUNCHERS, after its gates are
+    demonstrated; until then its sessions are notify-only."""
+
+    def __init__(self, runtime: str, binary: str, eligibility, argv, snapshot, verify, can_launch: str):
+        self.runtime, self.binary = runtime, binary
+        self.executable = f"{runtime}_path"
+        self.eligibility, self.argv, self.snapshot, self.verify = eligibility, argv, snapshot, verify
+        self.can_launch = can_launch
+
+
+# The explicit allow-list of runtimes that may be launched unattended. Only
+# Codex has passed its gates (§6 proofs C-1..C-5); Claude Code did not (C-6),
+# and Cursor and Gemini CLI have no demonstrated launch: notify-only.
+LAUNCHERS = {
+    CODEX: Launcher(CODEX, "codex", codex_eligibility,
+                    lambda exe, rt, sid, seq: codex_argv(exe, rt.sandbox or "", sid, seq),
+                    rollout_offsets, verify_after, LAUNCH_TEXT),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -910,24 +1068,29 @@ def _connection_for(home: Path, binding: dict, prefer: str, system: System) -> T
 
 
 def _client(runtime: str, config: dict) -> str:
+    """The X-Cardinal-Client of the plugin whose key reads: <name>/<version
+    of that plugin when it ran enable>, the name alone otherwise."""
     version = (config.get("versions") or {}).get(runtime)
     from .evidence import client_string
     try:
-        return client_string("claude-plugin" if runtime == CLAUDE else "codex", version)
+        return client_string("claude-plugin" if runtime == CLAUDE else runtime, version)
     except ValueError:
-        return "codex"
+        return "cardinal-wake"
 
 
 # ---------------------------------------------------------------------------
 # One pass
 # ---------------------------------------------------------------------------
 
-def _notify(system: System, binding: Optional[dict], sid: str, state: str, words: str) -> None:
-    """Session short id, investigation and state; never decision text."""
+def _notify(system: System, binding: Optional[dict], sid: str, state: str, words: str,
+            runtime: str = UNKNOWN) -> None:
+    """The runtime, the session's short id, the investigation and the state;
+    never decision text."""
     inv = (binding or {}).get("investigation_id")
     link = (binding or {}).get("investigation_url")
     where = link if isinstance(link, str) and _LINK_RE.fullmatch(link) else (inv if ie.valid_investigation(inv) else "")
-    msg = f"Session {sid[:8]}: {state.lower()} - {words}" + (f" {where}" if where else "")
+    label = LABELS.get(runtime, LABELS[UNKNOWN])
+    msg = f"{label} session {sid[:8]}: {state.lower()} - {words}" + (f" {where}" if where else "")
     with contextlib.suppress(Exception):
         system.notifier("Cardinal wake", msg[:400])
 
@@ -994,20 +1157,22 @@ def consider(home: Path, sid: str, binding: dict, system: System, config: dict, 
     pending = [e for e in wake_decisions(events, sid, binding) if str(e["seq"]) not in led["entries"]]
     if not pending:
         return
-    if rt.kind == CODEX:
-        rt = codex_eligibility(home, sid, rt)
+    launcher = LAUNCHERS.get(rt.kind)   # None: a notify-only runtime (no launch has passed the gates)
+    if launcher is not None:
+        rt = launcher.eligibility(home, sid, rt)
     live = live_signals(home, sid, rt, system, now, led)
     why = ""
     if live:
         why = "the session is live (" + "; ".join(live) + "): it will see the decision itself"
-    elif not rt.eligible:
+    elif launcher is None or not rt.eligible:
         why = rt.reason
     elif not config["launch"]:
         why = "unattended launch is off (cardinal-wake enable --launch)"
-    elif disabled_reason(home, CODEX):
-        why = "Codex launch is disabled: " + str(disabled_reason(home, CODEX)) + " (cardinal-wake reenable codex)"
-    elif not (config["codex_path"] and os.access(config["codex_path"], os.X_OK)):
-        why = "codex was not found when wake was enabled (run cardinal-wake enable --launch again)"
+    elif disabled_reason(home, rt.kind):
+        why = (f"{LABELS[rt.kind]} launch is disabled: {disabled_reason(home, rt.kind)} "
+               f"(cardinal-wake reenable {rt.kind})")
+    elif not (config.get(launcher.executable) and os.access(config[launcher.executable], os.X_OK)):
+        why = f"{launcher.binary} was not found when wake was enabled (run cardinal-wake enable --launch again)"
     if why:
         for e in pending:
             _notify_only(home, sid, binding, e["seq"], rt.kind, why, system, report, dry_run=dry_run)
@@ -1031,16 +1196,20 @@ def _notify_only(home, sid, binding, seq, kind, why, system, report, *, dry_run=
         transition(entry, NOTIFIED, now, why)
         led["entries"][str(seq)] = entry
         write_ledger(home, sid, led, now)
-    _notify(system, binding, sid, NOTIFIED, f"owner decision #{seq} waits for you ({why.split(':')[0]})")
+    _notify(system, binding, sid, NOTIFIED, f"owner decision #{seq} waits for you ({why.split(':')[0]})", kind)
     _report(system, report, sid, seq, "notified", why)
 
 
 def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime, config: dict, system: System,
                      report: list, *, dry_run: bool = False) -> str:
-    """Claim #seq for `sid` and launch the pinned Codex resume, under the
-    session's lock (§5.4). Returns launched | failed | seen | in_flight |
-    cap | busy | dry_run."""
-    argv = codex_argv(config["codex_path"], rt.sandbox or "", sid, seq)
+    """Claim #seq for `sid` and launch its runtime's pinned resume
+    (LAUNCHERS; only an eligible session of a runtime there gets here),
+    under the session's lock (§5.4). Returns launched | failed | seen |
+    in_flight | cap | busy | dry_run."""
+    launcher = LAUNCHERS[rt.kind]
+    if not rt.eligible:
+        raise ValueError("not an eligible session")
+    argv = launcher.argv(config.get(launcher.executable), rt, sid, seq)
     if dry_run:
         _report(system, report, sid, seq, "would launch", f"in {rt.sandbox}, cwd from the rollout")
         return "dry_run"
@@ -1063,10 +1232,11 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
                 if capped is None or now - capped >= DAY:
                     led["cap_notified_at"] = now
                     write_ledger(home, sid, led, now)
-                    _notify(system, binding, sid, "waiting", f"owner decision #{seq}: the daily wake cap is reached")
+                    _notify(system, binding, sid, "waiting", f"owner decision #{seq}: the daily wake cap is reached",
+                            rt.kind)
                 _report(system, report, sid, seq, "capped", "the daily wake cap is reached; reconsidered later")
                 return "cap"
-            entry = {"seq": seq, "investigation_id": binding["investigation_id"], "runtime": CODEX,
+            entry = {"seq": seq, "investigation_id": binding["investigation_id"], "runtime": rt.kind,
                      "sandbox": rt.sandbox, "claimed_at": now, "spawn_errors": 0}
             transition(entry, DECISION_SEEN, now)
             transition(entry, CLAIMED, now)
@@ -1076,7 +1246,7 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
         # §4): once that PR's evidence hold lands, set it here for sid
         # (reason "wake") so the woken run's local evidence survives size
         # eviction while space allows. Not implemented in this PR.
-        offsets = rollout_offsets(home, sid)
+        offsets = launcher.snapshot(home, sid)
         log = logs_dir(home) / f"{sid}-{seq}-{int(now)}.log"
         env = child_env(system.environ)
         for _ in range(1 + SPAWN_RETRIES):
@@ -1091,14 +1261,15 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
             started = system.process_start(pid)
             entry["child"] = {"pid": pid, "start": started, "launched_at": system.now(), "log": str(log),
                               "offsets": offsets, "sandbox": rt.sandbox}
-            transition(entry, RESUMING, system.now(), f"codex exec resume in {rt.sandbox}")
+            transition(entry, RESUMING, system.now(), f"{launcher.binary} resumed in {rt.sandbox}")
             write_ledger(home, sid, led, system.now())
-            _notify(system, binding, sid, RESUMING, f"resuming for owner decision #{seq} in {rt.sandbox}")
+            _notify(system, binding, sid, RESUMING, f"resuming for owner decision #{seq} in {rt.sandbox}", rt.kind)
             _report(system, report, sid, seq, "launched", f"pid {pid}, {rt.sandbox}")
             return "launched"
-        transition(entry, FAILED, system.now(), f"could not start codex ({entry['spawn_errors']} spawn errors)")
+        transition(entry, FAILED, system.now(),
+                   f"could not start {launcher.binary} ({entry['spawn_errors']} spawn errors)")
         write_ledger(home, sid, led, system.now())
-    _notify(system, binding, sid, FAILED, f"could not start codex for owner decision #{seq}")
+    _notify(system, binding, sid, FAILED, f"could not start {launcher.binary} for owner decision #{seq}", rt.kind)
     _report(system, report, sid, seq, "failed", "spawn errors")
     return "failed"
 
@@ -1122,7 +1293,8 @@ def settle(home: Path, sid: str, system: System, config: dict, report: list, *, 
                 now = system.now()
                 transition(entry, FAILED, now, "the waker stopped during the launch; not retried")
                 write_ledger(home, sid, led, now)
-                _notify(system, binding, sid, FAILED, f"owner decision #{entry.get('seq')}: launch interrupted")
+                _notify(system, binding, sid, FAILED, f"owner decision #{entry.get('seq')}: launch interrupted",
+                        str(entry.get("runtime")))
                 _report(system, report, sid, entry.get("seq"), "failed", "launch interrupted")
             elif entry.get("state") == RESUMING:
                 _settle_resuming(home, sid, led, entry, binding, system, config, report)
@@ -1135,29 +1307,37 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
     pinned = child.get("sandbox") or entry.get("sandbox")
     offsets = child.get("offsets") if isinstance(child.get("offsets"), dict) else {}
     launched = _num(child.get("launched_at")) or now
+    runtime = entry.get("runtime") if entry.get("runtime") in RUNTIMES else CODEX
+    launcher = LAUNCHERS.get(runtime)
+
+    def verify(require_turn: bool) -> Optional[str]:
+        if launcher is None:   # a launch by a runtime no longer allowed: never trusted
+            return f"{LABELS.get(runtime, runtime)} has no launcher to verify the woken run"
+        return launcher.verify(home, sid, offsets, pinned, require_turn=require_turn)
+
     if child_alive(child, system):
         if now - launched <= WAKE_TIMEOUT:
             return
-        bad = verify_after(home, sid, offsets, pinned, require_turn=False)
+        bad = verify(False)
         if bad:
-            _disable_codex(home, sid, binding, bad, system, report, now)
+            _disable_launch(home, runtime, sid, binding, bad, system, report, now)
         transition(entry, FAILED, now, "still running after 2 h; left running")
         write_ledger(home, sid, led, now)
         _notify(system, binding, sid, FAILED, f"owner decision #{seq}: the resumed session is still running "
-                                              "after 2 h (left running)")
+                                              "after 2 h (left running)", runtime)
         _report(system, report, sid, seq, "failed", "timeout; child left running")
         return
     if "verified" not in entry:
-        bad = verify_after(home, sid, offsets, pinned)
+        bad = verify(True)
         entry["verified"] = bad is None
         if bad:
             entry.setdefault("history", []).append({"state": RESUMING, "at": _iso(now), "note": bad})
-            _disable_codex(home, sid, binding, bad, system, report, now)
+            _disable_launch(home, runtime, sid, binding, bad, system, report, now)
         entry.setdefault("exited_at", now)
         write_ledger(home, sid, led, now)
     acked = None
     if binding is not None and binding.get("investigation_id") == entry.get("investigation_id"):
-        conn, conn_runtime = _connection_for(home, binding, CODEX, system)
+        conn, conn_runtime = _connection_for(home, binding, runtime, system)
         if conn:
             try:
                 events, complete = system.fetch(conn, entry["investigation_id"], sid, int(seq),
@@ -1175,15 +1355,15 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
                    else "the run ended; its acknowledgment could not be read")
         words = f"the run for owner decision #{seq} ended without an acknowledgment (not retried)"
     write_ledger(home, sid, led, now)
-    _notify(system, binding, sid, entry["state"], words)
+    _notify(system, binding, sid, entry["state"], words, runtime)
     _report(system, report, sid, seq, entry["state"].lower(), entry.get("reason", ""))
 
 
-def _disable_codex(home, sid, binding, why, system, report, now) -> None:
-    disable_runtime(home, CODEX, f"session {sid[:8]}: {why}", now)
-    _notify(system, binding, sid, "disabled", f"Codex wake is disabled: {why}. Run cardinal-wake reenable codex "
-                                              "after checking.")
-    _report(system, report, sid, None, "codex disabled", why)
+def _disable_launch(home, runtime, sid, binding, why, system, report, now) -> None:
+    disable_runtime(home, runtime, f"session {sid[:8]}: {why}", now)
+    _notify(system, binding, sid, "disabled", f"{LABELS.get(runtime, runtime)} wake is disabled: {why}. Run "
+                                              f"cardinal-wake reenable {runtime} after checking.", runtime)
+    _report(system, report, sid, None, f"{runtime} disabled", why)
 
 
 # ---------------------------------------------------------------------------
@@ -1259,8 +1439,10 @@ def enable(home: Path, *, launch: bool, environ: Mapping[str, str], launchctl: C
            out: Callable[[str], None], now: float, version: Optional[str] = None,
            runtime: Optional[str] = None, core_dir: Optional[Path] = None) -> int:
     path_env = environ.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"
-    codex = shutil.which("codex", path=path_env)
-    codex = os.path.abspath(codex) if codex else None
+    executables = {}
+    for launcher in LAUNCHERS.values():   # each launchable runtime's binary, absolute, resolved now
+        found = shutil.which(launcher.binary, path=path_env)
+        executables[launcher.executable] = os.path.abspath(found) if found else None
     python = shutil.which("python3", path=path_env) or sys.executable
     python = os.path.abspath(python)
     runner = install_lib(home, core_dir)
@@ -1269,7 +1451,7 @@ def enable(home: Path, *, launch: bool, environ: Mapping[str, str], launchctl: C
     versions = dict(old.get("versions") or {})
     if runtime in RUNTIMES and version:
         versions[runtime] = version
-    write_config(home, {"enabled": True, "launch": bool(launch), "codex_path": codex, "python": python,
+    write_config(home, {"enabled": True, "launch": bool(launch), **executables, "python": python,
                         "enabled_at": old.get("enabled_at") if old["enabled"] and old.get("enabled_at") else _iso(now),
                         "versions": versions})
     plist = plist_path(home)
@@ -1287,16 +1469,21 @@ def enable(home: Path, *, launch: bool, environ: Mapping[str, str], launchctl: C
     out(f"Wake is on: launchd runs {runner} every {RUN_INTERVAL} s ({plist}).")
     out("It wakes a session only for an owner decision you post on its Investigation page, addressed to that "
         "session. Agents cannot post one.")
+    if runtime in NOTIFY_ONLY_REASONS and runtime not in LAUNCHERS:
+        out(f"{LABELS[runtime]} sessions are notify-only: an addressed decision shows a notification and never "
+            f"resumes a {LABELS[runtime]} session" + (", with or without --launch." if launch else "."))
     if launch:
-        out(LAUNCH_TEXT)
-        if not codex:
-            out("codex was not found on PATH, so nothing can launch yet: install the Codex CLI and run "
-                "cardinal-wake enable --launch again.")
-        else:
-            out(f"Codex: {codex}")
-        reason = disabled_reason(home, CODEX)
-        if reason:
-            out(f"Codex launch is disabled: {reason}. Run cardinal-wake reenable codex after checking.")
+        for r, launcher in LAUNCHERS.items():
+            out(launcher.can_launch)
+            exe = executables.get(launcher.executable)
+            if not exe:
+                out(f"{launcher.binary} was not found on PATH, so {LABELS[r]} sessions cannot launch yet: install "
+                    f"it and run cardinal-wake enable --launch again.")
+            else:
+                out(f"{LABELS[r]}: {exe}")
+            reason = disabled_reason(home, r)
+            if reason:
+                out(f"{LABELS[r]} launch is disabled: {reason}. Run cardinal-wake reenable {r} after checking.")
     else:
         out("Unattended launch is off: every eligible decision is a notification only (cardinal-wake enable "
             "--launch allows Codex CLI sessions to resume).")
@@ -1324,7 +1511,10 @@ def status(home: Path, system: System, out: Callable[[str], None]) -> int:
     out(f"wake: {'on' if c['enabled'] else 'off'}; unattended launch: {'on' if c['launch'] else 'off'}"
         f"{'; enabled ' + str(c['enabled_at']) if c['enabled'] and c['enabled_at'] else ''}")
     out(f"launchd agent: {'installed' if plist_path(home).exists() else 'not installed'} ({plist_path(home)})")
-    out(f"codex: {c['codex_path'] or 'not found'}")
+    for launcher in LAUNCHERS.values():
+        out(f"{launcher.binary}: {c.get(launcher.executable) or 'not found'}")
+    out("notify-only runtimes: " + ", ".join(LABELS[r] for r in RUNTIMES if r not in LAUNCHERS)
+        + ", and any session whose runtime is not recognized")
     for r in RUNTIMES:
         reason = disabled_reason(home, r)
         if reason:
@@ -1342,7 +1532,8 @@ def status(home: Path, system: System, out: Callable[[str], None]) -> int:
     out("candidate sessions:" if cands else "candidate sessions: none")
     for sid, b, _ in cands:
         rt = resolve(home, sid)
-        out(f"  {sid[:8]} {rt.kind}: {'can launch in ' + str(rt.sandbox) if rt.eligible else rt.reason}")
+        out(f"  {sid[:8]} {LABELS.get(rt.kind, rt.kind)}: "
+            f"{'can launch in ' + str(rt.sandbox) if rt.eligible else rt.reason}")
     return 0
 
 
@@ -1377,7 +1568,7 @@ def cli_main(argv: Optional[List[str]] = None, *, runtime: Optional[str] = None,
     p_run.add_argument("--once", action="store_true", help="one pass, then exit")
     p_run.add_argument("--dry-run", action="store_true", help="print what would happen; launch nothing")
     p_re = sub.add_parser("reenable", help="allow a runtime to launch again after a failed sandbox check")
-    p_re.add_argument("target", choices=[CODEX])
+    p_re.add_argument("target", choices=sorted(LAUNCHERS))
     args = parser.parse_args(argv)
     home = home or ie.home_dir()
     system = system or System()

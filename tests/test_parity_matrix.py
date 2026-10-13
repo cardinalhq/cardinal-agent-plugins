@@ -293,6 +293,21 @@ class ParityMatrixShape(unittest.TestCase):
                         self.assertIn(anchor, md_anchors(target),
                                       f"{fid}/{adapter}: {path} has no heading for #{anchor}")
 
+    def test_notes_qualify_present_cells_and_outside_cells_are_native_adapters(self):
+        """Optional per-feature fields: `notes` {adapter: text} qualifies a
+        present cell (e.g. notify-only); `outside_matrix` {opencode|pi|devin:
+        'na:<reason>' | 'limit:<citation>'} says why an adapter outside the
+        matrix lacks the feature."""
+        for fid, f in self.features.items():
+            with self.subTest(feature=fid):
+                for adapter, note in (f.get("notes") or {}).items():
+                    self.assertEqual(f["adapters"].get(adapter), "present",
+                                     f"{fid}/{adapter}: a note on a non-present cell")
+                    self.assertGreater(len(str(note).strip()), 10, f"{fid}/{adapter}: an empty note")
+                for adapter, cell in (f.get("outside_matrix") or {}).items():
+                    self.assertIn(adapter, ("opencode", "pi", "devin"), f"{fid}: {adapter} is a matrix adapter")
+                    self.assertRegex(cell, r"^(na:\S.{10,}|limit:\S.*)$", f"{fid}/{adapter}: give a reason")
+
     def test_na_cells_give_a_reason(self):
         for fid, f in self.features.items():
             for adapter, cell in f["adapters"].items():

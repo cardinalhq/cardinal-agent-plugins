@@ -59,8 +59,9 @@ BEHAVIOR_ARTIFACTS = (
     "skills/storyboard/scripts/render_preview.py",
 )
 
-# Owner-woken sessions (docs/specs/resume-and-wake.md §5): Claude Code and
-# Codex only; enable copies the vendored core into ~/.cardinal/wake/lib.
+# Owner-woken sessions (docs/specs/resume-and-wake.md §5): every adapter
+# ships cardinal-wake (Codex launches; the others are notify-only); enable
+# copies the vendored core into ~/.cardinal/wake/lib.
 WAKE_ARTIFACTS = ("hooks/cardinal_core/session_wake.py",)
 
 REQUIRED_ARTIFACTS = {
@@ -69,10 +70,10 @@ REQUIRED_ARTIFACTS = {
               + WAKE_ARTIFACTS,
     "codex": (".codex-plugin/plugin.json", "scripts/cardinal-behavior", "scripts/cardinal-checks",
               "scripts/cardinal-wake") + BEHAVIOR_ARTIFACTS + WAKE_ARTIFACTS,
-    "cursor": (".cursor-plugin/plugin.json", "scripts/cardinal-behavior", "scripts/cardinal-checks")
-              + BEHAVIOR_ARTIFACTS,
+    "cursor": (".cursor-plugin/plugin.json", "scripts/cardinal-behavior", "scripts/cardinal-checks",
+               "scripts/cardinal-wake") + BEHAVIOR_ARTIFACTS + WAKE_ARTIFACTS,
     "gemini": (".gemini-plugin/plugin.json", "extension/gemini-extension.json", "scripts/cardinal-behavior",
-               "scripts/cardinal-checks") + BEHAVIOR_ARTIFACTS,
+               "scripts/cardinal-checks", "scripts/cardinal-wake") + BEHAVIOR_ARTIFACTS + WAKE_ARTIFACTS,
 }
 
 BANNER = (
