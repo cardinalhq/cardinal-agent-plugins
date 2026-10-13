@@ -24,8 +24,18 @@ the reason, never a byte of the tunnel. The process exits when the
 process that started it is gone (its parent pid changes), or on SIGTERM
 (Gemini signals the group when it exits).
 
-Usage (what cardinal-wake puts in GEMINI_SANDBOX_PROXY_COMMAND):
-    python3 allowlist_proxy.py --log PATH [--port 8877] HOST [HOST ...]
+The port is owned exclusively: never SO_REUSEADDR (with it, a wildcard
+bind succeeds over another process already listening on 127.0.0.1:8877,
+which would then receive the sandbox's traffic), and after the bind the
+loopback addresses must be refused to a fresh socket (verify_exclusive);
+otherwise the proxy exits 3 and starts nothing (fail closed).
+
+Usage:
+    python3 -I allowlist_proxy.py --log PATH [--port 8877] HOST [HOST ...]
+        serve until the parent process is gone;
+    python3 -I allowlist_proxy.py --log PATH [--port 8877] HOST [HOST ...] -- COMMAND ...
+        cardinal-wake's Gemini launch: own the port first, then run COMMAND
+        (sandbox-exec around gemini) as a child and exit with its status.
 
 Standard library only; Python 3.9; importable (serve() / make_server()
 take the port, the upstream connector and the log so tests bind an
@@ -192,9 +202,19 @@ def make_handler(allowed: Iterable[str], log: Callable[..., None],
     return Handler
 
 
+class NotExclusive(OSError):
+    """The proxy's port is (also) held by another socket."""
+
+
 class _DualStackServer(socketserver.ThreadingTCPServer):
+    """[::]:port with IPv4 mapped in. Never SO_REUSEADDR: with it, a wildcard
+    bind succeeds over another process already holding 127.0.0.1:port, which
+    would then receive the sandbox's connections to localhost. After the
+    bind, the loopback addresses must be refused to anyone else
+    (verify_exclusive), else the server closes (fail closed)."""
+
     address_family = socket.AF_INET6
-    allow_reuse_address = True
+    allow_reuse_address = False
     daemon_threads = True
 
     def server_bind(self):
@@ -205,17 +225,47 @@ class _DualStackServer(socketserver.ThreadingTCPServer):
         super().server_bind()
 
 
+def verify_exclusive(port: int) -> None:
+    """Raise NotExclusive unless binding 127.0.0.1:port, ::1:port and
+    0.0.0.0:port is refused (EADDRINUSE) to a fresh socket: then this
+    process's wildcard bind owns the loopback port on both stacks."""
+    for family, addr in ((socket.AF_INET, ("127.0.0.1", port)), (socket.AF_INET6, ("::1", port)),
+                         (socket.AF_INET, ("0.0.0.0", port))):
+        try:
+            probe = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            continue   # no such stack on this machine: nothing can listen there either
+        try:
+            probe.bind(addr)
+        except OSError:
+            continue
+        else:
+            raise NotExclusive(f"{addr[0]}:{port} is not exclusively ours")
+        finally:
+            probe.close()
+
+
 def default_upstream(host: str, port: int) -> socket.socket:
     return socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
 
 
 def make_server(hosts: Iterable[str], *, port: int = PORT, bind: str = "::", log_path: Optional[str] = None,
                 upstream: Callable[[str, int], socket.socket] = default_upstream,
-                log: Optional[Callable[..., None]] = None) -> socketserver.ThreadingTCPServer:
+                log: Optional[Callable[..., None]] = None,
+                exclusive: bool = True) -> socketserver.ThreadingTCPServer:
     """A bound (not yet serving) proxy; port 0 picks a free one
-    (server.server_address[1])."""
+    (server.server_address[1]). The bind is exclusive (no SO_REUSEADDR)
+    and, with exclusive, verified (verify_exclusive); OSError when either
+    fails, and nothing is left listening."""
     handler = make_handler(hosts, log or _Logger(log_path), upstream)
-    return _DualStackServer((bind, port), handler)
+    server = _DualStackServer((bind, port), handler)
+    if exclusive:
+        try:
+            verify_exclusive(server.server_address[1])
+        except OSError:
+            server.server_close()
+            raise
+    return server
 
 
 def _watch_parent(parent: int) -> None:
@@ -225,7 +275,18 @@ def _watch_parent(parent: int) -> None:
             os._exit(0)
 
 
-def main(argv: Optional[list] = None) -> int:
+def main(argv: Optional[list] = None, *, popen=None) -> int:
+    """`allowlist_proxy.py [--log PATH] [--port N] HOST... [-- COMMAND...]`.
+    Without COMMAND: serve until the parent is gone (Gemini's
+    GEMINI_SANDBOX_PROXY_COMMAND). With COMMAND (cardinal-wake's Gemini
+    launch): bind first, exclusively (exit 3 without running COMMAND when
+    the port cannot be owned), then run COMMAND as this process's child,
+    forward SIGTERM / SIGINT to it, and exit with its status when it ends."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command: list = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, command = argv[:i], argv[i + 1:]
     parser = argparse.ArgumentParser(prog="allowlist_proxy.py", description=__doc__.split("\n\n")[0])
     parser.add_argument("--log", default=None, help="append ALLOW / DENY lines here (0600)")
     parser.add_argument("--port", type=int, default=PORT)
@@ -235,13 +296,40 @@ def main(argv: Optional[list] = None) -> int:
     if bad:
         sys.stderr.write(f"allowlist_proxy: not host names: {', '.join(bad)[:200]}\n")
         return 2
-    server = make_server(args.hosts, port=args.port, log_path=args.log)
-    threading.Thread(target=_watch_parent, args=(os.getppid(),), daemon=True).start()
     try:
-        server.serve_forever(poll_interval=0.5)
-    except KeyboardInterrupt:
-        pass
-    return 0
+        server = make_server(args.hosts, port=args.port, log_path=args.log)
+    except OSError as e:
+        sys.stderr.write(f"allowlist_proxy: cannot own port {args.port}: {type(e).__name__}\n")
+        return 3
+    if not command:
+        threading.Thread(target=_watch_parent, args=(os.getppid(),), daemon=True).start()
+        try:
+            server.serve_forever(poll_interval=0.5)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    import signal
+    import subprocess
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True).start()
+    try:
+        child = (popen or subprocess.Popen)(command)
+    except OSError as e:
+        server.shutdown()
+        server.server_close()
+        sys.stderr.write(f"allowlist_proxy: cannot start the command: {type(e).__name__}\n")
+        return 127
+
+    def forward(signum, frame):  # noqa: ARG001
+        try:
+            child.send_signal(signum)
+        except OSError:
+            pass
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, forward)
+    rc = child.wait()
+    server.shutdown()
+    server.server_close()
+    return rc if rc >= 0 else 128 - rc
 
 
 if __name__ == "__main__":

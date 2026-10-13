@@ -17,122 +17,143 @@ running `cardinal-wake enable` (a per-user launchd agent); `--launch` also
 allows unattended launch for runtimes that passed their gates (§6), else the
 waker only notifies.
 
+The daemon itself (B1). `enable` vets what launchd will run: the interpreter
+is this Python or /usr/bin/python3, resolved outside $HOME, git work trees
+under $HOME, approved roots and temp dirs, and runs with -I; the launch
+binaries (and node, when one is a node script) resolve outside git work
+trees under $HOME, approved roots and temp dirs; PATH (the plist's and every
+woken child's) is the system dirs plus those binaries' directories, never the
+shell's; each file's path, size, mtime and inode are recorded. Every launch
+re-checks them (binaries_problem: unchanged, still outside those places and
+outside the session's working directory), else a notification.
+
 One pass (run_once; launchd runs `cardinal-wake run --once` every
 RUN_INTERVAL seconds from the stable copy in ~/.cardinal/wake/lib/):
   1. settle every in-flight ledger entry: a launch the waker was interrupted
-     in (FAILED, never retried), a child that exited (the sandbox it ran in
-     is verified, then ACKNOWLEDGED when this session acknowledged the
-     decision, else FAILED), a child past WAKE_TIMEOUT (FAILED, left running,
-     the owner notified). Runs whether or not the opt-in is on.
-  2. with the opt-in on, every candidate session: a binding in
-     ~/.cardinal/investigations/sessions touched within CANDIDATE_WINDOW,
-     is_author true, the owner_decision capability on. Its events are read
-     straight from Cardinal (read-investigation-events with the plugin's key,
-     that runtime's first, the binding's org), never from the local inbox, so a
+     in (its child recovered by argv, else FAILED, never retried), a child
+     that exited (what it ran is verified, then ACKNOWLEDGED with the
+     session's disposition, else FAILED), a child past WAKE_TIMEOUT
+     (TIMED_OUT: left running, the owner notified, still judged when it
+     exits). Runs whether or not the opt-in is on.
+  2. with the opt-in on, every candidate session: a binding touched within
+     CANDIDATE_WINDOW, is_author true, the owner_decision capability on (a
+     ~/.cardinal binding decides alone; a relocated one only for sessions
+     with no Codex or Claude records). Its events are read straight from
+     Cardinal (read-investigation-events with the plugin's key, that
+     runtime's first, the binding's org), never from the local inbox, so a
      local file cannot fake a decision. A decision e wakes sid only when
      (§5.2): verified_owner_decision(e) (server-stamped fields);
      e.to_session_id == sid (a broadcast never wakes); e is still
-     deliverable() to sid (capability on, unacknowledged by this session);
-     e.seq has no ledger entry; the caps hold (SESSION_DAILY_CAP claims per
-     session and GLOBAL_DAILY_CAP across sessions per rolling day); the
-     session is not live; the session is eligible. Live or ineligible:
-     NOTIFIED (a notification, never a launch, never reconsidered).
+     deliverable() to sid; e.seq of its investigation was never handled for
+     sid (no ledger entry and above the never-pruned high-water mark, B3);
+     created_at within DECISION_MAX_AGE (older or undated: notified once);
+     the caps hold (SESSION_DAILY_CAP claims per session and
+     GLOBAL_DAILY_CAP across sessions per rolling day); the session is not
+     live; the session is eligible. Live or ineligible: NOTIFIED (a
+     notification, never a launch, never reconsidered).
 
-Eligibility (§5.3). Codex only, and only when ALL hold: a rollout
-~/.codex/sessions/**/rollout-*-<sid>.jsonl exists (the Codex sandbox cannot
-write there); its session_meta (the one whose id is sid) names a CLI
-originator (CODEX_ORIGINATORS, an allow-list: the desktop app's process
-outlives its threads) and a CLI source (not a subagent thread); EVERY
-turn_context has sandbox_policy.type workspace-write or read-only and never
-network_access true (one danger-full-access turn: that agent could have
-tampered with local state); the session id is a UUID (never an argv option);
-cwd comes from session_meta.cwd (never the binding, which the agent can
-write) and is a git work tree (`codex exec` refuses anything else without
---skip-git-repo-check, which is never passed); no directory from cwd up to
-the work-tree root holds Codex project config (.codex/*.toml or
-.codex/hooks.json, a .codex that is a symlink or unreadable: its MCP
-servers would start outside the sandbox on resume, proof C-8). Checked
-again before every launch.
+Codex eligibility (§5.3), ALL of: a rollout
+~/.codex/sessions/**/rollout-*-<sid>.jsonl (the Codex sandbox cannot write
+there); its session_meta (the one whose id is sid) names a CLI originator
+(CODEX_ORIGINATORS, an allow-list) and a CLI source (not a subagent); EVERY
+turn_context ran workspace-write or read-only, never with network, and could
+write only inside the working directory (turn_policy_problem:
+sandbox_policy.writable_roots, the file-system entries of
+file_system_sandbox_policy / permission_profile, permission_profile.network);
+the session id is a UUID; cwd comes from session_meta.cwd (never the
+binding), realpath'd before every check and for the launch, strictly inside
+$HOME and neither inside nor above HOME_PROTECTED (B2), a git work tree, with
+no Codex project config from cwd up to the work-tree root (proof C-8); no
+Codex config (~/.codex/config.toml, /etc/codex/*.toml) widens workspace-write
+(sandbox_workspace_write, permissions, writable_roots, network_access); and
+the MCP servers and plugins can all be named on the command line
+(codex_mcp_overrides). Checked again before every launch.
 
 Other runtimes are notify-only. Each is recognized by its own records
-(RECORDS, a glob): a Claude transcript (~/.claude/projects/*/<sid>.jsonl;
-gate C-6 not demonstrated: a resumed `claude -p` runs with the user's own
-settings; Remote Control is the Claude path); a Gemini CLI chat
-(~/.gemini/tmp/*/chats/session-*-<sid[:8]>.json[l] whose head names the
-sessionId; its launch is built and off, GEMINI_LAUNCH_PROVEN, see "Gemini
-CLI launch" below);
-Cursor's records (~/.cursor/projects/*/agent-transcripts/<sid>.*,
-~/.cursor/chats/*/<sid>/, best effort). Records of none or of several
-runtimes: unknown, still notified. Notifications name the runtime. The
-only runtimes that may launch are LAUNCHERS, an explicit allow-list (one
-Launcher per runtime: eligibility, pinned argv, snapshot, post-run
-verify); adding one is that entry, after its gates are demonstrated.
-Rollouts are streamed line by line, bounded
-(MAX_ROLLOUT_BYTES, MAX_LINE), and only their session_meta / turn_context
-records are parsed; nothing of their contents is logged.
+(RECORDS, a glob): a Claude transcript (gate C-6 not demonstrated; Remote
+Control is the Claude path); a Gemini CLI chat (its launch is built and off,
+GEMINI_LAUNCH_PROVEN); Cursor's records (best effort). Records of none or of
+several runtimes: unknown, still notified. Notifications name the runtime and
+the investigation (its id and the connection's host, never a link the
+binding carries). The only runtimes that may launch are LAUNCHERS, an
+explicit allow-list (one Launcher per runtime); adding one is that entry,
+after its gates are demonstrated. Rollouts are streamed line by line,
+bounded (MAX_ROLLOUT_BYTES, MAX_LINE); only session_meta, turn_context and
+MCP tool-call records are parsed; nothing of their contents is logged.
 
-Launch (Codex; config launch true, no ~/.cardinal/wake/disabled/codex):
-  <codex> exec -s <the session's sandbox> -c approval_policy="never" resume <sid> "<WAKE_PROMPT>"
-pinned by a golden test: the absolute codex path resolved at enable time,
-cwd from the rollout, never --profile, --dangerously-*, --ignore-* or
---skip-git-repo-check. The environment is the waker's own (launchd's, plus
-the PATH captured at enable) without CARDINAL_* (nothing may switch the
-hooks, the poller or the storyboard off, or join another investigation),
-CODEX_HOME (the rollout verified is ~/.codex's) or a parent session id.
-Detached (its own session), output to a 0600 log in ~/.cardinal/wake/logs.
-After it exits, every turn_context it added to the rollout must show the
-pinned mode with network off; otherwise (or with none recorded) the waker
-writes ~/.cardinal/wake/disabled/codex with the reason, notifies, and never
-launches Codex again until the owner runs `cardinal-wake reenable codex`.
-There is no fallback to other flags.
+Codex launch (config launch true, no ~/.cardinal/wake/disabled/codex):
+  <codex> exec -s <the session's sandbox> -c approval_policy="never"
+    -c mcp_servers.cardinal.enabled_tools=[<read/post investigation events>]
+    -c mcp_servers.<every other server>.enabled=false
+    -c plugins."<every non-Cardinal plugin>".enabled=false
+    resume <sid> "<WAKE_PROMPT>"
+pinned by golden tests, in the realpath'd cwd; never --profile,
+--dangerously-*, --ignore-* or --skip-git-repo-check. Codex starts MCP
+servers outside its sandbox, so the woken run gets only the Cardinal
+server's CARDINAL_WAKE_TOOLS (H1). Environment: the waker's, without
+CARDINAL_*, CODEX_HOME or a parent session id, PATH the vetted one.
+Detached, output to a 0600 per-wake log (the newest WAKE_LOGS_KEEP kept; a
+finished one over MAX_WAKE_LOG keeps its tail). After it exits, everything it
+added to the rollout must stay in bounds: each turn the pinned mode, no
+network, writes only inside cwd; each MCP call a CARDINAL_WAKE_TOOLS call on
+the Cardinal server. Otherwise (or with no turn recorded) the waker writes
+~/.cardinal/wake/disabled/codex with the reason, notifies, and launches no
+Codex session until `cardinal-wake reenable codex`. No fallback to other
+flags. (A call made from inside Codex's code-mode `exec` tool is not
+visible in the rollout; the -c restriction is what bounds it.)
 
 Gemini CLI launch (§5.3 Gemini; built, shipped off until GEMINI_LAUNCH_PROVEN):
-  <gemini> --resume <ident> -s --approval-mode yolo --skip-trust -p "<WAKE_PROMPT>"
-with GEMINI_SANDBOX=sandbox-exec, SEATBELT_PROFILE=restrictive-proxied and
-GEMINI_SANDBOX_PROXY_COMMAND = the stable allowlist_proxy.py (CONNECT, 443,
-exact hosts; the profile allows only localhost:8877), everything else that
-moves the sandbox stripped (GEMINI_SANDBOX_ENV). Eligible only in an
-approved root (enable --root; the cwd comes from Gemini's agent-writable
-project record), every recorded turn sandboxed (agent-writable: a hint),
-a supported auth type, no Gemini configuration that changes the sandbox
-(gemini_project_config, fail closed), port 8877 free, no other Gemini wake
-in flight. Within SPAWN_VERIFY_WINDOW the child's tree must run
-sandbox-exec with the proxied profile, else the tree is killed and Gemini
-launch disabled. Inside the sandbox the hooks keep their state under the
-relocated home (paths.state_home); the waker reads those bindings as hints
-and never writes there.
+  <python> -I allowlist_proxy.py --log <log> --port 8877 <hosts> --
+    /usr/bin/sandbox-exec -D TARGET_DIR=<cwd> -D TMP_DIR=<private> -D HOME_DIR
+      -D CACHE_DIR -D INCLUDE_DIR_0..4=/dev/null -f <cardinal's restrictive-proxied profile>
+    <gemini> --resume <ident> --approval-mode yolo --skip-trust -p "<WAKE_PROMPT>"
+Prevention, not detection (G2): the proxy owns port 8877 exclusively (G3)
+before it starts the command, and the sandbox wraps the whole Gemini process
+from its first instruction; Gemini's own -s is not passed (a seatbelt cannot
+be nested) and SANDBOX=sandbox-exec is set, as Gemini sets it inside its own
+sandbox, so it never starts another. The profile denies reading .env files
+and the OAuth credentials, so only a Gemini API key works (passed in the
+environment). Eligible only in an approved root, every recorded turn
+sandboxed (agent-writable: a hint), no Gemini configuration that changes the
+sandbox (fail closed), port 8877 free, no other Gemini wake in flight. A
+started tree that does not show the sandbox within SPAWN_VERIFY_WINDOW is
+killed and Gemini launch disabled (defense in depth; a quick exit is judged
+after the run).
 
-Lifecycle (§5.4), ledger ~/.cardinal/wake/ledger/<sid>.json; every
-read-modify-write holds an flock on <sid>.lock, and every transition is
-written before the action it describes:
-  DECISION_SEEN -> CLAIMED -> RESUMING -> ACKNOWLEDGED | FAILED; NOTIFIED.
-A claim is refused while the session has an entry in flight (CLAIMED, or
-RESUMING whose child has not been settled); the claim, the spawn and the
-RESUMING write happen under one lock, so a CLAIMED entry found later means
-the waker died mid-launch (FAILED, not retried). A spawn error (no child
-ever existed) is retried at most SPAWN_RETRIES times, then FAILED. A child
-that started is never retried. A decision posted during a run is delivered
-inside it by the hooks; one still unacknowledged after the run (and after
-LIVE_WINDOW, so the run's own file writes do not read as a live session) is
+Lifecycle (§5.4), ledger ~/.cardinal/wake/ledger/<sid>.json keyed by
+investigation_id:seq, with a per-investigation high-water mark that is never
+pruned; every read-modify-write holds an flock on <sid>.lock, and every
+transition is written before the action it describes:
+  DECISION_SEEN -> CLAIMED -> RESUMING [-> TIMED_OUT] -> ACKNOWLEDGED | FAILED; NOTIFIED.
+A claim is refused while the session has an entry in flight (CLAIMED,
+RESUMING, TIMED_OUT). The claim (with the pre-launch snapshot), the spawn and
+the RESUMING write happen under one lock; a CLAIMED entry found later means
+the waker died mid-launch: a live process whose argv names the session and
+this decision's wake prompt is recovered as the child, else FAILED (never
+retried, never "interrupted" while a child runs). A spawn error (no child
+ever existed) is retried at most SPAWN_RETRIES times. A child that started is
+never retried. A decision posted during a run is delivered inside it by the
+hooks; one still unacknowledged after the run (and after LIVE_WINDOW) is
 considered again and counts against the caps. The caps' check and the claim
-also hold ~/.cardinal/wake/ledger/.global.lock (taken after the session's
-lock, never before it).
+also hold ~/.cardinal/wake/ledger/.global.lock (after the session's lock).
 
 Liveness: live when ANY of: the poller status anchor pid is alive and
-started before the status file was written (a reused pid is dead); a
-process's argv contains the session id; the rollout or transcript, or the
-binding's .active file, changed within LIVE_WINDOW; a child the waker
-started (any ledger entry's pid, with its start time) is alive, such as one
-left running past WAKE_TIMEOUT. A signal that cannot be
-read (no process table, an anchor whose start time is unknown) counts as
-live.
+started before the status file was written; a process's argv contains the
+session id; the rollout or transcript, or the binding's .active file,
+changed within LIVE_WINDOW; a child the waker started is alive. A signal
+that cannot be read counts as live. Gap (L5): a Codex TUI started without
+the session id in its argv (`codex`, then picking the session) and idle for
+more than LIVE_WINDOW with no poller running reads as stopped; the waker
+then resumes the session beside it. Close the window before posting.
 
-Reporting: each transition is a ledger history line and, for NOTIFIED,
-RESUMING, ACKNOWLEDGED and FAILED, a local macOS notification naming the
-session's short id, the investigation and the state, never the decision's
-text (the ledger never holds it either). Success means the session
-acknowledged the decision; launching a process is never reported as
-success. A `session.wake` server event is a follow-up (§8).
+Reporting: a ledger history line per transition and, for NOTIFIED,
+RESUMING, TIMED_OUT, ACKNOWLEDGED and FAILED, a local notification (never
+the decision's text). Success means the session acknowledged the decision,
+with its disposition (accepted / declined / noted / conflicts), by the
+author's own principal naming the session (never a grantee, never
+granted_by); an agent holding the author's key could still post one, so it
+reports what the session said. Launching a process is never success. A
+`session.wake` server event is a follow-up (§8).
 
 Standard library only; Python 3.9. Every external effect (clock, process
 table, process start times, launcher, notifier, Cardinal reads, launchctl)
@@ -158,7 +179,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 from . import investigation_events as ie
 from . import investigation_poller as poller
@@ -190,18 +211,53 @@ READ_BUDGET = 25.0
 MAX_ROLLOUT_BYTES = 512 * 1024 * 1024
 MAX_LINE = 16 * 1024 * 1024
 MAX_LAUNCHD_LOG = 1024 * 1024
+DECISION_MAX_AGE = 7 * 86400.0   # an owner decision older than this (created_at) never launches: notified once
+WAKE_LOGS_KEEP = 50              # per-wake logs kept (newest); older ones are deleted
+MAX_WAKE_LOG = 10 * 1024 * 1024  # a finished wake's log larger than this keeps only its last WAKE_LOG_TAIL bytes
+WAKE_LOG_TAIL = 1024 * 1024
 
 PLIST_LABEL = "io.cardinalhq.wake"
+
+# The daemon's own executables (enable resolves and vets them; every run
+# checks them again). PATH for the daemon and every woken child: these
+# system directories plus the directories of the vetted interpreter and the
+# launcher binaries (and node, when one is a node script), never the shell's.
+SYSTEM_PATH_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+SYSTEM_PYTHON = "/usr/bin/python3"
+UNSAFE_TEMP_DIRS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+# Directories under $HOME a woken Codex session's working directory may be
+# neither inside nor above (its workspace-write sandbox could write them).
+HOME_PROTECTED = (".cardinal", ".codex", ".claude", ".gemini", ".cursor", "Library", ".ssh", ".config", ".gnupg",
+                  ".aws", ".docker", ".kube", ".local", ".zsh", ".oh-my-zsh", ".bash_it", ".npm", ".pyenv",
+                  ".nvm", ".cargo", ".rustup")
+# Codex config that would widen a woken session's workspace-write sandbox or
+# its network (any of these keys, in any config Codex loads, refuses the launch).
+CODEX_CONFIG_FILES = ("/etc/codex/config.toml", "/etc/codex/managed_config.toml")
+_CODEX_WIDENING_RE = re.compile(
+    r"^\s*(?:\[\s*\[?\s*(?:sandbox_workspace_write|permissions|permission_profiles?|default_permissions)\b"
+    r"|(?:sandbox_workspace_write|permissions|permission_profiles?|default_permissions)\s*[.=]"
+    r"|.*\b(?:writable_roots|network_access)\s*=)")
+# The only MCP tools a woken Codex run may call: the Cardinal server's read
+# and post of its own Investigation's events (an acknowledgment is a post).
+# Every other server is disabled and every non-Cardinal plugin is disabled
+# for the launch (codex_mcp_overrides); a call outside this list in the
+# rollout disables Codex launch (verify_after).
+CARDINAL_MCP_SERVER = "cardinal"
+CARDINAL_PLUGIN_PREFIX = "cardinal-codex-plugin@"
+CARDINAL_WAKE_TOOLS = ("storyboard__read_investigation_events", "storyboard__post_investigation_event")
+_TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")   # fullmatch
+_TOML_QUOTED_ID_RE = re.compile(r"[A-Za-z0-9_.@:/ -]{1,128}")   # fullmatch (the inside of a "quoted" key)
 
 DECISION_SEEN = "DECISION_SEEN"
 CLAIMED = "CLAIMED"
 RESUMING = "RESUMING"
+TIMED_OUT = "TIMED_OUT"          # still running past WAKE_TIMEOUT: left running, settled when it exits
 ACKNOWLEDGED = "ACKNOWLEDGED"
 FAILED = "FAILED"
 NOTIFIED = "NOTIFIED"
-IN_FLIGHT = (CLAIMED, RESUMING)
+IN_FLIGHT = (CLAIMED, RESUMING, TIMED_OUT)
 TERMINAL = (ACKNOWLEDGED, FAILED, NOTIFIED)
-NOTIFY_STATES = (NOTIFIED, RESUMING, ACKNOWLEDGED, FAILED)
+NOTIFY_STATES = (NOTIFIED, RESUMING, TIMED_OUT, ACKNOWLEDGED, FAILED)
 
 CODEX = "codex"
 CLAUDE = "claude"
@@ -358,8 +414,15 @@ def global_lock(home: Path, wait: float = 10.0):
 def read_config(home: Path) -> dict:
     c = _read_json(config_path(home))
     roots = c.get("roots") if isinstance(c.get("roots"), list) else []
+    python, path_env = c.get("python"), c.get("path_env")
+    binaries = c.get("binaries") if isinstance(c.get("binaries"), dict) else {}
     out = {"enabled": c.get("enabled") is True, "launch": c.get("launch") is True,
-           "enabled_at": c.get("enabled_at"), "python": c.get("python"),
+           "enabled_at": c.get("enabled_at"),
+           "python": python if isinstance(python, str) and os.path.isabs(python) else None,
+           "path_env": path_env if isinstance(path_env, str) and path_env else None,
+           "binaries": {k: v for k, v in binaries.items() if isinstance(k, str) and os.path.isabs(k)
+                        and isinstance(v, list)},
+           "node_path": c.get("node_path") if isinstance(c.get("node_path"), str) else None,
            "versions": c.get("versions") if isinstance(c.get("versions"), dict) else {},
            "roots": [r for r in roots if isinstance(r, str) and os.path.isabs(r)]}
     for launcher in LAUNCHERS.values():   # <runtime>_path: an absolute executable, or None
@@ -388,6 +451,100 @@ def disable_runtime(home: Path, runtime: str, reason: str, now: float) -> None:
     ie.write_json(p, {"reason": reason, "at": _iso(now)})
 
 
+# ---------------------------------------------------------------------------
+# The daemon's executables (B1: never from an agent-writable place)
+# ---------------------------------------------------------------------------
+
+def temp_dirs() -> Tuple[str, ...]:
+    """Directories any sandboxed agent may write (temp): no executable the
+    daemon runs may live there."""
+    import tempfile
+    return tuple(dict.fromkeys(list(UNSAFE_TEMP_DIRS) + [os.path.realpath(tempfile.gettempdir())]))
+
+
+def unsafe_location(path: str, home: Path, roots: List[str], *, allow_home: bool = True) -> Optional[str]:
+    """Why the daemon must not run `path` (resolved), or None: inside a git
+    work tree under $HOME (where every wakeable workspace lives: a Codex
+    session's cwd must be strictly inside $HOME, approved roots are too),
+    an approved root, a temp directory, or (allow_home False) anywhere under
+    $HOME. A git tree outside $HOME is not refused: Homebrew's own prefix
+    (/opt/homebrew) is one, and no wake ever runs an agent there."""
+    real = os.path.realpath(path)
+    home_real = os.path.realpath(str(home))
+    git = _git_root(os.path.dirname(real))
+    if git is not None and _within(os.path.realpath(str(git)), home_real):
+        return f"{real} is inside a git work tree"
+    for root in roots:
+        if _within(real, os.path.realpath(root)):
+            return f"{real} is inside the approved root {root}"
+    for t in temp_dirs():
+        if _within(real, t):
+            return f"{real} is inside a temporary directory"
+    if not allow_home and _within(real, os.path.realpath(str(home))):
+        return f"{real} is inside your home directory"
+    return None
+
+
+def fingerprint(path: str) -> Optional[list]:
+    """[size, mtime_ns, inode] of the file `path` resolves to, or None."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [st.st_size, st.st_mtime_ns, st.st_ino]
+
+
+def needs_node(path: str) -> bool:
+    """`path` is a script run by node (`#!/usr/bin/env node` and the like)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.readline(256)
+    except OSError:
+        return False
+    return head.startswith(b"#!") and b"node" in head
+
+
+def pick_python(home: Path, roots: List[str]) -> Tuple[Optional[str], str]:
+    """(the interpreter the daemon runs, with -I) or (None, why none is
+    safe): this Python if it resolves outside $HOME, git work trees,
+    approved roots and temp dirs, else /usr/bin/python3."""
+    reasons = []
+    for candidate in (sys.executable, SYSTEM_PYTHON):
+        if not candidate or not os.access(candidate, os.X_OK):
+            continue
+        why = unsafe_location(candidate, home, roots, allow_home=False)
+        if why is None:
+            return os.path.realpath(candidate), ""
+        reasons.append(why)
+    return None, "; ".join(reasons) or "no python3 found"
+
+
+def daemon_path(*dirs: Optional[str]) -> str:
+    """PATH for the daemon and its children: the system directories plus
+    the given (vetted) directories, nothing from the user's shell."""
+    return ":".join(dict.fromkeys([*SYSTEM_PATH_DIRS, *[d for d in dirs if d]]))
+
+
+def binaries_problem(config: dict, home: Path, cwd: Optional[str] = None) -> Optional[str]:
+    """Why the vetted executables (the interpreter, the launch binaries,
+    node) cannot be trusted now, or None: each must still be the file enable
+    vetted (same path, size, mtime, inode), outside every unsafe location,
+    and outside the woken session's working directory."""
+    binaries = config.get("binaries") if isinstance(config.get("binaries"), dict) else {}
+    if not binaries or not config.get("python") or not config.get("path_env"):
+        return "the daemon's executables were not vetted (run cardinal-wake enable --launch again)"
+    roots = config.get("roots") or []
+    for path, fp in binaries.items():
+        if fingerprint(path) != fp or os.path.realpath(path) != path:
+            return f"{path} changed since cardinal-wake enable (run it again)"
+        why = unsafe_location(path, home, roots, allow_home=(path != config.get("python")))
+        if why:
+            return why
+        if cwd and _within(path, os.path.realpath(cwd)):
+            return f"{path} is inside the session's working directory"
+    return None
+
+
 def reenable_runtime(home: Path, runtime: str) -> bool:
     try:
         disabled_path(home, runtime).unlink()
@@ -405,10 +562,35 @@ def read_ledger(home: Path, sid: str) -> dict:
     entries = data.get("entries")
     data["session_id"] = sid
     data["entries"] = {k: v for k, v in entries.items() if isinstance(v, dict)} if isinstance(entries, dict) else {}
+    hwm = data.get("hwm")
+    data["hwm"] = {k: v for k, v in hwm.items() if ie.valid_investigation(k) and isinstance(v, int)
+                   and not isinstance(v, bool)} if isinstance(hwm, dict) else {}
     return data
 
 
+def entry_key(investigation_id: str, seq: int) -> str:
+    """A ledger entry's key: seqs are per investigation, so the key is both."""
+    return f"{investigation_id}:{seq}"
+
+
+def decision_seen(ledger: dict, investigation_id: str, seq: int) -> bool:
+    """#seq of `investigation_id` was handled for this session: it has an
+    entry, or it is at or below the session's high-water mark for that
+    investigation (never pruned: a pruned entry cannot let a decision run
+    again)."""
+    return entry_key(investigation_id, seq) in ledger["entries"] or seq <= ledger["hwm"].get(investigation_id, 0)
+
+
+def add_entry(ledger: dict, entry: dict) -> None:
+    """Record a new entry and raise the investigation's high-water mark."""
+    inv, seq = entry["investigation_id"], entry["seq"]
+    ledger["entries"][entry_key(inv, seq)] = entry
+    ledger["hwm"][inv] = max(ledger["hwm"].get(inv, 0), seq)
+
+
 def write_ledger(home: Path, sid: str, ledger: dict, now: float) -> None:
+    """Persist the ledger; terminal entries older than LEDGER_KEEP (or past
+    LEDGER_MAX_ENTRIES) go, the high-water marks never do."""
     entries = ledger["entries"]
     for k in [k for k, e in entries.items()
               if e.get("state") in TERMINAL and now - (_num(e.get("updated_at")) or 0.0) > LEDGER_KEEP]:
@@ -755,19 +937,41 @@ class Unverifiable(Exception):
 
 
 _RECORD_MARKERS = (b"turn_context", b"session_meta")
+_MCP_MARKERS = (b"mcp__", b"mcpToolCall", b"mcp_tool_call")
 _TURN_TYPE_RE = re.compile(rb'"type"\s*:\s*"turn_context"')
 
 
-def _records(path: Path, offset: int = 0) -> Iterator[dict]:
+def _mcp_call(rec: Any) -> Optional[Tuple[str, str]]:
+    """(server, tool) when a rollout record is an MCP tool call, else None:
+    a function_call in an mcp__<server> namespace, an mcp_tool_call_begin /
+    _end event, or an mcpToolCall item."""
+    if not isinstance(rec, dict):
+        return None
+    p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+    ns = p.get("namespace")
+    if p.get("type") == "function_call" and isinstance(ns, str) and ns.startswith("mcp__"):
+        return ns[len("mcp__"):], str(p.get("name"))
+    inv = p.get("invocation") if isinstance(p.get("invocation"), dict) else None
+    if p.get("type") in ("mcp_tool_call_begin", "mcp_tool_call_end") and inv is not None:
+        return str(inv.get("server")), str(inv.get("tool"))
+    item = p.get("item") if isinstance(p.get("item"), dict) else None
+    if item is not None and item.get("type") in ("mcpToolCall", "mcp_tool_call"):
+        return str(item.get("server")), str(item.get("tool"))
+    return None
+
+
+def _records(path: Path, offset: int = 0, *, mcp: bool = False) -> Iterator[dict]:
     """The session_meta and turn_context records of a rollout from byte
-    `offset`, streamed line by line (MAX_LINE per line, MAX_ROLLOUT_BYTES in
-    all). A line that may be a turn_context but cannot be parsed (overlong,
-    malformed) raises Unverifiable: every turn has to be seen."""
+    `offset` (with mcp, its MCP tool calls too: _mcp_call), streamed line by
+    line (MAX_LINE per line, MAX_ROLLOUT_BYTES in all). A line that may be
+    one of them but cannot be parsed (overlong, malformed) raises
+    Unverifiable: every turn (and call) has to be seen."""
     st = os.lstat(str(path))
     if not os.path.isfile(str(path)) or os.path.islink(str(path)):
         raise Unverifiable("a rollout is not a regular file")
     if st.st_size - offset > MAX_ROLLOUT_BYTES:
         raise Unverifiable("a rollout is too large to verify")
+    markers = _RECORD_MARKERS + (_MCP_MARKERS if mcp else ())
     total = 0
     with open(str(path), "rb") as f:
         f.seek(offset)
@@ -779,8 +983,10 @@ def _records(path: Path, offset: int = 0) -> Iterator[dict]:
             if total > MAX_ROLLOUT_BYTES:
                 raise Unverifiable("a rollout is too large to verify")
             if len(line) > MAX_LINE and not line.endswith(b"\n"):
-                if b"turn_context" in line[:4096]:
-                    raise Unverifiable("a rollout turn record is too large to verify")
+                head = line[:4096]
+                mcp_like = mcp and (b'"namespace"' in head or any(m in head for m in _MCP_MARKERS))
+                if b"turn_context" in head or mcp_like:
+                    raise Unverifiable("a rollout record is too large to verify")
                 while not line.endswith(b"\n"):   # skip the rest of an overlong line
                     line = f.readline(MAX_LINE)
                     if not line:
@@ -789,7 +995,7 @@ def _records(path: Path, offset: int = 0) -> Iterator[dict]:
                     if total > MAX_ROLLOUT_BYTES:
                         raise Unverifiable("a rollout is too large to verify")
                 continue
-            if not any(m in line for m in _RECORD_MARKERS):
+            if not any(m in line for m in markers):
                 continue
             try:
                 rec = json.loads(line)
@@ -797,15 +1003,73 @@ def _records(path: Path, offset: int = 0) -> Iterator[dict]:
                 if _TURN_TYPE_RE.search(line):
                     raise Unverifiable("a rollout turn record is malformed")
                 continue
-            if isinstance(rec, dict) and rec.get("type") in ("turn_context", "session_meta"):
+            if isinstance(rec, dict) and (rec.get("type") in ("turn_context", "session_meta")
+                                          or (mcp and _mcp_call(rec) is not None)):
                 yield rec
+
+
+def _payload(rec: dict) -> dict:
+    return rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
 
 
 def _turn(rec: dict) -> Tuple[Any, Any]:
     """(sandbox_policy.type, network_access) of a turn_context record."""
-    payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+    payload = _payload(rec)
     policy = payload.get("sandbox_policy") if isinstance(payload.get("sandbox_policy"), dict) else {}
     return policy.get("type"), policy.get("network_access")
+
+
+_SPECIAL_WRITABLE = ("slash_tmp", "tmpdir")
+
+
+def turn_policy_problem(payload: dict, cwd_real: str) -> Optional[str]:
+    """Why one turn's recorded sandbox could write outside the session's
+    working directory (realpath'd) or reach the network, or None. Checked:
+    sandbox_policy.writable_roots; the file-system entries of
+    file_system_sandbox_policy and permission_profile.file_system (every
+    non-read entry a path inside cwd, or Codex's own /tmp / $TMPDIR);
+    permission_profile.network (restricted only). Unknown shapes refuse."""
+    policy = payload.get("sandbox_policy") if isinstance(payload.get("sandbox_policy"), dict) else {}
+    writes: List[str] = []
+    roots = policy.get("writable_roots")
+    if roots is not None:
+        if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
+            return "a turn's writable_roots cannot be read"
+        writes += roots
+    profile = payload.get("permission_profile")
+    if profile is not None and not isinstance(profile, dict):
+        return "a turn's permission profile cannot be read"
+    profile = profile or {}
+    if profile.get("network") not in (None, "restricted"):
+        return "a turn's permission profile allows network access"
+    for fs in (payload.get("file_system_sandbox_policy"), profile.get("file_system")):
+        if fs is None:
+            continue
+        if not isinstance(fs, dict):
+            return "a turn's file-system policy cannot be read"
+        kind = fs.get("kind", fs.get("type"))
+        if kind not in (None, "restricted"):
+            return f"a turn's file-system policy is {str(kind)[:40]!r}"
+        entries = fs.get("entries", [])
+        if not isinstance(entries, list):
+            return "a turn's file-system policy cannot be read"
+        for e in entries:
+            if not isinstance(e, dict) or not isinstance(e.get("path"), dict):
+                return "a turn's file-system entry cannot be read"
+            if e.get("access") == "read":
+                continue
+            target = e["path"]
+            if target.get("type") == "path" and isinstance(target.get("path"), str):
+                writes.append(target["path"])
+            elif target.get("type") == "special" and isinstance(target.get("value"), dict) \
+                    and target["value"].get("kind") in _SPECIAL_WRITABLE:
+                continue
+            else:
+                return "a turn could write a location the waker does not recognize"
+    for w in writes:
+        if not os.path.isabs(w) or not _within(os.path.realpath(w), cwd_real):
+            return "a turn could write outside the session's working directory"
+    return None
 
 
 def _git_root(cwd: str) -> Optional[Path]:
@@ -823,13 +1087,15 @@ def _git_work_tree(cwd: str) -> bool:
 
 
 def codex_project_config(cwd: str) -> Optional[str]:
-    """Where Codex project config sits between `cwd` and its git work-tree
-    root (both included), or None. A .codex/ holding any *.toml (config.toml
-    can declare MCP servers, which a resumed `codex exec` starts OUTSIDE its
+    """Where Codex project config sits between `cwd` (realpath'd first: a
+    symlinked cwd is judged where it really is) and its git work-tree root
+    (both included), or None. A .codex/ holding any *.toml (config.toml can
+    declare MCP servers, which a resumed `codex exec` starts OUTSIDE its
     sandbox: proof C-8) or hooks.json counts; so does a .codex that is not a
     plain directory (a symlink is never followed) or cannot be read (fail
     closed). A sandboxed agent cannot create .codex inside workspace-write;
     a cloned repo or an unsandboxed tool can."""
+    cwd = os.path.realpath(cwd)
     root = _git_root(cwd)
     if root is None:
         return "no git work tree"
@@ -856,9 +1122,119 @@ def codex_project_config(cwd: str) -> Optional[str]:
     return None
 
 
+def home_cwd_problem(cwd_real: str, home: Path) -> Optional[str]:
+    """Why a Codex working directory (realpath) may not be woken: not
+    strictly inside $HOME, or inside or above one of HOME_PROTECTED (its
+    workspace-write sandbox would then write the waker's or an agent's
+    config, keys or shell setup)."""
+    home_real = os.path.realpath(str(home))
+    if cwd_real == home_real or not _within(cwd_real, home_real):
+        return "the session's working directory is not strictly inside your home directory"
+    for name in HOME_PROTECTED:
+        protected = os.path.join(home_real, name)
+        if _within(cwd_real, protected) or _within(protected, cwd_real):
+            return f"the session's working directory is inside or above ~/{name}"
+    return None
+
+
+def _codex_config_texts(home: Path) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+    """([(path, text)] of every Codex config file that exists: ~/.codex/
+    config.toml and the system ones), or ([], why one cannot be read)."""
+    out = []
+    for p in [str(Path(home) / ".codex" / "config.toml")] + list(CODEX_CONFIG_FILES):
+        if not os.path.lexists(p):
+            continue
+        try:
+            if os.path.getsize(p) > MAX_CONFIG_READ:
+                return [], f"{p} is too large to check"
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                out.append((p, f.read(MAX_CONFIG_READ + 1)))
+        except OSError:
+            return [], f"{p} cannot be read"
+    return out, None
+
+
+def _config_lines(text: str) -> Iterator[str]:
+    for line in text.splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            yield s
+
+
+def codex_config_problem(home: Path) -> Optional[str]:
+    """Why the Codex config would widen a woken workspace-write sandbox, or
+    None: any sandbox_workspace_write / permissions / permission profile
+    table or key, or a writable_roots / network_access key, in
+    ~/.codex/config.toml, /etc/codex/config.toml or managed_config.toml."""
+    texts, why = _codex_config_texts(home)
+    if why:
+        return why
+    for path, text in texts:
+        for line in _config_lines(text):
+            if _CODEX_WIDENING_RE.match(line):
+                return f"{path} widens the workspace-write sandbox ({line.split('=')[0].strip()[:60]})"
+    return None
+
+
+_MCP_HEADER_RE = re.compile(r'^\[\s*mcp_servers\s*\.\s*(?:"([^"]*)"|([A-Za-z0-9_-]+))\s*(?:\.[^\]]*)?\]$')
+_PLUGIN_HEADER_RE = re.compile(r'^\[\s*plugins\s*\.\s*"([^"]+)"\s*(?:\.[^\]]*)?\]$')
+
+
+def _toml_key(ident: str) -> Optional[str]:
+    if _TOML_BARE_KEY_RE.fullmatch(ident):
+        return ident
+    if _TOML_QUOTED_ID_RE.fullmatch(ident):
+        return f'"{ident}"'
+    return None
+
+
+def codex_mcp_overrides(home: Path) -> Tuple[Optional[List[str]], str]:
+    """(the -c values that leave a woken run only the Cardinal server's
+    CARDINAL_WAKE_TOOLS, "") or (None, why the MCP servers cannot be
+    enumerated). Every [mcp_servers.<id>] but the Cardinal one gets
+    enabled=false, the Cardinal one enabled_tools=CARDINAL_WAKE_TOOLS, and
+    every [plugins."<id>"] but the Cardinal plugin enabled=false (a plugin
+    can bring its own MCP servers). Any other way of declaring servers or
+    plugins (dotted keys, inline tables, arrays of tables) refuses."""
+    texts, why = _codex_config_texts(home)
+    if why:
+        return None, why
+    servers, plugins = set(), set()
+    for path, text in texts:
+        for line in _config_lines(text):
+            m = _MCP_HEADER_RE.match(line)
+            if m:
+                servers.add(m.group(1) if m.group(1) is not None else m.group(2))
+                continue
+            m = _PLUGIN_HEADER_RE.match(line)
+            if m:
+                plugins.add(m.group(1))
+                continue
+            if re.match(r"^(\[\s*\[?\s*)?(mcp_servers|plugins)\b", line):
+                return None, f"{path} declares MCP servers or plugins in a form the waker cannot disable"
+    out = []
+    for ident in sorted(servers):
+        key = _toml_key(ident)
+        if key is None:
+            return None, f"the MCP server id {ident[:40]!r} cannot be disabled on the command line"
+        if ident == CARDINAL_MCP_SERVER:
+            out.append(f"mcp_servers.{key}.enabled_tools=" + json.dumps(list(CARDINAL_WAKE_TOOLS)))
+        else:
+            out.append(f"mcp_servers.{key}.enabled=false")
+    for ident in sorted(plugins):
+        if ident.startswith(CARDINAL_PLUGIN_PREFIX):
+            continue
+        key = _toml_key(ident)
+        if key is None:
+            return None, f"the plugin id {ident[:40]!r} cannot be disabled on the command line"
+        out.append(f"plugins.{key}.enabled=false")
+    return out, ""
+
+
 def codex_eligibility(home: Path, sid: str, rt: Optional[Runtime] = None) -> Runtime:
-    """rt (runtime_kind) with eligible / reason / cwd / sandbox filled in
-    from the rollouts (§5.3)."""
+    """rt (runtime_kind) with eligible / reason / cwd / sandbox / extra
+    (mcp_overrides) filled in from the rollouts and the Codex config
+    (§5.3)."""
     rt = rt or runtime_kind(home, sid)
     if rt.kind != CODEX:
         return rt
@@ -871,11 +1247,11 @@ def codex_eligibility(home: Path, sid: str, rt: Optional[Runtime] = None) -> Run
         for path in rt.files:
             for rec in _records(path):
                 if rec["type"] == "session_meta":
-                    p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+                    p = _payload(rec)
                     if meta is None and p.get("id") == sid:
                         meta = p
                 else:
-                    turns.append(_turn(rec))
+                    turns.append(_payload(rec))
     except (OSError, Unverifiable) as e:
         rt.reason = f"{e if isinstance(e, Unverifiable) else 'a rollout could not be read'}: notify-only"
         return rt
@@ -893,7 +1269,9 @@ def codex_eligibility(home: Path, sid: str, rt: Optional[Runtime] = None) -> Run
     if not turns:
         rt.reason = "no turn recorded a sandbox: notify-only"
         return rt
-    for mode, network in turns:
+    modes = []
+    for payload in turns:
+        mode, network = _turn({"payload": payload})
         if mode not in SANDBOX_MODES:
             rt.reason = ("the session ran danger-full-access at least once: notify-only" if mode == "danger-full-access"
                          else "a turn ran without a recognized sandbox: notify-only")
@@ -901,21 +1279,41 @@ def codex_eligibility(home: Path, sid: str, rt: Optional[Runtime] = None) -> Run
         if network is True:
             rt.reason = "the session ran with network access at least once: notify-only"
             return rt
+        modes.append(mode)
     cwd = meta.get("cwd")
     if not (isinstance(cwd, str) and os.path.isabs(cwd) and os.path.isdir(cwd)):
         rt.reason = "the session's working directory is gone: notify-only"
         return rt
-    if not _git_work_tree(cwd):
+    real = os.path.realpath(cwd)   # every check and the launch use where it really is
+    why = home_cwd_problem(real, home)
+    if why:
+        rt.reason = why + ": notify-only"
+        return rt
+    for payload in turns:
+        why = turn_policy_problem(payload, real)
+        if why:
+            rt.reason = why + ": notify-only"
+            return rt
+    if not _git_work_tree(real):
         rt.reason = ("the session's working directory is not a git work tree (codex exec would need "
                      "--skip-git-repo-check, which is never passed): notify-only")
         return rt
-    found = codex_project_config(cwd)
+    found = codex_project_config(real)
     if found:
         rt.reason = ("the project has its own Codex config (a .codex with config or hooks between the working "
                      "directory and the repository root; its MCP servers would run outside the sandbox): "
                      "notify-only")
         return rt
-    rt.eligible, rt.reason, rt.cwd, rt.sandbox = True, "eligible", cwd, turns[-1][0]
+    why = codex_config_problem(home)
+    if why:
+        rt.reason = why + ": notify-only"
+        return rt
+    overrides, why = codex_mcp_overrides(home)
+    if overrides is None:
+        rt.reason = why + ": notify-only"
+        return rt
+    rt.eligible, rt.reason, rt.cwd, rt.sandbox = True, "eligible", real, modes[-1]
+    rt.extra = {"mcp_overrides": overrides}
     return rt
 
 
@@ -927,26 +1325,38 @@ def resolve(home: Path, sid: str) -> Runtime:
     return launcher.eligibility(home, sid, rt, read_config(home)) if launcher else rt
 
 
-def rollout_offsets(home: Path, sid: str) -> dict:
-    """{path: size} of the session's rollouts now (before a launch)."""
+def rollout_offsets(home: Path, sid: str, rt: Optional[Runtime] = None) -> dict:
+    """What verify_after needs from before a launch: {offsets: {path: size}
+    of the session's rollouts, cwd: the realpath the session runs in}."""
     out = {}
     for p in codex_rollouts(home, sid):
         with contextlib.suppress(OSError):
             out[str(p)] = os.lstat(str(p)).st_size
-    return out
+    return {"offsets": out, "cwd": rt.cwd if rt is not None else None}
 
 
-def verify_after(home: Path, sid: str, offsets: dict, pinned: str, *, require_turn: bool = True) -> Optional[str]:
-    """None when every turn_context the woken run added (past `offsets`, or
-    in a rollout that did not exist then) ran `pinned` with network off;
-    else why not. require_turn: none at all is a failure too."""
+def verify_after(home: Path, sid: str, snapshot: dict, pinned: str, *, require_turn: bool = True) -> Optional[str]:
+    """None when everything the woken run added to the rollout (past the
+    snapshot's offsets, or in a rollout that did not exist then) stayed in
+    bounds: every turn_context ran `pinned` with network off and could write
+    only inside the session's working directory (turn_policy_problem), and
+    every MCP tool call was a CARDINAL_WAKE_TOOLS call on the Cardinal
+    server; else why not. require_turn: no turn at all is a failure too."""
+    offsets = snapshot.get("offsets") if isinstance(snapshot.get("offsets"), dict) else snapshot
+    cwd = snapshot.get("cwd") if isinstance(snapshot.get("cwd"), str) else None
     seen = 0
     try:
         for p in codex_rollouts(home, sid):
-            start = offsets.get(str(p), 0)
+            start = offsets.get(str(p), 0) if isinstance(offsets.get(str(p), 0), int) else 0
             if os.lstat(str(p)).st_size < start:
                 return "the rollout was rewritten during the woken run"
-            for rec in _records(p, start):
+            for rec in _records(p, start, mcp=True):
+                call = _mcp_call(rec)
+                if call is not None:
+                    if call[0] != CARDINAL_MCP_SERVER or call[1] not in CARDINAL_WAKE_TOOLS:
+                        return (f"the woken run called the MCP tool {call[0][:40]}/{call[1][:60]}, "
+                                "outside its allow-list")
+                    continue
                 if rec["type"] != "turn_context":
                     continue
                 seen += 1
@@ -955,6 +1365,11 @@ def verify_after(home: Path, sid: str, offsets: dict, pinned: str, *, require_tu
                     return f"the woken run's sandbox was {mode!r}, not the pinned {pinned!r}"
                 if network is True:
                     return "the woken run had network access"
+                if cwd is None:
+                    return "the woken run's working directory is unknown"
+                why = turn_policy_problem(_payload(rec), cwd)
+                if why:
+                    return f"the woken run: {why}"
     except (OSError, Unverifiable) as e:
         return f"the woken run's rollout could not be verified ({e})"
     if require_turn and not seen:
@@ -962,22 +1377,32 @@ def verify_after(home: Path, sid: str, offsets: dict, pinned: str, *, require_tu
     return None
 
 
-def codex_argv(codex_path: str, sandbox: str, sid: str, seq: int) -> List[str]:
-    """The pinned launch (§5.3); nothing else is ever passed."""
+def codex_argv(codex_path: str, sandbox: str, sid: str, seq: int, overrides: Iterable[str] = ()) -> List[str]:
+    """The pinned launch (§5.3); nothing else is ever passed: the session's
+    own sandbox, approvals off, and the MCP restriction (one -c per
+    codex_mcp_overrides value)."""
     if not (isinstance(codex_path, str) and os.path.isabs(codex_path)):
         raise ValueError("codex must be an absolute path")
     if sandbox not in SANDBOX_MODES:
         raise ValueError(f"not a wake sandbox: {sandbox!r}")
     if not UUID_RE.fullmatch(sid or ""):
         raise ValueError(f"not a Codex session id: {sid!r}")
-    return [codex_path, "exec", "-s", sandbox, "-c", APPROVAL_NEVER, "resume", sid, wake_prompt(seq)]
+    extra: List[str] = []
+    for value in overrides:
+        if not (isinstance(value, str) and re.match(r"^(mcp_servers|plugins)\.", value)):
+            raise ValueError(f"not an MCP restriction: {value!r}")
+        extra += ["-c", value]
+    return [codex_path, "exec", "-s", sandbox, "-c", APPROVAL_NEVER, *extra, "resume", sid, wake_prompt(seq)]
 
 
-def child_env(environ: Mapping[str, str]) -> dict:
+def child_env(environ: Mapping[str, str], path_env: Optional[str] = None) -> dict:
     """The woken child's environment: the waker's, without CARDINAL_* (no
     switch may turn the plugin's hooks, poller or storyboard off, or join
-    another investigation), CODEX_HOME or a parent session's id."""
-    return {k: v for k, v in environ.items() if not k.startswith("CARDINAL_") and k not in STRIPPED_ENV}
+    another investigation), CODEX_HOME or a parent session's id; PATH is the
+    daemon's vetted one (path_env), never the user's shell PATH."""
+    env = {k: v for k, v in environ.items() if not k.startswith("CARDINAL_") and k not in STRIPPED_ENV}
+    env["PATH"] = path_env or daemon_path()
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -1188,9 +1613,15 @@ def gemini_auth(home: Path, environ: Mapping[str, str]) -> Tuple[Optional[tuple]
         with contextlib.suppress(ValueError, UnicodeDecodeError, AttributeError):
             selected = (json.loads(_strip_json_comments(data.decode("utf-8"))).get("security") or {}) \
                 .get("auth", {}).get("selectedType")
+    if selected == "oauth-personal":
+        # The restrictive-proxied profile denies reading oauth_creds.json (and
+        # every .env file) inside the sandbox, which now wraps the whole
+        # process from its first instruction (no unsandboxed outer Gemini to
+        # read it first), so a Google sign-in cannot work: notify-only.
+        return None, ("Sign in with Google is not supported for an unattended Gemini wake (its sandbox cannot read "
+                      "the OAuth credentials); a Gemini API key is")
     if selected not in GEMINI_AUTH_HOSTS:
-        return None, (f"Gemini auth {selected!r} is not supported for an unattended wake (Gemini API key or "
-                      "Sign in with Google only)")
+        return None, f"Gemini auth {selected!r} is not supported for an unattended wake (Gemini API key only)"
     if selected == "gemini-api-key" and not environ.get("GEMINI_API_KEY"):
         env = _read_small(Path(home) / ".gemini" / ".env") or b""
         names = {m.group(1) for m in (_ENV_LINE_RE.match(line) for line in env.decode("utf-8", "replace")
@@ -1318,13 +1749,77 @@ def gemini_eligibility(home: Path, sid: str, rt: Optional[Runtime] = None, confi
     return rt
 
 
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+GEMINI_SEATBELT_FILE = "seatbelt-restrictive-proxied.sb"   # cardinal_core's copy of Gemini's profile
+GEMINI_INCLUDE_DIRS = 5
+GEMINI_PROXY_URL = f"http://localhost:{GEMINI_PROXY_PORT}"
+
+
+def proxy_script(home: Path) -> Path:
+    return lib_dir(home) / "cardinal_core" / "allowlist_proxy.py"
+
+
+def seatbelt_profile(home: Path) -> Path:
+    return lib_dir(home) / "cardinal_core" / GEMINI_SEATBELT_FILE
+
+
+def darwin_cache_dir() -> Optional[str]:
+    """`getconf DARWIN_USER_CACHE_DIR`, realpath'd (the profile's CACHE_DIR)."""
+    try:
+        out = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_CACHE_DIR"], capture_output=True, text=True,
+                             timeout=5, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return os.path.realpath(out) if out and os.path.isabs(out) else None
+
+
+def gemini_api_key(home: Path, environ: Mapping[str, str]) -> Optional[str]:
+    """The user's GEMINI_API_KEY for the woken process (its sandbox denies
+    reading any .env file and the keychain): from the waker's environment,
+    else the GEMINI_API_KEY line of ~/.gemini/.env. Never logged or stored."""
+    if environ.get("GEMINI_API_KEY"):
+        return environ["GEMINI_API_KEY"]
+    data = _read_small(Path(home) / ".gemini" / ".env") or b""
+    for line in data.decode("utf-8", "replace").splitlines():
+        m = re.match(r"^\s*(?:export\s+)?GEMINI_API_KEY\s*=\s*(.*?)\s*$", line)
+        if m:
+            value = m.group(1)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            return value or None
+    return None
+
+
+def gemini_prepare(home: Path, rt: Runtime, config: dict, log: Path, system: "System") -> Optional[str]:
+    """Right before the spawn: this wake's private temp dir (the profile's
+    TMP_DIR, 0700), CACHE_DIR, and the paths the argv names; why it cannot
+    be prepared, else None."""
+    import tempfile
+    cache = darwin_cache_dir()
+    if not cache:
+        return "the user cache directory (getconf DARWIN_USER_CACHE_DIR) is unknown"
+    try:
+        tmp = tempfile.mkdtemp(prefix="cardinal-wake-gemini-", dir=os.path.realpath(tempfile.gettempdir()))
+        os.chmod(tmp, 0o700)
+    except OSError as e:
+        return f"no private temp directory ({type(e).__name__})"
+    rt.extra.update(tmp_dir=os.path.realpath(tmp), cache_dir=cache, log=str(log), python=config.get("python"),
+                    proxy=str(proxy_script(home)), profile=str(seatbelt_profile(home)),
+                    home_dir=os.path.realpath(str(home)))
+    return None
+
+
 def gemini_argv(gemini_path: str, rt: Runtime, sid: str, seq: int) -> List[str]:
-    """The pinned Gemini launch: resumed in its seatbelt sandbox (-s, the
-    proxied profile from the environment), approvals off inside it (yolo:
-    the sandbox and the allow-list proxy are the boundary, as workspace-write
-    with approval never is for Codex), workspace trust skipped (headless; the
-    project guard has checked what trust would load). Never --yolo / -y
-    without -s, --sandbox-image or --include-directories."""
+    """The pinned Gemini launch (prevention, not detection): the allow-list
+    proxy binds the port exclusively, then runs
+      sandbox-exec -D <params> -f <cardinal's restrictive-proxied profile>
+        <gemini> --resume <ident> --approval-mode yolo --skip-trust -p <prompt>
+    as its child, so the whole Gemini process is sandboxed from its first
+    instruction. Gemini's own -s is NOT passed (a seatbelt cannot be nested:
+    Gemini would re-exec sandbox-exec inside ours and fail); SANDBOX is set
+    in its environment, as Gemini sets it inside its own sandbox, so it never
+    tries. yolo acts inside that sandbox: the sandbox and the proxy are the
+    boundary. Never --yolo / -y, --sandbox-image or --include-directories."""
     if not (isinstance(gemini_path, str) and os.path.isabs(gemini_path)):
         raise ValueError("gemini must be an absolute path")
     if not UUID_RE.fullmatch(sid or ""):
@@ -1334,34 +1829,48 @@ def gemini_argv(gemini_path: str, rt: Runtime, sid: str, seq: int) -> List[str]:
         raise ValueError(f"not a resume ident: {ident!r}")
     if rt.sandbox != GEMINI_PROFILE:
         raise ValueError(f"not the wake profile: {rt.sandbox!r}")
-    return [gemini_path, "--resume", ident, "-s", "--approval-mode", "yolo", "--skip-trust", "-p", wake_prompt(seq)]
-
-
-def proxy_script(home: Path) -> Path:
-    return lib_dir(home) / "cardinal_core" / "allowlist_proxy.py"
+    x = rt.extra
+    for k in ("tmp_dir", "cache_dir", "log", "python", "proxy", "profile", "home_dir"):
+        if not (isinstance(x.get(k), str) and os.path.isabs(x[k])):
+            raise ValueError(f"the launch is not prepared ({k})")
+    if not (isinstance(rt.cwd, str) and os.path.isabs(rt.cwd)):
+        raise ValueError("no working directory")
+    hosts = [h for h in x.get("hosts") or [GEMINI_API_HOST]]
+    params = ["TARGET_DIR=" + rt.cwd, "TMP_DIR=" + x["tmp_dir"], "HOME_DIR=" + x["home_dir"],
+              "CACHE_DIR=" + x["cache_dir"]] + [f"INCLUDE_DIR_{i}=/dev/null" for i in range(GEMINI_INCLUDE_DIRS)]
+    sandbox = [SANDBOX_EXEC] + [a for p in params for a in ("-D", p)] + ["-f", x["profile"]]
+    return ([x["python"], "-I", x["proxy"], "--log", x["log"], "--port", str(GEMINI_PROXY_PORT), *hosts, "--"]
+            + sandbox
+            + [gemini_path, "--resume", ident, "--approval-mode", "yolo", "--skip-trust", "-p", wake_prompt(seq)])
 
 
 def gemini_env(environ: Mapping[str, str], config: dict, home: Path, log: Path, rt: Runtime) -> dict:
-    """The woken Gemini's environment: child_env without anything in
-    GEMINI_SANDBOX_ENV (or a SEATBELT_* / GEMINI_SANDBOX* name), plus the
-    seatbelt sandbox, the proxied profile and the allow-list proxy command
-    (the stable copy in ~/.cardinal/wake/lib, logging to this wake's log)."""
-    env = {k: v for k, v in child_env(environ).items()
+    """The woken Gemini's environment: child_env (the vetted PATH) without
+    anything in GEMINI_SANDBOX_ENV (or a SEATBELT_* / GEMINI_SANDBOX* name);
+    SANDBOX=sandbox-exec (the hooks keep their state under the relocated
+    home, and Gemini does not start a sandbox of its own inside ours); the
+    proxy in HTTPS_PROXY / HTTP_PROXY; TMPDIR = this wake's temp dir; the
+    user's GEMINI_API_KEY (the sandbox cannot read ~/.gemini/.env)."""
+    env = {k: v for k, v in child_env(environ, config.get("path_env")).items()
            if k not in GEMINI_SANDBOX_ENV and not k.startswith(GEMINI_SANDBOX_ENV_PREFIXES)}
-    hosts = rt.extra.get("hosts") or [GEMINI_API_HOST]
-    python = config.get("python") if isinstance(config.get("python"), str) and os.path.isabs(config["python"]) \
-        else sys.executable
-    env["GEMINI_SANDBOX"] = "sandbox-exec"
-    env["SEATBELT_PROFILE"] = GEMINI_PROFILE
-    env["GEMINI_SANDBOX_PROXY_COMMAND"] = " ".join(shlex.quote(a) for a in (
-        [python, str(proxy_script(home)), "--log", str(log), "--port", str(GEMINI_PROXY_PORT)] + list(hosts)))
+    env["SANDBOX"] = paths.SEATBELT_SANDBOX
+    for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        env[k] = GEMINI_PROXY_URL
+    tmp = rt.extra.get("tmp_dir")
+    if tmp:
+        env["TMPDIR"] = env["TMP"] = env["TEMP"] = tmp
+    key = gemini_api_key(home, environ)
+    if key:
+        env["GEMINI_API_KEY"] = key
     return env
 
 
 def gemini_preflight(home: Path, config: dict, system: "System") -> Optional[str]:
     """Why a Gemini launch cannot start now (a notification instead), or None."""
-    if not proxy_script(home).is_file():
-        return "the allow-list proxy is not installed (run cardinal-wake enable again)"
+    if not proxy_script(home).is_file() or not seatbelt_profile(home).is_file():
+        return "the allow-list proxy or the seatbelt profile is not installed (run cardinal-wake enable again)"
+    if not os.access(SANDBOX_EXEC, os.X_OK):
+        return "sandbox-exec is not available"
     if system.port_busy(GEMINI_PROXY_PORT):
         return f"port {GEMINI_PROXY_PORT} is in use, so the allow-list proxy cannot start"
     return None
@@ -1394,9 +1903,11 @@ def seatbelt_observed(rows: list, pid: int) -> bool:
 
 
 def gemini_verify_spawn(home: Path, sid: str, pid: int, system: "System") -> Optional[str]:
-    """None once `pid`'s tree runs sandbox-exec -f <...restrictive-proxied...>
-    (within SPAWN_VERIFY_WINDOW); else the whole tree is killed and the
-    reason returned (the caller disables Gemini launch). No fallback."""
+    """Defense in depth (the argv already starts the sandbox): None once
+    `pid`'s tree runs sandbox-exec -f <...restrictive-proxied...>, or when
+    the process has already exited (a quick exit is judged after the run,
+    never by this check); else, after SPAWN_VERIFY_WINDOW, the whole tree is
+    killed and the reason returned (the caller disables Gemini launch)."""
     deadline = system.now() + SPAWN_VERIFY_WINDOW
     seen: List[Tuple[int, int, str]] = []
     while True:
@@ -1405,6 +1916,8 @@ def gemini_verify_spawn(home: Path, sid: str, pid: int, system: "System") -> Opt
             seen = [r for r in rows if r[0] == pid] + _descendants(rows, pid) or seen
             if seatbelt_observed(rows, pid):
                 return None
+        if not system.alive(pid):
+            return None
         if system.now() >= deadline:
             break
         system.sleep(SPAWN_VERIFY_POLL)
@@ -1417,7 +1930,7 @@ def gemini_verify_spawn(home: Path, sid: str, pid: int, system: "System") -> Opt
             "the woken process tree was killed")
 
 
-def gemini_snapshot(home: Path, sid: str) -> dict:
+def gemini_snapshot(home: Path, sid: str, rt: Optional[Runtime] = None) -> dict:
     plain_home, boxed_home = state_homes(home)
     plain, boxed = ie.sandbox_turns(plain_home, sid), ie.sandbox_turns(boxed_home, sid)
     return {"sandboxed": boxed["sandboxed"], "unsandboxed": plain["unsandboxed"] + boxed["unsandboxed"]
@@ -1445,31 +1958,36 @@ class Launcher:
         enable time; `binary` is the name looked up);
       eligibility(home, sid, rt, config) -> rt with eligible / reason / cwd
         / sandbox / extra;
+      prepare(home, rt, config, log, system) -> None, or why the launch
+        cannot be prepared (right before the spawn);
       argv(executable, rt, sid, seq) -> the pinned argv (golden-tested);
-      env(environ, config, home, log, rt) -> the child's environment;
+      env(environ, config, home, log, rt) -> the child's environment (PATH
+        is always the vetted path_env);
       preflight(home, config, system) -> None, or why it cannot start now
         (a notification);
       exclusive: at most one in-flight launch of this runtime machine-wide;
-      snapshot(home, sid) -> what verify needs from before the launch;
+      snapshot(home, sid, rt) -> what verify needs from before the launch;
       after_spawn(home, sid, pid, system) -> None, or why the started child
         is not in its sandbox (it has been killed; the runtime is disabled);
       verify(home, sid, snapshot, pinned, require_turn) -> None, or why the
-        woken run did not stay in the pinned sandbox (that disables the
-        runtime: ~/.cardinal/wake/disabled/<runtime>);
+        woken run did not stay in bounds (that disables the runtime:
+        ~/.cardinal/wake/disabled/<runtime>);
       proven: False keeps the launcher off (its sessions notify-only).
 
     Adding a runtime is one Launcher in LAUNCHERS; it launches only once
     `proven` is True, after its gates are demonstrated."""
 
     def __init__(self, runtime: str, binary: str, eligibility, argv, snapshot, verify, can_launch: str, *,
-                 env=None, preflight=None, after_spawn=None, exclusive: bool = False, proven: bool = True):
+                 env=None, preflight=None, after_spawn=None, prepare=None, exclusive: bool = False,
+                 proven: bool = True):
         self.runtime, self.binary = runtime, binary
         self.executable = f"{runtime}_path"
         self.eligibility, self.argv, self.snapshot, self.verify = eligibility, argv, snapshot, verify
         self.can_launch = can_launch
-        self.env = env or (lambda environ, config, home, log, rt: child_env(environ))
+        self.env = env or (lambda environ, config, home, log, rt: child_env(environ, config.get("path_env")))
         self.preflight = preflight or (lambda home, config, system: None)
         self.after_spawn = after_spawn or (lambda home, sid, pid, system: None)
+        self.prepare = prepare or (lambda home, rt, config, log, system: None)
         self.exclusive, self.proven = exclusive, proven
 
 
@@ -1483,10 +2001,11 @@ GEMINI_LAUNCH_TEXT = (
 # not pass (C-6) and Cursor has no demonstrated launch: notify-only.
 LAUNCHERS = {
     CODEX: Launcher(CODEX, "codex", lambda home, sid, rt, config: codex_eligibility(home, sid, rt),
-                    lambda exe, rt, sid, seq: codex_argv(exe, rt.sandbox or "", sid, seq),
+                    lambda exe, rt, sid, seq: codex_argv(exe, rt.sandbox or "", sid, seq,
+                                                         rt.extra.get("mcp_overrides") or ()),
                     rollout_offsets, verify_after, LAUNCH_TEXT),
     GEMINI: Launcher(GEMINI, "gemini", gemini_eligibility, gemini_argv, gemini_snapshot, gemini_verify_after,
-                     GEMINI_LAUNCH_TEXT, env=gemini_env, preflight=gemini_preflight,
+                     GEMINI_LAUNCH_TEXT, env=gemini_env, preflight=gemini_preflight, prepare=gemini_prepare,
                      after_spawn=gemini_verify_spawn, exclusive=True, proven=GEMINI_LAUNCH_PROVEN),
 }
 
@@ -1564,11 +2083,14 @@ def state_homes(home: Path) -> Tuple[Path, Path]:
 def candidate_sessions(home: Path, now: float) -> List[Tuple[str, dict, float, Path]]:
     """(sid, binding, binding mtime, state home) of sessions that may be
     woken: touched within CANDIDATE_WINDOW, the investigation's author,
-    owner_decision on. Bindings under the relocated sandboxed home count too
-    (as untrusted as any binding); a session id bound in both is taken from
-    ~/.cardinal only."""
+    owner_decision on. A session bound under ~/.cardinal is decided there
+    alone, stale or not (the relocated binding, which a sandboxed agent can
+    write, never shadows it). Relocated bindings count only for sessions
+    with no Codex or Claude Code records (whose hooks never run in a
+    seatbelt sandbox), and are as untrusted as any binding."""
     out, seen = [], set()
-    for state in state_homes(home):
+    plain, boxed = state_homes(home)
+    for state in (plain, boxed):
         d = ie.sessions_dir(state)
         try:
             names = os.listdir(str(d))
@@ -1577,6 +2099,9 @@ def candidate_sessions(home: Path, now: float) -> List[Tuple[str, dict, float, P
         for name in sorted(names):
             sid = name[:-5] if name.endswith(".json") else ""
             if not ie.valid_session(sid) or sid in seen:
+                continue
+            seen.add(sid)   # before any other check: a stale real binding is never replaced by a relocated one
+            if state == boxed and (codex_rollouts(home, sid) or claude_transcripts(home, sid)):
                 continue
             try:
                 mtime = (d / name).stat().st_mtime
@@ -1587,7 +2112,6 @@ def candidate_sessions(home: Path, now: float) -> List[Tuple[str, dict, float, P
             b = ie.read_binding(state, sid)
             if b is None or b.get("is_author") is not True or not ie.capability(b, "owner_decision"):
                 continue
-            seen.add(sid)
             out.append((sid, b, mtime, state))
     return out
 
@@ -1614,15 +2138,43 @@ def wake_decisions(events: list, sid: str, binding: dict) -> List[dict]:
     return sorted(out, key=lambda e: e["seq"])
 
 
-def acknowledged(events: list, sid: str, seq: int) -> bool:
-    """This session (the author's principal naming it) acknowledged #seq."""
+def created_epoch(e: dict) -> Optional[float]:
+    """The server's created_at of an event, as epoch seconds, or None."""
+    import calendar
+    v = e.get("created_at")
+    if not isinstance(v, str):
+        return None
+    m = re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?Z", v)
+    if not m:
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")))
+    except ValueError:
+        return None
+
+
+DISPOSITIONS = ("accepted", "declined", "noted", "conflicts")
+
+
+def acknowledged(events: list, sid: str, seq: int) -> Optional[str]:
+    """The disposition (accepted / declined / noted / conflicts) with which
+    this session acknowledged #seq, or None. Only an acknowledgment by the
+    investigation author's own principal naming this session counts: never
+    a grantee's, never one carrying granted_by. (An agent holding the
+    author's key could still post one in this session's name: an
+    acknowledgment reports what the session said, not proof it acted.)"""
     for e in events:
-        if isinstance(e, dict) and ie.event_class(e) == ie.CONTROL and e.get("type") == ie.ACKNOWLEDGED \
-                and ie._own(e, sid):
-            p = e.get("payload")
-            if isinstance(p, dict) and p.get("ack_of") == seq:
-                return True
-    return False
+        if not (isinstance(e, dict) and ie.event_class(e) == ie.CONTROL and e.get("type") == ie.ACKNOWLEDGED
+                and ie._own(e, sid)):
+            continue
+        producer = e.get("producer") if isinstance(e.get("producer"), dict) else {}
+        if producer.get("granted_by"):
+            continue
+        p = e.get("payload")
+        if isinstance(p, dict) and p.get("ack_of") == seq:
+            d = p.get("disposition")
+            return d if d in DISPOSITIONS else "acknowledged"
+    return None
 
 
 def _connection_for(home: Path, binding: dict, prefer: str, system: System) -> Tuple[dict, str]:
@@ -1653,15 +2205,28 @@ def _client(runtime: str, config: dict) -> str:
 # One pass
 # ---------------------------------------------------------------------------
 
+def _where(binding: Optional[dict], origin: Optional[str]) -> str:
+    """'inv_… on <host>': built only from the investigation id and the
+    plugin connection's origin, never from a link the (agent-writable)
+    binding carries."""
+    import urllib.parse
+    inv = (binding or {}).get("investigation_id")
+    if not ie.valid_investigation(inv):
+        return ""
+    host = ""
+    if isinstance(origin, str) and origin.startswith("https://"):
+        h = (urllib.parse.urlsplit(origin).hostname or "").lower()
+        host = h if re.fullmatch(r"[a-z0-9.-]{1,253}", h) else ""
+    return f"{inv} on {host}" if host else inv
+
+
 def _notify(system: System, binding: Optional[dict], sid: str, state: str, words: str,
-            runtime: str = UNKNOWN) -> None:
+            runtime: str = UNKNOWN, origin: Optional[str] = None) -> None:
     """The runtime, the session's short id, the investigation and the state;
     never decision text."""
-    inv = (binding or {}).get("investigation_id")
-    link = (binding or {}).get("investigation_url")
-    where = link if isinstance(link, str) and _LINK_RE.fullmatch(link) else (inv if ie.valid_investigation(inv) else "")
+    where = _where(binding, origin)
     label = LABELS.get(runtime, LABELS[UNKNOWN])
-    msg = f"{label} session {sid[:8]}: {state.lower()} - {words}" + (f" {where}" if where else "")
+    msg = f"{label} session {sid[:8]}: {state.lower()} - {words}" + (f" ({where})" if where else "")
     with contextlib.suppress(Exception):
         system.notifier("Cardinal wake", msg[:400])
 
@@ -1683,6 +2248,9 @@ def run_once(home: Path, system: Optional[System] = None, *, dry_run: bool = Fal
             settle(home, sid, system, config, report, dry_run=dry_run)
         except Exception as e:  # one broken ledger never stops the pass
             _report(system, report, sid, None, "error", f"settling failed ({type(e).__name__})")
+    if not dry_run:
+        with contextlib.suppress(OSError):
+            prune_logs(home)
     if not config["enabled"]:
         _report(system, report, "-", None, "skip", "wake is not enabled (cardinal-wake enable)")
         return report
@@ -1719,17 +2287,28 @@ def consider(home: Path, sid: str, binding: dict, system: System, config: dict, 
     conn, conn_runtime = _connection_for(home, binding, rt.kind, system)
     if not conn:
         return
+    inv = binding["investigation_id"]
     try:
-        events, complete = system.fetch(conn, binding["investigation_id"], sid, read_from(binding),
-                                        _client(conn_runtime, config))
+        events, complete = system.fetch(conn, inv, sid, read_from(binding), _client(conn_runtime, config))
     except Exception as e:
         _report(system, report, sid, None, "skip", f"could not read the investigation ({type(e).__name__})")
         return
     if not complete:
         _report(system, report, sid, None, "skip", "the investigation's events could not all be read this pass")
         return
-    pending = [e for e in wake_decisions(events, sid, binding) if str(e["seq"]) not in led["entries"]]
+    pending = [e for e in wake_decisions(events, sid, binding) if not decision_seen(led, inv, e["seq"])]
     if not pending:
+        return
+    fresh = []
+    for e in pending:   # an old decision is notified once (its seq then counts as handled), never launched
+        created = created_epoch(e)
+        if created is None or now - created > DECISION_MAX_AGE:
+            _notify_only(home, sid, binding, e["seq"], rt.kind, "the decision is older than 7 days (or undated): "
+                         "post a new one to resume the session", system, report, dry_run=dry_run,
+                         origin=conn.get("origin"))
+        else:
+            fresh.append(e)
+    if not fresh:
         return
     launcher = active_launcher(rt.kind)   # None: notify-only (no launch has passed, or is proven for, its gates)
     if launcher is not None:
@@ -1748,32 +2327,35 @@ def consider(home: Path, sid: str, binding: dict, system: System, config: dict, 
     elif not (config.get(launcher.executable) and os.access(config[launcher.executable], os.X_OK)):
         why = f"{launcher.binary} was not found when wake was enabled (run cardinal-wake enable --launch again)"
     else:
-        why = launcher.preflight(home, config, system) or ""
+        why = (binaries_problem(config, home, rt.cwd) or launcher.preflight(home, config, system) or "")
     if why:
-        for e in pending:
-            _notify_only(home, sid, binding, e["seq"], rt.kind, why, system, report, dry_run=dry_run)
+        for e in fresh:
+            _notify_only(home, sid, binding, e["seq"], rt.kind, why, system, report, dry_run=dry_run,
+                         origin=conn.get("origin"))
         return
-    claim_and_launch(home, sid, binding, pending[0]["seq"], rt, config, system, report, dry_run=dry_run,
-                     state=state)
+    claim_and_launch(home, sid, binding, fresh[0]["seq"], rt, config, system, report, dry_run=dry_run,
+                     state=state, origin=conn.get("origin"))
 
 
-def _notify_only(home, sid, binding, seq, kind, why, system, report, *, dry_run=False) -> None:
+def _notify_only(home, sid, binding, seq, kind, why, system, report, *, dry_run=False, origin=None) -> None:
     if dry_run:
         _report(system, report, sid, seq, "would notify", why)
         return
     now = system.now()
+    inv = binding["investigation_id"]
     with session_lock(home, sid) as got:
         if not got:
             return
         led = read_ledger(home, sid)
-        if str(seq) in led["entries"]:
+        if decision_seen(led, inv, seq):
             return
-        entry = {"seq": seq, "investigation_id": binding["investigation_id"], "runtime": kind}
+        entry = {"seq": seq, "investigation_id": inv, "runtime": kind}
         transition(entry, DECISION_SEEN, now)
         transition(entry, NOTIFIED, now, why)
-        led["entries"][str(seq)] = entry
+        add_entry(led, entry)
         write_ledger(home, sid, led, now)
-    _notify(system, binding, sid, NOTIFIED, f"owner decision #{seq} waits for you ({why.split(':')[0]})", kind)
+    _notify(system, binding, sid, NOTIFIED, f"owner decision #{seq} waits for you ({why.split(':')[0]})", kind,
+            origin)
     _report(system, report, sid, seq, "notified", why)
 
 
@@ -1797,20 +2379,22 @@ def wake_hold(home: Path, sid: str, state: Path) -> None:
 
 
 def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime, config: dict, system: System,
-                     report: list, *, dry_run: bool = False, state: Optional[Path] = None) -> str:
+                     report: list, *, dry_run: bool = False, state: Optional[Path] = None,
+                     origin: Optional[str] = None) -> str:
     """Claim #seq for `sid` and launch its runtime's pinned resume
     (LAUNCHERS, proven; only an eligible session of such a runtime gets
-    here), under the session's lock (§5.4). Returns launched | failed |
-    seen | in_flight | runtime_busy | cap | busy | dry_run."""
+    here), under the session's lock (§5.4). The CLAIMED entry (with the
+    pre-launch snapshot) is written before the spawn. Returns launched |
+    failed | seen | in_flight | runtime_busy | cap | busy | dry_run."""
     launcher = LAUNCHERS[rt.kind]
     if not launcher.proven:
         raise ValueError(f"{rt.kind} launch is not proven")
     if not rt.eligible:
         raise ValueError("not an eligible session")
-    argv = launcher.argv(config.get(launcher.executable), rt, sid, seq)
     if dry_run:
-        _report(system, report, sid, seq, "would launch", f"in {rt.sandbox}, cwd from the rollout")
+        _report(system, report, sid, seq, "would launch", f"in {rt.sandbox}, cwd from the session's own record")
         return "dry_run"
+    inv = binding["investigation_id"]
     if system.before_claim is not None:
         system.before_claim(sid, seq)
     with session_lock(home, sid) as got:
@@ -1818,7 +2402,7 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
             return "busy"
         now = system.now()
         led = read_ledger(home, sid)
-        if str(seq) in led["entries"]:
+        if decision_seen(led, inv, seq):
             return "seen"
         if in_flight(led):
             return "in_flight"
@@ -1834,21 +2418,22 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
                     led["cap_notified_at"] = now
                     write_ledger(home, sid, led, now)
                     _notify(system, binding, sid, "waiting", f"owner decision #{seq}: the daily wake cap is reached",
-                            rt.kind)
+                            rt.kind, origin)
                 _report(system, report, sid, seq, "capped", "the daily wake cap is reached; reconsidered later")
                 return "cap"
-            entry = {"seq": seq, "investigation_id": binding["investigation_id"], "runtime": rt.kind,
-                     "sandbox": rt.sandbox, "claimed_at": now, "spawn_errors": 0,
-                     "sandboxed_state": paths.is_sandboxed_home(state or home)}
+            entry = {"seq": seq, "investigation_id": inv, "runtime": rt.kind, "sandbox": rt.sandbox,
+                     "claimed_at": now, "spawn_errors": 0, "sandboxed_state": paths.is_sandboxed_home(state or home),
+                     "snapshot": launcher.snapshot(home, sid, rt)}
             transition(entry, DECISION_SEEN, now)
             transition(entry, CLAIMED, now)
-            led["entries"][str(seq)] = entry
+            add_entry(led, entry)
             write_ledger(home, sid, led, now)
         wake_hold(home, sid, state or home)
-        offsets = launcher.snapshot(home, sid)
         log = logs_dir(home) / f"{sid}-{seq}-{int(now)}.log"
-        env = launcher.env(system.environ, config, home, log, rt)
-        for _ in range(1 + SPAWN_RETRIES):
+        problem = launcher.prepare(home, rt, config, log, system)
+        argv = None if problem else launcher.argv(config.get(launcher.executable), rt, sid, seq)
+        env = None if problem else launcher.env(system.environ, config, home, log, rt)
+        for _ in range(0 if problem else 1 + SPAWN_RETRIES):
             try:
                 pid = system.launcher(argv, rt.cwd, env, log)
             except OSError as e:
@@ -1859,7 +2444,7 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
                 continue
             started = system.process_start(pid)
             entry["child"] = {"pid": pid, "start": started, "launched_at": system.now(), "log": str(log),
-                              "offsets": offsets, "sandbox": rt.sandbox}
+                              "offsets": entry["snapshot"], "sandbox": rt.sandbox}
             transition(entry, RESUMING, system.now(), f"{launcher.binary} resumed in {rt.sandbox}")
             write_ledger(home, sid, led, system.now())
             bad = launcher.after_spawn(home, sid, pid, system)
@@ -1867,16 +2452,18 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
                 entry["verified"] = False
                 transition(entry, FAILED, system.now(), bad)
                 write_ledger(home, sid, led, system.now())
-                _disable_launch(home, rt.kind, sid, binding, bad, system, report, system.now())
+                _disable_launch(home, rt.kind, sid, binding, bad, system, report, system.now(), origin)
                 return "failed"
-            _notify(system, binding, sid, RESUMING, f"resuming for owner decision #{seq} in {rt.sandbox}", rt.kind)
+            _notify(system, binding, sid, RESUMING, f"resuming for owner decision #{seq} in {rt.sandbox}", rt.kind,
+                    origin)
             _report(system, report, sid, seq, "launched", f"pid {pid}, {rt.sandbox}")
             return "launched"
-        transition(entry, FAILED, system.now(),
-                   f"could not start {launcher.binary} ({entry['spawn_errors']} spawn errors)")
+        transition(entry, FAILED, system.now(), f"could not prepare {launcher.binary}: {problem}" if problem
+                   else f"could not start {launcher.binary} ({entry['spawn_errors']} spawn errors)")
         write_ledger(home, sid, led, system.now())
-    _notify(system, binding, sid, FAILED, f"could not start {launcher.binary} for owner decision #{seq}", rt.kind)
-    _report(system, report, sid, seq, "failed", "spawn errors")
+    _notify(system, binding, sid, FAILED, f"could not start {launcher.binary} for owner decision #{seq}", rt.kind,
+            origin)
+    _report(system, report, sid, seq, "failed", problem or "spawn errors")
     return "failed"
 
 
@@ -1897,14 +2484,44 @@ def settle(home: Path, sid: str, system: System, config: dict, report: list, *, 
         for key, entry in list(led["entries"].items()):
             binding = ie.read_binding(boxed_home if entry.get("sandboxed_state") else plain_home, sid)
             if entry.get("state") == CLAIMED:
-                now = system.now()
-                transition(entry, FAILED, now, "the waker stopped during the launch; not retried")
-                write_ledger(home, sid, led, now)
-                _notify(system, binding, sid, FAILED, f"owner decision #{entry.get('seq')}: launch interrupted",
-                        str(entry.get("runtime")))
-                _report(system, report, sid, entry.get("seq"), "failed", "launch interrupted")
-            elif entry.get("state") == RESUMING:
+                _settle_claimed(home, sid, led, entry, binding, system, report)
+            if entry.get("state") in (RESUMING, TIMED_OUT):
                 _settle_resuming(home, sid, led, entry, binding, system, config, report)
+
+
+def _settle_claimed(home, sid, led, entry, binding, system, report) -> None:
+    """A CLAIMED entry found later: the waker stopped between the claim and
+    the RESUMING write. A live process whose argv names the session and this
+    decision's wake prompt is taken as the child (RESUMING, recovered,
+    judged like any run), so "interrupted" is never reported while the
+    child runs; none: FAILED,
+    never retried; the process table unreadable: left CLAIMED (it blocks
+    further claims) until WAKE_TIMEOUT."""
+    now = system.now()
+    runtime = str(entry.get("runtime"))
+    table = system.process_table()
+    if table is None:
+        if now - (_num(entry.get("claimed_at")) or now) > WAKE_TIMEOUT:
+            transition(entry, FAILED, now, "the waker stopped during the launch and no child could be found")
+            write_ledger(home, sid, led, now)
+        return
+    # Our child's argv names the session and carries this decision's wake prompt (a per-decision marker a
+    # session the user resumed by hand does not have).
+    marker = f"owner decision #{entry.get('seq')} in its Investigation"
+    found = [pid for pid, args in table if pid != os.getpid() and sid in args and marker in args]
+    if found:
+        pid = found[0]
+        snap = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
+        entry["child"] = {"pid": pid, "start": system.process_start(pid), "launched_at": entry.get("claimed_at", now),
+                          "offsets": snap, "sandbox": entry.get("sandbox"), "recovered": True}
+        transition(entry, RESUMING, now, "recovered: the waker stopped during the launch but its child is running")
+        write_ledger(home, sid, led, now)
+        _report(system, report, sid, entry.get("seq"), "recovered", f"pid {pid}")
+        return
+    transition(entry, FAILED, now, "the waker stopped during the launch and no child is running; not retried")
+    write_ledger(home, sid, led, now)
+    _notify(system, binding, sid, FAILED, f"owner decision #{entry.get('seq')}: launch interrupted", runtime)
+    _report(system, report, sid, entry.get("seq"), "failed", "launch interrupted")
 
 
 def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> None:
@@ -1923,54 +2540,104 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
         return launcher.verify(home, sid, offsets, pinned, require_turn=require_turn)
 
     if child_alive(child, system):
-        if now - launched <= WAKE_TIMEOUT:
+        if entry.get("state") == TIMED_OUT or now - launched <= WAKE_TIMEOUT:
             return
         bad = verify(False)
         if bad:
             _disable_launch(home, runtime, sid, binding, bad, system, report, now)
-        transition(entry, FAILED, now, "still running after 2 h; left running")
+        transition(entry, TIMED_OUT, now, "still running after 2 h; left running, judged when it exits")
         write_ledger(home, sid, led, now)
-        _notify(system, binding, sid, FAILED, f"owner decision #{seq}: the resumed session is still running "
-                                              "after 2 h (left running)", runtime)
-        _report(system, report, sid, seq, "failed", "timeout; child left running")
+        _notify(system, binding, sid, TIMED_OUT, f"owner decision #{seq}: the resumed session is still running "
+                                                 "after 2 h (left running)", runtime)
+        _report(system, report, sid, seq, "timed out", "child left running")
         return
     if "verified" not in entry:
         bad = verify(True)
         entry["verified"] = bad is None
         if bad:
-            entry.setdefault("history", []).append({"state": RESUMING, "at": _iso(now), "note": bad})
+            entry.setdefault("history", []).append({"state": entry.get("state"), "at": _iso(now), "note": bad})
             _disable_launch(home, runtime, sid, binding, bad, system, report, now)
         entry.setdefault("exited_at", now)
         write_ledger(home, sid, led, now)
-    acked = None
+    disposition: Optional[str] = None
+    readable = False
+    origin = None
     if binding is not None and binding.get("investigation_id") == entry.get("investigation_id"):
         conn, conn_runtime = _connection_for(home, binding, runtime, system)
+        origin = conn.get("origin") if conn else None
         if conn:
             try:
                 events, complete = system.fetch(conn, entry["investigation_id"], sid, int(seq),
                                                 _client(conn_runtime, config))
-                acked = True if acknowledged(events, sid, seq) else (False if complete else None)
+                disposition = acknowledged(events, sid, seq)
+                readable = disposition is not None or complete
             except Exception:
-                acked = None
-    if acked is None and now - (_num(entry.get("exited_at")) or now) < ACK_CHECK_GRACE:
+                readable = False
+    if not readable and now - (_num(entry.get("exited_at")) or now) < ACK_CHECK_GRACE:
         return  # the acknowledgment could not be read: asked again next pass
-    if acked:
-        transition(entry, ACKNOWLEDGED, now, "the session acknowledged the decision")
-        words = f"acknowledged owner decision #{seq}"
+    if disposition:
+        entry["disposition"] = disposition
+        transition(entry, ACKNOWLEDGED, now, f"the session acknowledged the decision ({disposition})")
+        words = f"acknowledged owner decision #{seq} ({disposition})"
     else:
-        transition(entry, FAILED, now, "the run ended without acknowledging the decision" if acked is False
+        transition(entry, FAILED, now, "the run ended without acknowledging the decision" if readable
                    else "the run ended; its acknowledgment could not be read")
         words = f"the run for owner decision #{seq} ended without an acknowledgment (not retried)"
     write_ledger(home, sid, led, now)
-    _notify(system, binding, sid, entry["state"], words, runtime)
+    trim_log(child.get("log"))
+    _notify(system, binding, sid, entry["state"], words, runtime, origin)
     _report(system, report, sid, seq, entry["state"].lower(), entry.get("reason", ""))
 
 
-def _disable_launch(home, runtime, sid, binding, why, system, report, now) -> None:
+def _disable_launch(home, runtime, sid, binding, why, system, report, now, origin=None) -> None:
     disable_runtime(home, runtime, f"session {sid[:8]}: {why}", now)
     _notify(system, binding, sid, "disabled", f"{LABELS.get(runtime, runtime)} wake is disabled: {why}. Run "
-                                              f"cardinal-wake reenable {runtime} after checking.", runtime)
+                                              f"cardinal-wake reenable {runtime} after checking.", runtime, origin)
     _report(system, report, sid, None, f"{runtime} disabled", why)
+
+
+def trim_log(path: Any) -> None:
+    """A finished wake's log larger than MAX_WAKE_LOG keeps only its last
+    WAKE_LOG_TAIL bytes. Fail open."""
+    if not (isinstance(path, str) and os.path.isabs(path)):
+        return
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size <= MAX_WAKE_LOG:
+            return
+        with open(path, "rb") as f:
+            f.seek(-WAKE_LOG_TAIL, os.SEEK_END)
+            tail = f.read()
+        tmp = path + ".trim"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(b"[cardinal-wake: earlier output trimmed]\n" + tail)
+        os.replace(tmp, path)
+    except OSError:
+        return
+
+
+def prune_logs(home: Path) -> None:
+    """Keep the newest WAKE_LOGS_KEEP per-wake logs (never launchd.log, never
+    a log an in-flight run is writing)."""
+    d = logs_dir(home)
+    try:
+        names = [n for n in os.listdir(str(d)) if n.endswith(".log") and n != "launchd.log"]
+    except OSError:
+        return
+    if len(names) <= WAKE_LOGS_KEEP:
+        return
+    busy = set()
+    for sid in ledger_sids(home):
+        for e in in_flight(read_ledger(home, sid)):
+            child = e.get("child") if isinstance(e.get("child"), dict) else {}
+            if isinstance(child.get("log"), str):
+                busy.add(os.path.basename(child["log"]))
+    files = sorted(names, key=lambda n: (d / n).stat().st_mtime if (d / n).exists() else 0.0)
+    for n in files[:len(files) - WAKE_LOGS_KEEP]:
+        if n not in busy:
+            with contextlib.suppress(OSError):
+                (d / n).unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -2019,7 +2686,7 @@ def plist_bytes(home: Path, python: str, runner: Path, path_env: str) -> bytes:
     log = logs_dir(home) / "launchd.log"
     return plistlib.dumps({
         "Label": PLIST_LABEL,
-        "ProgramArguments": [python, str(runner), "run", "--once"],
+        "ProgramArguments": [python, "-I", str(runner), "run", "--once"],
         "StartInterval": RUN_INTERVAL,
         "RunAtLoad": True,
         "ProcessType": "Background",
@@ -2063,19 +2730,55 @@ def enable(home: Path, *, launch: bool, environ: Mapping[str, str], launchctl: C
         roots = list(dict.fromkeys(approved))
     else:
         roots = list(old.get("roots") or [])
-    path_env = environ.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"
-    executables = {}
-    for launcher in LAUNCHERS.values():   # each launchable runtime's binary, absolute, resolved now
-        found = shutil.which(launcher.binary, path=path_env)
-        executables[launcher.executable] = os.path.abspath(found) if found else None
-    python = shutil.which("python3", path=path_env) or sys.executable
-    python = os.path.abspath(python)
+    # B1: the daemon never runs anything an agent can write. The interpreter
+    # is this Python or /usr/bin/python3, outside $HOME, git work trees,
+    # approved roots and temp dirs, run with -I; the launch binaries (and
+    # node, for a node script) resolve outside git work trees, approved roots
+    # and temp dirs; PATH is the system dirs plus their directories only.
+    user_path = environ.get("PATH") or ":".join(SYSTEM_PATH_DIRS)
+    python, why = pick_python(home, roots)
+    if python is None:
+        out(f"cardinal-wake: no Python the daemon may run: {why}. Install python3 outside your home directory "
+            "and your repositories (or the Xcode command line tools for /usr/bin/python3).")
+        return 2
+    executables: dict = {}
+    binaries = {python: fingerprint(python)}
+    node_path = None
+    dirs = [os.path.dirname(python)]
+    for launcher in LAUNCHERS.values():   # each launchable runtime's binary, resolved now
+        found = shutil.which(launcher.binary, path=user_path)
+        real = os.path.realpath(found) if found else None
+        if real and unsafe_location(real, home, roots):
+            if launch:
+                out(f"cardinal-wake: {launcher.binary} resolves to an unsafe place: "
+                    f"{unsafe_location(real, home, roots)}. Install it outside your repositories and temp dirs.")
+                return 2
+            real = None
+        if real and needs_node(real):
+            node = shutil.which("node", path=user_path)
+            node_real = os.path.realpath(node) if node else None
+            problem = "node was not found" if not node_real else unsafe_location(node_real, home, roots)
+            if problem:
+                if launch:
+                    out(f"cardinal-wake: {launcher.binary} is a node script and {problem}.")
+                    return 2
+                real = None
+            else:
+                node_path = node_real
+                binaries[node_real] = fingerprint(node_real)
+                dirs.append(os.path.dirname(node_real))
+        executables[launcher.executable] = real
+        if real:
+            binaries[real] = fingerprint(real)
+            dirs.append(os.path.dirname(real))
+    path_env = daemon_path(*dirs)
     runner = install_lib(home, core_dir)
     _private_dir(logs_dir(home))
     versions = dict(old.get("versions") or {})
     if runtime in RUNTIMES and version:
         versions[runtime] = version
     write_config(home, {"enabled": True, "launch": bool(launch), **executables, "python": python,
+                        "node_path": node_path, "path_env": path_env, "binaries": binaries,
                         "enabled_at": old.get("enabled_at") if old["enabled"] and old.get("enabled_at") else _iso(now),
                         "versions": versions, "roots": roots})
     plist = plist_path(home)
@@ -2139,6 +2842,10 @@ def status(home: Path, system: System, out: Callable[[str], None]) -> int:
     out(f"wake: {'on' if c['enabled'] else 'off'}; unattended launch: {'on' if c['launch'] else 'off'}"
         f"{'; enabled ' + str(c['enabled_at']) if c['enabled'] and c['enabled_at'] else ''}")
     out(f"launchd agent: {'installed' if plist_path(home).exists() else 'not installed'} ({plist_path(home)})")
+    out(f"python: {c.get('python') or 'not vetted'} (-I); PATH: {c.get('path_env') or 'not vetted'}")
+    if c["enabled"]:
+        problem = binaries_problem(c, home)
+        out("executables: " + (problem if problem else "unchanged since enable"))
     for launcher in LAUNCHERS.values():
         out(f"{launcher.binary}: {c.get(launcher.executable) or 'not found'}"
             + ("" if launcher.proven else " (launch built, off until its live proofs pass)"))

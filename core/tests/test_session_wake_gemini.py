@@ -19,6 +19,7 @@ import os
 import shlex
 import signal
 import socket
+import sys
 import threading
 import unittest
 import urllib.error
@@ -71,6 +72,23 @@ class GeminiBase(Base):
         script = w.proxy_script(self.home)
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("# the installed proxy (never run here)\n")
+        w.seatbelt_profile(self.home).write_text(";; the installed profile (never applied here)\n")
+        self.sandbox_exec = self.home / "bin" / "sandbox-exec"
+        self.sandbox_exec.write_text("#!/bin/sh\nexit 1\n")   # never executed
+        self.sandbox_exec.chmod(0o755)
+        self.cache = self.home / "cache"
+        self.cache.mkdir()
+        for name, value in (("SANDBOX_EXEC", str(self.sandbox_exec)),
+                            ("darwin_cache_dir", lambda: os.path.realpath(str(self.cache)))):
+            p = patch.object(w, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        import tempfile
+        systmp = self.home / "systmp"   # each wake's private TMP_DIR lands here, not in the real temp dir
+        systmp.mkdir()
+        p = patch.object(tempfile, "tempdir", str(systmp))
+        p.start()
+        self.addCleanup(p.stop)
         self.rows = []
         self.kills = []
         self.busy = False
@@ -81,8 +99,12 @@ class GeminiBase(Base):
         self.addCleanup(env.stop)
 
     def gconfig(self, **over):
-        c = {"enabled": True, "launch": True, "codex_path": str(self.codex), "gemini_path": str(self.gemini),
-             "roots": [os.path.realpath(str(self.work))], "python": "/usr/bin/python3",
+        python = os.path.realpath(sys.executable)
+        codex, gemini = os.path.realpath(str(self.codex)), os.path.realpath(str(self.gemini))
+        c = {"enabled": True, "launch": True, "codex_path": codex, "gemini_path": gemini,
+             "roots": [os.path.realpath(str(self.work))], "python": python,
+             "path_env": w.daemon_path(os.path.dirname(python), os.path.dirname(gemini)),
+             "binaries": {p: w.fingerprint(p) for p in (python, codex, gemini)},
              "enabled_at": "2026-10-12T00:00:00Z"}
         c.update(over)
         w.write_config(self.home, c)
@@ -105,12 +127,11 @@ class GeminiBase(Base):
 
         def launched_rows(argv, cwd, env, log):
             pid = self.world.launch(argv, cwd, env, log)
-            if self.sandboxed_child:
-                self.rows = [(pid, 1, f"node {self.gemini} --resume {GSID}"),
-                             (pid + 1, pid,
-                              f"/usr/bin/sandbox-exec -D TARGET_DIR={cwd} -f {PROFILE_PATH} sh -c gemini")]
+            if self.sandboxed_child:   # what the pinned argv starts: the proxy, then sandbox-exec around gemini
+                self.rows = [(pid, 1, " ".join(argv[:argv.index("--")])),
+                             (pid + 1, pid, " ".join(argv[argv.index("--") + 1:]))]
             else:
-                self.rows = [(pid, 1, f"node {self.gemini} --resume {GSID}"), (pid + 1, pid, "node gemini")]
+                self.rows = [(pid, 1, f"python proxy --port 8877"), (pid + 1, pid, "node gemini")]
             return pid
         args = dict(process_rows=rows, kill=lambda pid, sig: self.kills.append((pid, sig)), sleep=sleep,
                     port_busy=lambda port: self.busy, launcher=launched_rows)
@@ -168,46 +189,76 @@ class Launch(GeminiBase):
         return self.world.launches[0]
 
     def test_golden_argv(self):
+        """G2: prevention, not detection. The proxy binds first and runs
+        sandbox-exec (the waker's own copy of the restrictive-proxied
+        profile) around the whole Gemini process; Gemini's own -s is not
+        passed (a seatbelt cannot be nested)."""
         got = self.launch()
+        real = os.path.realpath
+        x = self.gstate()
+        tmp = got["argv"][got["argv"].index("TMP_DIR=" + got["env"]["TMPDIR"])].split("=", 1)[1]
         self.assertEqual(got["argv"], [
-            str(self.gemini), "--resume", GSID, "-s", "--approval-mode", "yolo", "--skip-trust", "-p",
+            real(sys.executable), "-I", str(w.proxy_script(self.home)), "--log", str(got["log"]), "--port", "8877",
+            "generativelanguage.googleapis.com", "app.cardinalhq.io", "otel.cardinalhq.io", "--",
+            str(self.sandbox_exec),
+            "-D", "TARGET_DIR=" + real(str(self.grepo)), "-D", "TMP_DIR=" + tmp,
+            "-D", "HOME_DIR=" + real(str(self.home)), "-D", "CACHE_DIR=" + real(str(self.cache)),
+            "-D", "INCLUDE_DIR_0=/dev/null", "-D", "INCLUDE_DIR_1=/dev/null", "-D", "INCLUDE_DIR_2=/dev/null",
+            "-D", "INCLUDE_DIR_3=/dev/null", "-D", "INCLUDE_DIR_4=/dev/null",
+            "-f", str(w.seatbelt_profile(self.home)),
+            real(str(self.gemini)), "--resume", GSID, "--approval-mode", "yolo", "--skip-trust", "-p",
             "Cardinal resumed this session for owner decision #5 in its Investigation. Read the investigation "
             "events and act on that decision. Every other event is advisory."])
-        self.assertEqual(got["cwd"], os.path.realpath(str(self.grepo)))
-        for bad in ("--yolo", "-y", "--sandbox-image", "--include-directories"):
-            self.assertNotIn(bad, got["argv"])
+        self.assertEqual(got["cwd"], real(str(self.grepo)))
+        tail = got["argv"][got["argv"].index("--resume") - 1:]
+        for bad in ("-s", "--sandbox", "--yolo", "-y", "--sandbox-image", "--include-directories"):
+            self.assertNotIn(bad, tail)
+        self.assertTrue(os.path.isdir(tmp) and oct(os.stat(tmp).st_mode & 0o777) == "0o700")
+        self.addCleanup(os.rmdir, tmp)
         self.assertNotIn(SECRET, " ".join(got["argv"]))
-        self.assertEqual(self.gstate()["state"], w.RESUMING)
-        self.assertTrue(self.gstate()["sandboxed_state"])
+        self.assertEqual(x["state"], w.RESUMING)
+        self.assertTrue(x["sandboxed_state"])
 
-    def test_environment_pins_the_proxied_seatbelt_and_strips_the_rest(self):
-        hostile = {"PATH": "/usr/bin", "SANDBOX": "x", "SANDBOX_FLAGS": "--privileged", "GEMINI_SANDBOX_IMAGE": "i",
-                   "BUILD_SANDBOX": "1", "SEATBELT_PROFILE": "permissive-open", "SEATBELT_EXTRA": "1",
-                   "GEMINI_CLI_HOME": "/tmp/x", "GEMINI_SANDBOX": "false", "HTTPS_PROXY": "http://evil:1",
-                   "no_proxy": "*", "NODE_OPTIONS": "--require /tmp/x.js", "DEBUG": "1",
-                   "CARDINAL_STORYBOARD_SESSION_START": "0", "CARDINAL_INVESTIGATION_POLLER": "0", "LANG": "C"}
+    def test_environment_marks_the_sandbox_and_strips_the_rest(self):
+        hostile = {"PATH": "/usr/bin:/opt/evil", "SANDBOX": "x", "SANDBOX_FLAGS": "--privileged",
+                   "GEMINI_SANDBOX_IMAGE": "i", "BUILD_SANDBOX": "1", "SEATBELT_PROFILE": "permissive-open",
+                   "SEATBELT_EXTRA": "1", "GEMINI_CLI_HOME": "/tmp/x", "GEMINI_SANDBOX": "false",
+                   "GEMINI_SANDBOX_PROXY_COMMAND": "nc", "HTTPS_PROXY": "http://evil:1", "no_proxy": "*",
+                   "NODE_OPTIONS": "--require /tmp/x.js", "DEBUG": "1", "CARDINAL_STORYBOARD_SESSION_START": "0",
+                   "CARDINAL_INVESTIGATION_POLLER": "0", "LANG": "C"}
         with gemini_proven():
             w.run_once(self.home, self.system(environ=hostile))
         env = self.world.launches[0]["env"]
-        self.assertEqual(env["GEMINI_SANDBOX"], "sandbox-exec")
-        self.assertEqual(env["SEATBELT_PROFILE"], "restrictive-proxied")
-        for k in ("SANDBOX", "SANDBOX_FLAGS", "GEMINI_SANDBOX_IMAGE", "BUILD_SANDBOX", "SEATBELT_EXTRA",
-                  "GEMINI_CLI_HOME", "HTTPS_PROXY", "no_proxy", "NODE_OPTIONS", "DEBUG"):
+        self.assertEqual(env["SANDBOX"], "sandbox-exec")   # hooks relocate; Gemini never re-sandboxes
+        for k in ("GEMINI_SANDBOX", "SEATBELT_PROFILE", "GEMINI_SANDBOX_PROXY_COMMAND", "SANDBOX_FLAGS",
+                  "GEMINI_SANDBOX_IMAGE", "BUILD_SANDBOX", "SEATBELT_EXTRA", "GEMINI_CLI_HOME", "no_proxy",
+                  "NODE_OPTIONS", "DEBUG"):
             self.assertNotIn(k, env)
+        for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            self.assertEqual(env[k], "http://localhost:8877")
         self.assertFalse([k for k in env if k.startswith("CARDINAL_")])
-        self.assertEqual((env["PATH"], env["LANG"]), ("/usr/bin", "C"))
-        cmd = shlex.split(env["GEMINI_SANDBOX_PROXY_COMMAND"])
-        log = str(self.world.launches[0]["log"])
-        self.assertEqual(cmd, ["/usr/bin/python3", str(w.proxy_script(self.home)), "--log", log, "--port", "8877",
-                               "generativelanguage.googleapis.com", "app.cardinalhq.io", "otel.cardinalhq.io"])
-        self.assertTrue(str(w.proxy_script(self.home)).startswith(str(self.home / ".cardinal" / "wake" / "lib")))
+        self.assertEqual(env["PATH"], w.read_config(self.home)["path_env"])
+        self.assertNotIn("/opt/evil", env["PATH"])
+        self.assertEqual(env["LANG"], "C")
+        self.assertEqual(env["GEMINI_API_KEY"], "not-a-real-key")   # the sandbox cannot read ~/.gemini/.env
+        self.addCleanup(lambda: os.rmdir(env["TMPDIR"]) if os.path.isdir(env["TMPDIR"]) else None)
 
-    def test_oauth_adds_only_the_code_assist_and_token_hosts(self):
+    def test_sign_in_with_google_is_notify_only(self):
         (self.home / ".gemini" / "settings.json").write_text(
             json.dumps({"security": {"auth": {"selectedType": "oauth-personal"}}}))
-        cmd = shlex.split(self.launch()["env"]["GEMINI_SANDBOX_PROXY_COMMAND"])
-        self.assertEqual(cmd[6:], ["generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com",
-                                   "oauth2.googleapis.com", "app.cardinalhq.io", "otel.cardinalhq.io"])
+        self.assert_notify("Sign in with Google is not supported")
+
+    def test_a_quick_exit_is_not_a_missing_sandbox(self):
+        def gone_launcher(argv, cwd, env, log):
+            pid = self.world.launch(argv, cwd, env, log)
+            self.world.alive.discard(pid)   # exited before the first look
+            self.rows = []
+            return pid
+        with gemini_proven():
+            w.run_once(self.home, self.system(launcher=gone_launcher))
+        self.assertEqual(self.kills, [])
+        self.assertIsNone(w.disabled_reason(self.home, "gemini"))
+        self.assertEqual(self.gstate()["state"], w.RESUMING)
 
     def test_sandbox_observed_keeps_it_running(self):
         self.launch()

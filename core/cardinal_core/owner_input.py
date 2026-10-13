@@ -809,7 +809,7 @@ REPEAT_WINDOW = 30.0
 # The prompt cardinal-wake (session_wake) resumes a stopped session with,
 # fixed except for the owner decision's seq (docs/specs/resume-and-wake.md
 # §5.3). The decision text is never in it: it arrives through the normal
-# hooks. Listed in MACHINE_PROMPTS for Claude and Codex (an exact match, the
+# hooks. Listed in MACHINE_PROMPTS for Claude, Codex and Gemini (an exact match, the
 # seq a positive integer) so a woken turn is never recorded as owner input.
 WAKE_PROMPT = ("Cardinal resumed this session for owner decision #{seq} in its Investigation. "
                "Read the investigation events and act on that decision. Every other event is advisory.")
@@ -840,6 +840,8 @@ MACHINE_PROMPTS = {
         re.compile(r"^\s*System: Potential loop detected\b"),
         re.compile(r"^\s*You are an AI agent that brings the power of Gemini directly into the terminal\. "
                    r"Your task is to analyze the current directory and generate a comprehensive GEMINI\.md file"),
+        # cardinal-wake's `gemini --resume <id> ... -p "<WAKE_PROMPT>"` (its launch ships off).
+        WAKE_PROMPT_RE,
     ),
     # Codex submits these template prompts for /review's presets and /init's
     # AGENTS.md (captured from codex-cli 0.160.1 / 0.162.1 UserPromptSubmit

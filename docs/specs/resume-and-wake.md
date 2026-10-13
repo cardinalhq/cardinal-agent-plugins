@@ -246,7 +246,25 @@ these hold:
 - its originator is not the Codex desktop app. The app's process outlives
   its threads, so it is notify-only;
 - `cwd` is taken from the rollout's `session_meta.cwd`, never from the
-  binding;
+  binding. It is realpath'd before every check, and the launch runs in the
+  realpath;
+- the realpath of `cwd` is strictly inside `$HOME`. It is neither inside nor
+  above a protected directory: `~/.cardinal`, `~/.codex`, `~/.claude`,
+  `~/.gemini`, `~/.cursor`, `~/Library`, `~/.ssh`, `~/.config`, `~/.gnupg`,
+  `~/.aws`, `~/.docker`, `~/.kube`, `~/.local`, shell setup dirs, and tool
+  homes such as `~/.npm`, `~/.nvm`, `~/.pyenv` and `~/.cargo`;
+- every turn could write only inside the realpath of `cwd`. The waker checks
+  `sandbox_policy.writable_roots`, every non-read entry of
+  `file_system_sandbox_policy` and `permission_profile.file_system`
+  (Codex's own `/tmp` and `$TMPDIR` are allowed), and
+  `permission_profile.network` (restricted only). An unknown shape refuses;
+- no Codex config widens workspace-write. The files checked are
+  `~/.codex/config.toml`, `/etc/codex/config.toml` and
+  `/etc/codex/managed_config.toml`. Any of these refuses:
+  `sandbox_workspace_write`, `permissions`, permission profiles,
+  `default_permissions`, or a `writable_roots` / `network_access` key;
+- every MCP server and plugin those configs declare can be named on the
+  command line, so the launch can disable it (below);
 - no directory from `cwd` up to and including the git work-tree root holds
   Codex project config. That means a `.codex/` containing any `*.toml`
   (`config.toml` can declare MCP servers) or a `hooks.json`. A `.codex`
@@ -255,17 +273,58 @@ these hold:
   the sandbox (proof C-8). This is checked before every launch, and the
   notification says "the project has its own Codex config".
 
-Launch, with the argv pinned and covered by a golden test:
+Launch, with the argv pinned and covered by golden tests:
 ```
 codex exec -s <the session's own sandbox: workspace-write|read-only> \
-  -c approval_policy="never" resume <sid> "<wake prompt>"
+  -c approval_policy="never" \
+  -c 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", "storyboard__post_investigation_event"]' \
+  -c mcp_servers.<every other server>.enabled=false \
+  -c 'plugins."<every non-Cardinal plugin>".enabled=false' \
+  resume <sid> "<wake prompt>"
 ```
-- It runs in `cwd`, without `--profile`, `--dangerously-*` or `--ignore-*`.
-- After the child exits, the waker re-reads the rollout. The woken turns'
-  `turn_context.sandbox_policy.type` must equal the pinned mode. If it
-  doesn't, the waker writes `~/.cardinal/wake/disabled/codex` (with the
-  reason), notifies, and never launches Codex again until the owner
-  re-enables it. There is no fallback to other flags.
+- It runs in the realpath of `cwd`, without `--profile`, `--dangerously-*`,
+  `--ignore-*` or `--skip-git-repo-check`.
+- **MCP servers run outside the Codex sandbox.** With `approval_policy=never`,
+  the user's MCP servers, and Cardinal's own write tools (Slack, GitHub,
+  SQL, Kubernetes, ServiceNow…), would be reachable by an unattended agent,
+  and a grantee's advisory could steer it into them. So the woken run keeps
+  only the Cardinal server's read and post of investigation events (an
+  acknowledgment is a post). Every other server is disabled, and so is every
+  plugin except Cardinal's, since a plugin can bring its own servers.
+- Servers or plugins declared any other way (dotted keys, inline tables,
+  arrays of tables), or with ids that can't be named on the command line,
+  refuse the launch.
+- **After the child exits,** the waker re-reads the rollout. Every woken
+  turn must:
+  - have `sandbox_policy.type` equal to the pinned mode;
+  - run with network off;
+  - be able to write only inside `cwd`.
+
+  Every MCP tool call recorded must be one of the two Cardinal tools.
+  Otherwise, or with no turn recorded, the waker writes
+  `~/.cardinal/wake/disabled/codex` (with the reason), notifies, and never
+  launches Codex again until the owner re-enables it. There is no fallback
+  to other flags.
+- A call made from inside Codex's code-mode `exec` tool doesn't appear in
+  the rollout. The `-c` restriction is what bounds it (live check C-15).
+
+**The daemon's own executables (B1).** launchd runs the waker unattended
+every pass, so nothing it runs may be agent-writable:
+- **Interpreter:** `enable` picks this Python or `/usr/bin/python3`, resolved
+  outside `$HOME`, git work trees under `$HOME`, approved roots and temp
+  dirs. The plist runs it with `-I`, so `PYTHON*`, user site-packages and
+  the script's directory are ignored.
+- **Launch binaries:** `codex`, `gemini`, and `node` when one of them is a
+  node script must resolve outside git work trees under `$HOME`, approved
+  roots and temp dirs. Otherwise `enable --launch` refuses.
+  - A git tree outside `$HOME` isn't refused: Homebrew's own prefix is one,
+    and no wake ever runs an agent there.
+- **PATH:** the plist's PATH and every woken child's is the system dirs plus
+  those binaries' directories, never the shell's.
+- **Re-checked at every launch:** each binary's path, size, mtime and inode
+  are recorded at `enable` and re-checked at every launch, along with
+  "outside the session's cwd". A change is a notification ("run enable
+  again").
 
 **Claude: notify-only.** Gate 2 is not demonstrated:
 - the user's own settings, including bypass mode and broad allow lists,
@@ -303,18 +362,21 @@ fail (proof C-7). Gemini's `-s` sandbox wraps the whole CLI, Cardinal's
 hooks included, and every `*-open` profile allows network. The launch path
 is designed around that:
 - **Network lock (C-9, proven).** The `restrictive-proxied` seatbelt
-  profile denies every outbound connection except `localhost:8877`. Gemini
-  starts `GEMINI_SANDBOX_PROXY_COMMAND` itself before entering the sandbox.
-  The waker sets that command to its own `allowlist_proxy.py`, copied into
-  `~/.cardinal/wake/lib`:
+  profile denies every outbound connection except `localhost:8877`. The
+  waker's own `allowlist_proxy.py`, copied into `~/.cardinal/wake/lib`,
+  listens there:
   - CONNECT only, port 443 only, exact host names only;
-  - the hosts are the Gemini API, plus the Code Assist and OAuth token
-    hosts for "Sign in with Google", plus the Cardinal hosts of the Gemini
+  - the hosts are the Gemini API plus the Cardinal hosts of the Gemini
     plugin's connection;
   - it refuses non-loopback peers, logs each ALLOW and DENY to the wake's
     log, and exits with its parent.
-  - Only one Gemini wake runs machine-wide (the port), enforced under the
-    global lock. If 8877 is already bound, the result is notify-only.
+  - **It owns the port exclusively (G3).** It never sets `SO_REUSEADDR`: with
+    it, a wildcard bind succeeds over another process already holding
+    `127.0.0.1:8877` (verified on macOS). After the bind it verifies that a
+    fresh socket can bind neither `127.0.0.1`, `::1` nor `0.0.0.0` on the
+    port. If either check fails, it exits 3 and starts nothing.
+  - Only one Gemini wake runs machine-wide, enforced under the global lock.
+    If 8877 is already bound, the result is notify-only.
 - **Hook state.** Inside the sandbox (`SANDBOX=sandbox-exec`), the hooks
   keep their per-session Cardinal state under
   `~/.cache/cardinal/sandboxed/.cardinal`, which the profile allows them
@@ -324,18 +386,38 @@ is designed around that:
   written by hooks. The waker reads relocated bindings as the untrusted
   hints all bindings are. The hooks' HTTP openers honor `HTTPS_PROXY`,
   which is tested.
-- **Pinned launch.** `gemini --resume <ident> -s --approval-mode yolo
-  --skip-trust -p "<wake prompt>"`, with this environment:
-  - set: `GEMINI_SANDBOX=sandbox-exec`, `SEATBELT_PROFILE=restrictive-proxied`
-    and the proxy command;
-  - stripped: everything that changes the sandbox, the proxy, the settings
-    location or the debugger, including `SANDBOX` (which makes Gemini skip
-    its sandbox), `SANDBOX_FLAGS`, `GEMINI_SANDBOX_IMAGE`, `BUILD_SANDBOX`,
-    `SEATBELT_*`, `GEMINI_CLI_HOME`, `*_PROXY`, `NODE_OPTIONS`, `DEBUG` and
-    `CARDINAL_*`;
-  - never passed: `--yolo` or `-y` without `-s`, `--sandbox-image`,
+- **Pinned launch: prevention, not detection (G2).** The waker applies the
+  sandbox itself, so it exists from Gemini's first instruction:
+  ```
+  python3 -I allowlist_proxy.py --log <wake log> --port 8877 <hosts> -- \
+    /usr/bin/sandbox-exec -D TARGET_DIR=<cwd> -D TMP_DIR=<private 0700 dir> \
+      -D HOME_DIR=<home> -D CACHE_DIR=<user cache> -D INCLUDE_DIR_0..4=/dev/null \
+      -f <cardinal's copy of restrictive-proxied.sb> \
+    gemini --resume <ident> --approval-mode yolo --skip-trust -p "<wake prompt>"
+  ```
+  - The proxy owns the port first, then runs `sandbox-exec` as its child.
+  - The profile is the waker's own copy of Gemini 0.63.0's
+    `restrictive-proxied.sb`, minus its inbound debugger port.
+  - Gemini's own `-s` is **not** passed: a seatbelt can't be nested (a
+    nested `sandbox-exec` fails; tested).
+  - `SANDBOX=sandbox-exec` is set in its environment, as Gemini sets it
+    inside its own sandbox. The hooks then keep their state in the relocated
+    home, and Gemini never tries to start a second sandbox.
+  - **Environment:** `HTTPS_PROXY` and `HTTP_PROXY` point at the proxy, and
+    `TMPDIR` is the private dir. Everything else that changes the sandbox,
+    the proxy, the settings location or the debugger is stripped:
+    `GEMINI_SANDBOX`, `SEATBELT_*`, `GEMINI_SANDBOX_PROXY_COMMAND`,
+    `SANDBOX_FLAGS`, `GEMINI_SANDBOX_IMAGE`, `BUILD_SANDBOX`,
+    `GEMINI_CLI_HOME`, `NO_PROXY`, `NODE_OPTIONS`, `DEBUG` and `CARDINAL_*`.
+    PATH is the vetted one.
+  - **API key:** the profile denies reading every `.env` file and the OAuth
+    credentials, so only a Gemini API key works. The waker passes the
+    user's `GEMINI_API_KEY` in the environment, from its own environment or
+    `~/.gemini/.env`, and never logs or stores it. "Sign in with Google" is
+    notify-only.
+  - **Never passed:** `--yolo` / `-y`, `--sandbox-image`,
     `--include-directories`.
-  - yolo acts inside the sandbox: the sandbox plus the proxy is the
+  - yolo acts inside the sandbox. The sandbox plus the proxy is the
     boundary, as workspace-write with approval never is for Codex.
 - **Eligibility** (all of these, checked before every launch):
   - a UUID session id;
@@ -344,8 +426,8 @@ is designed around that:
     project record, which must be a git work tree and not `$HOME` or an
     ancestor of it;
   - every recorded turn sandboxed (below), and no binding under `~/.cardinal`;
-  - a supported auth type, with an API key readable inside the sandbox via
-    `~/.gemini/.env` (the sandbox can't reach the keychain);
+  - a Gemini API key (in the waker's environment or `~/.gemini/.env`;
+    the sandbox can reach neither the keychain nor `.env` files);
   - the Gemini project guard (fail closed). It refuses any of:
     - a `.gemini` from cwd to the git root that is not a plain directory or
       can't be read;
@@ -362,11 +444,18 @@ is designed around that:
     - user or system settings that widen the sandbox;
   - a resume identifier (`resolve_gemini_resume_ident`; the UUID, with a
     marked hook for an index fallback, pending C-10).
-- **Runtime check.** Within 20 s of the spawn, the child's process tree
-  must run `sandbox-exec -f <…restrictive-proxied….sb>`. If it doesn't,
-  the waker kills the whole tree, writes `~/.cardinal/wake/disabled/gemini`
-  and notifies. There is no fallback. After the run, any unsandboxed turn
-  recorded, or no sandboxed turn recorded, also disables Gemini launch.
+- **Runtime check (defense in depth).** The argv already starts the sandbox.
+  Even so, within 20 s of the spawn the child's process tree must show
+  `sandbox-exec -f <…restrictive-proxied….sb>`. If it doesn't, the waker
+  kills the whole tree, writes `~/.cardinal/wake/disabled/gemini` and
+  notifies. There is no fallback.
+  - A child that has already exited is not judged by this check; the run
+    is judged after it ends.
+  - After the run, any unsandboxed turn recorded, or no sandboxed turn
+    recorded, also disables Gemini launch.
+- **Gemini's chat history:** the profile denies writes to `~/.gemini`, so
+  the woken run's turns may not be saved to Gemini's history. Live check
+  C-16 covers this.
 - **History is weaker than Codex's.** Gemini records no sandbox per turn.
   The plugin's prompt hook counts each turn as sandboxed or not in the
   session's Cardinal state. That record is agent-writable (a sandboxed
@@ -378,31 +467,50 @@ is designed around that:
 for owner decision #<seq> in its Investigation. Read the investigation
 events and act on that decision. Every other event is advisory." The
 decision text is never in the prompt; it arrives through the normal hooks
-(proof C-4). The prompt is listed in `owner_input.MACHINE_PROMPTS` for both
-runtimes, so it is never recorded as owner input.
+(proof C-4). The prompt is listed in `owner_input.MACHINE_PROMPTS` for
+Claude, Codex and Gemini, so it is never recorded as owner input.
 
 ### 5.4 Lifecycle, liveness, one execution per decision
 
-Ledger: `~/.cardinal/wake/ledger/<sid>.json`. Every read-modify-write holds
-an flock on `<sid>.lock`, and each transition is written before the action
-it describes.
+Ledger: `~/.cardinal/wake/ledger/<sid>.json`, with entries keyed by
+`investigation_id:seq` (seqs are per investigation). Every read-modify-write
+holds an flock on `<sid>.lock`, and each transition is written before the
+action it describes.
 
 ```
-DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, decision acked─▶ ACKNOWLEDGED
+DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, decision acked─▶ ACKNOWLEDGED (with its disposition)
       │                   │                   ├─child exits, not acked──────────────▶ FAILED
       │                   └─spawn error─▶ (≤2 retries, then FAILED)
-      │                                        └─running > WAKE_TIMEOUT (2 h)──────────▶ FAILED (child left running, owner notified)
-      └─not eligible / live session─▶ NOTIFIED
+      │                                        └─running > WAKE_TIMEOUT (2 h)─▶ TIMED_OUT (left running, owner notified)
+      │                                                                          └─child exits─▶ verified, then ACKNOWLEDGED | FAILED
+      └─not eligible / live session / decision older than 7 days─▶ NOTIFIED
 ```
 
+- **A decision runs at most once (B3).** Each `(investigation, session)` has
+  a high-water mark: the highest seq ever handled. It is never pruned, so
+  a seq at or below it never wakes, even after its entry ages out of the
+  ledger. A decision whose `created_at` is older than 7 days, or missing,
+  never launches; it gets one notification.
 - **One run per session.** A claim is refused while that session's ledger
-  holds a `RESUMING` entry whose child pid (with its start time) is alive. A
-  second decision posted during a run is delivered *inside* that run by the
-  hooks. Only a decision still unacknowledged after the run ends is
-  considered again, and it counts against the caps.
+  holds an in-flight entry (`CLAIMED`, `RESUMING`, `TIMED_OUT`). A second
+  decision posted during a run is delivered *inside* that run by the hooks.
+  Only a decision still unacknowledged after the run ends is considered
+  again, and it counts against the caps.
 - **No automatic retry once anything may have run.** A retry happens only
   for a spawn error, where no child ever existed. Re-posting is the owner's
   call.
+- **A crash mid-launch.** The `CLAIMED` entry, with the pre-launch snapshot,
+  is written before the spawn. If the waker dies before `RESUMING`, the next
+  pass looks for a live process whose argv names the session and this
+  decision's wake prompt (a per-decision marker):
+  - found: it is recovered as the child and judged like any run;
+  - not found: `FAILED`, never retried;
+  - an unreadable process table leaves the entry `CLAIMED`, blocking further
+    claims, until the 2 h timeout.
+
+  "Interrupted" is never reported while the child runs.
+- **Logs.** The newest 50 per-wake logs are kept. A finished run's log over
+  10 MB keeps its last 1 MB.
 - **Liveness: live if ANY of these holds.**
   - the poller status `anchor` pid is alive with a start time older than
     the status file;
@@ -411,20 +519,52 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
   - the binding's `.active` file was touched within the last 120 s;
   - a ledger child is alive.
 
-  A live session means a notification only.
+  A live session means a notification only. An unreadable signal counts as
+  live.
+- **Known liveness gap (L5).** A Codex TUI started without the session id in
+  its argv (`codex`, then picking the session) shows none of these signals
+  once it has been idle for more than 120 s with no poller running. The
+  waker would then resume the session beside the open window. Close the
+  window before posting a decision for it.
+- **Candidate bindings (M3).** A binding under `~/.cardinal` decides for its
+  session alone, stale or not. The relocated sandboxed binding (which an
+  agent can write) never shadows it, and counts only for sessions with no
+  Codex or Claude Code records.
 - **Reporting.** Each transition is a local macOS notification plus a line
-  in the ledger. Success means the session acknowledged the decision
-  (visible on the Investigation timeline). Launching a process is never
-  reported as success. A `session.wake` Storyboard state needs a conductor
-  event type and is a follow-up.
+  in the ledger.
+  - Notifications name the investigation by its id and the plugin
+    connection's host, never by a link the binding carries.
+  - Success means the session acknowledged the decision, and the report
+    includes its disposition (accepted, declined, noted, conflicts).
+  - Only an acknowledgment from the investigation author's own principal
+    naming the session counts: never a grantee's, never one with
+    `granted_by`. An agent holding the author's key could still post one
+    in the session's name, so an acknowledgment reports what the session
+    said, not proof that it acted.
+  - Launching a process is never reported as success.
+  - A `session.wake` Storyboard state needs a conductor event type and is
+    a follow-up.
 
 ### 5.5 Wake authorization is not action authorization
 
 A wake authorizes processing the decision, inside the session's own
 sandbox:
-- workspace-write: no network, nothing written outside the workspace;
+- workspace-write: no network, nothing written outside the workspace (the
+  waker refuses sessions whose recorded writable roots reach outside it);
 - approval policy never: anything that needs approval fails rather than
   escalating.
+- **MCP is the exception the sandbox doesn't cover.** Codex runs MCP servers
+  outside its sandbox, so an approval-free agent could otherwise act through
+  any configured server, Cardinal's own write tools included (Slack,
+  GitHub, SQL, Kubernetes, ServiceNow).
+  - The woken run therefore keeps only `storyboard__read_investigation_events`
+    and `storyboard__post_investigation_event` on the Cardinal server.
+  - Every other server and every non-Cardinal plugin is disabled on the
+    command line.
+  - The rollout is checked afterwards for any other MCP call.
+  - Posting still reaches Cardinal: the agent can post a cue, question,
+    challenge or acknowledgment to investigations its key can write. That
+    is what acknowledging needs.
 
 A woken agent that needs a consequential action does the rest of the work,
 then stops and asks (`question.opened`). That action needs a later decision
@@ -457,6 +597,8 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-12 | The runtime check sees `sandbox-exec -f …restrictive-proxied….sb` in the child's tree, and the agent can't write `~/.cardinal` or reach a non-allow-listed host | Owner, live | **Pending live proof** |
 | C-13 | Gemini's outer, unsandboxed process runs no project-defined command (MCP server, hook, tool discovery) before it enters the sandbox | Owner, live (until then the project guard refuses those settings) | **Pending live proof** |
 | C-14 | Duplicate decisions and a second Gemini session can't start concurrent Gemini executions (port 8877 and the global lock) | Unit tests in the C PR; owner, live | Unit tests pass; **live pending** |
+| C-15 | A woken Codex run can call only the Cardinal server's read/post of investigation events (`-c mcp_servers.cardinal.enabled_tools=[…]`, every other server `enabled=false`, every non-Cardinal plugin `enabled=false`), including from code-mode `exec` | Owner, live (codex-cli 0.162.1) | Unit tests cover the argv and the post-run rollout check; **live pending** |
+| C-16 | The waker's own `sandbox-exec -f <copy of restrictive-proxied>` around `gemini` (no `-s`, `SANDBOX` set) runs Gemini, delivers and acknowledges through the proxy, and Gemini starts no second sandbox | Locally: the shipped profile parses with the wake parameters (`/usr/bin/true` under it), and a nested `sandbox-exec` fails. Owner, live: a woken run | Profile and nesting: **proven locally**. End to end: **live pending** |
 
 Still owed: an end-to-end manual run, in which the owner posts an addressed
 decision from the web for a stopped, sandboxed Codex CLI session and watches
@@ -483,7 +625,10 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
     most twice; a started child is never retried; a timeout leads to
     FAILED; a post-run sandbox mismatch disables Codex.
   - C, launch: a golden argv test; the wake prompt matches
-    `MACHINE_PROMPTS` for both runtimes.
+    `MACHINE_PROMPTS` for every runtime.
+  - Review 3 regressions (`core/tests/test_session_wake_security.py`): each
+    finding's case, including the reviewer's repro script. Each case failed
+    on 9675269 except two positive controls.
 - **Targeted pytest runs only.** CI is the gate.
 - **Manual (owner).** Run a Codex CLI session with `-s workspace-write`,
   quit it, and post an addressed decision from the web. Watch it resume,
@@ -507,7 +652,15 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
 - Agent-triggered or chained wakes.
 - Waking the Codex desktop app or any session that ever ran unsandboxed.
 - Claude or Cursor unattended launch (notify-only); Gemini CLI launch until its live gates pass.
-- Launching a Codex session whose repository carries Codex project config.
+- Launching a Codex session whose repository carries Codex project config,
+  whose cwd is not strictly inside `$HOME` (or is in or above a protected
+  directory), whose recorded sandbox could write outside its cwd, or whose
+  Codex config widens workspace-write.
+- Giving a woken run any MCP server or tool beyond the Cardinal
+  investigation read/post.
+- Running the daemon or a woken run with an executable, an interpreter or a
+  PATH entry an agent could write.
+- Waking on a decision older than 7 days, or twice on any decision.
 - A cloud waker; Linux/Windows service managers (launchd only).
 - Injecting into a live TUI.
 - Uploading uncited evidence; a new `adopt` command.
@@ -544,3 +697,27 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
   - C uses existing Cardinal authentication, no passkey or signing.
   - Unattended wake is enabled only for a runtime where all three gates
     are demonstrated.
+- **Review 3 (independent security review of PR #209 at 9675269: BLOCK).**
+  - B1: the daemon's interpreter and PATH came from the shell → a vetted
+    interpreter outside `$HOME`, workspaces, approved roots and temp dirs,
+    run with `-I`; launch binaries (and node) vetted the same way;
+    a system-only PATH; fingerprints re-checked at every launch.
+  - B2: `writable_roots` and `cwd == $HOME` were ignored → cwd strictly
+    inside `$HOME` and outside protected dirs; every recorded write path
+    inside cwd (eligibility and post-run); Codex config that widens
+    workspace-write refuses.
+  - B3: a pruned entry let an old decision run again → a never-pruned
+    high-water mark per investigation and session; decisions older than
+    7 days never launch.
+  - H1: MCP servers run outside the sandbox → the woken run keeps only the
+    Cardinal investigation read/post; everything else disabled with `-c`;
+    a post-run rollout check.
+  - M1-M3: realpath'd cwd; ledger keyed by investigation:seq; relocated
+    bindings never shadow real ones and notification text never uses a
+    binding's link.
+  - G1-G3: the Gemini machine prompt; the waker's own `sandbox-exec` around
+    Gemini (prevention) with the post-start check kept; an exclusively
+    owned proxy port.
+  - L1-L5: TIMED_OUT stays verifiable; crash-after-spawn recovery; the
+    acknowledgment's disposition and principal; log rotation; the TUI
+    liveness gap documented.

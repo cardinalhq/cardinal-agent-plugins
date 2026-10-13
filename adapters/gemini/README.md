@@ -386,7 +386,7 @@ session, the Investigation and the state, and is never resumed. An
 unattended Gemini launch is built but ships off (`GEMINI_LAUNCH_PROVEN`
 in `cardinal_core.session_wake`) until its live proofs pass
 ([`docs/specs/resume-and-wake.md`](../../docs/specs/resume-and-wake.md)
-§5.3 Gemini, §6 C-9 to C-14). When it is on, a decision resumes the
+§5.3 Gemini, §6 C-9 to C-16). When it is on, a decision resumes the
 session only if:
 
 - you approved its directory: `cardinal-wake enable --launch --root PATH`
@@ -394,9 +394,11 @@ session only if:
   directory, from Gemini's own project record, must be inside an approved
   root and be a git work tree;
 - every turn of the session ran inside Gemini's sandbox (`gemini -s`);
-- you sign in with a Gemini API key or "Sign in with Google". With an API
-  key, put `GEMINI_API_KEY` in `~/.gemini/.env`: inside the sandbox
-  Gemini cannot read the macOS keychain;
+- you sign in with a Gemini API key, in `~/.gemini/.env`
+  (`GEMINI_API_KEY=…`). The sandbox can read neither the macOS keychain nor
+  any `.env` file, so the waker passes the key to the woken process in its
+  environment; it never logs or stores it. "Sign in with Google" is
+  notify-only, because the sandbox can't read the OAuth credentials;
 - nothing in the repository or your settings changes the sandbox. That
   rules out any of:
   - a custom `.gemini/sandbox-macos-*.sb`, `sandbox.Dockerfile` or
@@ -410,21 +412,29 @@ session only if:
   - a symlinked or unreadable `.gemini`;
 - no other Gemini wake is running and port 8877 is free.
 
-It then runs `gemini --resume <id> -s --approval-mode yolo --skip-trust -p
-"<wake prompt>"`:
-- **Sandbox:** Gemini's `restrictive-proxied` seatbelt profile. The agent
-  can write only the workspace, temp and cache directories.
-- **Network:** the profile allows only `localhost:8877`. There the waker's
-  allow-list proxy (`allowlist_proxy.py`, copied into
-  `~/.cardinal/wake/lib`) tunnels HTTPS to the Gemini API, Google sign-in
-  hosts when you use them, and your Cardinal hosts, and refuses everything
-  else. Each verdict goes to the wake's log.
-- **Runtime check:** within 20 s the waker must see Gemini's
-  `sandbox-exec` with that profile in the process tree. If it doesn't, it
-  kills the process tree and turns Gemini launch off until you run
-  `cardinal-wake reenable gemini`.
+It then starts the waker's allow-list proxy, which runs
+`sandbox-exec -f <the waker's copy of Gemini's restrictive-proxied profile>
+gemini --resume <id> --approval-mode yolo --skip-trust -p "<wake prompt>"`:
+- **Sandbox, from the first instruction:** the waker applies the seatbelt
+  itself, around the whole Gemini process. The agent can write only the
+  workspace, its own temp dir and the cache directories.
+  - Gemini's own `-s` is not passed: a seatbelt can't be nested. Instead
+    `SANDBOX=sandbox-exec` is set, which tells Gemini it is already
+    sandboxed (and tells this plugin's hooks where to keep their state).
+- **Network:** the profile allows only `localhost:8877`. The proxy
+  (`allowlist_proxy.py`, copied into `~/.cardinal/wake/lib`) owns that port
+  exclusively before Gemini starts. It tunnels HTTPS to the Gemini API and
+  your Cardinal hosts and refuses everything else. Each verdict goes to the
+  wake's log.
+- **Runtime check:** within 20 s the waker must also see `sandbox-exec` with
+  that profile in the process tree. If it doesn't, it kills the process tree
+  and turns Gemini launch off until you run `cardinal-wake reenable gemini`.
+  A process that has already exited is judged after the run instead.
 - **Yolo:** it acts inside the sandbox. The sandbox and the proxy are the
   boundary.
+- **The daemon:** like the Codex launch, it runs with a vetted Python
+  (`-I`), a vetted `gemini` (and `node`), and a system-only PATH, all
+  checked again before every launch.
 
 **State inside the sandbox.** Gemini's sandbox also wraps this plugin's
 hooks, and they cannot write `~/.cardinal` (nor `~/.gemini`) there.

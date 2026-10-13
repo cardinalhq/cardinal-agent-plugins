@@ -15,6 +15,7 @@ import multiprocessing
 import os
 import plistlib
 import stat
+import sys
 import tempfile
 import time
 import unittest
@@ -38,12 +39,16 @@ ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "CARDINAL_STORYBOARD_SES
        "CODEX_HOME": "/tmp/elsewhere", "CODEX_SESSION_ID": "parent", "LANG": "en_US.UTF-8"}
 
 
-def decision(seq, to=SID, inv=INV, **producer):
+def iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def decision(seq, to=SID, inv=INV, created=None, **producer):
     p = {"principal": {"kind": "user", "id": "owner"}, "session_id": None, "is_investigation_author": True}
     p.update(producer)
     return {"investigation_id": inv, "seq": seq, "class": "owner", "type": "owner.decided",
-            "authority": "owner_decision", "created_at": "2026-10-12T12:00:00Z", "to_session_id": to,
-            "payload": {"text": SECRET}, "producer": p}
+            "authority": "owner_decision", "created_at": iso(time.time() if created is None else created),
+            "to_session_id": to, "payload": {"text": SECRET}, "producer": p}
 
 
 def ack(seq, ack_of, sid=SID, inv=INV, author=True):
@@ -134,6 +139,9 @@ class Base(unittest.TestCase):
         env_patch = patch.dict(os.environ, isolated, clear=True)
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        temp = patch.object(w, "temp_dirs", lambda: ())   # the test HOME itself lives in a temp dir
+        temp.start()
+        self.addCleanup(temp.stop)
         self.t0 = time.time()
         self.world = World(self.t0)
         self.codex = self.home / "bin" / "codex"
@@ -141,15 +149,20 @@ class Base(unittest.TestCase):
         self.codex.write_text("#!/bin/sh\nexit 1\n")   # never executed: the launcher is faked
         self.codex.chmod(0o755)
         self.config()
-        self.repo = Path(self.tmp.name) / "repo"
+        self.repo = self.home / "work" / "repo"
         (self.repo / ".git").mkdir(parents=True)
         self.session(SID)
 
     # -- fixtures --------------------------------------------------------
-    def config(self, enabled=True, launch=True, codex=True):
-        w.write_config(self.home, {"enabled": enabled, "launch": launch,
-                                   "codex_path": str(self.codex) if codex else None,
-                                   "enabled_at": "2026-10-12T00:00:00Z"})
+    def config(self, enabled=True, launch=True, codex=True, **extra):
+        python = os.path.realpath(sys.executable)
+        codex_path = os.path.realpath(str(self.codex))
+        c = {"enabled": enabled, "launch": launch, "codex_path": codex_path if codex else None,
+             "python": python, "path_env": w.daemon_path(os.path.dirname(python), os.path.dirname(codex_path)),
+             "binaries": {python: w.fingerprint(python), codex_path: w.fingerprint(codex_path)},
+             "enabled_at": "2026-10-12T00:00:00Z"}
+        c.update(extra)
+        w.write_config(self.home, c)
 
     def rollout_path(self, sid):
         return self.home / ".codex" / "sessions" / "2026" / "10" / "12" / f"rollout-2026-10-12T16-36-07-{sid}.jsonl"
@@ -176,8 +189,10 @@ class Base(unittest.TestCase):
     def run_pass(self, **kw):
         return w.run_once(self.home, self.world.system(**kw))
 
-    def ledger(self, sid=SID):
-        return w.read_ledger(self.home, sid)["entries"]
+    def ledger(self, sid=SID, inv=INV):
+        """The session's entries for `inv`, keyed by seq (as text)."""
+        return {k.split(":", 1)[1]: v for k, v in w.read_ledger(self.home, sid)["entries"].items()
+                if k.startswith(inv + ":")}
 
     def state(self, seq, sid=SID):
         return self.ledger(sid).get(str(seq), {}).get("state")
@@ -408,10 +423,10 @@ class Eligibility(Base):
         ie.write_binding(self.home, SID, binding(cwd="/", workspace="/etc"))
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertEqual(self.world.launches[0]["cwd"], str(self.repo))
+        self.assertEqual(self.world.launches[0]["cwd"], os.path.realpath(str(self.repo)))
 
     def test_a_cwd_outside_a_git_work_tree_is_notify_only(self):
-        plain = Path(self.tmp.name) / "plain"
+        plain = self.home / "plain"
         plain.mkdir()
         self.session(SID, cwd=plain)
         self.world.events = [decision(5)]
@@ -556,7 +571,8 @@ def _race_worker(home, t0, barrier, launches_file):
 
     system = world.system(launcher=launch, alive=lambda pid: pid == 4242, process_start=lambda pid: t0,
                           before_claim=lambda sid, seq: barrier.wait(60), out=lambda line: None)
-    w.run_once(Path(home), system)
+    with patch.object(w, "temp_dirs", lambda: ()):   # the test HOME lives in a temp dir
+        w.run_once(Path(home), system)
 
 
 class Lifecycle(Base):
@@ -673,20 +689,28 @@ class Lifecycle(Base):
         self.run_pass(fetch=down)
         self.assertEqual(self.state(5), w.FAILED)
 
-    def test_a_run_past_the_timeout_fails_and_is_left_running(self):
+    def test_a_run_past_the_timeout_is_timed_out_and_judged_when_it_exits(self):
+        """L1: past WAKE_TIMEOUT the entry is TIMED_OUT (non-terminal), the
+        child is left running and the owner told; it still blocks other runs
+        and is verified and judged when it exits."""
         self.world.events = [decision(5)]
         self.run_pass()
         self.world.t += w.WAKE_TIMEOUT + 1
         self.run_pass()
-        self.assertEqual(self.state(5), w.FAILED)
+        self.assertEqual(self.state(5), w.TIMED_OUT)
         self.assertIn(self.world.launches[0]["pid"], self.world.alive)
         self.assertTrue(any("still running" in m for _, m in self.world.notes))
         self.world.t += w.LIVE_WINDOW + 1
         self.world.events.append(decision(7))
         self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)    # the left-running child keeps the session live
-        self.assertEqual(self.state(7), w.NOTIFIED)
-        self.assertIn("still going", self.ledger()["7"]["reason"])
+        self.assertEqual(len(self.world.launches), 1)    # the left-running child keeps the session busy
+        self.assertNotIn("7", self.ledger())             # considered once that run ends
+        self.append_turns(SID, turn("danger-full-access", network=None))
+        self.world.exit()
+        self.world.t += 60
+        self.run_pass()
+        self.assertEqual(self.state(5), w.FAILED)
+        self.assertIn("danger-full-access", w.disabled_reason(self.home, "codex"))   # verified at exit
 
     def test_a_reused_child_pid_is_not_the_child(self):
         self.world.events = [decision(5)]
@@ -697,16 +721,50 @@ class Lifecycle(Base):
         self.run_pass()
         self.assertNotEqual(self.state(5), w.RESUMING)
 
-    def test_a_claim_interrupted_mid_launch_fails_and_is_not_retried(self):
+    def claimed(self, seq=5):
         led = w.read_ledger(self.home, SID)
-        e = {"seq": 5, "investigation_id": INV, "runtime": "codex", "claimed_at": self.t0}
+        e = {"seq": seq, "investigation_id": INV, "runtime": "codex", "claimed_at": self.t0,
+             "sandbox": "workspace-write", "snapshot": w.rollout_offsets(self.home, SID, w.resolve(self.home, SID))}
         w.transition(e, w.CLAIMED, self.t0)
-        led["entries"]["5"] = e
+        w.add_entry(led, e)
         w.write_ledger(self.home, SID, led, self.t0)
+
+    def test_a_claim_interrupted_mid_launch_fails_and_is_not_retried(self):
+        self.claimed()
         self.world.events = [decision(5)]
         self.run_pass()
         self.assertEqual(self.state(5), w.FAILED)
+        self.assertIn("no child is running", self.ledger()["5"]["reason"])
         self.assertEqual(self.world.launches, [])
+
+    def test_a_claim_interrupted_after_the_spawn_recovers_the_running_child(self):
+        """L2: the waker died between the spawn and the RESUMING write. The
+        child (its argv names the session and this decision's wake prompt)
+        is still running: never reported interrupted; RESUMING, then judged."""
+        self.claimed()
+        prompt = w.codex_argv(str(self.codex), "workspace-write", SID, 5)[-1]
+        self.world.table = [(5150, f"/x/codex exec -s workspace-write resume {SID} {prompt}")]
+        self.world.alive.add(5150)
+        self.world.starts[5150] = self.t0
+        self.world.events = [decision(5)]
+        self.run_pass()
+        self.assertEqual(self.state(5), w.RESUMING)
+        self.assertTrue(self.ledger()["5"]["child"]["recovered"])
+        self.assertFalse(any("interrupted" in m for _, m in self.world.notes))
+        self.world.table = []
+        self.world.alive.discard(5150)
+        self.append_turns(SID, turn())
+        self.world.events.append(ack(6, 5))
+        self.world.t += 60
+        self.run_pass()
+        self.assertEqual(self.state(5), w.ACKNOWLEDGED)
+        self.assertEqual(self.world.launches, [])
+
+    def test_a_process_resumed_by_hand_is_not_taken_for_the_child(self):
+        self.claimed()
+        self.world.table = [(5151, f"/x/codex resume {SID}")]   # the user's own TUI: no wake prompt
+        self.run_pass()
+        self.assertEqual(self.state(5), w.FAILED)
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +776,8 @@ class Launch(Base):
         self.world.events = [decision(5)]
         self.run_pass()
         self.assertEqual(self.world.launches[0]["argv"], [
-            str(self.codex), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"', "resume", SID,
+            os.path.realpath(str(self.codex)), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"',
+            "resume", SID,
             "Cardinal resumed this session for owner decision #5 in its Investigation. Read the investigation "
             "events and act on that decision. Every other event is advisory."])
 
@@ -747,7 +806,8 @@ class Launch(Base):
         self.assertFalse([k for k in env if k.startswith("CARDINAL_")])
         for k in ("CODEX_HOME", "CODEX_SESSION_ID"):
             self.assertNotIn(k, env)
-        self.assertEqual(env["PATH"], ENV["PATH"])
+        self.assertEqual(env["PATH"], w.read_config(self.home)["path_env"])   # B1: never the user's PATH
+        self.assertNotIn(ENV["PATH"], [env["PATH"]])
         self.assertEqual(env["LANG"], ENV["LANG"])
 
     def test_a_launch_holds_the_sessions_evidence(self):
@@ -1107,13 +1167,13 @@ class CLI(Base):
         plist = plistlib.loads(w.plist_path(self.home).read_bytes())
         runner = self.home / ".cardinal" / "wake" / "lib" / "cardinal-wake"
         self.assertEqual(plist["Label"], "io.cardinalhq.wake")
-        self.assertEqual(plist["ProgramArguments"][1:], [str(runner), "run", "--once"])
+        self.assertEqual(plist["ProgramArguments"][1:], ["-I", str(runner), "run", "--once"])
         self.assertTrue(30 <= plist["StartInterval"] <= 60)
         self.assertNotIn("plugins", json.dumps(plist))
         self.assertTrue((runner.parent / "cardinal_core" / "session_wake.py").is_file())
         self.assertEqual(stat.S_IMODE(runner.stat().st_mode), 0o700)
         c = json.loads(w.config_path(self.home).read_text())
-        self.assertEqual((c["enabled"], c["launch"], c["codex_path"]), (True, True, str(self.codex)))
+        self.assertEqual((c["enabled"], c["launch"], c["codex_path"]), (True, True, os.path.realpath(str(self.codex))))
         self.assertTrue(c["enabled_at"])
         self.assertEqual(stat.S_IMODE(w.config_path(self.home).stat().st_mode), 0o600)
         self.assertEqual([a[0] for a in calls], ["bootout", "bootstrap"])
