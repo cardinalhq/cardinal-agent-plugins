@@ -82,21 +82,30 @@ bounded (MAX_ROLLOUT_BYTES, MAX_LINE); only session_meta, turn_context and
 MCP tool-call records are parsed; nothing of their contents is logged.
 
 Codex launch (config launch true, no ~/.cardinal/wake/disabled/codex):
-  <codex> exec -s <the session's sandbox> -c approval_policy="never"
+  <codex> exec -s <the session's sandbox> -c approval_policy="never" -c web_search="disabled"
+    -c mcp_servers.cardinal.tools.<each of the two>.approval_mode="approve"
     -c mcp_servers.cardinal.enabled_tools=[<read/post investigation events>]
     -c mcp_servers.<every other server>.enabled=false
     -c plugins."<every non-Cardinal plugin>".enabled=false
+    --disable <each of CODEX_DISABLED_FEATURES>
     resume <sid> "<WAKE_PROMPT>"
 pinned by golden tests, in the realpath'd cwd; never --profile,
 --dangerously-*, --ignore-* or --skip-git-repo-check. Codex starts MCP
-servers outside its sandbox, so the woken run gets only the Cardinal
-server's CARDINAL_WAKE_TOOLS (H1). Environment: the waker's, without
+servers outside its sandbox and exposes app connectors, web search, image
+generation and browser tools that config.toml does not name, so the woken
+run gets only the Cardinal server's CARDINAL_WAKE_TOOLS (pre-approved:
+approval_policy=never refuses an unapproved MCP call) and those features
+off (live proof H1). The same flags are validated first with `<codex>
+<flags> features list` (codex_lockdown_problem: exit 0, every feature
+listed, not removed, off; cached per binary identity), else a notification:
+never a partial lockdown. Environment: the waker's, without
 CARDINAL_*, CODEX_HOME or a parent session id, PATH the vetted one.
 Detached, output to a 0600 per-wake log (the newest WAKE_LOGS_KEEP kept; a
 finished one over MAX_WAKE_LOG keeps its tail). After it exits, everything it
 added to the rollout must stay in bounds: each turn the pinned mode, no
-network, writes only inside cwd; each MCP call a CARDINAL_WAKE_TOOLS call on
-the Cardinal server. Otherwise (or with no turn recorded) the waker writes
+network, writes only inside cwd; each tool call in CODEX_ALLOWED_CALLS
+(exec, wait, request_user_input_async, clock.sleep, collaboration.*, the two
+Cardinal tools). Otherwise (or with no turn recorded) the waker writes
 ~/.cardinal/wake/disabled/codex with the reason, notifies, and launches no
 Codex session until `cardinal-wake reenable codex`. No fallback to other
 flags. (A call made from inside Codex's code-mode `exec` tool is not
@@ -245,6 +254,30 @@ _CODEX_WIDENING_RE = re.compile(
 CARDINAL_MCP_SERVER = "cardinal"
 CARDINAL_PLUGIN_PREFIX = "cardinal-codex-plugin@"
 CARDINAL_WAKE_TOOLS = ("storyboard__read_investigation_events", "storyboard__post_investigation_event")
+# The lockdown of a woken Codex run beyond MCP (live proof H1, codex-cli
+# 0.162.1): Codex exposes ~90 tools that are not in config.toml (ChatGPT app
+# connectors, web search, image generation, the browser and computer-use
+# REPLs, plugin installs), which per-server / per-plugin -c switches do not
+# remove. These features are disabled (--disable, before `resume`) and web
+# search is off. code_mode_host is NEVER disabled: every tool, the shell and
+# MCP included, runs through functions.exec in this build. multi_agent does
+# not remove the collaboration.* tools; a spawned sub-agent inherits the same
+# sandbox and tool list (H1), so they are allowed.
+CODEX_DISABLED_FEATURES = ("apps", "plugins", "remote_plugin", "image_generation", "computer_use", "browser_use",
+                           "browser_use_external", "in_app_browser", "multi_agent", "tool_suggest",
+                           "skill_mcp_dependency_install")
+CODEX_WEB_SEARCH_OFF = 'web_search="disabled"'
+# The only tool calls a woken run's rollout may hold (response_item calls:
+# (type, namespace, name); namespace None also matches "functions"). Calls
+# made inside functions.exec (apply_patch, exec_command, the Cardinal MCP
+# tools...) are not rollout calls; the lockdown is what bounds them.
+CODEX_ALLOWED_CALLS = frozenset(
+    [("custom_tool_call", None, "exec"), ("function_call", None, "exec"), ("function_call", None, "wait"),
+     ("function_call", None, "request_user_input_async"), ("function_call", "clock", "sleep")]
+    + [("function_call", "collaboration", t) for t in ("followup_task", "interrupt_agent", "list_agents",
+                                                       "send_message", "spawn_agent", "wait_agent")]
+    + [("function_call", "mcp__" + CARDINAL_MCP_SERVER, t) for t in CARDINAL_WAKE_TOOLS])
+CODEX_PROBE_TIMEOUT = 30.0
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")   # fullmatch
 _TOML_QUOTED_ID_RE = re.compile(r"[A-Za-z0-9_.@:/ -]{1,128}")   # fullmatch (the inside of a "quoted" key)
 
@@ -824,7 +857,9 @@ class System:
                  process_rows: Optional[Callable[[], Optional[list]]] = None,
                  kill: Optional[Callable[[int, int], None]] = None,
                  sleep: Optional[Callable[[float], None]] = None,
-                 port_busy: Optional[Callable[[int], bool]] = None):
+                 port_busy: Optional[Callable[[int], bool]] = None,
+                 run_probe: Optional[Callable[[List[str], Optional[str]], Tuple[int, str]]] = None):
+        self.run_probe = run_probe or globals()["run_probe"]
         self.process_rows = process_rows or globals()["process_rows"]
         self.kill = kill or os.kill
         self.sleep = sleep or time.sleep
@@ -937,8 +972,24 @@ class Unverifiable(Exception):
 
 
 _RECORD_MARKERS = (b"turn_context", b"session_meta")
-_MCP_MARKERS = (b"mcp__", b"mcpToolCall", b"mcp_tool_call")
+_MCP_MARKERS = (b"mcp__", b"mcpToolCall", b"mcp_tool_call", b'_call"')
 _TURN_TYPE_RE = re.compile(rb'"type"\s*:\s*"turn_context"')
+
+
+def _tool_call(rec: Any) -> Optional[Tuple[str, Optional[str], str]]:
+    """(type, namespace, name) when a rollout record is a tool call the
+    model made (a response_item whose payload type ends in _call: function,
+    custom tool, web search, image generation, local shell...), else None.
+    Namespace "functions" reads as None."""
+    if not isinstance(rec, dict) or rec.get("type") != "response_item":
+        return None
+    p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+    kind = p.get("type")
+    if not (isinstance(kind, str) and kind.endswith("_call")):
+        return None
+    ns = p.get("namespace")
+    ns = None if ns in (None, "", "functions") else str(ns)
+    return kind, ns, str(p.get("name"))
 
 
 def _mcp_call(rec: Any) -> Optional[Tuple[str, str]]:
@@ -1004,7 +1055,7 @@ def _records(path: Path, offset: int = 0, *, mcp: bool = False) -> Iterator[dict
                     raise Unverifiable("a rollout turn record is malformed")
                 continue
             if isinstance(rec, dict) and (rec.get("type") in ("turn_context", "session_meta")
-                                          or (mcp and _mcp_call(rec) is not None)):
+                                          or (mcp and (_mcp_call(rec) is not None or _tool_call(rec) is not None))):
                 yield rec
 
 
@@ -1218,6 +1269,9 @@ def codex_mcp_overrides(home: Path) -> Tuple[Optional[List[str]], str]:
         if key is None:
             return None, f"the MCP server id {ident[:40]!r} cannot be disabled on the command line"
         if ident == CARDINAL_MCP_SERVER:
+            # Under approval_policy=never an MCP call that needs approval is refused (H1): the two
+            # allowed tools are pre-approved, nothing else is reachable.
+            out += [f'mcp_servers.{key}.tools.{tool}.approval_mode="approve"' for tool in CARDINAL_WAKE_TOOLS]
             out.append(f"mcp_servers.{key}.enabled_tools=" + json.dumps(list(CARDINAL_WAKE_TOOLS)))
         else:
             out.append(f"mcp_servers.{key}.enabled=false")
@@ -1339,9 +1393,11 @@ def verify_after(home: Path, sid: str, snapshot: dict, pinned: str, *, require_t
     """None when everything the woken run added to the rollout (past the
     snapshot's offsets, or in a rollout that did not exist then) stayed in
     bounds: every turn_context ran `pinned` with network off and could write
-    only inside the session's working directory (turn_policy_problem), and
-    every MCP tool call was a CARDINAL_WAKE_TOOLS call on the Cardinal
-    server; else why not. require_turn: no turn at all is a failure too."""
+    only inside the session's working directory (turn_policy_problem), every
+    tool call is in CODEX_ALLOWED_CALLS (no web search, image generation,
+    app connector or other MCP tool), and every MCP tool call event was a
+    CARDINAL_WAKE_TOOLS call on the Cardinal server; else why not.
+    require_turn: no turn at all is a failure too."""
     offsets = snapshot.get("offsets") if isinstance(snapshot.get("offsets"), dict) else snapshot
     cwd = snapshot.get("cwd") if isinstance(snapshot.get("cwd"), str) else None
     seen = 0
@@ -1351,6 +1407,12 @@ def verify_after(home: Path, sid: str, snapshot: dict, pinned: str, *, require_t
             if os.lstat(str(p)).st_size < start:
                 return "the rollout was rewritten during the woken run"
             for rec in _records(p, start, mcp=True):
+                tool = _tool_call(rec)
+                if tool is not None:
+                    if tool not in CODEX_ALLOWED_CALLS:
+                        return (f"the woken run made a tool call outside its allow-list "
+                                f"({tool[0][:40]} {str(tool[1])[:40]}/{tool[2][:60]})")
+                    continue
                 call = _mcp_call(rec)
                 if call is not None:
                     if call[0] != CARDINAL_MCP_SERVER or call[1] not in CARDINAL_WAKE_TOOLS:
@@ -1377,22 +1439,94 @@ def verify_after(home: Path, sid: str, snapshot: dict, pinned: str, *, require_t
     return None
 
 
+def codex_lockdown_flags(overrides: Iterable[str] = ()) -> List[str]:
+    """The flags that lock a woken run down (H1), in order: approvals off,
+    web search off, the MCP restriction (one -c per codex_mcp_overrides
+    value) and --disable per CODEX_DISABLED_FEATURES. The same flags are
+    validated beforehand with `codex ... features list` (codex_lockdown_problem)."""
+    flags = ["-c", APPROVAL_NEVER, "-c", CODEX_WEB_SEARCH_OFF]
+    for value in overrides:
+        if not (isinstance(value, str) and re.match(r"^(mcp_servers|plugins)\.", value)):
+            raise ValueError(f"not an MCP restriction: {value!r}")
+        flags += ["-c", value]
+    for feature in CODEX_DISABLED_FEATURES:
+        flags += ["--disable", feature]
+    return flags
+
+
 def codex_argv(codex_path: str, sandbox: str, sid: str, seq: int, overrides: Iterable[str] = ()) -> List[str]:
     """The pinned launch (§5.3); nothing else is ever passed: the session's
-    own sandbox, approvals off, and the MCP restriction (one -c per
-    codex_mcp_overrides value)."""
+    own sandbox and the lockdown (codex_lockdown_flags), all before
+    `resume`."""
     if not (isinstance(codex_path, str) and os.path.isabs(codex_path)):
         raise ValueError("codex must be an absolute path")
     if sandbox not in SANDBOX_MODES:
         raise ValueError(f"not a wake sandbox: {sandbox!r}")
     if not UUID_RE.fullmatch(sid or ""):
         raise ValueError(f"not a Codex session id: {sid!r}")
-    extra: List[str] = []
-    for value in overrides:
-        if not (isinstance(value, str) and re.match(r"^(mcp_servers|plugins)\.", value)):
-            raise ValueError(f"not an MCP restriction: {value!r}")
-        extra += ["-c", value]
-    return [codex_path, "exec", "-s", sandbox, "-c", APPROVAL_NEVER, *extra, "resume", sid, wake_prompt(seq)]
+    return [codex_path, "exec", "-s", sandbox, *codex_lockdown_flags(overrides), "resume", sid, wake_prompt(seq)]
+
+
+def parse_features(text: str) -> dict:
+    """{name: (stage, enabled)} from `codex features list` (name, a stage that
+    may contain spaces, true / false per line)."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[-1] in ("true", "false") and re.fullmatch(r"[a-z0-9_]{1,80}", parts[0]):
+            out[parts[0]] = (" ".join(parts[1:-1]), parts[-1] == "true")
+    return out
+
+
+def codex_probe_path(home: Path) -> Path:
+    return wake_dir(home) / "codex-probe.json"
+
+
+def codex_lockdown_problem(home: Path, config: dict, system: "System", rt: Optional[Runtime] = None) -> Optional[str]:
+    """Why the lockdown cannot be trusted for this codex (fail closed: a
+    notification, never a launch with a partial lockdown), or None. Runs
+    `<codex> <lockdown flags> features list` (no session; the user's config
+    is loaded and the -c keys and feature names validated): it must exit 0,
+    and every CODEX_DISABLED_FEATURES feature must be listed, not removed,
+    and off. A success is cached per codex binary identity and flag set."""
+    import hashlib
+    codex = config.get("codex_path")
+    if not codex:
+        return "codex was not found when wake was enabled"
+    overrides = (rt.extra.get("mcp_overrides") if rt is not None else None) or []
+    try:
+        argv = [codex, *codex_lockdown_flags(overrides), "features", "list"]
+    except ValueError as e:
+        return str(e)
+    key = hashlib.sha256(json.dumps([os.path.realpath(codex), fingerprint(codex), argv]).encode()).hexdigest()
+    cache = _read_json(codex_probe_path(home))
+    if cache.get(key) is True:
+        return None
+    try:
+        rc, out = system.run_probe(argv, config.get("path_env"))
+    except Exception as e:
+        return f"codex could not validate the lockdown ({type(e).__name__})"
+    if rc != 0:
+        return "codex rejected the lockdown flags (an unknown feature or config key): no launch"
+    features = parse_features(out)
+    for name in CODEX_DISABLED_FEATURES:
+        got = features.get(name)
+        if got is None:
+            return f"codex does not know the feature {name!r}, so the lockdown would be partial: no launch"
+        stage, enabled = got
+        if stage == "removed" or enabled:
+            return f"codex cannot disable the feature {name!r} ({stage}): no launch"
+    with contextlib.suppress(OSError, ValueError):
+        _private_dir(wake_dir(home))
+        ie.write_json(codex_probe_path(home), {key: True})
+    return None
+
+
+def run_probe(argv: List[str], path_env: Optional[str]) -> Tuple[int, str]:
+    """Run a read-only codex command (never a session); (exit code, stdout)."""
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=CODEX_PROBE_TIMEOUT, check=False,
+                       stdin=subprocess.DEVNULL, env=child_env(os.environ, path_env))
+    return r.returncode, r.stdout
 
 
 def child_env(environ: Mapping[str, str], path_env: Optional[str] = None) -> dict:
@@ -1865,7 +1999,7 @@ def gemini_env(environ: Mapping[str, str], config: dict, home: Path, log: Path, 
     return env
 
 
-def gemini_preflight(home: Path, config: dict, system: "System") -> Optional[str]:
+def gemini_preflight(home: Path, config: dict, system: "System", rt: Optional[Runtime] = None) -> Optional[str]:
     """Why a Gemini launch cannot start now (a notification instead), or None."""
     if not proxy_script(home).is_file() or not seatbelt_profile(home).is_file():
         return "the allow-list proxy or the seatbelt profile is not installed (run cardinal-wake enable again)"
@@ -1963,7 +2097,7 @@ class Launcher:
       argv(executable, rt, sid, seq) -> the pinned argv (golden-tested);
       env(environ, config, home, log, rt) -> the child's environment (PATH
         is always the vetted path_env);
-      preflight(home, config, system) -> None, or why it cannot start now
+      preflight(home, config, system, rt) -> None, or why it cannot start now
         (a notification);
       exclusive: at most one in-flight launch of this runtime machine-wide;
       snapshot(home, sid, rt) -> what verify needs from before the launch;
@@ -1985,7 +2119,7 @@ class Launcher:
         self.eligibility, self.argv, self.snapshot, self.verify = eligibility, argv, snapshot, verify
         self.can_launch = can_launch
         self.env = env or (lambda environ, config, home, log, rt: child_env(environ, config.get("path_env")))
-        self.preflight = preflight or (lambda home, config, system: None)
+        self.preflight = preflight or (lambda home, config, system, rt: None)
         self.after_spawn = after_spawn or (lambda home, sid, pid, system: None)
         self.prepare = prepare or (lambda home, rt, config, log, system: None)
         self.exclusive, self.proven = exclusive, proven
@@ -2003,7 +2137,7 @@ LAUNCHERS = {
     CODEX: Launcher(CODEX, "codex", lambda home, sid, rt, config: codex_eligibility(home, sid, rt),
                     lambda exe, rt, sid, seq: codex_argv(exe, rt.sandbox or "", sid, seq,
                                                          rt.extra.get("mcp_overrides") or ()),
-                    rollout_offsets, verify_after, LAUNCH_TEXT),
+                    rollout_offsets, verify_after, LAUNCH_TEXT, preflight=codex_lockdown_problem),
     GEMINI: Launcher(GEMINI, "gemini", gemini_eligibility, gemini_argv, gemini_snapshot, gemini_verify_after,
                      GEMINI_LAUNCH_TEXT, env=gemini_env, preflight=gemini_preflight, prepare=gemini_prepare,
                      after_spawn=gemini_verify_spawn, exclusive=True, proven=GEMINI_LAUNCH_PROVEN),
@@ -2327,7 +2461,7 @@ def consider(home: Path, sid: str, binding: dict, system: System, config: dict, 
     elif not (config.get(launcher.executable) and os.access(config[launcher.executable], os.X_OK)):
         why = f"{launcher.binary} was not found when wake was enabled (run cardinal-wake enable --launch again)"
     else:
-        why = (binaries_problem(config, home, rt.cwd) or launcher.preflight(home, config, system) or "")
+        why = (binaries_problem(config, home, rt.cwd) or launcher.preflight(home, config, system, rt) or "")
     if why:
         for e in fresh:
             _notify_only(home, sid, binding, e["seq"], rt.kind, why, system, report, dry_run=dry_run,

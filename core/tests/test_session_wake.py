@@ -96,6 +96,8 @@ class World:
         self.lines = []
         self.next_pid = 40000
         self.fetch_complete = True
+        self.probes = []
+        self.probe_answer = None
 
     def fetch(self, conn, inv, sid, after, client):
         assert conn == MEMBER
@@ -119,9 +121,18 @@ class World:
                     process_start=lambda pid: self.starts.get(pid), process_table=lambda: list(self.table),
                     launcher=self.launch, notifier=lambda title, msg: self.notes.append((title, msg)),
                     connection=lambda runtime, home: dict(MEMBER), fetch=self.fetch, environ=ENV,
-                    out=self.lines.append)
+                    out=self.lines.append, run_probe=self.probe)
         args.update(kw)
         return w.System(**args)
+
+    def probe(self, argv, path_env):
+        """A fake `codex <lockdown> features list`: every disabled feature
+        listed and off (what codex-cli 0.162.1 prints), plus code_mode_host on."""
+        self.probes.append(list(argv))
+        if self.probe_answer is not None:
+            return self.probe_answer
+        lines = [f"{f:<40} stable             false" for f in w.CODEX_DISABLED_FEATURES]
+        return 0, "\n".join(lines + ["code_mode_host                           stable             true"]) + "\n"
 
     def exit(self, pid=None):
         """The (last) launched child exits."""
@@ -777,6 +788,11 @@ class Launch(Base):
         self.run_pass()
         self.assertEqual(self.world.launches[0]["argv"], [
             os.path.realpath(str(self.codex)), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"',
+            "-c", 'web_search="disabled"',
+            "--disable", "apps", "--disable", "plugins", "--disable", "remote_plugin",
+            "--disable", "image_generation", "--disable", "computer_use", "--disable", "browser_use",
+            "--disable", "browser_use_external", "--disable", "in_app_browser", "--disable", "multi_agent",
+            "--disable", "tool_suggest", "--disable", "skill_mcp_dependency_install",
             "resume", SID,
             "Cardinal resumed this session for owner decision #5 in its Investigation. Read the investigation "
             "events and act on that decision. Every other event is advisory."])
@@ -790,8 +806,11 @@ class Launch(Base):
                         "danger-full-access", "--yolo"):
                 self.assertNotIn(bad, a)
         self.assertNotIn(SECRET, " ".join(argv))
-        self.assertEqual(argv.count("-c"), 1)
+        self.assertEqual(argv.count("-c"), 2)
+        self.assertEqual(argv.count("--disable"), len(w.CODEX_DISABLED_FEATURES))
+        self.assertNotIn("code_mode_host", argv)   # every tool runs through it (H1): never disabled
         self.assertEqual(argv.count("-s"), 1)
+        self.assertLess(max(i for i, a in enumerate(argv) if a in ("-c", "--disable")), argv.index("resume"))
 
     def test_argv_refuses_anything_but_the_pinned_shape(self):
         for args in (("codex", "workspace-write", SID, 1), (str(self.codex), "danger-full-access", SID, 1),

@@ -502,10 +502,15 @@ that meets all of these:
 It is resumed exactly as
 
 ```
-codex exec -s <its own sandbox> -c approval_policy="never" \
+codex exec -s <its own sandbox> -c approval_policy="never" -c 'web_search="disabled"' \
+  -c 'mcp_servers.cardinal.tools.storyboard__read_investigation_events.approval_mode="approve"' \
+  -c 'mcp_servers.cardinal.tools.storyboard__post_investigation_event.approval_mode="approve"' \
   -c 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", "storyboard__post_investigation_event"]' \
   -c mcp_servers.<each other server>.enabled=false \
   -c 'plugins."<each non-Cardinal plugin>".enabled=false' \
+  --disable apps --disable plugins --disable remote_plugin --disable image_generation \
+  --disable computer_use --disable browser_use --disable browser_use_external --disable in_app_browser \
+  --disable multi_agent --disable tool_suggest --disable skill_mcp_dependency_install \
   resume <session id> "Cardinal resumed this session for owner decision #<seq> in its Investigation. Read the investigation events and act on that decision. Every other event is advisory."
 ```
 
@@ -513,12 +518,24 @@ in that working directory, never one from the Investigation binding (which
 the agent can write).
 - **Never passed:** `--profile`, `--dangerously-*`, `--ignore-*` or
   `--skip-git-repo-check`.
-- **MCP:** Codex runs MCP servers outside its sandbox. The woken run keeps
-  only Cardinal's investigation read and post (that is how it
-  acknowledges); every other MCP server in your config, and every plugin
-  except Cardinal's, is turned off for the run. Servers declared in a way
-  the waker can't turn off on the command line make the session
-  notify-only.
+- **MCP and built-in tools:** Codex runs MCP servers outside its sandbox,
+  and exposes tools your config doesn't list: ChatGPT app connectors, web
+  search, image generation, the browser and computer-use tools, and plugin
+  installs.
+  - The woken run keeps only Cardinal's investigation read and post, which
+    is how it acknowledges. Those two are pre-approved, since with
+    approvals off an unapproved MCP call is refused.
+  - Every other MCP server and every plugin except Cardinal's are turned
+    off, and so are the features behind those built-in tools.
+  - What's left: the shell and `apply_patch` inside the sandbox, goals,
+    MCP resource reads, `view_image`, and sub-agents, which inherit the
+    same sandbox and tools.
+  - Before each launch the waker checks these exact flags with
+    `codex … features list` (no session). If this Codex doesn't know a
+    feature or rejects a setting, the decision is a notification: it never
+    launches with a partial lockdown.
+  - Servers declared in a way the waker can't turn off on the command line
+    make the session notify-only.
 - **The prompt:** the decision text is never in it; the decision arrives
   through the plugin's hooks, and the prompt itself is never recorded as
   owner input.
@@ -562,8 +579,9 @@ said. Starting a process is never reported as success.
   when it exits.
 - Then the waker checks the rollout. Every turn of the woken run must show
   the pinned sandbox with network off and writes only inside its working
-  directory, and every MCP call must be one of the two Cardinal tools. If
-  not (or with no turn recorded), it writes `~/.cardinal/wake/disabled/codex`
+  directory, and every tool call must be on the allow-list (no web search,
+  image generation, app connector or other MCP tool). If not (or with no
+  turn recorded), it writes `~/.cardinal/wake/disabled/codex`
   with the reason, notifies you, and launches no Codex session again until
   you run `python3 scripts/cardinal-wake reenable codex`. It never retries
   with other flags.

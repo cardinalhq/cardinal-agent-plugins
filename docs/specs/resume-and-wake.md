@@ -276,12 +276,39 @@ these hold:
 Launch, with the argv pinned and covered by golden tests:
 ```
 codex exec -s <the session's own sandbox: workspace-write|read-only> \
-  -c approval_policy="never" \
+  -c approval_policy="never" -c 'web_search="disabled"' \
+  -c 'mcp_servers.cardinal.tools.storyboard__read_investigation_events.approval_mode="approve"' \
+  -c 'mcp_servers.cardinal.tools.storyboard__post_investigation_event.approval_mode="approve"' \
   -c 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", "storyboard__post_investigation_event"]' \
   -c mcp_servers.<every other server>.enabled=false \
   -c 'plugins."<every non-Cardinal plugin>".enabled=false' \
+  --disable apps --disable plugins --disable remote_plugin --disable image_generation \
+  --disable computer_use --disable browser_use --disable browser_use_external --disable in_app_browser \
+  --disable multi_agent --disable tool_suggest --disable skill_mcp_dependency_install \
   resume <sid> "<wake prompt>"
 ```
+All flags go before `resume`.
+- **Why each part is needed (live proof H1).**
+  - Under `approval_policy=never` an MCP call that needs approval is
+    refused. The two Cardinal tools are therefore pre-approved
+    (`approval_mode="approve"`); without that, read and ack are impossible.
+  - Codex exposes about 90 tools that aren't in `config.toml`: ChatGPT app
+    connectors (`mcp__codex_apps__*`), web search, image generation, the
+    browser and computer-use REPLs, and plugin installs. Per-server and
+    per-plugin `-c` switches don't remove them; the `--disable` features
+    and `web_search="disabled"` do.
+  - `code_mode_host` is never disabled: every tool, shell and MCP included,
+    runs through `functions.exec` in this build.
+  - `--disable multi_agent` doesn't remove the `collaboration.*` tools. A
+    spawned sub-agent inherits the same sandbox and tool list, so they are
+    allowed.
+- **Fail closed on drift.** Feature names change between Codex versions.
+  Before a launch, the waker runs `<codex> <the same flags> features list`.
+  That is not a session: it loads the config, validates the `-c` keys and
+  values, and applies the `--disable`s. It must exit 0, and every feature
+  above must be listed, not "removed", and off. Otherwise the decision is a
+  notification, never a launch with a partial lockdown. A success is cached
+  per codex binary identity and flag set.
 - It runs in the realpath of `cwd`, without `--profile`, `--dangerously-*`,
   `--ignore-*` or `--skip-git-repo-check`.
 - **MCP servers run outside the Codex sandbox.** With `approval_policy=never`,
@@ -300,13 +327,17 @@ codex exec -s <the session's own sandbox: workspace-write|read-only> \
   - run with network off;
   - be able to write only inside `cwd`.
 
-  Every MCP tool call recorded must be one of the two Cardinal tools.
-  Otherwise, or with no turn recorded, the waker writes
+  Every tool call recorded must be on the allow-list: `exec`, `wait`,
+  `request_user_input_async`, `clock.sleep`, `collaboration.*` and the two
+  Cardinal tools. A web search, image generation, app connector or any
+  other MCP call is a violation. Otherwise, or with no turn recorded, the
+  waker writes
   `~/.cardinal/wake/disabled/codex` (with the reason), notifies, and never
   launches Codex again until the owner re-enables it. There is no fallback
   to other flags.
-- A call made from inside Codex's code-mode `exec` tool doesn't appear in
-  the rollout. The `-c` restriction is what bounds it (live check C-15).
+- A call made from inside Codex's code-mode `exec` tool (`apply_patch`,
+  `exec_command`, the Cardinal MCP tools) doesn't appear in the rollout as
+  a call. The lockdown is what bounds it (live proof H1).
 
 **The daemon's own executables (B1).** launchd runs the waker unattended
 every pass, so nothing it runs may be agent-writable:
@@ -558,10 +589,19 @@ sandbox:
   any configured server, Cardinal's own write tools included (Slack,
   GitHub, SQL, Kubernetes, ServiceNow).
   - The woken run therefore keeps only `storyboard__read_investigation_events`
-    and `storyboard__post_investigation_event` on the Cardinal server.
+    and `storyboard__post_investigation_event` on the Cardinal server, and
+    those two are pre-approved.
   - Every other server and every non-Cardinal plugin is disabled on the
     command line.
-  - The rollout is checked afterwards for any other MCP call.
+  - Built-in tools that act outside the sandbox are off too: app
+    connectors, web search, image generation, the browser and computer-use
+    REPLs, and plugin installs.
+  - The lockdown is validated with `features list` before every launch
+    (fail closed), and the rollout is checked afterwards for any call
+    outside the allow-list.
+  - What the woken agent has (H1): the shell and `apply_patch` inside its
+    sandbox, goals, MCP resource reads, `view_image`, the two Cardinal tools,
+    and sub-agents that inherit the same lockdown.
   - Posting still reaches Cardinal: the agent can post a cue, question,
     challenge or acknowledgment to investigations its key can write. That
     is what acknowledging needs.
@@ -597,7 +637,7 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-12 | The runtime check sees `sandbox-exec -f …restrictive-proxied….sb` in the child's tree, and the agent can't write `~/.cardinal` or reach a non-allow-listed host | Owner, live | **Pending live proof** |
 | C-13 | Gemini's outer, unsandboxed process runs no project-defined command (MCP server, hook, tool discovery) before it enters the sandbox | Owner, live (until then the project guard refuses those settings) | **Pending live proof** |
 | C-14 | Duplicate decisions and a second Gemini session can't start concurrent Gemini executions (port 8877 and the global lock) | Unit tests in the C PR; owner, live | Unit tests pass; **live pending** |
-| C-15 | A woken Codex run can call only the Cardinal server's read/post of investigation events (`-c mcp_servers.cardinal.enabled_tools=[…]`, every other server `enabled=false`, every non-Cardinal plugin `enabled=false`), including from code-mode `exec` | Owner, live (codex-cli 0.162.1) | Unit tests cover the argv and the post-run rollout check; **live pending** |
+| C-15 / H1 | A woken Codex run can use only its sandbox and the Cardinal server's read/post of investigation events | Owner, live (codex-cli 0.162.1; a throwaway workspace-write session; real config with the cardinal, cardinal-behavior, computer-use and node_repl servers and 13 plugins). (1) `enabled_tools` plus per-server and per-plugin `enabled=false`. (2) Adding `tools.<t>.approval_mode="approve"`. (3) Adding `--disable apps plugins remote_plugin image_generation computer_use browser_use browser_use_external in_app_browser multi_agent tool_suggest skill_mcp_dependency_install` and `web_search="disabled"`. (4) `--disable code_mode_host`. (5) A spawned sub-agent | (1) The allow-list works (slack gone) **but** the two Cardinal tools were refused ("requires approval, but approval policy is never"), and about 90 non-config tools stayed (app connectors, web, image gen, cua REPL, plugin install). (2) The read completed. (3) Tools are exactly `exec`, `wait`, `request_user_input_async`, `clock.sleep` and `collaboration.*`; inside exec: `apply_patch`, `exec_command`, `write_stdin`, goals, MCP resource reads, `view_image`, `clock__curr_time` and the two Cardinal tools. `ls` ran, and the Cardinal hooks still fired. (4) Every tool fails, so it is never disabled. (5) The sub-agent inherits the lockdown (`touch ~/probe` not permitted, no network, same tools). **Proven** → the argv in §5.3 |
 | C-16 | The waker's own `sandbox-exec -f <copy of restrictive-proxied>` around `gemini` (no `-s`, `SANDBOX` set) runs Gemini, delivers and acknowledges through the proxy, and Gemini starts no second sandbox | Locally: the shipped profile parses with the wake parameters (`/usr/bin/true` under it), and a nested `sandbox-exec` fails. Owner, live: a woken run | Profile and nesting: **proven locally**. End to end: **live pending** |
 
 Still owed: an end-to-end manual run, in which the owner posts an addressed

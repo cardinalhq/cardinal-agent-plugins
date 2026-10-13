@@ -353,8 +353,11 @@ class McpRestriction(Base):
         self.write_config(self.CONFIG)
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertEqual(self.world.launches[0]["argv"], [
+        expected = [
             os.path.realpath(str(self.codex)), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"',
+            "-c", 'web_search="disabled"',
+            "-c", 'mcp_servers.cardinal.tools.storyboard__read_investigation_events.approval_mode="approve"',
+            "-c", 'mcp_servers.cardinal.tools.storyboard__post_investigation_event.approval_mode="approve"',
             "-c", 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", '
                   '"storyboard__post_investigation_event"]',
             "-c", "mcp_servers.cardinal-behavior.enabled=false",
@@ -362,9 +365,17 @@ class McpRestriction(Base):
             "-c", "mcp_servers.node_repl.enabled=false",
             "-c", 'mcp_servers."slack bot".enabled=false',
             "-c", 'plugins."browser@openai-bundled".enabled=false',
+            "--disable", "apps", "--disable", "plugins", "--disable", "remote_plugin",
+            "--disable", "image_generation", "--disable", "computer_use", "--disable", "browser_use",
+            "--disable", "browser_use_external", "--disable", "in_app_browser", "--disable", "multi_agent",
+            "--disable", "tool_suggest", "--disable", "skill_mcp_dependency_install",
             "resume", SID,
             "Cardinal resumed this session for owner decision #5 in its Investigation. Read the investigation "
-            "events and act on that decision. Every other event is advisory."])
+            "events and act on that decision. Every other event is advisory."]
+        self.assertEqual(self.world.launches[0]["argv"], expected)
+        # The same lockdown was validated first, with no session: `codex <flags> features list`.
+        self.assertEqual(self.world.probes, [[expected[0]] + expected[4:expected.index("resume")]
+                                             + ["features", "list"]])
 
     def test_servers_declared_another_way_refuse(self):
         for text in ("mcp_servers.x.command = \"/bin/sh\"\n", "mcp_servers = { x = { command = \"sh\" } }\n",
@@ -399,6 +410,105 @@ class McpRestriction(Base):
                 self.assertEqual(bool(w.disabled_reason(self.home, "codex")), disabled)
                 if disabled:
                     self.assertIn("outside its allow-list", w.disabled_reason(self.home, "codex"))
+
+
+class Lockdown(Base):
+    """H1 (live, codex-cli 0.162.1): the feature lockdown is validated with
+    `codex <flags> features list` before a launch; anything short of a full
+    lockdown is a notification, never a partial launch."""
+
+    def setUp(self):
+        super().setUp()
+        self.world.events = [decision(5)]
+
+    def features(self, **over):
+        rows = {f: ("stable", False) for f in w.CODEX_DISABLED_FEATURES}
+        rows.update(over)
+        return "\n".join(f"{k:<40} {v[0]:<18} {'true' if v[1] else 'false'}" for k, v in rows.items() if v) + "\n"
+
+    def test_a_full_lockdown_launches_and_is_cached(self):
+        self.run_pass()
+        self.assertEqual(len(self.world.launches), 1)
+        self.assertEqual(len(self.world.probes), 1)
+        self.assertTrue(self.world.probes[0][-2:] == ["features", "list"])
+        self.assertNotIn("resume", self.world.probes[0])
+        self.world.events.append(decision(7))
+        self.append_turns(SID, turn())
+        self.world.exit()
+        self.world.t += 60
+        self.run_pass()
+        self.world.t += w.LIVE_WINDOW + 1
+        self.run_pass()
+        self.assertEqual(len(self.world.launches), 2)
+        self.assertEqual(len(self.world.probes), 1)   # cached for this codex binary and flag set
+
+    def test_a_rejected_flag_or_key_is_notify_only(self):
+        self.world.probe_answer = (1, "")
+        self.run_pass()
+        self.assertIn("rejected the lockdown flags", self.notified_only())
+
+    def test_an_unknown_feature_is_notify_only(self):
+        self.world.probe_answer = (0, self.features(in_app_browser=None))
+        self.run_pass()
+        self.assertIn("does not know the feature 'in_app_browser'", self.notified_only())
+
+    def test_a_removed_or_still_enabled_feature_is_notify_only(self):
+        for over in ({"apps": ("removed", False)}, {"plugins": ("stable", True)}):
+            with self.subTest(over):
+                self.setUp()
+                self.world.probe_answer = (0, self.features(**over))
+                self.run_pass()
+                self.assertIn("cannot disable the feature", self.notified_only())
+
+    def test_a_probe_that_cannot_run_is_notify_only(self):
+        def boom(argv, path_env):
+            raise OSError("no codex")
+        self.run_pass(run_probe=boom)
+        self.assertIn("could not validate the lockdown", self.notified_only())
+
+    def test_a_new_codex_binary_is_probed_again(self):
+        self.run_pass()
+        self.codex.write_text("#!/bin/sh\necho v2\n")
+        real = os.path.realpath(str(self.codex))
+        self.config(binaries={**w.read_config(self.home)["binaries"], real: w.fingerprint(real)})
+        self.world.events.append(decision(7))
+        self.append_turns(SID, turn())
+        self.world.exit()
+        self.world.t += 60
+        self.run_pass()
+        self.world.t += w.LIVE_WINDOW + 1
+        self.run_pass()
+        self.assertEqual(len(self.world.probes), 2)
+
+    def test_parse_features(self):
+        out = w.parse_features("apps                                     stable             false\n"
+                               "agent_message_board                      under development  true\n"
+                               "garbage line\n")
+        self.assertEqual(out, {"apps": ("stable", False), "agent_message_board": ("under development", True)})
+
+    def test_post_run_any_other_tool_call_disables_codex(self):
+        def call(kind, ns, name):
+            payload = {"type": kind, "name": name, "call_id": "c"}
+            if ns is not None:
+                payload["namespace"] = ns
+            return {"timestamp": "2026-10-12T23:40:00Z", "type": "response_item", "payload": payload}
+        allowed = [call("custom_tool_call", None, "exec"), call("function_call", "functions", "wait"),
+                   call("function_call", "collaboration", "spawn_agent"), call("function_call", "clock", "sleep"),
+                   call("function_call", "mcp__cardinal", "storyboard__post_investigation_event")]
+        bad = [call("web_search_call", None, "None"), call("image_generation_call", None, "None"),
+               call("function_call", "mcp__codex_apps", "sites_deploy_site_version"),
+               call("function_call", "web", "run"), call("function_call", None, "request_plugin_install"),
+               call("local_shell_call", None, "None")]
+        for extra, disabled in [(allowed, False)] + [([b], True) for b in bad]:
+            with self.subTest(extra=[c["payload"]["type"] + ":" + c["payload"]["name"] for c in extra]):
+                self.setUp()
+                self.run_pass()
+                self.append_turns(SID, turn(), *extra)
+                self.world.events.append(ack(6, 5))
+                self.world.exit()
+                self.world.t += 60
+                self.run_pass()
+                self.assertEqual(bool(w.disabled_reason(self.home, "codex")), disabled)
 
 
 class Candidates(Base):
