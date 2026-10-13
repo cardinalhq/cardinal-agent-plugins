@@ -81,7 +81,7 @@ four plugins exist at all:
 
 | Axis | claude | codex | cursor | gemini |
 | --- | --- | --- | --- | --- |
-| Telemetry acquisition | native OTel emitter does the heavy lifting; hooks fill gaps | transcript-JSONL scraping at Stop | hook payloads (no per-call tokens — product gap) | hook payloads per call + native OTLP passthrough |
+| Telemetry acquisition | native OTel emitter does the heavy lifting; hooks fill gaps | transcript-JSONL scraping at Stop | hook payloads (no per-call tokens — product gap) | hook payloads per call (+ Gemini's own OTLP exporter, opt-in: headers only via env) |
 | Hook event names | SessionStart / UserPromptSubmit / Stop / SubagentStop … | same names as Claude | camelCase (`beforeSubmitPrompt`, `postToolUse`, …) | SessionStart / BeforeAgent / AfterModel / AfterTool / AfterAgent / PreCompress |
 | Hook output protocol | `hookSpecificOutput` JSON | same as Claude | `{continue, user_message}`; no additional_context on prompt hook (divergence E) | same as Claude |
 | Config write target | Claude settings + hooks.json | `config.toml` (TOML, marker-block managed) | `~/.cursor/mcp.json` + `hooks.json` (+ project-scope variants) | `settings.json` + extension bundle |
