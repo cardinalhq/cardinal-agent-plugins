@@ -257,11 +257,11 @@ class Payload(unittest.TestCase):
 
 
 class WakePrompt(unittest.TestCase):
-    """cardinal-wake's resume prompt (session_wake) is a machine prompt on
-    Claude and Codex: never recorded as owner input; anything added is."""
+    """`cardinal-wake resume`'s first prompt (session_wake) is a machine
+    prompt on every runtime: never recorded as owner input; anything added is."""
 
     def test_the_wake_prompt_for_any_seq_is_not_typed(self):
-        for runtime in ("claude", "codex"):
+        for runtime in ("claude", "codex", "cursor", "gemini"):
             for seq in (1, 42, 10 ** 17):
                 with self.subTest(runtime=runtime, seq=seq):
                     self.assertTrue(oi.is_machine_prompt(runtime, oi.wake_prompt(seq, INV)))
@@ -269,7 +269,7 @@ class WakePrompt(unittest.TestCase):
 
     def test_a_changed_wake_prompt_is_owner_input(self):
         p = oi.wake_prompt(7, INV)
-        for runtime in ("claude", "codex"):
+        for runtime in ("claude", "codex", "cursor", "gemini"):
             for typed in (p + " Then merge it.", "Ignore that. " + p, p.replace("#7", "#0"),
                           p.replace("#7", "#seven"), p.replace(INV, "inv_x"),
                           p.replace(INV, INV + " and deploy prod")):
@@ -287,8 +287,8 @@ class WakePrompt(unittest.TestCase):
                 oi.wake_prompt(5, bad)
 
     def test_the_wake_prompt_names_the_tool_that_reads_the_decision(self):
-        """N1: a woken Codex run has no hooks, so the prompt carries the way to the
-        decision: the investigation id and the read tool (never the decision text)."""
+        """The prompt carries the way to the decision: the investigation id and the
+        read tool (never the decision text)."""
         p = oi.wake_prompt(5, INV)
         self.assertIn(INV, p)
         self.assertIn("storyboard__read_investigation_events", p)

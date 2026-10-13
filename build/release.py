@@ -59,11 +59,11 @@ BEHAVIOR_ARTIFACTS = (
     "skills/storyboard/scripts/render_preview.py",
 )
 
-# Owner-woken sessions (docs/specs/resume-and-wake.md §5): every adapter
-# ships cardinal-wake (Codex launches; the others are notify-only); enable
+# Owner-woken sessions (docs/specs/resume-and-wake.md §5, v4): every adapter
+# ships cardinal-wake (a notification per addressed decision, and `resume`,
+# attended, in the owner's terminal; nothing launches unattended); enable
 # copies the vendored core into ~/.cardinal/wake/lib.
-WAKE_ARTIFACTS = ("hooks/cardinal_core/session_wake.py", "hooks/cardinal_core/allowlist_proxy.py",
-                  "hooks/cardinal_core/seatbelt-restrictive-proxied.sb")
+WAKE_ARTIFACTS = ("hooks/cardinal_core/session_wake.py", "hooks/cardinal_core/owner_input.py")
 
 REQUIRED_ARTIFACTS = {
     "claude": (".claude-plugin/plugin.json", ".mcp.json", "bin/cardinal-behavior", "bin/cardinal-checks",

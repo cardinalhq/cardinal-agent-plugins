@@ -1,20 +1,24 @@
-"""Owner-woken sessions (cardinal_core.session_wake; docs/specs/resume-and-wake.md §5, §7).
+"""Owner-woken sessions, v4 "deliver, never launch" (cardinal_core.session_wake;
+docs/specs/resume-and-wake.md §5, §7).
 
 Every effect is faked: a temp HOME, a fixed clock, a fake process table,
-process start times, launcher, notifier and Cardinal reads, and an injected
-launchctl. Nothing here starts an agent or installs a launchd agent.
+process start times, notifier, Cardinal reads, `resume`'s exec, and an
+injected launchctl. Nothing here starts an agent or installs a launchd
+agent; the only real processes are the installed runner run with --help
+and `resume --print`.
 
 Run from core/:  python3 -m unittest tests.test_session_wake -v
 """
 
 from __future__ import annotations
 
-import io
 import json
 import multiprocessing
 import os
 import plistlib
+import shlex
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -34,34 +38,14 @@ INV2 = "inv_" + "b" * 24
 MEMBER = {"origin": "https://test.invalid", "org": "org", "key": "test-key"}
 SECRET = "SECRET-DECISION-TEXT deploy prod now"
 CAPS = {"owner_decision": {"enabled": True}}
-ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "CARDINAL_STORYBOARD_SESSION_START": "0",
-       "CARDINAL_INVESTIGATION_POLLER": "0", "CARDINAL_INVESTIGATION_ID": INV2, "CARDINAL_OWNER_INPUT": "0",
-       "CODEX_HOME": "/tmp/elsewhere", "CODEX_SESSION_ID": "parent", "LANG": "en_US.UTF-8"}
-
-
-# A native-executable header (N2: codex must be one, never a script).
-MACHO = b"\xcf\xfa\xed\xfe" + b"\0" * 60
-PROMPT5 = ("Cardinal resumed this session for owner decision #5 in Investigation " + INV + ". Read it with the "
-           "storyboard__read_investigation_events tool (investigation_id " + INV + ", types [\"owner.decided\"], "
-           "after 4) and act on it; read no other events. When done, write your answer to "
-           "$TMPDIR/cardinal-wake-ack.json as {\"ack_of\": 5, \"disposition\": \"accepted\", \"declined\" or "
-           "\"noted\", \"note\": \"what you did or why\"}. The note may not be passed on; put no secrets in it.")
-PINS = ["-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.writable_roots=[]",
-        "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
-        "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=false"]
-DISABLES = ["--disable", "apps", "--disable", "plugins", "--disable", "remote_plugin",
-            "--disable", "image_generation", "--disable", "computer_use", "--disable", "browser_use",
-            "--disable", "browser_use_external", "--disable", "in_app_browser", "--disable", "multi_agent",
-            "--disable", "tool_suggest", "--disable", "skill_mcp_dependency_install", "--disable", "hooks",
-            "--disable", "daemon_auto_start"]
-NOTIFY_OFF = ["-c", "notify=[]"]
-
-
-CWD = "<the session's cwd>"
+ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "en_US.UTF-8"}
 
 
 def iso(t):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+NOWAKE = object()
 
 
 def decision(seq, to=SID, inv=INV, created=None, wake=True, **producer):
@@ -75,9 +59,6 @@ def decision(seq, to=SID, inv=INV, created=None, wake=True, **producer):
     return {"investigation_id": inv, "seq": seq, "class": "owner", "type": "owner.decided",
             "authority": "owner_decision", "created_at": iso(time.time() if created is None else created),
             "to_session_id": to, "payload": payload, "producer": p}
-
-
-NOWAKE = object()
 
 
 def ack(seq, ack_of, sid=SID, inv=INV, author=True):
@@ -95,24 +76,15 @@ def binding(inv=INV, **extra):
     return b
 
 
-def turn(mode="workspace-write", network=False, ts="2026-10-12T23:36:11.185Z", slash_tmp=False):
-    """A turn_context as codex-cli 0.162.1 records it; a woken turn's
-    workspace-write policy carries the pinned exclude_slash_tmp=true."""
-    policy = {"type": mode}
-    if network is not None:
-        policy["network_access"] = network
-    if mode == "workspace-write":
-        policy.update(exclude_tmpdir_env_var=False, exclude_slash_tmp=not slash_tmp)
-    # cwd: CWD is replaced by the session's own working directory when the turn is written
-    # (Base.session / append_turns); every turn must have run there (review 3 #8).
-    return {"timestamp": ts, "type": "turn_context", "payload": {"cwd": CWD, "approval_policy": "never",
-                                                                   "sandbox_policy": policy}}
-
-
 def meta(sid, cwd, originator="codex_exec", source="exec"):
     return {"timestamp": "2026-10-12T23:36:08.796Z", "type": "session_meta",
             "payload": {"id": sid, "cwd": cwd, "originator": originator, "source": source,
                         "cli_version": "0.162.1", "base_instructions": {"text": "x" * 2000}}}
+
+
+def turn(cwd):
+    return {"timestamp": "2026-10-12T23:36:11.185Z", "type": "turn_context",
+            "payload": {"cwd": cwd, "approval_policy": "on-request", "sandbox_policy": {"type": "workspace-write"}}}
 
 
 class World:
@@ -121,64 +93,37 @@ class World:
     def __init__(self, t0):
         self.t = t0
         self.events = []
-        self.launches = []
-        self.attempts = 0
-        self.spawn_errors = 0
         self.alive = set()
         self.starts = {}
         self.table = []
-        self.notes = []
+        self.notes = []           # (title, message, open_file)
         self.lines = []
-        self.next_pid = 40000
         self.fetch_complete = True
-        self.probes = []
-        self.probe_answer = None
-        self.mcp_answer = None
-        self.posted = []          # relayed acknowledgments (System.post_ack)
-        self.post_error = None
-        self.probe_cwds = []
-        self.envrows = []         # (pid, pgid, argv + environment): System.process_envs
-        self.killed = []
-        self.boxed = []           # pids System.sandboxed_procs answers (this wake's survivors); None: cannot tell
-        self.boxed_calls = []
         self.wake_posts = []      # session.wake reports (System.post_wake)
         self.wake_error = None    # an exception, or state -> exception
+        self.execs = []           # (argv, cwd) `resume` ran
+        self.exec_error = None
 
     def fetch(self, conn, inv, sid, after, client):
         assert conn == MEMBER
         return [e for e in self.events if e["investigation_id"] == inv and e["seq"] > after
                 and e.get("to_session_id") in (None, sid)], self.fetch_complete
 
-    def launch(self, argv, cwd, env, log):
-        self.attempts += 1
-        if self.spawn_errors:
-            self.spawn_errors -= 1
-            raise FileNotFoundError(2, "no such file")
-        pid = self.next_pid
-        self.next_pid += 1
-        self.launches.append({"argv": list(argv), "cwd": cwd, "env": dict(env), "log": log, "pid": pid})
-        self.alive.add(pid)
-        self.starts[pid] = self.t
-        return pid
+    def notify(self, title, msg, open_file=None):
+        self.notes.append((title, msg, open_file))
+
+    def exec(self, argv, cwd):
+        if self.exec_error is not None:
+            raise self.exec_error
+        self.execs.append((list(argv), cwd))
 
     def system(self, **kw):
         args = dict(now=lambda: self.t, alive=lambda pid: pid in self.alive,
                     process_start=lambda pid: self.starts.get(pid), process_table=lambda: list(self.table),
-                    launcher=self.launch, notifier=lambda title, msg: self.notes.append((title, msg)),
-                    connection=lambda runtime, home: dict(MEMBER), fetch=self.fetch, environ=ENV,
-                    out=self.lines.append, run_probe=self.probe, post_ack=self.post_ack,
-                    process_envs=lambda: list(self.envrows), kill=self.kill, sleep=lambda seconds: None,
-                    post_wake=self.post_wake, sandboxed_procs=self.sandboxed_procs)
+                    notifier=self.notify, connection=lambda runtime, home: dict(MEMBER), fetch=self.fetch,
+                    environ=ENV, out=self.lines.append, post_wake=self.post_wake, exec=self.exec)
         args.update(kw)
-        # Only what this System takes (the same fakes also drive an older checkout when a
-        # regression test is shown to fail before its fix).
-        import inspect
-        known = inspect.signature(w.System.__init__).parameters
-        return w.System(**{k: v for k, v in args.items() if k in known})
-
-    def sandboxed_procs(self, since, tmp_dirs, canary):
-        self.boxed_calls.append((since, list(tmp_dirs), canary))
-        return None if self.boxed is None else list(self.boxed)
+        return w.System(**args)
 
     def post_wake(self, conn, inv, sid, payload, key, client):
         assert conn == MEMBER
@@ -187,51 +132,6 @@ class World:
             raise err
         self.wake_posts.append({"inv": inv, "sid": sid, "payload": dict(payload), "key": key, "client": client})
         return {"event": {}}
-
-    def kill(self, pid, sig):
-        """A fake kill: recorded; the process is gone from the process list after SIGKILL
-        (and after SIGTERM unless it is in self.stubborn)."""
-        self.killed.append((pid, sig))
-        import signal as _signal
-        if sig == _signal.SIGKILL or pid not in getattr(self, "stubborn", set()):
-            self.envrows = [r for r in self.envrows if r[0] != pid]
-            if self.boxed:
-                self.boxed = [p for p in self.boxed if p != pid]
-
-    def probe(self, argv, path_env, cwd=None):
-        """A fake `codex <lockdown> features list`: every disabled feature
-        listed and off (what codex-cli 0.162.1 prints), plus code_mode_host
-        on; and `codex <lockdown> mcp list --json`: only Cardinal enabled."""
-        self.probes.append(list(argv))
-        self.probe_cwds.append(cwd)
-        if argv[-3:] == ["mcp", "list", "--json"]:
-            if self.mcp_answer is not None:
-                return self.mcp_answer
-            return 0, json.dumps([{"name": "cardinal", "enabled": True, "transport": {"type": "streamable_http"}},
-                                  {"name": "node_repl", "enabled": False, "disabled_reason": None}])
-        if self.probe_answer is not None:
-            return self.probe_answer
-        lines = [f"{f:<40} stable             false" for f in w.CODEX_DISABLED_FEATURES]
-        return 0, "\n".join(lines + ["code_mode_host                           stable             true"]) + "\n"
-
-    def post_ack(self, conn, inv, sid, seq, disposition, note, client):
-        """A fake append of the relayed acknowledgment: recorded, and seen by the next read
-        as the session's own (idempotent per session and seq, like ack:<sid>:<seq>)."""
-        assert conn == MEMBER
-        if self.post_error is not None:
-            raise self.post_error
-        self.posted.append({"inv": inv, "sid": sid, "seq": seq, "disposition": disposition, "note": note,
-                            "client": client})
-        if not any(e.get("type") == "acknowledged" and e["payload"].get("ack_of") == seq
-                   and e["producer"].get("session_id") == sid for e in self.events):
-            e = ack(max([x["seq"] for x in self.events] + [0]) + 1, seq, sid=sid, inv=inv)
-            e["payload"]["disposition"] = disposition
-            self.events.append(e)
-        return {"event": {}}
-
-    def exit(self, pid=None):
-        """The (last) launched child exits."""
-        self.alive.discard(pid if pid is not None else self.launches[-1]["pid"])
 
 
 class Base(unittest.TestCase):
@@ -248,57 +148,34 @@ class Base(unittest.TestCase):
         temp = patch.object(w, "temp_dirs", lambda: ())   # the test HOME itself lives in a temp dir
         temp.start()
         self.addCleanup(temp.stop)
-        # Codex launch ships OFF (CODEX_LAUNCH_PROVEN; its survivor gate is not verified live). Most
-        # of these tests are about a launch, so they run with it proven; the gate is asserted off in
-        # LaunchGate (which does not use this fixture).
-        prov = patch.object(w.LAUNCHERS["codex"], "proven", True)
-        prov.start()
-        self.addCleanup(prov.stop)
         self.t0 = time.time()
         self.world = World(self.t0)
-        self.codex = self.home / "bin" / "codex"
-        self.codex.parent.mkdir()
-        self.codex.write_bytes(MACHO)   # never executed: the launcher is faked
-        self.codex.chmod(0o755)
         self.config()
         self.repo = self.home / "work" / "repo"
         (self.repo / ".git").mkdir(parents=True)
         self.session(SID)
 
     # -- fixtures --------------------------------------------------------
-    def config(self, enabled=True, launch=True, codex=True, **extra):
+    def config(self, enabled=True, **extra):
         python = os.path.realpath(sys.executable)
-        codex_path = os.path.realpath(str(self.codex))
-        c = {"enabled": enabled, "launch": launch, "codex_path": codex_path if codex else None,
-             "python": python, "path_env": w.daemon_path(os.path.dirname(python), os.path.dirname(codex_path)),
-             "binaries": {python: w.fingerprint(python), codex_path: w.fingerprint(codex_path)},
-             "enabled_at": "2026-10-12T00:00:00Z"}
+        c = {"enabled": enabled, "python": python, "path_env": w.daemon_path(os.path.dirname(python)),
+             "binaries": {python: w.fingerprint(python)}, "enabled_at": "2026-10-12T00:00:00Z"}
         c.update(extra)
         w.write_config(self.home, c)
 
     def rollout_path(self, sid):
         return self.home / ".codex" / "sessions" / "2026" / "10" / "12" / f"rollout-2026-10-12T16-36-07-{sid}.jsonl"
 
-    def session(self, sid, turns=None, originator="codex_exec", source="exec", cwd=None, bind=True, **bextra):
+    def session(self, sid, originator="codex_exec", source="exec", cwd=None, bind=True, **bextra):
+        """A bound Codex session: its rollout (session_meta + one turn) records `cwd`."""
         if bind:
             ie.write_binding(self.home, sid, binding(**bextra))
         p = self.rollout_path(sid)
         p.parent.mkdir(parents=True, exist_ok=True)
-        self.cwds = getattr(self, "cwds", {})
-        self.cwds[sid] = str(cwd or self.repo)
-        recs = [meta(sid, str(cwd or self.repo), originator, source)] + (turns if turns is not None else [turn()])
-        p.write_text("".join(self._line(sid, r) for r in recs))
+        cwd = str(cwd or self.repo)
+        p.write_text("".join(json.dumps(r) + "\n" for r in (meta(sid, cwd, originator, source), turn(cwd))))
         self.age(p)
         return p
-
-    def _line(self, sid, rec):
-        return json.dumps(rec).replace(json.dumps(CWD), json.dumps(self.cwds[sid])) + "\n"
-
-    def append_turns(self, sid, *turns):
-        with open(self.rollout_path(sid), "a") as f:
-            for t in turns:
-                f.write(self._line(sid, t))
-        self.age(self.rollout_path(sid))
 
     def age(self, path, seconds=1000):
         os.utime(str(path), (self.t0 - seconds, self.t0 - seconds))
@@ -314,15 +191,18 @@ class Base(unittest.TestCase):
     def state(self, seq, sid=SID):
         return self.ledger(sid).get(str(seq), {}).get("state")
 
-    def notified_only(self, seq=5, sid=SID):
-        self.assertEqual(self.world.launches, [])
+    def notified(self, seq=5, sid=SID):
+        """#seq was notified (once): its ledger reason."""
         self.assertEqual(self.state(seq, sid), w.NOTIFIED)
         return self.ledger(sid)[str(seq)]["reason"]
 
     def nothing(self, sid=SID):
-        self.assertEqual(self.world.launches, [])
         self.assertEqual(self.ledger(sid), {})
         self.assertEqual(self.world.notes, [])
+
+    def install_runner(self):
+        w.install_lib(self.home)
+        return w.runner_path(self.home)
 
 
 # ---------------------------------------------------------------------------
@@ -330,13 +210,14 @@ class Base(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class Predicate(Base):
-    def test_a_verified_decision_addressed_to_a_stopped_eligible_session_launches_once(self):
+    def test_a_verified_decision_addressed_to_a_stopped_session_is_notified_once(self):
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-        self.assertEqual(self.state(5), w.RESUMING)
+        self.assertEqual(len(self.world.notes), 1)
+        self.notified()
+        self.world.t += 600
         self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
+        self.assertEqual(len(self.world.notes), 1)
 
     def test_every_server_stamped_field_is_required(self):
         bad = {
@@ -360,17 +241,17 @@ class Predicate(Base):
                 self.run_pass()
                 self.nothing()
 
-    def test_a_broadcast_decision_never_wakes(self):
+    def test_a_broadcast_decision_never_notifies(self):
         self.world.events = [decision(5, to=None)]
         self.run_pass()
         self.nothing()
 
-    def test_a_decision_addressed_to_another_session_never_wakes(self):
+    def test_a_decision_addressed_to_another_session_never_notifies(self):
         self.world.events = [decision(5, to=SID2)]
         self.run_pass()
         self.nothing()
 
-    def test_an_acknowledged_decision_never_wakes(self):
+    def test_an_acknowledged_decision_never_notifies(self):
         self.world.events = [decision(5), ack(6, 5)]
         self.run_pass()
         self.nothing()
@@ -378,7 +259,7 @@ class Predicate(Base):
     def test_an_acknowledgment_by_another_session_does_not_count(self):
         self.world.events = [decision(5), ack(6, 5, sid=SID2)]
         self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
+        self.notified()
 
     def test_owner_decision_capability_off(self):
         ie.write_binding(self.home, SID, binding(capabilities={}))
@@ -398,32 +279,19 @@ class Predicate(Base):
         self.run_pass()
         self.nothing()
 
-    def test_a_seq_with_a_ledger_entry_is_never_woken_again(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.append_turns(SID, turn())
-        self.world.exit()
-        self.world.t += 10
-        self.run_pass()                       # settled: FAILED (no ack)
-        self.assertEqual(self.state(5), w.FAILED)
-        self.world.t += 3 * w.LIVE_WINDOW
-        self.run_pass()
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-
     def test_machine_opt_in_off(self):
         self.config(enabled=False)
         self.world.events = [decision(5)]
         self.run_pass()
         self.nothing()
 
-    def test_an_incomplete_read_never_wakes(self):
+    def test_an_incomplete_read_never_notifies(self):
         self.world.events = [decision(5)]
         self.world.fetch_complete = False
         self.run_pass()
         self.nothing()
 
-    def test_a_failed_read_never_wakes(self):
+    def test_a_failed_read_never_notifies(self):
         def boom(*a):
             raise OSError("network down")
         self.world.events = [decision(5)]
@@ -441,165 +309,147 @@ class Predicate(Base):
         self.run_pass()   # Cardinal answers no events
         self.nothing()
 
+    def test_a_dry_run_writes_and_notifies_nothing(self):
+        self.world.events = [decision(5)]
+        report = w.run_once(self.home, self.world.system(), dry_run=True)
+        self.assertEqual([r["action"] for r in report], ["would notify"])
+        self.nothing()
+
 
 class Caps(Base):
-    def seed(self, sid, n, inv=INV):
+    def seed(self, sid, n, inv=INV2, key="notified_at"):
         led = w.read_ledger(self.home, sid)
         for i in range(n):
-            e = {"seq": 100 + i, "investigation_id": inv, "runtime": "codex", "claimed_at": self.t0 - 60}
-            w.transition(e, w.FAILED, self.t0 - 60, "seeded")
-            led["entries"][str(100 + i)] = e
+            e = {"seq": 100 + i, "investigation_id": inv, "runtime": "codex", key: self.t0 - 60}
+            w.transition(e, w.NOTIFIED, self.t0 - 60, "seeded")
+            w.add_entry(led, e)
         w.write_ledger(self.home, sid, led, self.t0)
 
-    def test_three_claims_per_session_per_day(self):
+    def test_three_notifications_per_session_per_day(self):
         self.seed(SID, w.SESSION_DAILY_CAP)
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertEqual(self.world.launches, [])
-        self.assertIsNone(self.state(5))           # not NOTIFIED: reconsidered once the day has passed
+        self.assertIsNone(self.state(5))            # not recorded: reconsidered once the day has passed
         self.assertEqual(len(self.world.notes), 1)
+        self.assertIn("daily notification cap", self.world.notes[0][1])
         self.run_pass()
-        self.assertEqual(len(self.world.notes), 1)  # the cap is notified once a day
+        self.assertEqual(len(self.world.notes), 1)   # the cap is notified once a day
         self.world.t = self.t0 + w.DAY
         self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
+        self.notified()
+        self.assertEqual(len(self.world.notes), 2)
 
-    def test_ten_claims_across_sessions_per_day(self):
+    def test_ten_notifications_across_sessions_per_day(self):
         for i in range(5):
-            other = f"0000000{i}-0000-0000-0000-000000000000"
-            self.seed(other, 2)
+            self.seed(f"0000000{i}-0000-0000-0000-000000000000", 2)
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertEqual(self.world.launches, [])
         self.assertIsNone(self.state(5))
 
-
-# ---------------------------------------------------------------------------
-# §5.3 eligibility
-# ---------------------------------------------------------------------------
-
-class Eligibility(Base):
-    def test_one_danger_full_access_turn_makes_it_notify_only(self):
-        self.session(SID, turns=[turn(), turn("danger-full-access", network=None), turn()])
+    def test_an_earlier_versions_claims_count_too(self):
+        self.seed(SID, w.SESSION_DAILY_CAP, key="claimed_at")
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertIn("danger-full-access", self.notified_only())
-        self.assertEqual(len(self.world.notes), 1)
-        self.assertNotIn(SECRET, self.world.notes[0][1])
+        self.assertIsNone(self.state(5))
 
-    def test_network_access_makes_it_notify_only(self):
-        self.session(SID, turns=[turn("workspace-write", network=True)])
-        self.world.events = [decision(5)]
+    def test_the_cap_stops_the_pass_at_the_first_decision_it_cannot_record(self):
+        self.seed(SID, w.SESSION_DAILY_CAP - 1)
+        self.world.events = [decision(5), decision(6), decision(7)]
         self.run_pass()
-        self.assertIn("network", self.notified_only())
-
-    def test_the_desktop_app_is_notify_only(self):
-        self.session(SID, originator="Codex Desktop", source="vscode")
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("desktop", self.notified_only())
-
-    def test_an_unrecognized_originator_is_notify_only(self):
-        self.session(SID, originator="codex_something_new")
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("originator", self.notified_only())
-
-    def test_a_subagent_thread_is_notify_only(self):
-        self.session(SID, source={"subagent": {"thread_spawn": {"parent_thread_id": SID2}}})
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("subagent", self.notified_only())
-
-    def test_no_rollout_is_notify_only(self):
-        self.rollout_path(SID).unlink()
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("no Codex, Claude Code, Cursor or Gemini CLI records", self.notified_only())
-        self.assertEqual(self.ledger()["5"]["runtime"], "unknown")
-        self.assertIn("Unknown-runtime session", self.world.notes[0][1])
-
-    def test_a_claude_session_is_notify_only(self):
-        self.rollout_path(SID).unlink()
-        t = self.home / ".claude" / "projects" / "-Users-x-repo" / f"{SID}.jsonl"
-        t.parent.mkdir(parents=True)
-        t.write_text("{}\n")
-        self.age(t)
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("Claude Code sessions are notify-only", self.notified_only())
-        self.assertEqual(self.ledger()["5"]["runtime"], "claude")
-
-    def test_no_turn_recorded_is_notify_only(self):
-        self.session(SID, turns=[])
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("no turn", self.notified_only())
-
-    def test_cwd_comes_from_the_rollout_never_the_binding(self):
-        ie.write_binding(self.home, SID, binding(cwd="/", workspace="/etc"))
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertEqual(self.world.launches[0]["cwd"], os.path.realpath(str(self.repo)))
-
-    def test_a_cwd_outside_a_git_work_tree_is_notify_only(self):
-        plain = self.home / "plain"
-        plain.mkdir()
-        self.session(SID, cwd=plain)
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("git work tree", self.notified_only())
-
-    def test_a_non_uuid_session_id_is_never_launched(self):
-        sid = "--dangerously-bypass-approvals-and-sandbox"
-        self.session(sid)
-        self.world.events = [decision(5, to=sid)]
-        self.run_pass()
-        self.assertIn("UUID", self.notified_only(sid=sid))
-
-    def test_a_symlinked_rollout_is_notify_only(self):
-        real = Path(self.tmp.name) / "real.jsonl"
-        os.replace(str(self.rollout_path(SID)), str(real))
-        os.symlink(str(real), str(self.rollout_path(SID)))
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("regular file", self.notified_only())
-
-    def test_a_malformed_turn_record_is_notify_only(self):
-        with open(self.rollout_path(SID), "a") as f:
-            f.write('{"timestamp":"x","type":"turn_context","payload":{"sandbox_policy":\n')
-        self.age(self.rollout_path(SID))
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("malformed", self.notified_only())
-
-    def test_the_last_turns_mode_is_pinned(self):
-        self.session(SID, turns=[turn("read-only"), turn("workspace-write")])
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertEqual(self.world.launches[0]["argv"][3], "workspace-write")
-
-    def test_a_read_only_last_turn_is_notify_only(self):
-        # Review 6 #2: the survivor check (the sandbox grants the wake's TMPDIR) cannot bound a
-        # read-only run, whose sandbox grants no writes; so it is notify-only.
-        self.session(SID, turns=[turn("workspace-write"), turn("read-only")])
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertEqual(self.world.launches, [])
-        self.assertIn("read-only", self.notified_only())
-
-    def test_only_session_records_are_parsed_and_long_lines_are_skipped(self):
-        big = json.dumps({"type": "response_item", "payload": {"text": "x" * 5000 + " turn_context"}}) + "\n"
-        with patch.object(w, "MAX_LINE", 4096):
-            with open(self.rollout_path(SID), "a") as f:
-                f.write(big)
-            self.age(self.rollout_path(SID))
-            rt = w.resolve(self.home, SID)
-        self.assertTrue(rt.eligible, rt.reason)
+        self.notified(5)
+        self.assertIsNone(self.state(6))
+        self.assertIsNone(self.state(7))
+        self.assertEqual(w.read_ledger(self.home, SID)["hwm"][INV], 5)   # never past the unrecorded #6
 
 
 # ---------------------------------------------------------------------------
-# §5.4 liveness
+# The notification
+# ---------------------------------------------------------------------------
+
+class Notification(Base):
+    def test_a_stopped_session_gets_its_resume_command_never_the_decision_text(self):
+        self.world.events = [decision(5)]
+        self.run_pass()
+        title, msg, open_file = self.world.notes[0]
+        self.assertEqual(title, "Cardinal wake")
+        self.assertEqual(msg, f"Owner decision for Codex session {SID[:8]} ({INV} on test.invalid). "
+                              f"Resume: ~/.cardinal/wake/lib/cardinal-wake resume {SID[:8]}")
+        self.assertIsNone(open_file)                  # no runner installed: nothing to click
+        self.assertNotIn("SECRET", msg)
+        self.assertIn("stopped", self.notified())
+
+    def test_with_the_runner_installed_a_click_resumes_through_a_private_command_file(self):
+        runner = self.install_runner()
+        self.world.events = [decision(5)]
+        self.run_pass()
+        _, msg, open_file = self.world.notes[0]
+        self.assertIn("click to resume in Terminal", msg)
+        p = Path(open_file)
+        self.assertEqual(p, self.home / ".cardinal" / "wake" / "resume" / f"{SID}.command")
+        self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(p.parent.stat().st_mode), 0o700)
+        python = w.read_config(self.home)["python"]
+        self.assertEqual(p.read_text().splitlines()[-1],
+                         f"exec {shlex.quote(python)} -I -S {shlex.quote(str(runner))} resume {SID}")
+        self.assertNotIn("plugins", p.read_text())
+
+    def test_a_live_session_is_told_to_switch_to_its_window(self):
+        self.install_runner()
+        self.world.table = [(1234, f"codex resume {SID}")]
+        self.world.events = [decision(5)]
+        self.run_pass()
+        _, msg, open_file = self.world.notes[0]
+        self.assertEqual(msg, f"Owner decision for Codex session {SID[:8]} ({INV} on test.invalid). "
+                              "It is still open: switch to that window.")
+        self.assertIsNone(open_file)
+        self.assertIn("the session is live", self.notified())
+        self.assertFalse((self.home / ".cardinal" / "wake" / "resume").exists())
+
+    def test_old_and_unrequested_decisions_are_notified_the_same_way(self):
+        self.world.events = [decision(5, created=self.t0 - 8 * 86400), decision(6, wake=NOWAKE)]
+        self.run_pass()
+        self.assertEqual(self.notified(5), w.DECISION_OLD)
+        self.assertEqual(self.notified(6), w.WAKE_NOT_REQUESTED)
+        self.assertEqual(len(self.world.notes), 2)
+        for _, msg, _ in self.world.notes:
+            self.assertIn("Resume:", msg)
+
+    def test_terminal_notifier_is_used_when_installed(self):
+        found = w.terminal_notifier(lambda p: p == "/usr/local/bin/terminal-notifier")
+        self.assertEqual(found, "/usr/local/bin/terminal-notifier")
+        self.assertEqual(w.terminal_notifier(lambda p: True), "/opt/homebrew/bin/terminal-notifier")
+        self.assertIsNone(w.terminal_notifier(lambda p: False))
+        f = "/Users/o'neil/.cardinal/wake/resume/x y.command"
+        argv = w.notify_argv("Cardinal wake", "msg", f, "/opt/homebrew/bin/terminal-notifier")
+        self.assertEqual(argv[:5], ["/opt/homebrew/bin/terminal-notifier", "-title", "Cardinal wake", "-message",
+                                    "msg"])
+        self.assertEqual(argv[argv.index("-execute") + 1], f"/usr/bin/open -a Terminal {shlex.quote(f)}")
+        self.assertEqual(shlex.split(argv[argv.index("-execute") + 1]), ["/usr/bin/open", "-a", "Terminal", f])
+        self.assertNotIn("-execute", w.notify_argv("t", "m", None, "/opt/homebrew/bin/terminal-notifier"))
+
+    def test_osascript_otherwise_with_the_text_as_arguments(self):
+        argv = w.notify_argv("Cardinal wake", 'say "hi" & do shell script "x"', "/x.command", None)
+        self.assertEqual(argv[0], "/usr/bin/osascript")
+        self.assertEqual(argv[-2:], ["Cardinal wake", 'say "hi" & do shell script "x"'])
+        self.assertNotIn("/x.command", argv)
+
+    def test_notify_macos_picks_the_notifier(self):
+        runs = []
+        with patch.object(w.sys, "platform", "darwin"), \
+                patch.object(w.subprocess, "run", lambda argv, **kw: runs.append(argv)), \
+                patch.object(w, "terminal_notifier", lambda: "/opt/homebrew/bin/terminal-notifier"):
+            w.notify_macos("t", "m", "/f.command")
+        with patch.object(w.sys, "platform", "darwin"), \
+                patch.object(w.subprocess, "run", lambda argv, **kw: runs.append(argv)), \
+                patch.object(w, "terminal_notifier", lambda: None):
+            w.notify_macos("t", "m", "/f.command")
+        self.assertEqual(runs[0][0], "/opt/homebrew/bin/terminal-notifier")
+        self.assertIn("-execute", runs[0])
+        self.assertEqual(runs[1][0], "/usr/bin/osascript")
+
+
+# ---------------------------------------------------------------------------
+# Liveness (the notification's wording)
 # ---------------------------------------------------------------------------
 
 class Liveness(Base):
@@ -612,44 +462,49 @@ class Liveness(Base):
         ie.write_json(poller.status_path(self.home, SID), {"pid": 1, "anchor": anchor})
         os.utime(str(poller.status_path(self.home, SID)), (self.t0 - written_ago, self.t0 - written_ago))
 
+    def live(self, phrase):
+        self.run_pass()
+        self.assertIn(phrase, self.notified())
+        self.assertIn("switch to that window", self.world.notes[0][1])
+
+    def stopped(self):
+        self.run_pass()
+        self.assertIn("stopped", self.notified())
+        self.assertIn("Resume:", self.world.notes[0][1])
+
     def test_poller_anchor_alive_and_older_than_its_status_file(self):
         self.poller_status(777)
         self.world.alive.add(777)
         self.world.starts[777] = self.t0 - 1000
-        self.run_pass()
-        self.assertIn("agent process", self.notified_only())
+        self.live("agent process")
 
     def test_a_reused_anchor_pid_is_dead(self):
         self.poller_status(777)
         self.world.alive.add(777)
         self.world.starts[777] = self.t0 - 100   # started after the status file was written
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
+        self.stopped()
 
     def test_an_anchor_whose_start_is_unknown_counts_as_live(self):
         self.poller_status(777)
         self.world.alive.add(777)
-        self.run_pass()
-        self.assertIn("agent process", self.notified_only())
+        self.live("agent process")
 
     def test_a_dead_anchor(self):
         self.poller_status(777)
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
+        self.stopped()
 
     def test_a_process_naming_the_session(self):
         self.world.table = [(1234, f"node /opt/codex resume {SID}")]
-        self.run_pass()
-        self.assertIn("names the session", self.notified_only())
+        self.live("names the session")
 
     def test_an_unreadable_process_table_counts_as_live(self):
+        self.world.table = None
         self.run_pass(process_table=lambda: None)
-        self.assertIn("process table", self.notified_only())
+        self.assertIn("process table", self.notified())
 
     def test_a_rollout_written_in_the_last_two_minutes(self):
         self.age(self.rollout_path(SID), 30)
-        self.run_pass()
-        self.assertIn("transcript changed", self.notified_only())
+        self.live("transcript changed")
 
     def test_a_transcript_written_in_the_last_two_minutes(self):
         self.rollout_path(SID).unlink()
@@ -657,495 +512,148 @@ class Liveness(Base):
         t.parent.mkdir(parents=True)
         t.write_text("{}\n")
         self.age(t, 30)
-        self.run_pass()
-        self.assertIn("live", self.notified_only())
+        self.live("transcript changed")
 
     def test_the_binding_active_file_touched_in_the_last_two_minutes(self):
         ie.touch_activity(self.home, SID)
         os.utime(str(ie.activity_path(self.home, SID)), (self.t0 - 30, self.t0 - 30))
-        self.run_pass()
-        self.assertIn("used a tool", self.notified_only())
+        self.live("used a tool")
 
     def test_old_signals_are_not_live(self):
         ie.touch_activity(self.home, SID)
         os.utime(str(ie.activity_path(self.home, SID)), (self.t0 - 500, self.t0 - 500))
         self.world.table = [(1, "/sbin/launchd"), (os.getpid(), f"python waker {SID}")]
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-
-    def test_a_ledger_child_alive_holds_every_other_decision(self):
-        self.run_pass()
-        self.world.events.append(decision(7))
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-        self.assertNotIn("7", self.ledger())   # not NOTIFIED: delivered inside the run, or considered after it
+        self.stopped()
 
 
 # ---------------------------------------------------------------------------
-# §5.4 lifecycle: one execution per decision
+# §5.4 the ledger: one notification per decision
 # ---------------------------------------------------------------------------
 
-def _race_worker(home, t0, barrier, launches_file):
-    """One waker process of the C-5 race (spawned: module level)."""
+def _race_worker(home, t0, barrier, notes_file):
+    """One waker process of the race (spawned: module level)."""
     world = World(t0)
     world.events = [decision(5)]
 
-    def launch(argv, cwd, env, log):
-        with open(launches_file, "a") as f:
+    def notify(title, msg, open_file=None):
+        with open(notes_file, "a") as f:
             f.write(f"{os.getpid()}\n")
-        return 4242
 
-    system = world.system(launcher=launch, alive=lambda pid: pid == 4242, process_start=lambda pid: t0,
-                          before_claim=lambda sid, seq: barrier.wait(60), out=lambda line: None)
-    with patch.object(w, "temp_dirs", lambda: ()), patch.object(w.LAUNCHERS["codex"], "proven", True):
+    system = world.system(notifier=notify, before_claim=lambda sid, seq: barrier.wait(60), out=lambda line: None)
+    with patch.object(w, "temp_dirs", lambda: ()):
         w.run_once(Path(home), system)
 
 
 class Lifecycle(Base):
-    def test_two_waker_processes_racing_one_decision_launch_once(self):
-        """Proof C-5: two OS processes run a pass against the same decision;
-        both reach the claim together (a barrier right before the session
-        lock), and exactly one launches."""
+    def test_two_waker_processes_racing_one_decision_notify_exactly_once(self):
+        """Two OS processes run a pass against the same decision; both reach
+        the record together (a barrier right before the session lock), and
+        exactly one notifies."""
         self.world.events = [decision(5)]
-        launches = Path(self.tmp.name) / "launches.txt"
+        notes = Path(self.tmp.name) / "notes.txt"
         ctx = multiprocessing.get_context("spawn")
         for _ in range(3):   # a few rounds: the outcome must never depend on who wins
-            launches.write_text("")
+            notes.write_text("")
             with contextlib_suppress_file(w.ledger_path(self.home, SID)):
                 pass
             barrier = ctx.Barrier(2)
-            procs = [ctx.Process(target=_race_worker, args=(str(self.home), self.t0, barrier, str(launches)))
+            procs = [ctx.Process(target=_race_worker, args=(str(self.home), self.t0, barrier, str(notes)))
                      for _ in range(2)]
             for p in procs:
                 p.start()
             for p in procs:
                 p.join(120)
             self.assertEqual([p.exitcode for p in procs], [0, 0])
-            self.assertEqual(len(launches.read_text().splitlines()), 1)
-            self.assertEqual(self.state(5), w.RESUMING)
+            self.assertEqual(len(notes.read_text().splitlines()), 1)
+            self.assertEqual(self.state(5), w.NOTIFIED)
 
-    def test_two_decisions_for_one_session_give_one_run(self):
+    def test_every_pending_decision_is_notified_in_ascending_seq(self):
+        self.world.events = [decision(7), decision(5), decision(6, wake=NOWAKE)]
+        report = self.run_pass()
+        self.assertEqual([r["seq"] for r in report if r["action"] == "notified"], [5, 6, 7])
+        self.assertEqual(len(self.world.notes), 3)
+
+    def test_a_seq_with_a_ledger_entry_is_never_notified_again(self):
         self.world.events = [decision(5)]
         self.run_pass()
-        self.world.events.append(decision(7))
-        self.world.t += 60
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-        self.append_turns(SID, turn())
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()                                  # #5 settles: FAILED (unacknowledged)
-        self.assertEqual(self.state(5), w.FAILED)
-        self.assertEqual(len(self.world.launches), 1)    # the run's writes are still fresh: not yet
-        self.world.t += w.LIVE_WINDOW + 1
-        self.run_pass()                                  # #7, still unacknowledged after the run
-        self.assertEqual(len(self.world.launches), 2)
-        self.assertIn("#7", self.world.launches[1]["argv"][-1])
-
-    def test_a_decision_acknowledged_inside_the_run_is_not_considered_again(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.world.events += [decision(7), ack(8, 5), ack(9, 7)]
-        self.append_turns(SID, turn())
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()
-        self.world.t += w.LIVE_WINDOW + 1
-        self.run_pass()
-        self.assertEqual(self.state(5), w.ACKNOWLEDGED)
-        self.assertEqual(len(self.world.launches), 1)
-
-    def test_a_spawn_error_is_retried_at_most_twice_then_failed(self):
-        self.world.spawn_errors = 10
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertEqual(self.world.attempts, 1 + w.SPAWN_RETRIES)
-        self.assertEqual(self.state(5), w.FAILED)
-        self.assertEqual(self.ledger()["5"]["spawn_errors"], 3)
-        self.world.t += 3600
-        self.run_pass()
-        self.assertEqual(self.world.attempts, 3)
-
-    def test_a_spawn_error_then_a_start(self):
-        self.world.spawn_errors = 1
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertEqual(self.world.attempts, 2)
-        self.assertEqual(self.state(5), w.RESUMING)
-
-    def test_a_started_child_that_exits_without_an_ack_fails_and_is_never_retried(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.append_turns(SID, turn())
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()
-        self.assertEqual(self.state(5), w.FAILED)
-        for _ in range(3):
-            self.world.t += 3600
-            self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-        self.assertTrue(any("failed" in m for _, m in self.world.notes))
-
-    def test_an_acknowledged_decision_is_acknowledged(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.append_turns(SID, turn())
-        self.world.events.append(ack(6, 5))
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()
-        self.assertEqual(self.state(5), w.ACKNOWLEDGED)
-        self.assertFalse(w.disabled_reason(self.home, "codex"))
-        states = [h["state"] for h in self.ledger()["5"]["history"]]
-        self.assertEqual(states, [w.DECISION_SEEN, w.CLAIMED, w.RESUMING, w.ACKNOWLEDGED])
-
-    def test_an_ack_that_cannot_be_read_waits_then_fails(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.append_turns(SID, turn())
-        self.world.exit()
-        self.world.t += 60
-
-        def down(*a):
-            raise OSError("down")
-        self.run_pass(fetch=down)
-        self.assertEqual(self.state(5), w.RESUMING)
-        self.world.t += w.ACK_CHECK_GRACE + 1
-        self.run_pass(fetch=down)
-        self.assertEqual(self.state(5), w.FAILED)
-
-    def test_a_run_past_the_timeout_is_timed_out_and_judged_when_it_exits(self):
-        """L1: past WAKE_TIMEOUT the entry is TIMED_OUT (non-terminal), the
-        child is left running and the owner told; it still blocks other runs
-        and is verified and judged when it exits."""
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.world.t += w.WAKE_TIMEOUT + 1
-        self.run_pass()
-        self.assertEqual(self.state(5), w.TIMED_OUT)
-        self.assertIn(self.world.launches[0]["pid"], self.world.alive)
-        self.assertTrue(any("still running" in m for _, m in self.world.notes))
-        self.world.t += w.LIVE_WINDOW + 1
-        self.world.events.append(decision(7))
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)    # the left-running child keeps the session busy
-        self.assertNotIn("7", self.ledger())             # considered once that run ends
-        self.append_turns(SID, turn("danger-full-access", network=None))
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()
-        self.assertEqual(self.state(5), w.FAILED)
-        self.assertIn("danger-full-access", w.disabled_reason(self.home, "codex"))   # verified at exit
-
-    def test_a_reused_child_pid_is_not_the_child(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        pid = self.world.launches[0]["pid"]
-        self.world.starts[pid] = self.world.t + 500      # a different process now holds the pid
-        self.world.t += 60
-        self.run_pass()
-        self.assertNotEqual(self.state(5), w.RESUMING)
-
-    def claimed(self, seq=5):
         led = w.read_ledger(self.home, SID)
-        e = {"seq": seq, "investigation_id": INV, "runtime": "codex", "claimed_at": self.t0,
-             "sandbox": "workspace-write", "snapshot": w.rollout_offsets(self.home, SID, w.resolve(self.home, SID))}
-        w.transition(e, w.CLAIMED, self.t0)
-        w.add_entry(led, e)
-        w.write_ledger(self.home, SID, led, self.t0)
+        for e in led["entries"].values():
+            e["updated_at"] = self.world.t - w.LEDGER_KEEP - 10
+        w.write_ledger(self.home, SID, led, self.world.t)   # prunes the terminal entry
+        self.assertEqual(self.ledger(), {})
+        self.world.t += 600
+        self.run_pass()
+        self.assertEqual(len(self.world.notes), 1)          # the high-water mark holds
 
-    def test_a_claim_interrupted_mid_launch_fails_and_is_not_retried(self):
-        self.claimed()
+    def test_a_decision_for_another_investigation_is_a_different_decision(self):
         self.world.events = [decision(5)]
         self.run_pass()
-        self.assertEqual(self.state(5), w.FAILED)
-        self.assertIn("no child is running", self.ledger()["5"]["reason"])
-        self.assertEqual(self.world.launches, [])
-
-    def test_a_claim_interrupted_after_the_spawn_recovers_the_running_child(self):
-        """L2: the waker died between the spawn and the RESUMING write. The
-        child (its argv names the session and this decision's wake prompt)
-        is still running: never reported interrupted; RESUMING, then judged."""
-        self.claimed()
-        prompt = w.codex_argv(str(self.codex), "workspace-write", SID, 5, (), INV)[-1]
-        self.world.table = [(5150, f"/x/codex exec -s workspace-write resume {SID} {prompt}")]
-        self.world.alive.add(5150)
-        self.world.starts[5150] = self.t0
-        self.world.events = [decision(5)]
+        ie.write_binding(self.home, SID, binding(inv=INV2))
+        self.world.events = [decision(5, inv=INV2)]
+        self.world.t += 600
         self.run_pass()
-        self.assertEqual(self.state(5), w.RESUMING)
-        self.assertTrue(self.ledger()["5"]["child"]["recovered"])
-        self.assertFalse(any("interrupted" in m for _, m in self.world.notes))
-        self.world.table = []
-        self.world.alive.discard(5150)
-        self.append_turns(SID, turn())
-        self.world.events.append(ack(6, 5))
-        self.world.t += 60
+        self.assertEqual(self.ledger(inv=INV2)["5"]["state"], w.NOTIFIED)
+        self.assertEqual(len(self.world.notes), 2)
+
+
+class LegacyLedger(Base):
+    """Ledgers an earlier version (unattended launch) wrote still load: their
+    launch states are terminal, never settled or reported again."""
+
+    def write_legacy(self):
+        led = {"session_id": SID, "hwm": {INV: 4}, "probe_retries": {INV + ":9": 1}, "entries": {}}
+        for i, st in enumerate(w.LEGACY_STATES):
+            seq = i + 1
+            led["entries"][f"{INV}:{seq}"] = {
+                "seq": seq, "investigation_id": INV, "runtime": "codex", "state": st, "claimed_at": self.t0 - 2 * 86400,
+                "updated_at": self.t0 - 2 * 86400, "reports": [], "tmp_dir": "/nonexistent/tmp",
+                "child": {"pid": 99999, "start": self.t0, "log": "/nonexistent.log"},
+                "history": [{"state": "CLAIMED", "at": "2026-10-11T00:00:00Z"}, {"state": st, "at": "2026-10-11T"}]}
+        w.ledger_dir(self.home).mkdir(parents=True)
+        w.ledger_path(self.home, SID).write_text(json.dumps(led))
+
+    def test_an_old_ledger_loads_and_a_new_decision_is_notified(self):
+        self.write_legacy()
+        led = w.read_ledger(self.home, SID)
+        self.assertEqual(len(led["entries"]), len(w.LEGACY_STATES))
+        self.assertNotIn("probe_retries", led)
+        self.world.events = [decision(2), decision(7)]
         self.run_pass()
-        self.assertEqual(self.state(5), w.ACKNOWLEDGED)
-        self.assertEqual(self.world.launches, [])
+        self.assertEqual(self.state(2), "RESUMING")          # never reconsidered
+        self.notified(7)
+        self.assertEqual(len(self.world.notes), 1)
+        self.assertEqual(self.world.execs, [])
 
-    def test_a_process_resumed_by_hand_is_not_taken_for_the_child(self):
-        self.claimed()
-        self.world.table = [(5151, f"/x/codex resume {SID}")]   # the user's own TUI: no wake prompt
-        self.run_pass()
-        self.assertEqual(self.state(5), w.FAILED)
+    def test_legacy_states_are_terminal_and_pruned(self):
+        self.write_legacy()
+        led = w.read_ledger(self.home, SID)
+        w.write_ledger(self.home, SID, led, self.t0 + w.LEDGER_KEEP)
+        led = w.read_ledger(self.home, SID)
+        self.assertEqual(led["entries"], {})
+        self.assertEqual(led["hwm"], {INV: 4})
 
-
-# ---------------------------------------------------------------------------
-# §5.3 launch
-# ---------------------------------------------------------------------------
-
-class Launch(Base):
-    def test_golden_argv(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertEqual(self.world.launches[0]["argv"], [
-            os.path.realpath(str(self.codex)), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"',
-            "-c", 'web_search="disabled"', *PINS, *NOTIFY_OFF, *DISABLES, "resume", SID, PROMPT5])
-
-    def test_no_disallowed_flag_and_no_decision_text(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        argv = self.world.launches[0]["argv"]
-        for a in argv:
-            for bad in ("--profile", "--dangerously", "--ignore", "--skip-git-repo-check", "--full-auto",
-                        "danger-full-access", "--yolo"):
-                self.assertNotIn(bad, a)
-        self.assertNotIn(SECRET, " ".join(argv))
-        self.assertEqual(argv.count("-c"), 3 + len(w.CODEX_SANDBOX_PINS))
-        self.assertEqual(argv.count("--disable"), len(w.CODEX_DISABLED_FEATURES))
-        self.assertNotIn("code_mode_host", argv)   # every tool runs through it (H1): never disabled
-        self.assertEqual(argv.count("-s"), 1)
-        self.assertLess(max(i for i, a in enumerate(argv) if a in ("-c", "--disable")), argv.index("resume"))
-
-    def test_argv_refuses_anything_but_the_pinned_shape(self):
-        for args in (("codex", "workspace-write", SID, 1), (str(self.codex), "danger-full-access", SID, 1),
-                     (str(self.codex), "workspace-write", "-x", 1), (str(self.codex), "workspace-write", SID, 0)):
-            with self.subTest(args), self.assertRaises(ValueError):
-                w.codex_argv(*args, (), INV)
-        for inv in ("", "inv_x", INV + " && rm", None):    # the prompt only ever names a real investigation id
-            with self.subTest(inv=inv), self.assertRaises(ValueError):
-                w.codex_argv(str(self.codex), "workspace-write", SID, 1, (), inv)
-
-    def test_the_environment_drops_every_cardinal_switch(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        env = self.world.launches[0]["env"]
-        self.assertFalse([k for k in env if k.startswith("CARDINAL_")])
-        for k in ("CODEX_HOME", "CODEX_SESSION_ID"):
-            self.assertNotIn(k, env)
-        self.assertEqual(env["PATH"], w.read_config(self.home)["path_env"])   # B1: never the user's PATH
-        self.assertNotIn(ENV["PATH"], [env["PATH"]])
-        self.assertEqual(env["LANG"], ENV["LANG"])
-        self.assertEqual(env["TERM"], "dumb")
-        self.assertEqual(env["HOME"], str(self.home))
-
-    def test_a_launch_holds_the_sessions_evidence(self):
-        from cardinal_core import evidence
-        root = self.home / ".cardinal" / "evidence"
-        (root / SID).mkdir(parents=True)
-        self.world.events = [decision(5)]
-        self.run_pass()
-        hold = evidence.read_hold(root, SID, now=self.t0 + 1)
-        self.assertEqual(hold["reason"], "wake")
-
-    def test_no_wake_hold_without_a_spool_or_with_capture_off(self):
-        from cardinal_core import evidence
-        root = self.home / ".cardinal" / "evidence"
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertFalse((root / SID).exists())            # nothing to protect: no directory created
-        self.setUp()
-        (root / SID).mkdir(parents=True)
-        (root / evidence.DISABLED_FLAG).write_text("")
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-        self.assertIsNone(evidence.read_hold(root, SID, now=self.t0 + 1))
-
-    def test_the_disabled_marker_blocks_launch(self):
-        w.disable_runtime(self.home, "codex", "test", self.t0)
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("disabled", self.notified_only())
-
-    def test_launch_off_is_notify_only(self):
-        self.config(launch=False)
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("launch is off", self.notified_only())
-
-    def test_codex_not_found_at_enable_is_notify_only(self):
-        self.config(codex=False)
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.assertIn("codex was not found", self.notified_only())
-
-    def test_the_default_launcher_detaches_and_logs_privately(self):
-        log = Path(self.tmp.name) / "logs" / "x.log"
-        pid = w.launch_detached(["/bin/sh", "-c", "echo hi"], self.tmp.name, {"PATH": "/bin:/usr/bin"}, log)
-        child = next(p for p in w._CHILDREN if p.pid == pid)
-        child.wait(30)
-        w.reap()
-        self.assertNotIn(child, w._CHILDREN)
-        self.assertEqual(log.read_text().strip(), "hi")
-        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
-        with self.assertRaises(OSError):
-            w.launch_detached([str(Path(self.tmp.name) / "missing")], self.tmp.name, {}, log)
-
-    def test_dry_run_launches_writes_and_notifies_nothing(self):
-        self.world.events = [decision(5)]
-        report = w.run_once(self.home, self.world.system(), dry_run=True)
-        self.nothing()
-        self.assertEqual([r["action"] for r in report], ["would launch"])
-
-
-class PostRunVerification(Base):
-    def launch_and_exit(self, *turns, acked=True):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        self.append_turns(SID, *turns)
-        if acked:
-            self.world.events.append(ack(6, 5))
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()
-
-    def assert_disabled_and_no_more_launches(self):
-        self.assertTrue(w.disabled_reason(self.home, "codex"))
-        self.assertTrue(any("disabled" in m for _, m in self.world.notes))
-        self.session(SID2)
-        self.world.events.append(decision(9, to=SID2))
-        self.world.t += w.LIVE_WINDOW + 1
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-        self.assertIn("disabled", self.ledger(SID2)["9"]["reason"])
-
-    def test_a_woken_turn_outside_the_pinned_sandbox_disables_codex(self):
-        self.launch_and_exit(turn("danger-full-access", network=None))
-        self.assertIn("danger-full-access", w.disabled_reason(self.home, "codex"))
-        self.assert_disabled_and_no_more_launches()
-
-    def test_a_woken_turn_with_network_disables_codex(self):
-        self.launch_and_exit(turn("workspace-write", network=True))
-        self.assert_disabled_and_no_more_launches()
-
-    def test_no_woken_turn_disables_codex(self):
-        self.launch_and_exit()
-        self.assertIn("no turn", w.disabled_reason(self.home, "codex"))
-        self.assert_disabled_and_no_more_launches()
-
-    def test_a_new_rollout_file_is_verified_too(self):
-        self.world.events = [decision(5)]
-        self.run_pass()
-        other = self.rollout_path(SID).with_name(f"rollout-2026-10-13T01-00-00-{SID}.jsonl")
-        other.write_text(json.dumps(turn("danger-full-access", network=None)) + "\n")
-        self.age(other)
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()
-        self.assertTrue(w.disabled_reason(self.home, "codex"))
-
-    def test_the_pinned_sandbox_keeps_codex_enabled(self):
-        self.launch_and_exit(turn(), turn())
-        self.assertIsNone(w.disabled_reason(self.home, "codex"))
-        self.assertTrue(self.ledger()["5"]["verified"])
-
-    def test_reenable_clears_the_marker(self):
-        self.launch_and_exit(turn("danger-full-access", network=None))
+    def test_status_lists_them(self):
+        self.write_legacy()
         out = []
-        code = w.cli_main(["reenable", "codex"], home=self.home, system=self.world.system(out=out.append))
-        self.assertEqual(code, 0)
-        self.assertIsNone(w.disabled_reason(self.home, "codex"))
+        self.assertEqual(w.status(self.home, self.world.system(), out.append), 0)
+        self.assertIn(f"{SID[:8]} #2 RESUMING", "\n".join(out))
 
-
-class ProjectCodexConfig(Base):
-    """Proof C-8: a project .codex/config.toml's MCP servers run outside the
-    sandbox on resume, so a repo carrying Codex project config is
-    notify-only (checked before every launch)."""
-
-    def setUp(self):
-        super().setUp()
+    def test_an_old_config_with_launch_on_is_read_and_ignored(self):
+        self.config(launch=True, codex_path="/opt/homebrew/bin/codex", roots=["/x"], relay_notes=True)
+        c = w.read_config(self.home)
+        self.assertTrue(c["enabled"])
+        self.assertNotIn("launch", c)
         self.world.events = [decision(5)]
-
-    def assert_refused(self):
         self.run_pass()
-        self.assertIn("its own Codex config", self.notified_only())
+        self.notified()
+        self.assertEqual(self.world.execs, [])
 
-    def test_config_toml_in_the_cwd(self):
-        (self.repo / ".codex").mkdir()
-        (self.repo / ".codex" / "config.toml").write_text('[mcp_servers.x]\ncommand = "/bin/sh"\n')
-        self.assert_refused()
 
-    def test_any_toml_or_hooks_json(self):
-        for name in ("profile.toml", "hooks.json"):
-            with self.subTest(name):
-                self.setUp()
-                (self.repo / ".codex").mkdir()
-                (self.repo / ".codex" / name).write_text("{}")
-                self.assert_refused()
-
-    def test_config_in_a_parent_within_the_repo(self):
-        sub = self.repo / "pkg" / "svc"
-        sub.mkdir(parents=True)
-        (self.repo / "pkg" / ".codex").mkdir()
-        (self.repo / "pkg" / ".codex" / "config.toml").write_text("")
-        self.session(SID, cwd=sub)
-        self.assert_refused()
-
-    def test_config_above_the_repository_root_is_not_walked(self):
-        outer = self.repo.parent / ".codex"
-        outer.mkdir()
-        (outer / "config.toml").write_text("")
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-
-    def test_a_symlinked_codex_dir(self):
-        target = Path(self.tmp.name) / "elsewhere"
-        target.mkdir()
-        os.symlink(str(target), str(self.repo / ".codex"))
-        self.assert_refused()
-
-    def test_a_codex_file_that_is_not_a_directory(self):
-        (self.repo / ".codex").write_text("")
-        self.assert_refused()
-
-    @unittest.skipIf(os.geteuid() == 0, "root reads any directory")
-    def test_an_unreadable_codex_dir(self):
-        d = self.repo / ".codex"
-        d.mkdir()
-        os.chmod(str(d), 0)
-        self.addCleanup(os.chmod, str(d), 0o700)
-        self.assert_refused()
-
-    def test_a_codex_dir_without_config_stays_eligible(self):
-        (self.repo / ".codex").mkdir()
-        (self.repo / ".codex" / "AGENTS.md").write_text("# notes")
-        (self.repo / ".codex" / "prompts").mkdir()
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-
-    def test_config_added_after_one_launch_blocks_the_next(self):
-        self.run_pass()
-        self.append_turns(SID, turn())
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()
-        (self.repo / ".codex").mkdir()
-        (self.repo / ".codex" / "config.toml").write_text("")
-        self.world.events.append(decision(7))
-        self.world.t += w.LIVE_WINDOW + 1
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)
-        self.assertIn("its own Codex config", self.ledger()["7"]["reason"])
-
+# ---------------------------------------------------------------------------
+# Other runtimes
+# ---------------------------------------------------------------------------
 
 class OtherRuntimes(Base):
-    """Cursor, Gemini CLI and unrecognized runtimes: the notify path end to
-    end, never a launch, even with launch on."""
-
     def setUp(self):
         super().setUp()
         self.rollout_path(SID).unlink()
@@ -1170,34 +678,32 @@ class OtherRuntimes(Base):
         self.age(p)
         return p
 
-    def assert_notified(self, runtime, label, phrase):
+    def assert_notified(self, runtime, label):
         self.run_pass(connection=self.connection)
-        self.assertEqual(self.world.launches, [])
-        self.assertEqual(self.world.attempts, 0)
         entry = self.ledger()["5"]
         self.assertEqual((entry["state"], entry["runtime"]), (w.NOTIFIED, runtime))
-        self.assertIn(phrase, entry["reason"])
         self.assertEqual(len(self.world.notes), 1)
-        self.assertTrue(self.world.notes[0][1].startswith(f"{label} session {SID[:8]}:"), self.world.notes[0])
+        self.assertTrue(self.world.notes[0][1].startswith(f"Owner decision for {label} session {SID[:8]} "),
+                        self.world.notes[0])
         self.assertNotIn("SECRET", self.world.notes[0][1])
         return entry
 
-    def test_gemini_is_notify_only_with_launch_on(self):
+    def test_gemini(self):
         self.gemini_chat()
-        self.assert_notified("gemini", "Gemini CLI", "until its sandboxed launch")
+        self.assert_notified("gemini", "Gemini CLI")
         self.assertEqual(self.calls[0], "gemini")   # its own plugin's key first
 
     def test_a_legacy_gemini_json_chat(self):
         self.gemini_chat(suffix=".json", head=json.dumps({"sessionId": SID, "messages": []}, indent=2))
-        self.assert_notified("gemini", "Gemini CLI", "notify-only")
+        self.assert_notified("gemini", "Gemini CLI")
 
     def test_a_gemini_chat_for_another_session_with_the_same_prefix_is_not_it(self):
         self.gemini_chat(head=json.dumps({"sessionId": SID[:8] + "-0000-0000-0000-000000000000"}))
-        self.assert_notified("unknown", "Unknown-runtime", "no Codex, Claude Code, Cursor or Gemini CLI records")
+        self.assert_notified("unknown", "Unknown-runtime")
 
-    def test_cursor_is_notify_only_with_launch_on(self):
+    def test_cursor(self):
         self.cursor_transcript()
-        self.assert_notified("cursor", "Cursor", "Cursor sessions are notify-only")
+        self.assert_notified("cursor", "Cursor")
         self.assertEqual(self.calls[0], "cursor")
 
     def test_a_cursor_chat_store(self):
@@ -1205,21 +711,22 @@ class OtherRuntimes(Base):
         d.mkdir(parents=True)
         (d / "store.db").write_bytes(b"x")
         self.age(d / "store.db")
-        self.assert_notified("cursor", "Cursor", "notify-only")
+        self.assert_notified("cursor", "Cursor")
 
     def test_an_unknown_runtime_is_notified(self):
-        self.assert_notified("unknown", "Unknown-runtime", "notify-only")
+        self.assert_notified("unknown", "Unknown-runtime")
         self.assertEqual(self.calls, ["codex"])    # tries every plugin's key, first match wins
 
     def test_records_of_two_runtimes_are_unknown(self):
-        self.session(SID)            # a Codex rollout (eligible on its own)
+        self.session(SID)
         self.gemini_chat()
-        self.assert_notified("unknown", "Unknown-runtime", "Codex and Gemini CLI")
+        self.assert_notified("unknown", "Unknown-runtime")
+        self.assertIn("Codex and Gemini CLI", w.runtime_kind(self.home, SID).reason)
 
     def test_a_live_gemini_session_is_notified_as_live(self):
         p = self.gemini_chat()
         self.age(p, 30)
-        self.assert_notified("gemini", "Gemini CLI", "live")
+        self.assertIn("live", self.assert_notified("gemini", "Gemini CLI")["reason"])
 
     def test_the_plugin_key_of_the_bindings_org_is_used(self):
         self.gemini_chat()
@@ -1231,24 +738,213 @@ class OtherRuntimes(Base):
         self.assertEqual(self.calls[:2], ["gemini", "codex"])
         self.assertEqual(self.state(5), w.NOTIFIED)
 
-    def test_no_active_launcher_for_them(self):
-        self.assertEqual([r for r in w.RUNTIMES if w.active_launcher(r)], ["codex"])   # codex proven in Base
-        for runtime in ("claude", "cursor", "gemini"):
-            self.assertIn(runtime, w.NOTIFY_ONLY_REASONS)
-        for runtime, error in (("cursor", KeyError), ("claude", KeyError), ("gemini", ValueError)):
-            with self.subTest(runtime), self.assertRaises(error):
-                w.claim_and_launch(self.home, SID, binding(), 5, w.Runtime(runtime, [], eligible=True,
-                                                                           sandbox="workspace-write", cwd="/"),
-                                   w.read_config(self.home), self.world.system(), [])
-        self.assertEqual(self.world.attempts, 0)
 
-    def test_status_names_the_runtime(self):
-        self.gemini_chat()
+# ---------------------------------------------------------------------------
+# resume: attended, in the owner's terminal
+# ---------------------------------------------------------------------------
+
+class Resume(Base):
+    def setUp(self):
+        super().setUp()
+        self.bin = Path(self.tmp.name) / "bin"
+        self.bin.mkdir()
+        for name in ("claude", "codex", "gemini", "cursor-agent", "agent"):
+            self.tool(name)
+        self.environ = {"PATH": f"{self.bin}:/usr/bin:/bin"}
+        ie.write_binding(self.home, SID, binding(cwd=str(self.home)))   # a binding's cwd is never used
+
+    def tool(self, name):
+        p = self.bin / name
+        p.write_text("#!/bin/sh\nexit 0\n")
+        p.chmod(0o755)
+        return p
+
+    def resume(self, arg=SID, *, print_only=False):
         out = []
-        w.status(self.home, self.world.system(), out.append)
-        text = "\n".join(out)
-        self.assertIn(f"{SID[:8]} Gemini CLI: Gemini CLI sessions are notify-only", text)
-        self.assertIn("notify-only runtimes: Claude Code, Cursor, Gemini CLI", text)
+        code = w.resume(self.home, arg, self.world.system(out=out.append, environ=self.environ),
+                        print_only=print_only)
+        return code, "\n".join(out)
+
+    def notify5(self):
+        self.world.events = [decision(5)]
+        self.run_pass()
+
+    def plan(self, sid=SID):
+        return w.resume_plan(self.home, sid, self.environ)
+
+    # -- the session ------------------------------------------------------
+    def test_a_unique_prefix_of_eight_hex_characters(self):
+        self.assertEqual(w.resolve_session(self.home, SID[:8]), SID)
+        self.assertEqual(w.resolve_session(self.home, SID[:8].upper()), SID)
+        self.assertEqual(w.resolve_session(self.home, SID[:13]), SID)
+
+    def test_an_ambiguous_prefix(self):
+        other = SID[:8] + "-0000-0000-0000-000000000000"
+        ie.write_binding(self.home, other, binding())
+        with self.assertRaises(w.ResumeError) as e:
+            w.resolve_session(self.home, SID[:8])
+        self.assertIn("ambiguous", str(e.exception))
+        self.assertEqual(w.resolve_session(self.home, SID[:10]), SID)
+
+    def test_a_prefix_that_is_too_short_or_not_hex(self):
+        for bad in (SID[:7], "", "01a1-32", "zzzzzzzz", "../../etc", "-01a13279"):
+            with self.subTest(bad=bad), self.assertRaises(w.ResumeError):
+                w.resolve_session(self.home, bad)
+
+    def test_prefixes_cover_the_relocated_state_home_too(self):
+        from cardinal_core import paths
+        gsid = "8a6e4964-0d1f-4c55-9f0e-2b7c1d3a4e5f"
+        ie.write_binding(paths.sandboxed_home(self.home), gsid, binding())
+        self.assertEqual(w.resolve_session(self.home, gsid[:8]), gsid)
+
+    def test_an_unbound_prefix(self):
+        with self.assertRaises(w.ResumeError):
+            w.resolve_session(self.home, "ffffffff")
+
+    def test_only_a_uuid_reaches_an_argv(self):
+        for bad in ("not-a-uuid", SID + "x", "-" + SID[1:], SID.replace("-", "")):
+            with self.subTest(bad=bad), self.assertRaises(w.ResumeError):
+                w.resume_plan(self.home, bad, self.environ)
+        ie.write_binding(self.home, "0123456789abcdef", binding())   # a valid binding id, not a UUID
+        with self.assertRaises(w.ResumeError):
+            w.resolve_session(self.home, "01234567")
+
+    # -- each runtime -----------------------------------------------------
+    def test_codex_cli(self):
+        self.notify5()
+        plan = self.plan()
+        self.assertEqual(plan.argv, [str(self.bin / "codex"), "resume", SID, oi.wake_prompt(5, INV)])
+        self.assertEqual(plan.cwd, str(self.repo))   # the rollout's session_meta.cwd, never the binding
+        code, out = self.resume()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.world.execs, [(plan.argv, str(self.repo))])
+
+    def test_codex_cwd_is_the_meta_whose_id_is_the_session(self):
+        p = self.rollout_path(SID)
+        other = self.home / "elsewhere"
+        other.mkdir()
+        p.write_text(json.dumps(meta(SID2, str(other))) + "\n" + p.read_text())   # a forked parent's meta first
+        self.assertEqual(self.plan().cwd, str(self.repo))
+
+    def test_codex_desktop_opens_the_thread(self):
+        self.session(SID, originator="Codex Desktop", source="vscode")
+        plan = self.plan()
+        self.assertEqual(plan.argv, ["/usr/bin/open", f"codex://threads/{SID}"])
+        self.assertIsNone(plan.cwd)
+        code, out = self.resume()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.world.execs, [(["/usr/bin/open", f"codex://threads/{SID}"], None)])
+        self.assertIn("desktop", out)
+
+    def claude_transcript(self, *cwds):
+        self.rollout_path(SID).unlink()
+        d = self.home / ".claude" / "projects" / w.claude_project_dir_name(str(self.repo))
+        d.mkdir(parents=True)
+        lines = [{"type": "user", "sessionId": SID, "cwd": c, "message": {"content": "x"}} for c in cwds]
+        (d / f"{SID}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+
+    def test_claude_code(self):
+        self.claude_transcript(str(self.repo))
+        self.notify5()
+        plan = self.plan()
+        self.assertEqual(plan.argv, [str(self.bin / "claude"), "--resume", SID, oi.wake_prompt(5, INV)])
+        self.assertEqual(plan.cwd, str(self.repo))
+
+    def test_claude_code_prefers_the_cwd_that_names_its_project_directory(self):
+        sub = self.repo / "sub"
+        sub.mkdir()
+        self.claude_transcript(str(sub), str(self.repo), str(sub))
+        self.assertEqual(self.plan().cwd, str(self.repo))
+
+    def test_gemini_cli(self):
+        self.rollout_path(SID).unlink()
+        chat = self.home / ".gemini" / "tmp" / "h" / "chats" / f"session-2026-10-12T10-00-{SID[:8]}.jsonl"
+        chat.parent.mkdir(parents=True)
+        chat.write_text(json.dumps({"sessionId": SID}) + "\n")
+        (chat.parent.parent / ".project_root").write_text(str(self.repo) + "\n")
+        plan = self.plan()
+        self.assertEqual(plan.argv, [str(self.bin / "gemini"), "--resume", SID])   # nothing notified: no prompt
+        self.assertEqual(plan.cwd, str(self.repo))
+        self.assertIn("without a first prompt", plan.note)
+
+    def cursor_transcript(self, rec):
+        self.rollout_path(SID).unlink()
+        p = self.home / ".cursor" / "projects" / "Users-x-repo" / "agent-transcripts" / f"{SID}.jsonl"
+        p.parent.mkdir(parents=True)
+        p.write_text(json.dumps(rec) + "\n")
+
+    def test_cursor_agent_experimental(self):
+        self.cursor_transcript({"workspace_roots": [str(self.repo)]})
+        self.notify5()
+        plan = self.plan()
+        self.assertEqual(plan.argv, [str(self.bin / "cursor-agent"), "--resume", SID, oi.wake_prompt(5, INV)])
+        code, out = self.resume(print_only=True)
+        self.assertIn("Cursor (experimental)", out)
+
+    def test_cursor_without_cursor_agent_says_how_to_reopen_it(self):
+        self.cursor_transcript({"cwd": str(self.repo)})
+        (self.bin / "cursor-agent").unlink()      # `agent` stays on PATH: never used
+        code, out = self.resume()
+        self.assertEqual(code, 1)
+        self.assertIn("cursor-agent was not found", out)
+        self.assertIn("Reopen it in Cursor", out)
+        self.assertEqual(self.world.execs, [])
+
+    def test_cursor_records_without_a_directory(self):
+        self.cursor_transcript({"role": "user"})
+        code, out = self.resume()
+        self.assertEqual(code, 1)
+        self.assertIn("Reopen it in Cursor", out)
+
+    # -- refusals ---------------------------------------------------------
+    def test_a_missing_working_directory_is_refused(self):
+        gone = self.home / "gone"
+        self.session(SID, cwd=gone)
+        code, out = self.resume()
+        self.assertEqual(code, 1)
+        self.assertIn("no longer exists", out)
+        self.assertEqual(self.world.execs, [])
+
+    def test_an_unknown_runtime_is_refused(self):
+        self.rollout_path(SID).unlink()
+        code, out = self.resume()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot tell which runtime", out)
+
+    def test_a_missing_binary(self):
+        (self.bin / "codex").unlink()
+        code, out = self.resume()
+        self.assertEqual(code, 1)
+        self.assertIn("codex was not found", out)
+
+    def test_an_exec_that_fails(self):
+        self.world.exec_error = FileNotFoundError(2, "gone")
+        code, out = self.resume()
+        self.assertEqual(code, 1)
+
+    # -- the prompt and --print ----------------------------------------------
+    def test_the_prompt_is_the_lowest_recent_notified_decision_of_the_newest_investigation(self):
+        self.world.events = [decision(5), decision(6)]
+        self.run_pass()
+        self.assertEqual(self.plan().prompt, oi.wake_prompt(5, INV))
+        ie.write_binding(self.home, SID, binding(inv=INV2))
+        self.world.events = [decision(3, inv=INV2)]
+        self.world.t += 600
+        self.run_pass()
+        self.assertEqual(self.plan().prompt, oi.wake_prompt(3, INV2))
+
+    def test_print_shows_the_quoted_command_and_runs_nothing(self):
+        odd = self.home / "work" / "it's a repo"
+        (odd / ".git").mkdir(parents=True)
+        self.session(SID, cwd=odd)
+        self.notify5()
+        code, out = self.resume(SID[:8], print_only=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.world.execs, [])
+        lines = dict(line.split(": ", 1) for line in out.splitlines() if ": " in line)
+        self.assertEqual(lines["cwd"], str(odd))
+        self.assertEqual(shlex.split(lines["command"]),
+                         [str(self.bin / "codex"), "resume", SID, oi.wake_prompt(5, INV)])
 
 
 # ---------------------------------------------------------------------------
@@ -1256,19 +952,25 @@ class OtherRuntimes(Base):
 # ---------------------------------------------------------------------------
 
 class WakePrompt(unittest.TestCase):
-    def test_the_wake_prompt_is_a_machine_prompt_on_both_runtimes(self):
+    def test_the_wake_prompt_is_a_machine_prompt_on_every_runtime(self):
         for seq in (1, 5, 123456789):
-            for runtime in ("codex", "claude"):
+            for runtime in ("claude", "codex", "cursor", "gemini"):
                 with self.subTest(seq=seq, runtime=runtime):
+                    self.assertTrue(oi.is_machine_prompt(runtime, oi.wake_prompt(seq, INV)))
                     self.assertIsNone(oi.normalize_prompt(runtime, oi.wake_prompt(seq, INV)))
-                    self.assertIsNone(oi.normalize_prompt(runtime, w.codex_argv("/x/codex", "read-only", SID,
-                                                                                seq, (), INV)[-1]))
 
     def test_anything_added_to_it_is_owner_input(self):
         p = oi.wake_prompt(5, INV)
-        for runtime in ("codex", "claude"):
+        for runtime in ("claude", "codex", "cursor", "gemini"):
             self.assertEqual(oi.normalize_prompt(runtime, p + " Also deploy."), p + " Also deploy.")
             self.assertEqual(oi.normalize_prompt(runtime, "Please: " + p), "Please: " + p)
+
+    def test_it_never_carries_decision_text_or_the_old_ack_file(self):
+        p = oi.wake_prompt(5, INV)
+        self.assertIn("storyboard__read_investigation_events", p)
+        self.assertIn('types ["owner.decided"], after 4', p)
+        self.assertNotIn("cardinal-wake-ack.json", p)
+        self.assertNotIn("TMPDIR", p)
 
 
 # ---------------------------------------------------------------------------
@@ -1276,25 +978,17 @@ class WakePrompt(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class CLI(Base):
-    def launchctl(self):
-        calls = []
-
-        def run(args):
-            calls.append(list(args))
-            return 0, ""
-        return calls, run
-
-    def cli(self, *argv, platform="darwin", environ=None):
-        out = []
-        calls, run = self.launchctl()
-        system = self.world.system(out=out.append)
-        code = w.cli_main(list(argv), runtime="codex", home=self.home, system=system, launchctl=run,
-                          platform=platform, environ=environ or {"PATH": f"{self.codex.parent}:/usr/bin:/bin"})
+    def cli(self, *argv, platform="darwin", runtime="codex", environ=None):
+        out, calls = [], []
+        system = self.world.system(out=out.append, environ=environ or {"PATH": "/usr/bin:/bin"})
+        code = w.cli_main(list(argv), runtime=runtime, home=self.home, system=system,
+                          launchctl=lambda a: (calls.append(list(a)) or (0, "")), platform=platform,
+                          environ=environ or {"PATH": "/usr/bin:/bin"})
         return code, "\n".join(out), calls
 
     def test_enable_writes_a_plist_with_a_stable_path_and_the_config(self):
         w.config_path(self.home).unlink()
-        code, out, calls = self.cli("enable", "--launch")
+        code, out, calls = self.cli("enable")
         self.assertEqual(code, 0, out)
         plist = plistlib.loads(w.plist_path(self.home).read_bytes())
         runner = self.home / ".cardinal" / "wake" / "lib" / "cardinal-wake"
@@ -1303,57 +997,62 @@ class CLI(Base):
         self.assertTrue(30 <= plist["StartInterval"] <= 60)
         self.assertNotIn("plugins", json.dumps(plist))
         self.assertTrue((runner.parent / "cardinal_core" / "session_wake.py").is_file())
+        self.assertFalse((runner.parent / "cardinal_core" / "allowlist_proxy.py").exists())
         self.assertEqual(stat.S_IMODE(runner.stat().st_mode), 0o700)
         c = json.loads(w.config_path(self.home).read_text())
-        self.assertEqual((c["enabled"], c["launch"], c["codex_path"]), (True, True, os.path.realpath(str(self.codex))))
-        self.assertTrue(c["enabled_at"])
+        self.assertEqual(set(c), {"enabled", "python", "path_env", "binaries", "enabled_at", "versions"})
+        self.assertTrue(c["enabled"])
         self.assertEqual(stat.S_IMODE(w.config_path(self.home).stat().st_mode), 0o600)
         self.assertEqual([a[0] for a in calls], ["bootout", "bootstrap"])
-        self.assertEqual(calls[1][2], str(w.plist_path(self.home)))
-        self.assertIn("Can launch: Codex CLI sessions", out)
-        self.assertIn("Notify-only", out)
-        self.assertIn("Claude Code sessions", out)
-        self.assertIn("Codex desktop", out)
-        self.assertIn("danger-full-access", out)
+        self.assertIn("Nothing is ever launched unattended", out)
+        self.assertIn("cardinal-wake resume <session>", out)
 
-    def test_the_installed_runner_imports_its_own_copy(self):
+    def test_enable_launch_is_refused_in_one_line(self):
+        w.config_path(self.home).unlink()
+        code, out, calls = self.cli("enable", "--launch")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, w.LAUNCH_REMOVED)
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertIn("unattended launch was removed", out)
+        self.assertEqual(calls, [])
+        self.assertFalse(w.plist_path(self.home).exists())
+        self.assertFalse(w.config_path(self.home).exists())
+
+    def test_reenable_and_relay_notes_are_gone(self):
+        with self.assertRaises(SystemExit):
+            self.cli("reenable", "codex")
+        with self.assertRaises(SystemExit):
+            self.cli("enable", "--relay-notes")
+
+    def test_the_installed_runner_imports_its_own_copy_and_resumes(self):
         self.cli("enable")
         runner = self.home / ".cardinal" / "wake" / "lib" / "cardinal-wake"
-        import subprocess
-        import sys
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.home)}
         r = subprocess.run([sys.executable, str(runner), "--help"], capture_output=True, text=True, timeout=60,
-                           env={"PATH": "/usr/bin:/bin", "HOME": str(self.home)})
+                           env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("enable", r.stdout)
+        self.assertIn("resume", r.stdout)
+        bin_dir = Path(self.tmp.name) / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "codex").write_text("#!/bin/sh\n")
+        (bin_dir / "codex").chmod(0o755)
+        r = subprocess.run([sys.executable, "-I", "-S", str(runner), "resume", SID[:8], "--print"],
+                           capture_output=True, text=True, timeout=60, env={**env, "PATH": f"{bin_dir}:/usr/bin"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"command: {bin_dir / 'codex'} resume {SID}", r.stdout)
+        self.assertIn(f"cwd: {self.repo}", r.stdout)
 
     def test_enable_again_updates_in_place(self):
-        self.cli("enable", "--launch")
+        self.cli("enable")
+        first = json.loads(w.config_path(self.home).read_text())["enabled_at"]
         code, out, _ = self.cli("enable")
         self.assertEqual(code, 0)
-        self.assertFalse(json.loads(w.config_path(self.home).read_text())["launch"])
-        self.assertIn("Unattended launch is off", out)
+        self.assertEqual(json.loads(w.config_path(self.home).read_text())["enabled_at"], first)
 
-    def test_enable_without_codex_on_path_says_so(self):
-        code, out, _ = self.cli("enable", "--launch", environ={"PATH": "/nonexistent"})
-        self.assertEqual(code, 0)
-        self.assertIn("codex was not found", out)
-        self.assertIsNone(json.loads(w.config_path(self.home).read_text())["codex_path"])
-
-    def test_enable_on_notify_only_runtimes_says_so(self):
-        for runtime, label in (("gemini", "Gemini CLI"), ("cursor", "Cursor"), ("claude", "Claude Code")):
-            with self.subTest(runtime):
-                out = []
-                calls, run = self.launchctl()
-                code = w.cli_main(["enable", "--launch"], runtime=runtime, home=self.home,
-                                  system=self.world.system(out=out.append), launchctl=run, platform="darwin",
-                                  environ={"PATH": f"{self.codex.parent}:/usr/bin:/bin"})
-                text = "\n".join(out)
-                self.assertEqual(code, 0, text)
-                self.assertIn(f"{label} sessions are notify-only", text)
-                self.assertIn("with or without --launch", text)
-                self.assertIn("Can launch: Codex CLI sessions", text)
-        code, text, _ = self.cli("enable", "--launch")   # runtime codex: no notify-only line for itself
-        self.assertNotIn("Codex sessions are notify-only", text)
+    def test_enable_on_claude_mentions_remote_control(self):
+        code, out, _ = self.cli("enable", runtime="claude")
+        self.assertEqual(code, 0, out)
+        self.assertIn("claude --remote-control", out)
 
     def test_enable_is_macos_only(self):
         code, out, calls = self.cli("enable", platform="linux")
@@ -1362,7 +1061,7 @@ class CLI(Base):
         self.assertFalse(w.plist_path(self.home).exists())
 
     def test_disable_removes_the_agent(self):
-        self.cli("enable", "--launch")
+        self.cli("enable")
         code, out, calls = self.cli("disable")
         self.assertEqual(code, 0)
         self.assertFalse(w.plist_path(self.home).exists())
@@ -1372,138 +1071,43 @@ class CLI(Base):
         self.run_pass()
         self.nothing()
 
-    def test_status_shows_state_and_never_decision_text(self):
-        self.session(SID2, turns=[turn("danger-full-access", network=None)])
+    def test_status_shows_each_candidates_runtime_and_resume_command_never_decision_text(self):
+        bin_dir = Path(self.tmp.name) / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "codex").write_text("#!/bin/sh\n")
+        (bin_dir / "codex").chmod(0o755)
+        self.session(SID2, cwd=self.home / "gone")
         self.world.events = [decision(5), decision(6, to=SID2)]
         self.run_pass()
-        w.disable_runtime(self.home, "codex", "a test reason", self.t0)
-        code, out, _ = self.cli("status")
+        code, out, _ = self.cli("status", environ={"PATH": f"{bin_dir}:/usr/bin"})
         self.assertEqual(code, 0)
-        self.assertIn("wake: on; unattended launch: on", out)
-        self.assertIn("codex launch disabled: a test reason", out)
-        self.assertIn(f"{SID[:8]} #5 RESUMING", out)
-        self.assertIn(f"{SID2[:8]} #6 NOTIFIED", out)
-        self.assertIn("candidate sessions:", out)
-        self.assertIn("danger-full-access", out)
+        self.assertIn("wake: on", out)
+        self.assertNotIn("unattended launch", out)
+        self.assertIn(f"{SID[:8]} #5 NOTIFIED", out)
+        self.assertIn(f"  {SID[:8]} Codex: ~/.cardinal/wake/lib/cardinal-wake resume {SID[:8]} -> "
+                      f"{bin_dir / 'codex'} resume {SID} <wake prompt> (in {self.repo})", out)
+        self.assertIn(f"  {SID2[:8]} Codex: cannot resume here:", out)
         for path in (self.home / ".cardinal" / "wake").rglob("*"):
             if path.is_file() and path.suffix == ".json":
                 self.assertNotIn(SECRET, path.read_text())
-        for blob in [out] + [m for _, m in self.world.notes] + self.world.lines:
+        for blob in [out] + [m for _, m, _ in self.world.notes] + self.world.lines:
             self.assertNotIn("SECRET", blob)
+
+    def test_resume_through_the_cli(self):
+        bin_dir = Path(self.tmp.name) / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "codex").write_text("#!/bin/sh\n")
+        (bin_dir / "codex").chmod(0o755)
+        code, out, _ = self.cli("resume", SID[:8], environ={"PATH": f"{bin_dir}:/usr/bin"})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.world.execs, [([str(bin_dir / "codex"), "resume", SID], str(self.repo))])
 
     def test_run_dry_run(self):
         self.world.events = [decision(5)]
         code, out, _ = self.cli("run", "--dry-run")
         self.assertEqual(code, 0)
-        self.assertIn("would launch", out)
+        self.assertIn("would notify", out)
         self.nothing()
-
-
-class LaunchGate(Base):
-    """Codex launch ships OFF (CODEX_LAUNCH_PROVEN False); its survivor gate is
-    not verified live. The notify path, wake intent and session.wake reports
-    stay active. (Base proves codex for its other tests; here it is turned
-    back off.)"""
-
-    def setUp(self):
-        super().setUp()
-        off = patch.object(w.LAUNCHERS["codex"], "proven", False)
-        off.start()
-        self.addCleanup(off.stop)
-
-    def test_the_shipped_default_is_off(self):
-        self.assertIs(w.CODEX_LAUNCH_PROVEN, False)
-        self.assertIsNone(w.active_launcher("codex"))
-        self.assertEqual([r for r in w.RUNTIMES if w.active_launcher(r)], [])
-
-    def test_an_eligible_codex_decision_with_wake_is_notify_only(self):
-        self.world.events = [decision(5)]   # verified, addressed, wake:true, eligible
-        self.run_pass()
-        self.assertEqual(self.world.launches, [])
-        self.assertIn("pending live verification", self.notified_only())
-
-    def test_enable_launch_says_codex_is_pending(self):
-        out = []
-        code = w.cli_main(["enable", "--launch"], runtime="codex", home=self.home,
-                          system=self.world.system(out=out.append), launchctl=lambda a: (0, ""),
-                          platform="darwin", environ={"PATH": f"{self.codex.parent}:/usr/bin:/bin"})
-        self.assertEqual(code, 0, "\n".join(out))
-        text = "\n".join(out)
-        self.assertIn("Codex sessions are notify-only", text)
-        self.assertIn("CODEX_LAUNCH_PROVEN = True", text)
-        self.assertIn("C-23/C-24", text)
-
-    def test_wake_intent_and_reports_still_work_off(self):
-        # A decision without wake:true is still notify-only for the right reason, not the gate.
-        self.world.events = [decision(5, wake=NOWAKE)]
-        self.run_pass()
-        self.assertEqual(self.notified_only(), w.WAKE_NOT_REQUESTED)
-
-
-class DecisionOrdering(Base):
-    """Review 7 F2: a later decision must not silently drop an earlier one.
-    Decisions are handled in ascending seq and the pass stops at the first
-    one that launches or cannot be claimed, so notifying a higher decision
-    never raises the high-water mark past a lower pending decision that has
-    no entry yet. (Base proves codex, so a wake decision launches.)"""
-
-    def hwm(self, inv=INV):
-        return w.read_ledger(self.home, SID)["hwm"].get(inv, 0)
-
-    def test_a_later_no_wake_decision_does_not_drop_an_earlier_wake_one(self):
-        self.world.events = [decision(5), decision(6, wake=NOWAKE)]
-        self.run_pass()
-        self.assertEqual(len(self.world.launches), 1)                 # #5 launched
-        self.assertEqual(self.state(5), w.RESUMING)
-        self.assertNotIn("6", self.ledger())                          # #6 not handled this pass
-        self.assertEqual(self.hwm(), 5)                               # not raised past #6
-        # #6 is handled only after the run settles.
-        self.append_turns(SID, turn())
-        self.world.events.append(ack(7, 5))
-        self.world.exit()
-        self.world.t += 60
-        self.run_pass()
-        self.world.t += w.LIVE_WINDOW + 1
-        self.run_pass()
-        self.assertEqual(self.state(6), w.NOTIFIED)
-        self.assertEqual(self.ledger()["6"]["reason"], w.WAKE_NOT_REQUESTED)
-
-    def test_a_lower_no_wake_and_a_higher_wake_are_both_handled(self):
-        self.world.events = [decision(5, wake=NOWAKE), decision(6)]
-        self.run_pass()
-        self.assertEqual(self.state(5), w.NOTIFIED)                   # notified (records an entry)
-        self.assertEqual(self.ledger()["5"]["reason"], w.WAKE_NOT_REQUESTED)
-        self.assertEqual(self.state(6), w.RESUMING)                  # then the wake one launched
-        self.assertEqual(len(self.world.launches), 1)
-
-    def test_an_old_lower_and_a_fresh_wake_higher_are_both_handled(self):
-        self.world.events = [decision(5, created=self.t0 - 8 * 86400), decision(6)]
-        self.run_pass()
-        self.assertEqual(self.state(5), w.NOTIFIED)
-        self.assertIn("older than 7 days", self.ledger()["5"]["reason"])
-        self.assertEqual(self.state(6), w.RESUMING)
-
-    def test_a_transient_probe_failure_on_the_wake_one_defers_the_later_no_wake(self):
-        # Cross-pass: #5 wake returns "retry" (no entry) -> the pass stops; #6 is not consumed.
-        def boom(argv, path_env, cwd=None):
-            raise OSError("no codex")
-        self.world.events = [decision(5), decision(6, wake=NOWAKE)]
-        self.run_pass(run_probe=boom)
-        self.assertEqual(self.ledger(), {})                           # neither #5 nor #6 recorded
-        self.assertEqual(self.hwm(), 0)
-        self.assertEqual(w.read_ledger(self.home, SID)["probe_retries"], {w.entry_key(INV, 5): 1})
-        # Recover: #5 launches, #6 still deferred, and #5's retry counter is cleared.
-        self.world.t += w.LIVE_WINDOW + 1
-        self.run_pass()
-        self.assertEqual(self.state(5), w.RESUMING)
-        self.assertNotIn("6", self.ledger())
-        self.assertEqual(w.read_ledger(self.home, SID)["probe_retries"], {})
-
-    def test_read_ledger_normalizes_probe_retries(self):
-        led = w.read_ledger(self.home, SID)
-        led["probe_retries"] = {INV + ":5": 2, "bad": "x", INV + ":6": 0, INV + ":7": True}
-        w.write_ledger(self.home, SID, led, self.t0)
-        self.assertEqual(w.read_ledger(self.home, SID)["probe_retries"], {INV + ":5": 2})
 
 
 class contextlib_suppress_file:

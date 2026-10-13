@@ -2688,7 +2688,7 @@
     }
   },
   "session_wake": {
-    "title": "Owner-woken sessions: cardinal-wake (Codex CLI launch; every other runtime notify-only)",
+    "title": "Owner-woken sessions: cardinal-wake (a notification per addressed decision; attended resume)",
     "group": "investigation",
     "adapters": {
       "claude": "present",
@@ -2697,10 +2697,10 @@
       "gemini": "present"
     },
     "notes": {
-      "claude": "notify-only: a resumed claude -p runs with the user's own settings, so the wake sandbox is not guaranteed (docs/specs/resume-and-wake.md §6, C-6 not demonstrated); claude --remote-control reaches a running session",
-      "cursor": "notify-only: no unattended Cursor resume has been shown to pass the wake gates (docs/specs/resume-and-wake.md §5.3)",
-      "gemini": "notify-only for now: the Gemini CLI launch (the waker's own sandbox-exec with a copy of restrictive-proxied around the whole process, an exclusively owned allow-list proxy, approved roots, relocated hook state, a vetted daemon) is built but off (GEMINI_LAUNCH_PROVEN) until its live gates pass (docs/specs/resume-and-wake.md §5.3, §6 C-7, C-9 proven, C-10..C-16 pending)",
-      "codex": "notify-only for now: the Codex launch is built but shipped off (CODEX_LAUNCH_PROVEN False) until its survivor-detection gate is verified live (docs/specs/resume-and-wake.md §6 C-23/C-24). When on, it launches workspace-write CLI sessions (a read-only last turn stays notify-only) strictly inside $HOME whose recorded writes stay in their cwd, locked down to the shell plus the Cardinal investigation read MCP tool (pre-approved; the acknowledgment the agent writes to its private TMPDIR is relayed by the waker after the run; every other server and plugin disabled; app connectors, web search, image generation, browser features, hooks, notify and daemon_auto_start disabled and validated with codex features list and mcp list, fail closed), network, writable roots and the shared /tmp pinned off, an allow-listed environment, a vetted native codex and daemon, and post-run verification incl. a sandbox_check survivor sweep (docs/specs/resume-and-wake.md §5.3, §5.4, §5.5, §6 H1, C-17..C-24)"
+      "claude": "a notification per addressed owner decision; `cardinal-wake resume <session>` runs `claude --resume <sid> \"<wake prompt>\"` in the transcript's recorded cwd, attended, in the owner's terminal (one click with terminal-notifier); nothing launches unattended (docs/specs/resume-and-wake.md v4); `claude --remote-control` reaches a running session",
+      "codex": "a notification per addressed owner decision; `cardinal-wake resume <session>` runs `codex resume <sid> \"<wake prompt>\"` in the rollout's session_meta cwd, attended, in the owner's terminal; a Codex desktop session opens with codex://threads/<sid>; nothing launches unattended (docs/specs/resume-and-wake.md v4)",
+      "cursor": "a notification per addressed owner decision; `cardinal-wake resume <session>` runs `cursor-agent --resume <sid> \"<wake prompt>\"` (experimental, unverified) when Cursor's records carry the chat's directory and cursor-agent is installed, else it says how to reopen the chat in Cursor; nothing launches unattended (docs/specs/resume-and-wake.md v4)",
+      "gemini": "a notification per addressed owner decision; `cardinal-wake resume <session>` runs `gemini --resume <id> \"<wake prompt>\"` in Gemini's recorded project root, attended, in the owner's terminal (resuming by session UUID is unproven on gemini-cli 0.63.0); nothing launches unattended (docs/specs/resume-and-wake.md v4)"
     },
     "outside_matrix": {
       "opencode": "na:the OpenCode adapter has no Investigation binding layer (no session binding, poller or owner-decision delivery; adapters/opencode is telemetry, MCP and evidence capture), so there is no addressed decision to notify about",
@@ -2717,6 +2717,11 @@
           "kind": "grep",
           "path": "bin/cardinal-wake",
           "pattern": "session_wake\\.cli_main\\(sys\\.argv\\[1:\\], runtime=\"claude\""
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/session_wake.py",
+          "pattern": "RESUME_BINARIES = \\{CLAUDE: \"claude\""
         },
         {
           "kind": "grep",
@@ -2737,12 +2742,12 @@
         {
           "kind": "grep",
           "path": "../../core/cardinal_core/session_wake.py",
-          "pattern": "def codex_argv\\("
+          "pattern": "def codex_session_meta\\("
         },
         {
           "kind": "grep",
           "path": "../../core/cardinal_core/session_wake.py",
-          "pattern": "def codex_project_config\\("
+          "pattern": "codex://threads/"
         }
       ],
       "cursor": [
@@ -2759,6 +2764,11 @@
           "kind": "grep",
           "path": "../../core/cardinal_core/session_wake.py",
           "pattern": "CURSOR: cursor_records"
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/owner_input.py",
+          "pattern": "\"cursor\": \\(WAKE_PROMPT_RE,\\)"
         }
       ],
       "gemini": [
@@ -2777,13 +2787,9 @@
           "pattern": "GEMINI: gemini_chats"
         },
         {
-          "kind": "script",
-          "path": "../../core/cardinal_core/allowlist_proxy.py"
-        },
-        {
           "kind": "grep",
-          "path": "hooks/cardinal-gemini-telemetry.py",
-          "pattern": "ie\\.record_sandbox_turn\\("
+          "path": "../../core/cardinal_core/session_wake.py",
+          "pattern": "def resolve_gemini_resume_ident\\("
         }
       ]
     }
