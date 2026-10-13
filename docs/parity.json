@@ -1323,6 +1323,62 @@
       ]
     }
   },
+  "supervise_skill": {
+    "title": "supervise skill (watch another session's Investigation; shared common/supervise core)",
+    "group": "skills",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "present",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "skill",
+          "name": "supervise"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation reviewed"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "skill",
+          "name": "supervise"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation reviewed"
+        }
+      ],
+      "cursor": [
+        {
+          "kind": "skill",
+          "name": "supervise"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation reviewed"
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "skill",
+          "name": "supervise"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation reviewed"
+        }
+      ]
+    }
+  },
   "connection_skills": {
     "title": "connect / disconnect / status skills",
     "group": "skills",
