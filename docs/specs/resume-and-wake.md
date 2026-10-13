@@ -1,6 +1,7 @@
 # Picking up stopped work: storyboard continuation, evidence hold, owner-woken sessions
 
-Status: APPROVED v3 (2026-10-12).
+Status: APPROVED v3 (2026-10-12); amended v4 (2026-10-13): deliver, never launch
+(see "v4" below).
 - The owner approved A, B and a simplified C (§5): existing Cardinal
   authentication, no passkey or signing, three gates proven per runtime
   before unattended wake (§6).
@@ -18,6 +19,81 @@ The history:
 - C reverses three items in `investigation-v1-consolidation.md` §5 "Not
   doing": idle wake, Phase 4 delivery fixes, and Codex adapters. The owner
   approved that on 2026-10-12.
+
+## v4 (2026-10-13): deliver, never launch
+
+The owner approved replacing unattended launch with delivery plus an
+attended resume. What `cardinal-wake` does now:
+
+- **Kept:** the per-user launchd dispatcher (`enable` / `disable` /
+  `status` / `run`) and its B1 vetting (a vetted interpreter run with
+  `-I -S`, a system-only PATH, never an agent-writable path); candidate
+  selection (including the relocated-binding rules); the §5.2 predicate
+  (`verified_owner_decision`, `to_session_id == sid`, still deliverable,
+  author, the `owner_decision` capability); `DECISION_MAX_AGE`; the daily
+  caps (now on notifications: 3 per session, 10 overall); ascending-seq
+  handling that stops at the first decision it cannot record; the flocked
+  per-session ledger with its never-pruned high-water mark (one
+  notification per decision); liveness, now only to word the notification;
+  `session.wake` reports (only `notified` is produced).
+- **Removed:** every launcher (Codex and Gemini CLI, both of which shipped
+  off), their eligibility checks, lockdown and probes, the Gemini proxy and
+  seatbelt profile copy, the survivor detection, the claim / settle
+  lifecycle (CLAIMED, RESUMING, TIMED_OUT, ACK_RELAYED, ACKNOWLEDGED,
+  FAILED), the evidence hold set before a launch, the acknowledgment relay,
+  disabled runtimes and `reenable`, and
+  `enable --launch` / `--root` / `--relay-notes`. `enable --launch` fails
+  with a one-line message; an old config with `launch: true` is read and
+  ignored; ledgers holding the removed states load and treat them as
+  terminal. The Gemini hook no longer records per-turn sandbox counts.
+- **Added:** `cardinal-wake resume <session>` (a full id or a unique prefix
+  of 8+ hex characters among bound sessions). It resolves the runtime and
+  the working directory only from the runtime's own records (Claude
+  transcript `cwd`, the Codex rollout's `session_meta.cwd`, Gemini's
+  project root, Cursor's records when they carry one), never from the
+  binding, refuses a missing directory, and then `os.execvp`s, attended in
+  the owner's terminal, `claude --resume <sid> "<WAKE_PROMPT>"`,
+  `codex resume <sid> "<WAKE_PROMPT>"` (a Codex Desktop session:
+  `open codex://threads/<sid>`), `gemini --resume <ident> "<WAKE_PROMPT>"`,
+  or `cursor-agent --resume <sid> "<WAKE_PROMPT>"` (experimental; only a
+  binary named `cursor-agent`). `--print` shows the command and directory.
+  The executable is resolved to an absolute path from the absolute entries
+  of the owner's PATH only, before the chdir; a recorded directory with a
+  control character is refused; a prefix resolves among `~/.cardinal`
+  bindings first and only then among relocated ones; a session that looks
+  live gets a one-line warning (never a block).
+  The prompt names a decision the session has not received yet, from the
+  waker's own ledger: NOTIFIED entries notified while the session was
+  stopped, within `DECISION_MAX_AGE` of now, with seq past the binding's
+  `read_from` (its investigation only; a forged binding cursor can leave the
+  prompt out or bring back a consumed decision, but only a verified owner
+  decision for this session within that window); the lowest such seq in the investigation of the
+  newest one. None qualifies: no first prompt. It no longer asks for an
+  acknowledgment file (the resumed session has its hooks and network and
+  acknowledges as usual) and is an exact-match machine prompt for all four
+  runtimes.
+- **Notification:** never the decision's text. A live session: switch to
+  that window. A session of an unrecognized runtime: notify-only (no resume
+  offered). A stopped one: `Resume: ~/.cardinal/wake/lib/cardinal-wake
+  resume <sid8>`, unless the stable copy in `~/.cardinal/wake/lib` is
+  missing or older than the running code (its runner, `session_wake.py` or
+  `owner_input.py` differ): then "run cardinal-wake enable again" and no
+  click file. With terminal-notifier installed, a vetted interpreter
+  (`binaries_problem` clear) and real, user-owned `~/.cardinal/wake` and
+  `resume` directories (never symlinks), a click opens Terminal on a 0700
+  `~/.cardinal/wake/resume/<sid>.command` that execs the stable runner's
+  `resume <sid>` with that interpreter, and only then does the text offer
+  the click; otherwise osascript.
+
+Why: unattended launch created a new trust boundary (it needed sandbox
+proofs and eight reviews, and was still off); an attended resume in the
+owner's own terminal needs none of that. A resumed session receives its
+pending decision through the existing investigation hooks (PostToolUse /
+Stop delivery), so no SessionStart change is needed.
+
+The rest of this document is v3 as approved. §5.3's launch design, §5.4's
+launch lifecycle, §5.5 and the launch proofs in §6 are historical; where
+they disagree with this section, this section wins.
 
 ## 1. Problem
 
@@ -810,10 +886,7 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
     in flight. To bound the wedge, a run whose survivors cannot be cleared
     or confirmed within `WAKE_TIMEOUT` becomes FAILED (not retried); its
     TMPDIR is kept and its path recorded, and Codex launch is disabled until
-    the owner re-enables. To bound the wedge, a run
-    whose survivors cannot be cleared or confirmed within `WAKE_TIMEOUT`
-    becomes FAILED (not retried); its TMPDIR is kept and its path recorded,
-    and Codex launch is disabled until the owner re-enables.
+    the owner re-enables.
   - **Also before a claim.** The same test over the TMPDIRs of the
     session's in-flight and still-present finished entries is a liveness
     signal: a process any earlier wake of this session left — whatever its
