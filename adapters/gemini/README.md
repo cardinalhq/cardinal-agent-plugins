@@ -417,7 +417,10 @@ It then starts the waker's allow-list proxy, which runs
 gemini --resume <id> --approval-mode yolo --skip-trust -p "<wake prompt>"`:
 - **Sandbox, from the first instruction:** the waker applies the seatbelt
   itself, around the whole Gemini process. The agent can write only the
-  workspace, its own temp dir and the cache directories.
+  workspace, its own temp dir, the user cache directory Gemini's profile
+  names, and `~/.cache/cardinal/sandboxed` (this plugin's hook state). The
+  waker's copy of the profile drops Gemini's `~/.npm` and `~/.cache` writes:
+  npm and other tools later run code from there, outside any sandbox.
   - Gemini's own `-s` is not passed: a seatbelt can't be nested. Instead
     `SANDBOX=sandbox-exec` is set, which tells Gemini it is already
     sandboxed (and tells this plugin's hooks where to keep their state).

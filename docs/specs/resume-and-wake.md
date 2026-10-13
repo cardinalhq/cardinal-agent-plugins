@@ -260,9 +260,12 @@ these hold:
   `permission_profile.network` (restricted only). An unknown shape refuses;
 - no Codex config widens workspace-write. The files checked are
   `~/.codex/config.toml`, `/etc/codex/config.toml` and
-  `/etc/codex/managed_config.toml`. Any of these refuses:
-  `sandbox_workspace_write`, `permissions`, permission profiles,
-  `default_permissions`, or a `writable_roots` / `network_access` key;
+  `/etc/codex/managed_config.toml`. Any of these refuses, bare or quoted
+  (`"sandbox_workspace_write"`, `'network_access'`; review 4 L-a):
+  `sandbox_workspace_write` (also inside a profile table), `permissions`,
+  permission profiles, `default_permissions`, or a `writable_roots` /
+  `network_access` key. This is a line scan, not a TOML parser, so the
+  launch also pins those settings on the command line (below);
 - every MCP server and plugin those configs declare can be named on the
   command line, so the launch can disable it (below);
 - no directory from `cwd` up to and including the git work-tree root holds
@@ -277,6 +280,8 @@ Launch, with the argv pinned and covered by golden tests:
 ```
 codex exec -s <the session's own sandbox: workspace-write|read-only> \
   -c approval_policy="never" -c 'web_search="disabled"' \
+  -c sandbox_workspace_write.network_access=false -c 'sandbox_workspace_write.writable_roots=[]' \
+  -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=false \
   -c 'mcp_servers.cardinal.tools.storyboard__read_investigation_events.approval_mode="approve"' \
   -c 'mcp_servers.cardinal.tools.storyboard__post_investigation_event.approval_mode="approve"' \
   -c 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", "storyboard__post_investigation_event"]' \
@@ -284,10 +289,47 @@ codex exec -s <the session's own sandbox: workspace-write|read-only> \
   -c 'plugins."<every non-Cardinal plugin>".enabled=false' \
   --disable apps --disable plugins --disable remote_plugin --disable image_generation \
   --disable computer_use --disable browser_use --disable browser_use_external --disable in_app_browser \
-  --disable multi_agent --disable tool_suggest --disable skill_mcp_dependency_install \
+  --disable multi_agent --disable tool_suggest --disable skill_mcp_dependency_install --disable hooks \
   resume <sid> "<wake prompt>"
 ```
 All flags go before `resume`.
+- **Hooks are disabled (review 4 N1).** Codex runs hooks outside its
+  sandbox with the workspace as cwd. A user hook (`make lint`, a script in
+  the repo) or a hook launcher that resolves into a dev checkout is
+  workspace code run unsandboxed, and a project `hooks.json` (C-8) is not
+  the only source. So the woken run has `--disable hooks`, and the
+  `features list` probe must show `hooks` off.
+  - **Trade-off:** during a woken run there is no evidence capture, no
+    telemetry, no owner-input capture, no investigation poller and no Stop
+    reminder. The decision is not delivered by a hook any more: the wake
+    prompt names the investigation and the read tool, and the agent reads
+    the decision with `storyboard__read_investigation_events` and
+    acknowledges with `storyboard__post_investigation_event`, the two MCP
+    tools the run keeps (Codex calls them itself; they are not hooks).
+  - The fallback the review allowed (refuse unless every `hooks.json` entry
+    is Cardinal-managed and resolves into the `~/.cardinal/wake/lib` copy)
+    was not needed.
+- **Sandbox settings pinned (review 4 L-a, L-b).** `network_access=false`
+  and `writable_roots=[]` hold whatever the config says (the config scan is
+  a line scan). `exclude_slash_tmp=true` takes the shared `/tmp` away.
+  `$TMPDIR` stays writable (`exclude_tmpdir_env_var=false`) and is the
+  wake's own new 0700 directory under `~/.cardinal/wake/tmp/`, removed when
+  the wake settles, so the run writes no temp location another process
+  shares. **Codex 0.162.1 accepts an unknown `-c` key silently** (a bogus
+  `sandbox_workspace_write.bogus_key=true` exits 0; a wrong type exits 1),
+  so the probe proves the values' types, not that the keys exist. The
+  rollout records all four in each turn's `sandbox_policy`, so the
+  post-run check reads them back: a woken turn with any writable root, or
+  `workspace-write` without `exclude_slash_tmp: true`, or a `slash_tmp`
+  write entry, disables Codex launch.
+- **Environment (review 4 N3).** The child's environment is an allow-list:
+  `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `SHELL`, `TERM=dumb`, the vetted
+  `PATH`, the private `TMPDIR`, and `OPENAI_API_KEY` (API-key auth) only.
+  Never `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*`, `*_BASE_URL`, proxies,
+  `SSL_CERT_FILE` / `CODEX_CA_CERTIFICATE`, `CODEX_HOME` or `CARDINAL_*`.
+  The probes run with the same list; the plist sets only `PATH` (launchd
+  supplies the rest). The Cardinal MCP server's key is in its
+  `http_headers` in `config.toml`, so it needs no variable.
 - **Why each part is needed (live proof H1).**
   - Under `approval_policy=never` an MCP call that needs approval is
     refused. The two Cardinal tools are therefore pre-approved
@@ -304,11 +346,40 @@ All flags go before `resume`.
     allowed.
 - **Fail closed on drift.** Feature names change between Codex versions.
   Before a launch, the waker runs `<codex> <the same flags> features list`.
-  That is not a session: it loads the config, validates the `-c` keys and
-  values, and applies the `--disable`s. It must exit 0, and every feature
-  above must be listed, not "removed", and off. Otherwise the decision is a
-  notification, never a launch with a partial lockdown. A success is cached
-  per codex binary identity and flag set.
+  That is not a session: it loads the config, validates the `-c` values'
+  types and the `--disable` names, and applies the `--disable`s. It must
+  exit 0, every feature above must be listed, not "removed", and off, and
+  **every feature still on must be in the tested set** (review 4 N4,
+  `CODEX_TESTED_ON`): a default-on feature the lockdown was not tested with
+  makes the decision a notification until it is reviewed. A success is
+  cached per codex binary fingerprint, flag set and Codex config contents.
+  - The tested set is what stays on under the full lockdown on codex-cli
+    0.162.1 (Homebrew cask, live, 2026-10-12): `api_key_model_discovery`,
+    `auth_elicitation`, `browser_annotation_api`,
+    `browser_use_full_cdp_access`, `code_mode_host`, `collaboration_modes`,
+    `compaction_image_budget`, `content_item_kinds`, `daemon_auto_start`,
+    `enable_request_compression`, `fast_mode`, `goals`, `guardian_approval`,
+    `guardian_reuse_parent_compaction`, `in_app_chat`, `in_app_dictation`,
+    `in_app_local_automation`, `in_app_updates`, `in_app_voice`,
+    `instant_interrupt`, `item_ids`, `mentions_v2`, `plugin_sharing`,
+    `realtime_conversation`, `resize_all_images`, `shell_snapshot`,
+    `shell_tool`, `skill_search`, `sleep_tool`, `sqlite`, `steer`,
+    `system_proxy_fallback`, `terminal_resize_reflow`,
+    `tool_call_mcp_elicitation`, `tool_search_always_defer_mcp_tools`,
+    `tui_app_server`, `ultrafast_mode`, `unbounded_connection_retries`,
+    `unified_exec`, `unified_exec_tty`, `unified_exec_zsh_fork`,
+    `view_image`, `workspace_dependencies`, `worktrees`,
+    `write_stdin_approval`. The H1 run (these on, `hooks` then still on)
+    used exactly the allow-listed tools. A user who turns another feature
+    on in their config gets notifications until it is added here.
+  - **MCP probe, every launch.** Then `<codex> <the same flags> mcp list
+    --json` must exit 0 with a JSON list in which no server but `cardinal`
+    is enabled (an entry without `enabled: false` counts as enabled). It
+    sees every layer Codex loads, including cloud-managed and MDM config the
+    waker doesn't parse. A missing subcommand, a non-JSON answer or another
+    enabled server is a notification. It is not cached: MCP layers can
+    change without the binary or `config.toml` changing. (Live, 0.162.1,
+    the user's config: rc 0, only `cardinal` enabled.)
 - It runs in the realpath of `cwd`, without `--profile`, `--dangerously-*`,
   `--ignore-*` or `--skip-git-repo-check`.
 - **MCP servers run outside the Codex sandbox.** With `approval_policy=never`,
@@ -325,7 +396,9 @@ All flags go before `resume`.
   turn must:
   - have `sandbox_policy.type` equal to the pinned mode;
   - run with network off;
-  - be able to write only inside `cwd`.
+  - have no writable root and, in `workspace-write`, `exclude_slash_tmp:
+    true` (the pins, read back);
+  - be able to write only inside `cwd` and its private `$TMPDIR`.
 
   Every tool call recorded must be on the allow-list: `exec`, `wait`,
   `request_user_input_async`, `clock.sleep`, `collaboration.*` and the two
@@ -347,15 +420,33 @@ every pass, so nothing it runs may be agent-writable:
   the script's directory are ignored.
 - **Launch binaries:** `codex`, `gemini`, and `node` when one of them is a
   node script must resolve outside git work trees under `$HOME`, approved
-  roots and temp dirs. Otherwise `enable --launch` refuses.
+  roots, temp dirs and version-manager shim dirs (`~/.asdf`,
+  `~/.local/share/mise`, `~/.mise`, `~/.nodenv`, `~/.volta`, `~/.nvm`,
+  `~/.pyenv`, `~/.rbenv`, `~/.fnm`, `~/.proto`; and `volta-shim`, `mise`,
+  `asdf` by name), checked on both the PATH entry and its realpath: a shim
+  picks its target from files in the cwd (`.tool-versions`, `.nvmrc`,
+  `package.json`), which the agent can write. Otherwise `enable --launch`
+  refuses.
   - A git tree outside `$HOME` isn't refused: Homebrew's own prefix is one,
     and no wake ever runs an agent there.
+  - **codex must be a native executable (review 4 N2).** Its realpath must
+    be Mach-O (thin or universal; ELF is also accepted so the tests run on
+    Linux, and macOS cannot execute it). A Homebrew cask
+    (`/opt/homebrew/Caskroom/codex/<v>/bin/codex`) or standalone binary is
+    used as is. An npm install's `codex.js` is resolved without running it:
+    its package must be `@openai/codex`, and the native binary is
+    `vendor/<triple>/codex/codex` in it (or in
+    `node_modules/@openai/codex-darwin-<arch>`), triple by
+    `platform.machine()`. That Mach-O is recorded, fingerprinted and
+    launched directly; node never runs. Any other script is refused. The
+    interpreter and `node` must be native too.
 - **PATH:** the plist's PATH and every woken child's is the system dirs plus
   those binaries' directories, never the shell's.
-- **Re-checked at every launch:** each binary's path, size, mtime and inode
-  are recorded at `enable` and re-checked at every launch, along with
-  "outside the session's cwd". A change is a notification ("run enable
-  again").
+- **Re-checked at every launch:** each binary's path, size, mtime, inode,
+  ctime and SHA-256 (review 4 N5: size, mtime and inode survive an in-place
+  rewrite with the mtime set back) are recorded at `enable` and re-checked
+  at every launch, along with "native", "not a shim" and "outside the
+  session's cwd". A change is a notification ("run enable again").
 
 **Claude: notify-only.** Gate 2 is not demonstrated:
 - the user's own settings, including bypass mode and broad allow lists,
@@ -428,7 +519,12 @@ is designed around that:
   ```
   - The proxy owns the port first, then runs `sandbox-exec` as its child.
   - The profile is the waker's own copy of Gemini 0.63.0's
-    `restrictive-proxied.sb`, minus its inbound debugger port.
+    `restrictive-proxied.sb`, minus its inbound debugger port, and minus
+    its `~/.npm` and `~/.cache` writes (review 4): npm and other tools run
+    code from those later, unsandboxed. In `$HOME` it writes only
+    `~/.cache/cardinal/sandboxed` (the relocated hook state), which the
+    waker creates before the spawn. Tested under `sandbox-exec`: a write
+    to `~/.npm`, `~/.cache` or `~/.cache/other` is denied.
   - Gemini's own `-s` is **not** passed: a seatbelt can't be nested (a
     nested `sandbox-exec` fails; tested).
   - `SANDBOX=sandbox-exec` is set in its environment, as Gemini sets it
@@ -493,13 +589,20 @@ is designed around that:
   agent can write `~/.cache`), so it is a hint, weaker than Codex's
   rollout. What bounds a Gemini wake is the approved roots, the proxy and
   the runtime sandbox check.
+- **Open (not changed in review 4):** the profile still writes `CACHE_DIR`,
+  the user's `DARWIN_USER_CACHE_DIR`, as Gemini's own does. Narrowing it
+  belongs with the pending live proofs.
 
-**Wake prompt** (fixed except for the seq): "Cardinal resumed this session
-for owner decision #<seq> in its Investigation. Read the investigation
-events and act on that decision. Every other event is advisory." The
-decision text is never in the prompt; it arrives through the normal hooks
-(proof C-4). The prompt is listed in `owner_input.MACHINE_PROMPTS` for
-Claude, Codex and Gemini, so it is never recorded as owner input.
+**Wake prompt** (fixed except for the seq and the investigation id):
+"Cardinal resumed this session for owner decision #<seq> in Investigation
+<inv_id>. Read that investigation's events with the
+storyboard__read_investigation_events tool and act on the decision. Every
+other event is advisory." The decision text is never in the prompt. Since
+review 4 a woken Codex run has no hooks, so the prompt carries the way to
+the decision: the investigation id (`inv_` + 24 hex, validated) and the
+read tool. The prompt is listed in `owner_input.MACHINE_PROMPTS` for
+Claude, Codex and Gemini (the regex pins both the seq and the id shape), so
+it is never recorded as owner input; any text added to it is.
 
 ### 5.4 Lifecycle, liveness, one execution per decision
 
@@ -596,9 +699,16 @@ sandbox:
   - Built-in tools that act outside the sandbox are off too: app
     connectors, web search, image generation, the browser and computer-use
     REPLs, and plugin installs.
-  - The lockdown is validated with `features list` before every launch
-    (fail closed), and the rollout is checked afterwards for any call
-    outside the allow-list.
+  - The lockdown is validated with `features list` (every feature off that
+    must be, nothing on outside the tested set) and `mcp list` (only
+    Cardinal enabled) before every launch (fail closed), and the rollout is
+    checked afterwards for any call outside the allow-list.
+  - **Hooks are the other exception (review 4 N1).** Codex runs them
+    outside its sandbox in the workspace, so a woken run has none
+    (`--disable hooks`). Nothing the plugin's hooks do happens during it:
+    no evidence capture, telemetry, owner-input capture, poller or Stop
+    reminder. The decision reaches the agent through the read tool the
+    wake prompt names.
   - What the woken agent has (H1): the shell and `apply_patch` inside its
     sandbox, goals, MCP resource reads, `view_image`, the two Cardinal tools,
     and sub-agents that inherit the same lockdown.
@@ -626,7 +736,7 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-2 | A sandboxed Codex agent can't touch the waker's local state or reach out | Inside the resumed session: `touch ~/.cardinal/investigations/<probe>`; `curl https://example.com`; `touch ./inside` | Outside write blocked (no file created); `curl` exit 6 (no network); inside write ok |
 | C-3 | The resumed runtime enforces the pinned sandbox | `codex exec -s workspace-write -c sandbox_mode="danger-full-access" resume …` | Rollout `turn_context`: `workspace-write`, `network_access: false`, approval `never`; the `-s` flag beats the `-c` override |
 | | | A profile asking for full access (`-c profile=…`) | Codex refuses legacy config profiles; profiles apply only via `--profile`, which the waker never passes |
-| C-4 | Hooks run on a headless resume (the delivery path exists) | `codex exec resume` with Cardinal hooks on | SessionStart bound the session (`source auto`, `is_author true`, `owner_decision` enabled in prod) |
+| C-4 | Hooks run on a headless resume (the delivery path exists) | `codex exec resume` with Cardinal hooks on | SessionStart bound the session (`source auto`, `is_author true`, `owner_decision` enabled in prod). **Superseded for Codex by review 4 N1:** a woken run has `--disable hooks`; delivery is the prompt plus `storyboard__read_investigation_events` (C-17) |
 | C-5 | Duplicate decisions can't start concurrent executions | Unit and multi-process tests in the C PR: two wakers racing the same seq; two decisions for one session; spawn error vs. child started | See the PR's test output |
 | C-6 | Claude enforces a wake sandbox | Not attempted. User settings apply to `claude -p --resume`, and bypass or allow lists can't be excluded without dropping the plugin | **Not demonstrated → Claude notify-only** |
 | C-7 | Gemini CLI enforces a wake sandbox that leaves Cardinal's state intact (gemini-cli 0.63.0) | Gemini's `-s` (macOS seatbelt) wraps the whole CLI process, hooks included. Its bundled profiles (`sandbox-macos-{permissive,restrictive,strict}-open.sb`, `TARGET_DIR` = workspace) were run directly: `touch ~/.cardinal/investigations/<probe>`; a write in the workspace; `curl https://example.com`. Inside the sandbox it also can't read its API key from the macOS keychain (exit 41) | Outside write "Operation not permitted" in all three (the hooks couldn't keep state, or `~/.cardinal` would have to be writable by the agent); inside write ok; `curl` 200 in all three. **The open profiles fail.** The launch is redesigned around the proxied profile and relocated hook state (§5.3 Gemini) |
@@ -639,6 +749,9 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-14 | Duplicate decisions and a second Gemini session can't start concurrent Gemini executions (port 8877 and the global lock) | Unit tests in the C PR; owner, live | Unit tests pass; **live pending** |
 | C-15 / H1 | A woken Codex run can use only its sandbox and the Cardinal server's read/post of investigation events | Owner, live (codex-cli 0.162.1; a throwaway workspace-write session; real config with the cardinal, cardinal-behavior, computer-use and node_repl servers and 13 plugins). (1) `enabled_tools` plus per-server and per-plugin `enabled=false`. (2) Adding `tools.<t>.approval_mode="approve"`. (3) Adding `--disable apps plugins remote_plugin image_generation computer_use browser_use browser_use_external in_app_browser multi_agent tool_suggest skill_mcp_dependency_install` and `web_search="disabled"`. (4) `--disable code_mode_host`. (5) A spawned sub-agent | (1) The allow-list works (slack gone) **but** the two Cardinal tools were refused ("requires approval, but approval policy is never"), and about 90 non-config tools stayed (app connectors, web, image gen, cua REPL, plugin install). (2) The read completed. (3) Tools are exactly `exec`, `wait`, `request_user_input_async`, `clock.sleep` and `collaboration.*`; inside exec: `apply_patch`, `exec_command`, `write_stdin`, goals, MCP resource reads, `view_image`, `clock__curr_time` and the two Cardinal tools. `ls` ran, and the Cardinal hooks still fired. (4) Every tool fails, so it is never disabled. (5) The sub-agent inherits the lockdown (`touch ~/probe` not permitted, no network, same tools). **Proven** → the argv in §5.3 |
 | C-16 | The waker's own `sandbox-exec -f <copy of restrictive-proxied>` around `gemini` (no `-s`, `SANDBOX` set) runs Gemini, delivers and acknowledges through the proxy, and Gemini starts no second sandbox | Locally: the shipped profile parses with the wake parameters (`/usr/bin/true` under it), and a nested `sandbox-exec` fails. Owner, live: a woken run | Profile and nesting: **proven locally**. End to end: **live pending** |
+| C-17 | With `--disable hooks`, a woken Codex run still gets the decision and acknowledges it | Owner, live (codex-cli 0.162.1): the §5.3 argv on a throwaway workspace-write session; the rollout shows no hook ran, a `storyboard__read_investigation_events` call and an acknowledgment of #seq | Locally, no session: `features list` with the flags shows `hooks false`. End to end: **live pending** |
+| C-18 | The pre-launch probes see what a launch would load | Locally (0.162.1, the owner's real config, no session): `<codex> <flags> features list` and `<codex> <flags> mcp list --json` | features: rc 0, every disabled feature off, 45 features on (the tested set). mcp: rc 0, a JSON list of `{name, enabled, disabled_reason, transport, auth_status, startup_timeout_sec, tool_timeout_sec}`; only `cardinal` enabled (plugin servers vanish with `--disable plugins`). **Proven locally** |
+| C-19 | The sandbox pins hold | Locally: `-c sandbox_workspace_write.{network_access=false, writable_roots=[], exclude_slash_tmp=true, exclude_tmpdir_env_var=false}` through `features list`. Owner, live: a woken turn's `sandbox_policy` | All accepted (rc 0), **but so is a bogus key**; a wrong type is rc 1. So existence is proven only by the rollout: a woken `workspace-write` turn must record `exclude_slash_tmp: true` and no `writable_roots` (enforced post-run). End to end: **live pending** |
 
 Still owed: an end-to-end manual run, in which the owner posts an addressed
 decision from the web for a stopped, sandboxed Codex CLI session and watches
@@ -669,6 +782,11 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
   - Review 3 regressions (`core/tests/test_session_wake_security.py`): each
     finding's case, including the reviewer's repro script. Each case failed
     on 9675269 except two positive controls.
+  - Review 4 regressions (`core/tests/test_session_wake_review2.py`): N1-N5,
+    L-a, L-b and the Gemini profile, the reviewer's five repro cases with
+    their assertions turned around. 29 of 33 failed on 3223d8d; the other
+    four are positive controls (a native codex accepted, a non-`@openai`
+    package refused, the plist's PATH-only env, an off unknown feature).
 - **Targeted pytest runs only.** CI is the gate.
 - **Manual (owner).** Run a Codex CLI session with `-s workspace-write`,
   quit it, and post an addressed decision from the web. Watch it resume,
@@ -697,7 +815,11 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
   directory), whose recorded sandbox could write outside its cwd, or whose
   Codex config widens workspace-write.
 - Giving a woken run any MCP server or tool beyond the Cardinal
-  investigation read/post.
+  investigation read/post, or any hook (Cardinal's included).
+- Launching a codex that is a script, a version-manager shim or anything
+  but the native binary that runs, or a Codex with a default-on feature
+  outside the tested set.
+- Passing a woken run any environment variable outside the allow-list.
 - Running the daemon or a woken run with an executable, an interpreter or a
   PATH entry an agent could write.
 - Waking on a decision older than 7 days, or twice on any decision.
@@ -761,3 +883,24 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
   - L1-L5: TIMED_OUT stays verifiable; crash-after-spawn recovery; the
     acknowledgment's disposition and principal; log rotation; the TUI
     liveness gap documented.
+- **Review 4 (second independent security review of PR #209 at 3223d8d:
+  BLOCK on gate 2).**
+  - N1: hooks run outside the sandbox with the workspace as cwd → the woken
+    run has `--disable hooks` (probed off); the prompt names the
+    investigation and the read tool. Trade-off: no hook-driven capture or
+    reminders during a woken run.
+  - N2: the workspace could choose the codex binary (shims, scripts) → the
+    native Mach-O only (npm's `codex.js` resolved to its vendor binary and
+    launched directly), shim dirs refused, the executed binary fingerprinted.
+  - N3: the child inherited the waker's environment → an allow-list, for the
+    child and the probes; the plist sets only PATH.
+  - N4: drift → a default-on feature outside the tested set refuses; an
+    `mcp list --json` probe before every launch must show only Cardinal.
+  - N5: the fingerprint survived an in-place rewrite → ctime and SHA-256.
+  - L-a: quoted keys slipped the config scan → detected, and network and
+    writable roots pinned on the command line.
+  - L-b: the shared `/tmp` → `exclude_slash_tmp=true`, a private 0700
+    `TMPDIR` per wake; the pins are read back from the rollout because
+    Codex accepts unknown `-c` keys.
+  - Gemini (off): the profile copy no longer writes `~/.npm` or `~/.cache`,
+    only `~/.cache/cardinal/sandboxed`.

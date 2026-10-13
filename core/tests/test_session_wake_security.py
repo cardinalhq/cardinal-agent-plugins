@@ -31,7 +31,8 @@ from cardinal_core import owner_input as oi
 from cardinal_core import paths
 from cardinal_core import session_wake as w
 
-from tests.test_session_wake import (INV, INV2, MEMBER, SID, Base, ack, binding, decision, meta, turn)
+from tests.test_session_wake import (DISABLES, INV, INV2, MACHO, MEMBER, PINS, PROMPT5, SID, Base, ack, binding,
+                                     decision, meta, turn)
 
 
 def mcp_call(server, tool):
@@ -89,7 +90,9 @@ class Enable(Base):
         self.assertEqual(code, 2, out)
         self.assertIn("inside a git work tree", out)
 
-    def test_enable_refuses_a_node_codex_whose_node_is_in_a_workspace(self):
+    def test_enable_refuses_a_node_codex_that_is_not_an_npm_install(self):
+        """N2: a codex script is never run through node: an npm install is resolved to its
+        native binary; anything else (here, with node inside a workspace) is refused."""
         self.codex.write_text("#!/usr/bin/env node\nconsole.log(1)\n")
         node = self.repo / "node_modules" / ".bin" / "node"
         node.parent.mkdir(parents=True)
@@ -97,7 +100,7 @@ class Enable(Base):
         node.chmod(0o755)
         code, out = self.cli("enable", "--launch", environ={"PATH": f"{node.parent}:{self.codex.parent}:/usr/bin"})
         self.assertEqual(code, 2, out)
-        self.assertIn("node script", out)
+        self.assertIn("not a native (Mach-O) executable", out)
 
     def test_enable_refuses_binaries_in_temp_dirs(self):
         with patch.object(w, "temp_dirs", lambda: (os.path.realpath(str(self.home.parent)),)):
@@ -263,7 +266,7 @@ class CodexBounds(Base):
         self.world.exit()
         self.world.t += 60
         self.run_pass()
-        self.assertIn("could write outside", w.disabled_reason(self.home, "codex"))
+        self.assertIn("extra writable roots", w.disabled_reason(self.home, "codex"))
 
 
 class Replay(Base):
@@ -355,7 +358,7 @@ class McpRestriction(Base):
         self.run_pass()
         expected = [
             os.path.realpath(str(self.codex)), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"',
-            "-c", 'web_search="disabled"',
+            "-c", 'web_search="disabled"', *PINS,
             "-c", 'mcp_servers.cardinal.tools.storyboard__read_investigation_events.approval_mode="approve"',
             "-c", 'mcp_servers.cardinal.tools.storyboard__post_investigation_event.approval_mode="approve"',
             "-c", 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", '
@@ -365,17 +368,13 @@ class McpRestriction(Base):
             "-c", "mcp_servers.node_repl.enabled=false",
             "-c", 'mcp_servers."slack bot".enabled=false',
             "-c", 'plugins."browser@openai-bundled".enabled=false',
-            "--disable", "apps", "--disable", "plugins", "--disable", "remote_plugin",
-            "--disable", "image_generation", "--disable", "computer_use", "--disable", "browser_use",
-            "--disable", "browser_use_external", "--disable", "in_app_browser", "--disable", "multi_agent",
-            "--disable", "tool_suggest", "--disable", "skill_mcp_dependency_install",
-            "resume", SID,
-            "Cardinal resumed this session for owner decision #5 in its Investigation. Read the investigation "
-            "events and act on that decision. Every other event is advisory."]
+            *DISABLES, "resume", SID, PROMPT5]
         self.assertEqual(self.world.launches[0]["argv"], expected)
-        # The same lockdown was validated first, with no session: `codex <flags> features list`.
-        self.assertEqual(self.world.probes, [[expected[0]] + expected[4:expected.index("resume")]
-                                             + ["features", "list"]])
+        # The same lockdown was validated first, with no session: `codex <flags> features list`, then
+        # `codex <flags> mcp list --json` (N4).
+        flags = expected[4:expected.index("resume")]
+        self.assertEqual(self.world.probes, [[expected[0]] + flags + ["features", "list"],
+                                             [expected[0]] + flags + ["mcp", "list", "--json"]])
 
     def test_servers_declared_another_way_refuse(self):
         for text in ("mcp_servers.x.command = \"/bin/sh\"\n", "mcp_servers = { x = { command = \"sh\" } }\n",
@@ -426,12 +425,15 @@ class Lockdown(Base):
         rows.update(over)
         return "\n".join(f"{k:<40} {v[0]:<18} {'true' if v[1] else 'false'}" for k, v in rows.items() if v) + "\n"
 
+    def feature_probes(self):
+        return [p for p in self.world.probes if p[-2:] == ["features", "list"]]
+
     def test_a_full_lockdown_launches_and_is_cached(self):
         self.run_pass()
         self.assertEqual(len(self.world.launches), 1)
-        self.assertEqual(len(self.world.probes), 1)
-        self.assertTrue(self.world.probes[0][-2:] == ["features", "list"])
+        self.assertEqual(len(self.feature_probes()), 1)
         self.assertNotIn("resume", self.world.probes[0])
+        self.assertEqual(len(self.world.probes), 2)    # + the mcp list, every launch
         self.world.events.append(decision(7))
         self.append_turns(SID, turn())
         self.world.exit()
@@ -440,7 +442,8 @@ class Lockdown(Base):
         self.world.t += w.LIVE_WINDOW + 1
         self.run_pass()
         self.assertEqual(len(self.world.launches), 2)
-        self.assertEqual(len(self.world.probes), 1)   # cached for this codex binary and flag set
+        self.assertEqual(len(self.feature_probes()), 1)   # cached for this codex binary, flag set and config
+        self.assertEqual(len(self.world.probes), 3)       # the mcp list is never cached
 
     def test_a_rejected_flag_or_key_is_notify_only(self):
         self.world.probe_answer = (1, "")
@@ -468,7 +471,7 @@ class Lockdown(Base):
 
     def test_a_new_codex_binary_is_probed_again(self):
         self.run_pass()
-        self.codex.write_text("#!/bin/sh\necho v2\n")
+        self.codex.write_bytes(MACHO + b"v2")
         real = os.path.realpath(str(self.codex))
         self.config(binaries={**w.read_config(self.home)["binaries"], real: w.fingerprint(real)})
         self.world.events.append(decision(7))
@@ -478,7 +481,7 @@ class Lockdown(Base):
         self.run_pass()
         self.world.t += w.LIVE_WINDOW + 1
         self.run_pass()
-        self.assertEqual(len(self.world.probes), 2)
+        self.assertEqual(len(self.feature_probes()), 2)
 
     def test_parse_features(self):
         out = w.parse_features("apps                                     stable             false\n"
@@ -602,8 +605,8 @@ class GeminiMachinePrompt(unittest.TestCase):
     """G1."""
 
     def test_the_wake_prompt_is_a_machine_prompt_on_gemini(self):
-        self.assertIsNone(oi.normalize_prompt("gemini", oi.wake_prompt(9)))
-        self.assertTrue(oi.is_machine_prompt("gemini", oi.wake_prompt(9)))
+        self.assertIsNone(oi.normalize_prompt("gemini", oi.wake_prompt(9, INV)))
+        self.assertTrue(oi.is_machine_prompt("gemini", oi.wake_prompt(9, INV)))
 
 
 class ExclusivePort(unittest.TestCase):

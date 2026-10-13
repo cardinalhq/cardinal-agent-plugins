@@ -242,10 +242,14 @@ HOME_PROTECTED = (".cardinal", ".codex", ".claude", ".gemini", ".cursor", "Libra
 # Codex config that would widen a woken session's workspace-write sandbox or
 # its network (any of these keys, in any config Codex loads, refuses the launch).
 CODEX_CONFIG_FILES = ("/etc/codex/config.toml", "/etc/codex/managed_config.toml")
+# Keys may be bare, "basic-quoted" or 'literal-quoted' (L-a); the launch also
+# pins network_access / writable_roots on the command line (CODEX_SANDBOX_PINS).
+_CODEX_WIDENING_KEYS = r"(?:sandbox_workspace_write|permissions|permission_profiles?|default_permissions)"
 _CODEX_WIDENING_RE = re.compile(
-    r"^\s*(?:\[\s*\[?\s*(?:sandbox_workspace_write|permissions|permission_profiles?|default_permissions)\b"
-    r"|(?:sandbox_workspace_write|permissions|permission_profiles?|default_permissions)\s*[.=]"
-    r"|.*\b(?:writable_roots|network_access)\s*=)")
+    r"^\s*(?:\[\s*\[?\s*[\"']?" + _CODEX_WIDENING_KEYS + r"[\"']?\s*[.\]]"
+    r"|\[.*\bsandbox_workspace_write\b"
+    r"|[\"']?" + _CODEX_WIDENING_KEYS + r"[\"']?\s*[.=]"
+    r"|.*[\"']?\b(?:writable_roots|network_access)\b[\"']?\s*=)")
 # The only MCP tools a woken Codex run may call: the Cardinal server's read
 # and post of its own Investigation's events (an acknowledgment is a post).
 # Every other server is disabled and every non-Cardinal plugin is disabled
@@ -263,10 +267,54 @@ CARDINAL_WAKE_TOOLS = ("storyboard__read_investigation_events", "storyboard__pos
 # MCP included, runs through functions.exec in this build. multi_agent does
 # not remove the collaboration.* tools; a spawned sub-agent inherits the same
 # sandbox and tool list (H1), so they are allowed.
+#
+# hooks (N1): Codex hooks run OUTSIDE the sandbox with cwd = the workspace (a
+# user hook like `make`, or a hook launcher resolving into a dev checkout, is
+# workspace code run unsandboxed), so a woken run has none. The decision is
+# not delivered by a hook: the wake prompt names the investigation and the
+# read tool. No evidence capture, telemetry, owner-input capture or Stop
+# reminders during a woken run.
 CODEX_DISABLED_FEATURES = ("apps", "plugins", "remote_plugin", "image_generation", "computer_use", "browser_use",
                            "browser_use_external", "in_app_browser", "multi_agent", "tool_suggest",
-                           "skill_mcp_dependency_install")
+                           "skill_mcp_dependency_install", "hooks")
 CODEX_WEB_SEARCH_OFF = 'web_search="disabled"'
+# Pinned on the command line whatever the config says (L-a, L-b): no
+# network, no extra writable roots, never the shared /tmp; $TMPDIR stays
+# writable and is this wake's private 0700 dir under ~/.cardinal/wake/tmp.
+# Codex 0.162.1 silently accepts unknown keys here, so the post-run check
+# reads them back from the woken turns' sandbox_policy (it records
+# network_access, writable_roots, exclude_slash_tmp, exclude_tmpdir_env_var).
+CODEX_SANDBOX_PINS = ("sandbox_workspace_write.network_access=false", "sandbox_workspace_write.writable_roots=[]",
+                      "sandbox_workspace_write.exclude_slash_tmp=true",
+                      "sandbox_workspace_write.exclude_tmpdir_env_var=false")
+# N4: the features left ON under the full lockdown on the vetted codex-cli
+# 0.162.1 (live proof H1: with these on, the woken run's tools were exactly
+# the allow-listed set). A feature on under the lockdown that is not in this
+# set (a new default in another Codex) refuses the launch until reviewed.
+CODEX_TESTED_ON = frozenset((
+    "api_key_model_discovery", "auth_elicitation", "browser_annotation_api", "browser_use_full_cdp_access",
+    "code_mode_host", "collaboration_modes", "compaction_image_budget", "content_item_kinds", "daemon_auto_start",
+    "enable_request_compression", "fast_mode", "goals", "guardian_approval", "guardian_reuse_parent_compaction",
+    "in_app_chat", "in_app_dictation", "in_app_local_automation", "in_app_updates", "in_app_voice",
+    "instant_interrupt", "item_ids", "mentions_v2", "plugin_sharing", "realtime_conversation", "resize_all_images",
+    "shell_snapshot", "shell_tool", "skill_search", "sleep_tool", "sqlite", "steer", "system_proxy_fallback",
+    "terminal_resize_reflow", "tool_call_mcp_elicitation", "tool_search_always_defer_mcp_tools", "tui_app_server",
+    "ultrafast_mode", "unbounded_connection_retries", "unified_exec", "unified_exec_tty", "unified_exec_zsh_fork",
+    "view_image", "workspace_dependencies", "worktrees", "write_stdin_approval"))
+# N2: version-manager shims pick the real binary from files in the cwd
+# (.tool-versions, .nvmrc, package.json "volta"), which an agent can write;
+# none of the daemon's executables may resolve through them.
+SHIM_DIRS = (".asdf", ".local/share/mise", ".mise", ".nodenv", ".volta", ".nvm", ".pyenv", ".rbenv", ".fnm",
+             ".local/share/fnm", ".proto", ".local/share/aquaproj-aqua")
+SHIM_BINARIES = frozenset(("volta-shim", "mise", "asdf", "proto-shim", "rtx"))
+# Mach-O (32/64-bit, both byte orders; universal) and ELF (Linux, where the
+# tests run; macOS cannot execute it, so it gains nothing there).
+_NATIVE_MAGICS = frozenset((b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+                            b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\x7fELF"))
+# N3: the only variables a woken run (and the codex probe) inherits; the rest
+# (NODE_OPTIONS, NODE_PATH, DYLD_*, *_BASE_URL, proxies, CARDINAL_*...) never.
+CHILD_ENV_KEEP = ("USER", "LOGNAME", "LANG", "SHELL")
+CODEX_AUTH_ENV = ("OPENAI_API_KEY",)
 # The only tool calls a woken run's rollout may hold (response_item calls:
 # (type, namespace, name); namespace None also matches "functions"). Calls
 # made inside functions.exec (apply_patch, exec_command, the Cardinal MCP
@@ -316,8 +364,6 @@ CODEX_ORIGINATORS = frozenset({"codex_exec", "codex_cli_rs"})
 CODEX_SOURCES = frozenset({"exec", "cli"})
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")  # fullmatch
 APPROVAL_NEVER = 'approval_policy="never"'
-STRIPPED_ENV = frozenset({"CODEX_HOME", "CODEX_SESSION_ID", "OPENAI_CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID",
-                          "CLAUDE_SESSION_ID"})
 _LINK_RE = re.compile(r"https://[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?/[A-Za-z0-9._~/%?=&#:+-]{0,300}")  # fullmatch
 
 PS = "/bin/ps"
@@ -519,12 +565,67 @@ def unsafe_location(path: str, home: Path, roots: List[str], *, allow_home: bool
 
 
 def fingerprint(path: str) -> Optional[list]:
-    """[size, mtime_ns, inode] of the file `path` resolves to, or None."""
+    """[size, mtime_ns, inode, ctime_ns, sha256] of the file `path` resolves
+    to, or None (N5: size / mtime / inode alone survive an in-place rewrite
+    with the mtime set back; ctime and the content hash do not)."""
+    import hashlib
     try:
         st = os.stat(path)
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
     except OSError:
         return None
-    return [st.st_size, st.st_mtime_ns, st.st_ino]
+    return [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, h.hexdigest()]
+
+
+def is_native_executable(path: str) -> bool:
+    """`path` is a native executable (Mach-O, thin or universal; ELF where
+    tests run), never a script that picks or spawns another binary."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) in _NATIVE_MAGICS
+    except OSError:
+        return False
+
+
+def shim_problem(path: str, home: Path) -> Optional[str]:
+    """Why `path` (as found, or resolved) is a version-manager shim, or None."""
+    home_real = os.path.realpath(str(home))
+    for p in (os.path.abspath(path), os.path.realpath(path)):
+        for d in SHIM_DIRS:
+            if _within(p, os.path.join(home_real, d)) or _within(p, os.path.join(str(home), d)):
+                return f"{p} is a version-manager shim (~/{d}), which picks its target from files in the cwd"
+    if os.path.basename(os.path.realpath(path)) in SHIM_BINARIES:
+        return f"{os.path.realpath(path)} is a version-manager shim"
+    return None
+
+
+def npm_codex_native(script: str) -> Optional[str]:
+    """The Mach-O an npm install's codex.js would spawn, resolved without
+    running it (…/@openai/codex/bin/codex.js -> …/vendor/<triple>/codex/codex,
+    or the per-platform optional package's), or None."""
+    import platform
+    p = Path(os.path.realpath(script))
+    if p.name != "codex.js" or p.parent.name != "bin":
+        return None
+    pkg = p.parent.parent
+    if _read_json(pkg / "package.json").get("name") != "@openai/codex":
+        return None
+    triples = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+    if platform.machine() != "arm64":
+        triples.reverse()
+    candidates = []
+    for triple in triples:
+        arch = "arm64" if triple.startswith("aarch64") else "x64"
+        candidates += [pkg / "vendor" / triple / "codex" / "codex",
+                       pkg / "node_modules" / "@openai" / f"codex-darwin-{arch}" / "vendor" / triple / "codex"
+                       / "codex"]
+    for c in candidates:
+        if c.is_file() and is_native_executable(str(c)):
+            return os.path.realpath(str(c))
+    return None
 
 
 def needs_node(path: str) -> bool:
@@ -545,7 +646,9 @@ def pick_python(home: Path, roots: List[str]) -> Tuple[Optional[str], str]:
     for candidate in (sys.executable, SYSTEM_PYTHON):
         if not candidate or not os.access(candidate, os.X_OK):
             continue
-        why = unsafe_location(candidate, home, roots, allow_home=False)
+        why = (unsafe_location(candidate, home, roots, allow_home=False) or shim_problem(candidate, home)
+               or (None if is_native_executable(os.path.realpath(candidate))
+                   else f"{candidate} is not a native (Mach-O) executable"))
         if why is None:
             return os.path.realpath(candidate), ""
         reasons.append(why)
@@ -561,7 +664,9 @@ def daemon_path(*dirs: Optional[str]) -> str:
 def binaries_problem(config: dict, home: Path, cwd: Optional[str] = None) -> Optional[str]:
     """Why the vetted executables (the interpreter, the launch binaries,
     node) cannot be trusted now, or None: each must still be the file enable
-    vetted (same path, size, mtime, inode), outside every unsafe location,
+    vetted (same path, size, mtime, inode, ctime, sha256), outside every
+    unsafe location and version-manager shim, the interpreter and codex
+    Mach-O executables (never a script that picks or spawns another binary),
     and outside the woken session's working directory."""
     binaries = config.get("binaries") if isinstance(config.get("binaries"), dict) else {}
     if not binaries or not config.get("python") or not config.get("path_env"):
@@ -570,9 +675,13 @@ def binaries_problem(config: dict, home: Path, cwd: Optional[str] = None) -> Opt
     for path, fp in binaries.items():
         if fingerprint(path) != fp or os.path.realpath(path) != path:
             return f"{path} changed since cardinal-wake enable (run it again)"
-        why = unsafe_location(path, home, roots, allow_home=(path != config.get("python")))
+        why = unsafe_location(path, home, roots, allow_home=(path != config.get("python"))) \
+            or shim_problem(path, home)
         if why:
             return why
+        native = (config.get("python"), config.get("codex_path"), config.get("node_path"))
+        if path in native and not is_native_executable(path):
+            return f"{path} is not a native (Mach-O) executable"
         if cwd and _within(path, os.path.realpath(cwd)):
             return f"{path} is inside the session's working directory"
     return None
@@ -1073,14 +1182,22 @@ def _turn(rec: dict) -> Tuple[Any, Any]:
 _SPECIAL_WRITABLE = ("slash_tmp", "tmpdir")
 
 
-def turn_policy_problem(payload: dict, cwd_real: str) -> Optional[str]:
+def turn_policy_problem(payload: dict, cwd_real: str, *, strict: bool = False) -> Optional[str]:
     """Why one turn's recorded sandbox could write outside the session's
     working directory (realpath'd) or reach the network, or None. Checked:
     sandbox_policy.writable_roots; the file-system entries of
     file_system_sandbox_policy and permission_profile.file_system (every
     non-read entry a path inside cwd, or Codex's own /tmp / $TMPDIR);
-    permission_profile.network (restricted only). Unknown shapes refuse."""
+    permission_profile.network (restricted only). Unknown shapes refuse.
+    strict (a woken turn, under CODEX_SANDBOX_PINS): no writable root at
+    all, never the shared /tmp (workspace-write must record
+    exclude_slash_tmp true); $TMPDIR (the wake's private dir) only."""
     policy = payload.get("sandbox_policy") if isinstance(payload.get("sandbox_policy"), dict) else {}
+    if strict:
+        if policy.get("writable_roots") not in (None, []):
+            return "a woken turn had extra writable roots despite the pinned writable_roots=[]"
+        if policy.get("type") == "workspace-write" and policy.get("exclude_slash_tmp") is not True:
+            return "a woken turn could write the shared /tmp despite the pinned exclude_slash_tmp"
     writes: List[str] = []
     roots = policy.get("writable_roots")
     if roots is not None:
@@ -1114,6 +1231,8 @@ def turn_policy_problem(payload: dict, cwd_real: str) -> Optional[str]:
                 writes.append(target["path"])
             elif target.get("type") == "special" and isinstance(target.get("value"), dict) \
                     and target["value"].get("kind") in _SPECIAL_WRITABLE:
+                if strict and target["value"].get("kind") == "slash_tmp":
+                    return "a woken turn could write the shared /tmp"
                 continue
             else:
                 return "a turn could write a location the waker does not recognize"
@@ -1429,7 +1548,7 @@ def verify_after(home: Path, sid: str, snapshot: dict, pinned: str, *, require_t
                     return "the woken run had network access"
                 if cwd is None:
                     return "the woken run's working directory is unknown"
-                why = turn_policy_problem(_payload(rec), cwd)
+                why = turn_policy_problem(_payload(rec), cwd, strict=True)
                 if why:
                     return f"the woken run: {why}"
     except (OSError, Unverifiable) as e:
@@ -1445,6 +1564,8 @@ def codex_lockdown_flags(overrides: Iterable[str] = ()) -> List[str]:
     value) and --disable per CODEX_DISABLED_FEATURES. The same flags are
     validated beforehand with `codex ... features list` (codex_lockdown_problem)."""
     flags = ["-c", APPROVAL_NEVER, "-c", CODEX_WEB_SEARCH_OFF]
+    for pin in CODEX_SANDBOX_PINS:
+        flags += ["-c", pin]
     for value in overrides:
         if not (isinstance(value, str) and re.match(r"^(mcp_servers|plugins)\.", value)):
             raise ValueError(f"not an MCP restriction: {value!r}")
@@ -1454,17 +1575,19 @@ def codex_lockdown_flags(overrides: Iterable[str] = ()) -> List[str]:
     return flags
 
 
-def codex_argv(codex_path: str, sandbox: str, sid: str, seq: int, overrides: Iterable[str] = ()) -> List[str]:
+def codex_argv(codex_path: str, sandbox: str, sid: str, seq: int, overrides: Iterable[str] = (),
+               investigation_id: str = "") -> List[str]:
     """The pinned launch (§5.3); nothing else is ever passed: the session's
     own sandbox and the lockdown (codex_lockdown_flags), all before
-    `resume`."""
+    `resume`; the prompt names the decision and its investigation."""
     if not (isinstance(codex_path, str) and os.path.isabs(codex_path)):
         raise ValueError("codex must be an absolute path")
     if sandbox not in SANDBOX_MODES:
         raise ValueError(f"not a wake sandbox: {sandbox!r}")
     if not UUID_RE.fullmatch(sid or ""):
         raise ValueError(f"not a Codex session id: {sid!r}")
-    return [codex_path, "exec", "-s", sandbox, *codex_lockdown_flags(overrides), "resume", sid, wake_prompt(seq)]
+    return [codex_path, "exec", "-s", sandbox, *codex_lockdown_flags(overrides), "resume", sid,
+            wake_prompt(seq, investigation_id)]
 
 
 def parse_features(text: str) -> dict:
@@ -1487,56 +1610,120 @@ def codex_lockdown_problem(home: Path, config: dict, system: "System", rt: Optio
     notification, never a launch with a partial lockdown), or None. Runs
     `<codex> <lockdown flags> features list` (no session; the user's config
     is loaded and the -c keys and feature names validated): it must exit 0,
-    and every CODEX_DISABLED_FEATURES feature must be listed, not removed,
-    and off. A success is cached per codex binary identity and flag set."""
+    every CODEX_DISABLED_FEATURES feature must be listed, not removed, and
+    off, and every feature still on must be in CODEX_TESTED_ON (N4: a new
+    default-on feature refuses until reviewed). A success is cached per
+    codex binary identity, flag set and Codex config contents. Then, every
+    time (MCP layers can change without either), `<codex> <lockdown flags>
+    mcp list --json` must list no enabled server but the Cardinal one (this
+    also sees cloud-managed and MDM layers the waker does not parse)."""
     import hashlib
     codex = config.get("codex_path")
     if not codex:
         return "codex was not found when wake was enabled"
     overrides = (rt.extra.get("mcp_overrides") if rt is not None else None) or []
     try:
-        argv = [codex, *codex_lockdown_flags(overrides), "features", "list"]
+        flags = codex_lockdown_flags(overrides)
     except ValueError as e:
         return str(e)
-    key = hashlib.sha256(json.dumps([os.path.realpath(codex), fingerprint(codex), argv]).encode()).hexdigest()
+    argv = [codex, *flags, "features", "list"]
+    texts, why = _codex_config_texts(home)
+    if why:
+        return why
+    key = hashlib.sha256(json.dumps([os.path.realpath(codex), fingerprint(codex), argv, texts]).encode()).hexdigest()
     cache = _read_json(codex_probe_path(home))
-    if cache.get(key) is True:
-        return None
+    if cache.get(key) is not True:
+        try:
+            rc, out = system.run_probe(argv, config.get("path_env"))
+        except Exception as e:
+            return f"codex could not validate the lockdown ({type(e).__name__})"
+        if rc != 0:
+            return "codex rejected the lockdown flags (an unknown feature or config key): no launch"
+        features = parse_features(out)
+        for name in CODEX_DISABLED_FEATURES:
+            got = features.get(name)
+            if got is None:
+                return f"codex does not know the feature {name!r}, so the lockdown would be partial: no launch"
+            stage, enabled = got
+            if stage == "removed" or enabled:
+                return f"codex cannot disable the feature {name!r} ({stage}): no launch"
+        untested = sorted(n for n, (stage, enabled) in features.items() if enabled and n not in CODEX_TESTED_ON)
+        if untested:
+            return ("codex has features on that the lockdown was not tested with (" + ", ".join(untested)[:200]
+                    + "): no launch until they are reviewed")
+        with contextlib.suppress(OSError, ValueError):
+            _private_dir(wake_dir(home))
+            ie.write_json(codex_probe_path(home), {key: True})
     try:
-        rc, out = system.run_probe(argv, config.get("path_env"))
+        rc, out = system.run_probe([codex, *flags, "mcp", "list", "--json"], config.get("path_env"))
     except Exception as e:
-        return f"codex could not validate the lockdown ({type(e).__name__})"
-    if rc != 0:
-        return "codex rejected the lockdown flags (an unknown feature or config key): no launch"
-    features = parse_features(out)
-    for name in CODEX_DISABLED_FEATURES:
-        got = features.get(name)
-        if got is None:
-            return f"codex does not know the feature {name!r}, so the lockdown would be partial: no launch"
-        stage, enabled = got
-        if stage == "removed" or enabled:
-            return f"codex cannot disable the feature {name!r} ({stage}): no launch"
-    with contextlib.suppress(OSError, ValueError):
-        _private_dir(wake_dir(home))
-        ie.write_json(codex_probe_path(home), {key: True})
+        return f"codex could not list its MCP servers ({type(e).__name__})"
+    try:
+        servers = json.loads(out) if rc == 0 else None
+    except ValueError:
+        servers = None
+    if not isinstance(servers, list) or not all(isinstance(s, dict) for s in servers):
+        return "codex could not list its MCP servers under the lockdown: no launch"
+    others = sorted(str(s.get("name"))[:40] for s in servers
+                    if s.get("enabled") is not False and s.get("name") != CARDINAL_MCP_SERVER)
+    if others:
+        return "MCP servers other than Cardinal stay enabled under the lockdown (" + ", ".join(others)[:200] + ")"
     return None
 
 
 def run_probe(argv: List[str], path_env: Optional[str]) -> Tuple[int, str]:
     """Run a read-only codex command (never a session); (exit code, stdout)."""
     r = subprocess.run(argv, capture_output=True, text=True, timeout=CODEX_PROBE_TIMEOUT, check=False,
-                       stdin=subprocess.DEVNULL, env=child_env(os.environ, path_env))
+                       stdin=subprocess.DEVNULL, env=child_env(os.environ, path_env, extra=CODEX_AUTH_ENV))
     return r.returncode, r.stdout
 
 
-def child_env(environ: Mapping[str, str], path_env: Optional[str] = None) -> dict:
-    """The woken child's environment: the waker's, without CARDINAL_* (no
-    switch may turn the plugin's hooks, poller or storyboard off, or join
-    another investigation), CODEX_HOME or a parent session's id; PATH is the
-    daemon's vetted one (path_env), never the user's shell PATH."""
-    env = {k: v for k, v in environ.items() if not k.startswith("CARDINAL_") and k not in STRIPPED_ENV}
+def child_env(environ: Mapping[str, str], path_env: Optional[str] = None, *, home: Optional[Path] = None,
+              tmpdir: Optional[str] = None, extra: Iterable[str] = ()) -> dict:
+    """The woken child's environment, from an explicit allow-list (N3):
+    HOME, USER, LOGNAME, LANG, LC_*, SHELL, TERM=dumb, PATH = the daemon's
+    vetted path_env, TMPDIR = this wake's private dir, plus only the named
+    `extra` variables (codex: OPENAI_API_KEY for API-key auth). Nothing else
+    is inherited: no NODE_OPTIONS / NODE_PATH / DYLD_* loader variables, no
+    *_BASE_URL, proxy or CA overrides, no CARDINAL_* switch, CODEX_HOME or
+    parent session id."""
+    env = {k: environ[k] for k in CHILD_ENV_KEEP if environ.get(k)}
+    env.update({k: v for k, v in environ.items() if k.startswith("LC_") and re.fullmatch(r"LC_[A-Z]{1,20}", k)})
+    env["HOME"] = str(home) if home is not None else (environ.get("HOME") or str(Path.home()))
+    env["TERM"] = "dumb"
     env["PATH"] = path_env or daemon_path()
+    if tmpdir:
+        env["TMPDIR"] = tmpdir
+    for k in extra:
+        if environ.get(k):
+            env[k] = environ[k]
     return env
+
+
+def codex_prepare(home: Path, rt: Runtime, config: dict, log: Path, system: "System") -> Optional[str]:
+    """Right before a Codex spawn: this wake's private TMPDIR (L-b), a new
+    0700 directory ~/.cardinal/wake/tmp/<wake id>-<random>, never the shared
+    /tmp or the user's $TMPDIR; removed when the wake settles."""
+    import tempfile
+    try:
+        base = wake_dir(home) / "tmp"
+        _private_dir(wake_dir(home))
+        _private_dir(base)
+        d = tempfile.mkdtemp(prefix=log.stem + "-", dir=str(base))
+        os.chmod(d, 0o700)
+    except OSError as e:
+        return f"no private temp directory ({type(e).__name__})"
+    rt.extra["tmp_dir"] = os.path.realpath(d)
+    return None
+
+
+def remove_tmpdir(home: Path, path: Any) -> None:
+    """Remove a finished wake's private TMPDIR (only one under ~/.cardinal/wake/tmp)."""
+    if not (isinstance(path, str) and os.path.isabs(path)):
+        return
+    base = os.path.realpath(str(wake_dir(home) / "tmp"))
+    if os.path.dirname(os.path.realpath(path)) == base:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1933,6 +2120,10 @@ def gemini_prepare(home: Path, rt: Runtime, config: dict, log: Path, system: "Sy
     if not cache:
         return "the user cache directory (getconf DARWIN_USER_CACHE_DIR) is unknown"
     try:
+        # The profile grants writes under ~/.cache/cardinal/sandboxed only (not ~/.cache), so it
+        # must exist before the sandbox starts.
+        boxed = paths.sandboxed_home(paths.unsandboxed_home(Path(home)))
+        boxed.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = tempfile.mkdtemp(prefix="cardinal-wake-gemini-", dir=os.path.realpath(tempfile.gettempdir()))
         os.chmod(tmp, 0o700)
     except OSError as e:
@@ -1975,7 +2166,8 @@ def gemini_argv(gemini_path: str, rt: Runtime, sid: str, seq: int) -> List[str]:
     sandbox = [SANDBOX_EXEC] + [a for p in params for a in ("-D", p)] + ["-f", x["profile"]]
     return ([x["python"], "-I", x["proxy"], "--log", x["log"], "--port", str(GEMINI_PROXY_PORT), *hosts, "--"]
             + sandbox
-            + [gemini_path, "--resume", ident, "--approval-mode", "yolo", "--skip-trust", "-p", wake_prompt(seq)])
+            + [gemini_path, "--resume", ident, "--approval-mode", "yolo", "--skip-trust", "-p",
+               wake_prompt(seq, x.get("investigation_id"))])
 
 
 def gemini_env(environ: Mapping[str, str], config: dict, home: Path, log: Path, rt: Runtime) -> dict:
@@ -1985,7 +2177,7 @@ def gemini_env(environ: Mapping[str, str], config: dict, home: Path, log: Path, 
     home, and Gemini does not start a sandbox of its own inside ours); the
     proxy in HTTPS_PROXY / HTTP_PROXY; TMPDIR = this wake's temp dir; the
     user's GEMINI_API_KEY (the sandbox cannot read ~/.gemini/.env)."""
-    env = {k: v for k, v in child_env(environ, config.get("path_env")).items()
+    env = {k: v for k, v in child_env(environ, config.get("path_env"), home=home).items()
            if k not in GEMINI_SANDBOX_ENV and not k.startswith(GEMINI_SANDBOX_ENV_PREFIXES)}
     env["SANDBOX"] = paths.SEATBELT_SANDBOX
     for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
@@ -2136,8 +2328,13 @@ GEMINI_LAUNCH_TEXT = (
 LAUNCHERS = {
     CODEX: Launcher(CODEX, "codex", lambda home, sid, rt, config: codex_eligibility(home, sid, rt),
                     lambda exe, rt, sid, seq: codex_argv(exe, rt.sandbox or "", sid, seq,
-                                                         rt.extra.get("mcp_overrides") or ()),
-                    rollout_offsets, verify_after, LAUNCH_TEXT, preflight=codex_lockdown_problem),
+                                                         rt.extra.get("mcp_overrides") or (),
+                                                         rt.extra.get("investigation_id", "")),
+                    rollout_offsets, verify_after, LAUNCH_TEXT, preflight=codex_lockdown_problem,
+                    prepare=codex_prepare,
+                    env=lambda environ, config, home, log, rt: child_env(
+                        environ, config.get("path_env"), home=home, tmpdir=rt.extra.get("tmp_dir"),
+                        extra=CODEX_AUTH_ENV)),
     GEMINI: Launcher(GEMINI, "gemini", gemini_eligibility, gemini_argv, gemini_snapshot, gemini_verify_after,
                      GEMINI_LAUNCH_TEXT, env=gemini_env, preflight=gemini_preflight, prepare=gemini_prepare,
                      after_spawn=gemini_verify_spawn, exclusive=True, proven=GEMINI_LAUNCH_PROVEN),
@@ -2564,7 +2761,11 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
             write_ledger(home, sid, led, now)
         wake_hold(home, sid, state or home)
         log = logs_dir(home) / f"{sid}-{seq}-{int(now)}.log"
+        rt.extra["investigation_id"] = inv
         problem = launcher.prepare(home, rt, config, log, system)
+        if rt.extra.get("tmp_dir"):
+            entry["tmp_dir"] = rt.extra["tmp_dir"]
+            write_ledger(home, sid, led, now)
         argv = None if problem else launcher.argv(config.get(launcher.executable), rt, sid, seq)
         env = None if problem else launcher.env(system.environ, config, home, log, rt)
         for _ in range(0 if problem else 1 + SPAWN_RETRIES):
@@ -2595,6 +2796,7 @@ def claim_and_launch(home: Path, sid: str, binding: dict, seq: int, rt: Runtime,
         transition(entry, FAILED, system.now(), f"could not prepare {launcher.binary}: {problem}" if problem
                    else f"could not start {launcher.binary} ({entry['spawn_errors']} spawn errors)")
         write_ledger(home, sid, led, system.now())
+        remove_tmpdir(home, entry.get("tmp_dir"))
     _notify(system, binding, sid, FAILED, f"could not start {launcher.binary} for owner decision #{seq}", rt.kind,
             origin)
     _report(system, report, sid, seq, "failed", problem or "spawn errors")
@@ -2641,7 +2843,7 @@ def _settle_claimed(home, sid, led, entry, binding, system, report) -> None:
         return
     # Our child's argv names the session and carries this decision's wake prompt (a per-decision marker a
     # session the user resumed by hand does not have).
-    marker = f"owner decision #{entry.get('seq')} in its Investigation"
+    marker = f"owner decision #{entry.get('seq')} in Investigation {entry.get('investigation_id')}"
     found = [pid for pid, args in table if pid != os.getpid() and sid in args and marker in args]
     if found:
         pid = found[0]
@@ -2719,6 +2921,7 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
         words = f"the run for owner decision #{seq} ended without an acknowledgment (not retried)"
     write_ledger(home, sid, led, now)
     trim_log(child.get("log"))
+    remove_tmpdir(home, entry.get("tmp_dir"))
     _notify(system, binding, sid, entry["state"], words, runtime, origin)
     _report(system, report, sid, seq, entry["state"].lower(), entry.get("reason", ""))
 
@@ -2882,25 +3085,36 @@ def enable(home: Path, *, launch: bool, environ: Mapping[str, str], launchctl: C
     for launcher in LAUNCHERS.values():   # each launchable runtime's binary, resolved now
         found = shutil.which(launcher.binary, path=user_path)
         real = os.path.realpath(found) if found else None
-        if real and unsafe_location(real, home, roots):
-            if launch:
-                out(f"cardinal-wake: {launcher.binary} resolves to an unsafe place: "
-                    f"{unsafe_location(real, home, roots)}. Install it outside your repositories and temp dirs.")
-                return 2
-            real = None
-        if real and needs_node(real):
+        problem = (unsafe_location(real, home, roots) or shim_problem(found, home)) if real else None
+        node_real = None
+        if real and not problem and launcher.runtime == CODEX and not is_native_executable(real):
+            # N2: codex must be the Mach-O it runs; an npm install's codex.js is resolved to the
+            # native binary it would spawn, launched directly; any other script is refused.
+            native = npm_codex_native(real) if needs_node(real) else None
+            if native:
+                real = native
+                problem = unsafe_location(native, home, roots) or shim_problem(native, home)
+            else:
+                problem = f"{real} is not a native (Mach-O) executable (a script may pick or spawn another binary)"
+        if real and not problem and needs_node(real):
             node = shutil.which("node", path=user_path)
             node_real = os.path.realpath(node) if node else None
-            problem = "node was not found" if not node_real else unsafe_location(node_real, home, roots)
+            problem = ("node was not found" if not node_real else
+                       unsafe_location(node_real, home, roots) or shim_problem(node, home)
+                       or (None if is_native_executable(node_real)
+                           else f"{node_real} is not a native (Mach-O) executable"))
             if problem:
-                if launch:
-                    out(f"cardinal-wake: {launcher.binary} is a node script and {problem}.")
-                    return 2
-                real = None
-            else:
-                node_path = node_real
-                binaries[node_real] = fingerprint(node_real)
-                dirs.append(os.path.dirname(node_real))
+                problem = f"{launcher.binary} is a node script and {problem}"
+        if problem:
+            if launch and launcher.proven:
+                out(f"cardinal-wake: {launcher.binary} cannot be trusted: {problem}. Install it outside your "
+                    "repositories, temp dirs and version-manager shims.")
+                return 2
+            real, node_real = None, None
+        if node_real:
+            node_path = node_real
+            binaries[node_real] = fingerprint(node_real)
+            dirs.append(os.path.dirname(node_real))
         executables[launcher.executable] = real
         if real:
             binaries[real] = fingerprint(real)

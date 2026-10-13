@@ -35,7 +35,8 @@ from cardinal_core import paths
 from cardinal_core import session_wake as w
 from cardinal_core.evidence_promote import no_redirect_opener
 
-from tests.test_session_wake import MEMBER, SECRET, Base, binding, decision
+from cardinal_core import owner_input as oi
+from tests.test_session_wake import INV, MEMBER, SECRET, Base, binding, decision
 
 GSID = "8a6e4964-0d1f-4c55-9f0e-2b7c1d3a4e5f"
 BOXED = {"SANDBOX": "sandbox-exec"}
@@ -207,8 +208,7 @@ class Launch(GeminiBase):
             "-D", "INCLUDE_DIR_3=/dev/null", "-D", "INCLUDE_DIR_4=/dev/null",
             "-f", str(w.seatbelt_profile(self.home)),
             real(str(self.gemini)), "--resume", GSID, "--approval-mode", "yolo", "--skip-trust", "-p",
-            "Cardinal resumed this session for owner decision #5 in its Investigation. Read the investigation "
-            "events and act on that decision. Every other event is advisory."])
+            oi.wake_prompt(5, INV)])
         self.assertEqual(got["cwd"], real(str(self.grepo)))
         tail = got["argv"][got["argv"].index("--resume") - 1:]
         for bad in ("-s", "--sandbox", "--yolo", "-y", "--sandbox-image", "--include-directories"):

@@ -39,6 +39,20 @@ ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "CARDINAL_STORYBOARD_SES
        "CODEX_HOME": "/tmp/elsewhere", "CODEX_SESSION_ID": "parent", "LANG": "en_US.UTF-8"}
 
 
+# A native-executable header (N2: codex must be one, never a script).
+MACHO = b"\xcf\xfa\xed\xfe" + b"\0" * 60
+PROMPT5 = ("Cardinal resumed this session for owner decision #5 in Investigation " + INV + ". Read that "
+           "investigation's events with the storyboard__read_investigation_events tool and act on the decision. "
+           "Every other event is advisory.")
+PINS = ["-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.writable_roots=[]",
+        "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+        "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=false"]
+DISABLES = ["--disable", "apps", "--disable", "plugins", "--disable", "remote_plugin",
+            "--disable", "image_generation", "--disable", "computer_use", "--disable", "browser_use",
+            "--disable", "browser_use_external", "--disable", "in_app_browser", "--disable", "multi_agent",
+            "--disable", "tool_suggest", "--disable", "skill_mcp_dependency_install", "--disable", "hooks"]
+
+
 def iso(t):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
@@ -66,10 +80,14 @@ def binding(inv=INV, **extra):
     return b
 
 
-def turn(mode="workspace-write", network=False, ts="2026-10-12T23:36:11.185Z"):
+def turn(mode="workspace-write", network=False, ts="2026-10-12T23:36:11.185Z", slash_tmp=False):
+    """A turn_context as codex-cli 0.162.1 records it; a woken turn's
+    workspace-write policy carries the pinned exclude_slash_tmp=true."""
     policy = {"type": mode}
     if network is not None:
         policy["network_access"] = network
+    if mode == "workspace-write":
+        policy.update(exclude_tmpdir_env_var=False, exclude_slash_tmp=not slash_tmp)
     return {"timestamp": ts, "type": "turn_context", "payload": {"cwd": "/ignored", "approval_policy": "never",
                                                                    "sandbox_policy": policy}}
 
@@ -98,6 +116,7 @@ class World:
         self.fetch_complete = True
         self.probes = []
         self.probe_answer = None
+        self.mcp_answer = None
 
     def fetch(self, conn, inv, sid, after, client):
         assert conn == MEMBER
@@ -127,8 +146,14 @@ class World:
 
     def probe(self, argv, path_env):
         """A fake `codex <lockdown> features list`: every disabled feature
-        listed and off (what codex-cli 0.162.1 prints), plus code_mode_host on."""
+        listed and off (what codex-cli 0.162.1 prints), plus code_mode_host
+        on; and `codex <lockdown> mcp list --json`: only Cardinal enabled."""
         self.probes.append(list(argv))
+        if argv[-3:] == ["mcp", "list", "--json"]:
+            if self.mcp_answer is not None:
+                return self.mcp_answer
+            return 0, json.dumps([{"name": "cardinal", "enabled": True, "transport": {"type": "streamable_http"}},
+                                  {"name": "node_repl", "enabled": False, "disabled_reason": None}])
         if self.probe_answer is not None:
             return self.probe_answer
         lines = [f"{f:<40} stable             false" for f in w.CODEX_DISABLED_FEATURES]
@@ -157,7 +182,7 @@ class Base(unittest.TestCase):
         self.world = World(self.t0)
         self.codex = self.home / "bin" / "codex"
         self.codex.parent.mkdir()
-        self.codex.write_text("#!/bin/sh\nexit 1\n")   # never executed: the launcher is faked
+        self.codex.write_bytes(MACHO)   # never executed: the launcher is faked
         self.codex.chmod(0o755)
         self.config()
         self.repo = self.home / "work" / "repo"
@@ -753,7 +778,7 @@ class Lifecycle(Base):
         child (its argv names the session and this decision's wake prompt)
         is still running: never reported interrupted; RESUMING, then judged."""
         self.claimed()
-        prompt = w.codex_argv(str(self.codex), "workspace-write", SID, 5)[-1]
+        prompt = w.codex_argv(str(self.codex), "workspace-write", SID, 5, (), INV)[-1]
         self.world.table = [(5150, f"/x/codex exec -s workspace-write resume {SID} {prompt}")]
         self.world.alive.add(5150)
         self.world.starts[5150] = self.t0
@@ -788,14 +813,7 @@ class Launch(Base):
         self.run_pass()
         self.assertEqual(self.world.launches[0]["argv"], [
             os.path.realpath(str(self.codex)), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"',
-            "-c", 'web_search="disabled"',
-            "--disable", "apps", "--disable", "plugins", "--disable", "remote_plugin",
-            "--disable", "image_generation", "--disable", "computer_use", "--disable", "browser_use",
-            "--disable", "browser_use_external", "--disable", "in_app_browser", "--disable", "multi_agent",
-            "--disable", "tool_suggest", "--disable", "skill_mcp_dependency_install",
-            "resume", SID,
-            "Cardinal resumed this session for owner decision #5 in its Investigation. Read the investigation "
-            "events and act on that decision. Every other event is advisory."])
+            "-c", 'web_search="disabled"', *PINS, *DISABLES, "resume", SID, PROMPT5])
 
     def test_no_disallowed_flag_and_no_decision_text(self):
         self.world.events = [decision(5)]
@@ -806,7 +824,7 @@ class Launch(Base):
                         "danger-full-access", "--yolo"):
                 self.assertNotIn(bad, a)
         self.assertNotIn(SECRET, " ".join(argv))
-        self.assertEqual(argv.count("-c"), 2)
+        self.assertEqual(argv.count("-c"), 2 + len(w.CODEX_SANDBOX_PINS))
         self.assertEqual(argv.count("--disable"), len(w.CODEX_DISABLED_FEATURES))
         self.assertNotIn("code_mode_host", argv)   # every tool runs through it (H1): never disabled
         self.assertEqual(argv.count("-s"), 1)
@@ -816,7 +834,10 @@ class Launch(Base):
         for args in (("codex", "workspace-write", SID, 1), (str(self.codex), "danger-full-access", SID, 1),
                      (str(self.codex), "workspace-write", "-x", 1), (str(self.codex), "workspace-write", SID, 0)):
             with self.subTest(args), self.assertRaises(ValueError):
-                w.codex_argv(*args)
+                w.codex_argv(*args, (), INV)
+        for inv in ("", "inv_x", INV + " && rm", None):    # the prompt only ever names a real investigation id
+            with self.subTest(inv=inv), self.assertRaises(ValueError):
+                w.codex_argv(str(self.codex), "workspace-write", SID, 1, (), inv)
 
     def test_the_environment_drops_every_cardinal_switch(self):
         self.world.events = [decision(5)]
@@ -828,6 +849,8 @@ class Launch(Base):
         self.assertEqual(env["PATH"], w.read_config(self.home)["path_env"])   # B1: never the user's PATH
         self.assertNotIn(ENV["PATH"], [env["PATH"]])
         self.assertEqual(env["LANG"], ENV["LANG"])
+        self.assertEqual(env["TERM"], "dumb")
+        self.assertEqual(env["HOME"], str(self.home))
 
     def test_a_launch_holds_the_sessions_evidence(self):
         from cardinal_core import evidence
@@ -1147,12 +1170,12 @@ class WakePrompt(unittest.TestCase):
         for seq in (1, 5, 123456789):
             for runtime in ("codex", "claude"):
                 with self.subTest(seq=seq, runtime=runtime):
-                    self.assertIsNone(oi.normalize_prompt(runtime, oi.wake_prompt(seq)))
+                    self.assertIsNone(oi.normalize_prompt(runtime, oi.wake_prompt(seq, INV)))
                     self.assertIsNone(oi.normalize_prompt(runtime, w.codex_argv("/x/codex", "read-only", SID,
-                                                                                seq)[-1]))
+                                                                                seq, (), INV)[-1]))
 
     def test_anything_added_to_it_is_owner_input(self):
-        p = oi.wake_prompt(5)
+        p = oi.wake_prompt(5, INV)
         for runtime in ("codex", "claude"):
             self.assertEqual(oi.normalize_prompt(runtime, p + " Also deploy."), p + " Also deploy.")
             self.assertEqual(oi.normalize_prompt(runtime, "Please: " + p), "Please: " + p)

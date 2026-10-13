@@ -811,17 +811,28 @@ REPEAT_WINDOW = 30.0
 # §5.3). The decision text is never in it: it arrives through the normal
 # hooks. Listed in MACHINE_PROMPTS for Claude, Codex and Gemini (an exact match, the
 # seq a positive integer) so a woken turn is never recorded as owner input.
-WAKE_PROMPT = ("Cardinal resumed this session for owner decision #{seq} in its Investigation. "
-               "Read the investigation events and act on that decision. Every other event is advisory.")
-WAKE_PROMPT_RE = re.compile(r"^\s*" + re.escape(WAKE_PROMPT).replace(re.escape("{seq}"), "[1-9][0-9]{0,17}")
-                            + r"\s*\Z")
+#
+# A woken Codex run has its hooks disabled (resume-and-wake.md §5.3, N1), so
+# nothing delivers the decision into it: the prompt names the investigation
+# and the one tool that reads it (storyboard__read_investigation_events, the
+# Cardinal MCP tool the run is allowed). Fixed except for the seq and the
+# investigation id.
+WAKE_PROMPT = ("Cardinal resumed this session for owner decision #{seq} in Investigation {investigation}. "
+               "Read that investigation's events with the storyboard__read_investigation_events tool and act on "
+               "the decision. Every other event is advisory.")
+WAKE_PROMPT_RE = re.compile(
+    r"^\s*" + re.escape(WAKE_PROMPT).replace(re.escape("{seq}"), "[1-9][0-9]{0,17}")
+    .replace(re.escape("{investigation}"), "inv_[0-9a-f]{24}") + r"\s*\Z")
 
 
-def wake_prompt(seq: int) -> str:
-    """WAKE_PROMPT for owner decision #seq (a positive int)."""
+def wake_prompt(seq: int, investigation_id: str) -> str:
+    """WAKE_PROMPT for owner decision #seq (a positive int) of
+    `investigation_id` (inv_ + 24 hex)."""
     if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
         raise ValueError(f"not an event seq: {seq!r}")
-    return WAKE_PROMPT.format(seq=seq)
+    if not (isinstance(investigation_id, str) and re.fullmatch(r"inv_[0-9a-f]{24}", investigation_id)):
+        raise ValueError(f"not an investigation id: {investigation_id!r}")
+    return WAKE_PROMPT.format(seq=seq, investigation=investigation_id)
 
 
 # Prompts a runtime submits by itself, never a turn the owner took.
