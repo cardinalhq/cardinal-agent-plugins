@@ -65,8 +65,9 @@ attended resume. What `cardinal-wake` does now:
   The prompt names a decision the session has not received yet, from the
   waker's own ledger: NOTIFIED entries notified while the session was
   stopped, within `DECISION_MAX_AGE` of now, with seq past the binding's
-  `read_from` (its investigation only; the agent-writable binding can only
-  leave the prompt out); the lowest such seq in the investigation of the
+  `read_from` (its investigation only; a forged binding cursor can leave the
+  prompt out or bring back a consumed decision, but only a verified owner
+  decision for this session within that window); the lowest such seq in the investigation of the
   newest one. None qualifies: no first prompt. It no longer asks for an
   acknowledgment file (the resumed session has its hooks and network and
   acknowledges as usual) and is an exact-match machine prompt for all four

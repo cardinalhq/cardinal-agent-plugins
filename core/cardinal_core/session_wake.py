@@ -1038,8 +1038,11 @@ def pending_prompt(home: Path, sid: str, now: float, binding: Optional[dict] = N
     never an earlier version's), within DECISION_MAX_AGE of now; the lowest
     seq in the investigation of the newest one. With a binding, only its
     investigation and only seqs past read_from(binding) count: a decision
-    the session already consumed reaches it through its hooks anyway (the
-    binding is agent-writable, but it can only leave the prompt out)."""
+    the session already consumed reaches it through its hooks anyway. The
+    binding is agent-writable: a forged cursor can leave the prompt out, or
+    bring back a decision already consumed, but only a verified owner
+    decision for this session, notified while it was stopped, within
+    DECISION_MAX_AGE."""
     try:
         entries = read_ledger(home, sid)["entries"].values()
     except ValueError:
