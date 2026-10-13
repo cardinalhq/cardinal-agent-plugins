@@ -547,7 +547,7 @@ is designed around that:
   ```
   python3 -I allowlist_proxy.py --log <wake log> --port 8877 <hosts> -- \
     /usr/bin/sandbox-exec -D TARGET_DIR=<cwd> -D TMP_DIR=<private 0700 dir> \
-      -D HOME_DIR=<home> -D CACHE_DIR=<user cache> -D INCLUDE_DIR_0..4=/dev/null \
+      -D HOME_DIR=<home> -D CACHE_DIR=<private 0700 dir>/cache -D INCLUDE_DIR_0..4=/dev/null \
       -f <cardinal's copy of restrictive-proxied.sb> \
     gemini --resume <ident> --approval-mode yolo --skip-trust -p "<wake prompt>"
   ```
@@ -565,7 +565,7 @@ is designed around that:
     inside its own sandbox. The hooks then keep their state in the relocated
     home, and Gemini never tries to start a second sandbox.
   - **Environment:** `HTTPS_PROXY` and `HTTP_PROXY` point at the proxy, and
-    `TMPDIR` is the private dir. Everything else that changes the sandbox,
+    `TMPDIR` is the private dir and `XDG_CACHE_HOME` its `cache`. Everything else that changes the sandbox,
     the proxy, the settings location or the debugger is stripped:
     `GEMINI_SANDBOX`, `SEATBELT_*`, `GEMINI_SANDBOX_PROXY_COMMAND`,
     `SANDBOX_FLAGS`, `GEMINI_SANDBOX_IMAGE`, `BUILD_SANDBOX`,
@@ -623,9 +623,16 @@ is designed around that:
   agent can write `~/.cache`), so it is a hint, weaker than Codex's
   rollout. What bounds a Gemini wake is the approved roots, the proxy and
   the runtime sandbox check.
-- **Open (not changed in review 4):** the profile still writes `CACHE_DIR`,
-  the user's `DARWIN_USER_CACHE_DIR`, as Gemini's own does. Narrowing it
-  belongs with the pending live proofs.
+- **Private cache (after review 4).** Gemini's own launch passes the
+  user's `DARWIN_USER_CACHE_DIR` as `CACHE_DIR`, which other apps and tools
+  read later, unsandboxed (cache poisoning, the same class as `~/.npm`).
+  The waker passes a private one instead: `<the wake's private dir>/cache`
+  (0700). The private dir is the wake's own under `~/.cardinal/wake/tmp/`,
+  as for Codex, removed when the wake settles; `XDG_CACHE_HOME` points at
+  the cache too. Tested under `sandbox-exec`: a write to the real
+  `DARWIN_USER_CACHE_DIR` is denied, one to the private cache allowed.
+  Whether anything Gemini runs needs the shared cache is part of the
+  pending live proofs (C-16).
 
 **Wake prompt** (fixed except for the seq, the read cursor seq - 1 and the
 investigation id): "Cardinal resumed this session for owner decision

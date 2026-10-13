@@ -77,13 +77,9 @@ class GeminiBase(Base):
         self.sandbox_exec = self.home / "bin" / "sandbox-exec"
         self.sandbox_exec.write_text("#!/bin/sh\nexit 1\n")   # never executed
         self.sandbox_exec.chmod(0o755)
-        self.cache = self.home / "cache"
-        self.cache.mkdir()
-        for name, value in (("SANDBOX_EXEC", str(self.sandbox_exec)),
-                            ("darwin_cache_dir", lambda: os.path.realpath(str(self.cache)))):
-            p = patch.object(w, name, value)
-            p.start()
-            self.addCleanup(p.stop)
+        p = patch.object(w, "SANDBOX_EXEC", str(self.sandbox_exec))
+        p.start()
+        self.addCleanup(p.stop)
         import tempfile
         systmp = self.home / "systmp"   # each wake's private TMP_DIR lands here, not in the real temp dir
         systmp.mkdir()
@@ -203,7 +199,7 @@ class Launch(GeminiBase):
             "generativelanguage.googleapis.com", "app.cardinalhq.io", "otel.cardinalhq.io", "--",
             str(self.sandbox_exec),
             "-D", "TARGET_DIR=" + real(str(self.grepo)), "-D", "TMP_DIR=" + tmp,
-            "-D", "HOME_DIR=" + real(str(self.home)), "-D", "CACHE_DIR=" + real(str(self.cache)),
+            "-D", "HOME_DIR=" + real(str(self.home)), "-D", "CACHE_DIR=" + os.path.join(tmp, "cache"),
             "-D", "INCLUDE_DIR_0=/dev/null", "-D", "INCLUDE_DIR_1=/dev/null", "-D", "INCLUDE_DIR_2=/dev/null",
             "-D", "INCLUDE_DIR_3=/dev/null", "-D", "INCLUDE_DIR_4=/dev/null",
             "-f", str(w.seatbelt_profile(self.home)),
@@ -214,7 +210,12 @@ class Launch(GeminiBase):
         for bad in ("-s", "--sandbox", "--yolo", "-y", "--sandbox-image", "--include-directories"):
             self.assertNotIn(bad, tail)
         self.assertTrue(os.path.isdir(tmp) and oct(os.stat(tmp).st_mode & 0o777) == "0o700")
-        self.addCleanup(os.rmdir, tmp)
+        # The private temp dir is this wake's own under ~/.cardinal/wake/tmp, and the cache inside it:
+        # never the shared DARWIN_USER_CACHE_DIR (other tools read it later, unsandboxed).
+        self.assertEqual(os.path.dirname(tmp), real(str(w.wake_dir(self.home) / "tmp")))
+        cache = os.path.join(tmp, "cache")
+        self.assertTrue(os.path.isdir(cache) and oct(os.stat(cache).st_mode & 0o777) == "0o700")
+        self.assertEqual(got["env"]["XDG_CACHE_HOME"], cache)
         self.assertNotIn(SECRET, " ".join(got["argv"]))
         self.assertEqual(x["state"], w.RESUMING)
         self.assertTrue(x["sandboxed_state"])
@@ -241,7 +242,7 @@ class Launch(GeminiBase):
         self.assertNotIn("/opt/evil", env["PATH"])
         self.assertEqual(env["LANG"], "C")
         self.assertEqual(env["GEMINI_API_KEY"], "not-a-real-key")   # the sandbox cannot read ~/.gemini/.env
-        self.addCleanup(lambda: os.rmdir(env["TMPDIR"]) if os.path.isdir(env["TMPDIR"]) else None)
+        self.assertEqual(env["XDG_CACHE_HOME"], os.path.join(env["TMPDIR"], "cache"))
 
     def test_sign_in_with_google_is_notify_only(self):
         (self.home / ".gemini" / "settings.json").write_text(

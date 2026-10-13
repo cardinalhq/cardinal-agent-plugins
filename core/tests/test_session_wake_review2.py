@@ -473,9 +473,41 @@ class GeminiProfile(unittest.TestCase):
             home = Path(t) / "home"
             home.mkdir()
             rt = w.Runtime(w.GEMINI, [])
-            with patch.object(w, "darwin_cache_dir", lambda: t), patch.object(tempfile, "tempdir", t):
-                self.assertIsNone(w.gemini_prepare(home, rt, {"python": sys.executable}, home / "l.log", None))
+            self.assertIsNone(w.gemini_prepare(home, rt, {"python": sys.executable}, home / "l.log", None))
             self.assertTrue(paths.sandboxed_home(home).is_dir())
+            # CACHE_DIR is private to the wake, inside its temp dir, and removed with it at settle.
+            tmp, cache = rt.extra["tmp_dir"], rt.extra["cache_dir"]
+            self.assertEqual(os.path.dirname(cache), tmp)
+            self.assertEqual(os.path.dirname(tmp), os.path.realpath(str(w.wake_dir(home) / "tmp")))
+            self.assertEqual(oct(os.stat(cache).st_mode & 0o777), "0o700")
+            w.remove_tmpdir(home, tmp)
+            self.assertFalse(os.path.exists(tmp))
+
+    @unittest.skipUnless(sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec"), "macOS seatbelt")
+    def test_under_the_profile_the_shared_user_cache_is_not_writable(self):
+        """CACHE_DIR is the wake's private cache: the real DARWIN_USER_CACHE_DIR (other apps and
+        tools read it later, unsandboxed) is not writable under the profile; the private one is."""
+        shared = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_CACHE_DIR"], capture_output=True, text=True,
+                                timeout=5).stdout.strip()
+        self.assertTrue(shared)
+        shared = os.path.realpath(shared)
+        with tempfile.TemporaryDirectory() as t:
+            t = os.path.realpath(t)
+            home, work, tmp = os.path.join(t, "home"), os.path.join(t, "work"), os.path.join(t, "wake")
+            cache = os.path.join(tmp, "cache")
+            for x in (home, work, cache):
+                os.makedirs(x)
+            params = [f"TARGET_DIR={work}", f"TMP_DIR={tmp}", f"HOME_DIR={home}", f"CACHE_DIR={cache}"] + \
+                [f"INCLUDE_DIR_{i}=/dev/null" for i in range(5)]
+            base = ["/usr/bin/sandbox-exec"] + [a for p in params for a in ("-D", p)] + ["-f", str(PROFILE)]
+            probe = os.path.join(shared, f"cardinal-wake-test-{os.getpid()}")
+            self.addCleanup(lambda: os.path.exists(probe) and os.unlink(probe))
+
+            def touch(path):
+                return subprocess.run(base + ["/usr/bin/touch", path], capture_output=True, timeout=30).returncode
+            self.assertEqual(touch(os.path.join(cache, "ok")), 0)
+            self.assertNotEqual(touch(probe), 0)
+            self.assertFalse(os.path.exists(probe))
 
 
 if __name__ == "__main__":

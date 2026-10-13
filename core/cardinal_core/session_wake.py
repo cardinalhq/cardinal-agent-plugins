@@ -1793,20 +1793,26 @@ def child_env(environ: Mapping[str, str], path_env: Optional[str] = None, *, hom
     return env
 
 
-def codex_prepare(home: Path, rt: Runtime, config: dict, log: Path, system: "System") -> Optional[str]:
-    """Right before a Codex spawn: this wake's private TMPDIR (L-b), a new
-    0700 directory ~/.cardinal/wake/tmp/<wake id>-<random>, never the shared
-    /tmp or the user's $TMPDIR; removed when the wake settles."""
+def private_wake_dir(home: Path, log: Path) -> str:
+    """A new 0700 directory ~/.cardinal/wake/tmp/<wake id>-<random> (realpath),
+    this wake's own temp dir, removed when the wake settles (remove_tmpdir).
+    Raises OSError."""
     import tempfile
+    base = wake_dir(home) / "tmp"
+    _private_dir(wake_dir(home))
+    _private_dir(base)
+    d = tempfile.mkdtemp(prefix=log.stem + "-", dir=str(base))
+    os.chmod(d, 0o700)
+    return os.path.realpath(d)
+
+
+def codex_prepare(home: Path, rt: Runtime, config: dict, log: Path, system: "System") -> Optional[str]:
+    """Right before a Codex spawn: this wake's private TMPDIR (L-b,
+    private_wake_dir), never the shared /tmp or the user's $TMPDIR."""
     try:
-        base = wake_dir(home) / "tmp"
-        _private_dir(wake_dir(home))
-        _private_dir(base)
-        d = tempfile.mkdtemp(prefix=log.stem + "-", dir=str(base))
-        os.chmod(d, 0o700)
+        rt.extra["tmp_dir"] = private_wake_dir(home, log)
     except OSError as e:
         return f"no private temp directory ({type(e).__name__})"
-    rt.extra["tmp_dir"] = os.path.realpath(d)
     return None
 
 
@@ -2177,16 +2183,6 @@ def seatbelt_profile(home: Path) -> Path:
     return lib_dir(home) / "cardinal_core" / GEMINI_SEATBELT_FILE
 
 
-def darwin_cache_dir() -> Optional[str]:
-    """`getconf DARWIN_USER_CACHE_DIR`, realpath'd (the profile's CACHE_DIR)."""
-    try:
-        out = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_CACHE_DIR"], capture_output=True, text=True,
-                             timeout=5, check=False).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return os.path.realpath(out) if out and os.path.isabs(out) else None
-
-
 def gemini_api_key(home: Path, environ: Mapping[str, str]) -> Optional[str]:
     """The user's GEMINI_API_KEY for the woken process (its sandbox denies
     reading any .env file and the keychain): from the waker's environment,
@@ -2206,22 +2202,22 @@ def gemini_api_key(home: Path, environ: Mapping[str, str]) -> Optional[str]:
 
 def gemini_prepare(home: Path, rt: Runtime, config: dict, log: Path, system: "System") -> Optional[str]:
     """Right before the spawn: this wake's private temp dir (the profile's
-    TMP_DIR, 0700), CACHE_DIR, and the paths the argv names; why it cannot
-    be prepared, else None."""
-    import tempfile
-    cache = darwin_cache_dir()
-    if not cache:
-        return "the user cache directory (getconf DARWIN_USER_CACHE_DIR) is unknown"
+    TMP_DIR: private_wake_dir, removed at settle), a private cache dir inside
+    it (the profile's CACHE_DIR, 0700; never the shared DARWIN_USER_CACHE_DIR,
+    which other tools read later, unsandboxed), and the paths the argv names;
+    why it cannot be prepared, else None."""
     try:
         # The profile grants writes under ~/.cache/cardinal/sandboxed only (not ~/.cache), so it
         # must exist before the sandbox starts.
         boxed = paths.sandboxed_home(paths.unsandboxed_home(Path(home)))
         boxed.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = tempfile.mkdtemp(prefix="cardinal-wake-gemini-", dir=os.path.realpath(tempfile.gettempdir()))
-        os.chmod(tmp, 0o700)
+        tmp = private_wake_dir(home, log)
+        cache = os.path.join(tmp, "cache")
+        os.mkdir(cache, 0o700)
+        os.chmod(cache, 0o700)
     except OSError as e:
         return f"no private temp directory ({type(e).__name__})"
-    rt.extra.update(tmp_dir=os.path.realpath(tmp), cache_dir=cache, log=str(log), python=config.get("python"),
+    rt.extra.update(tmp_dir=tmp, cache_dir=cache, log=str(log), python=config.get("python"),
                     proxy=str(proxy_script(home)), profile=str(seatbelt_profile(home)),
                     home_dir=os.path.realpath(str(home)))
     return None
@@ -2278,6 +2274,8 @@ def gemini_env(environ: Mapping[str, str], config: dict, home: Path, log: Path, 
     tmp = rt.extra.get("tmp_dir")
     if tmp:
         env["TMPDIR"] = env["TMP"] = env["TEMP"] = tmp
+    if rt.extra.get("cache_dir"):
+        env["XDG_CACHE_HOME"] = rt.extra["cache_dir"]   # the private CACHE_DIR, never ~/.cache
     key = gemini_api_key(home, environ)
     if key:
         env["GEMINI_API_KEY"] = key
