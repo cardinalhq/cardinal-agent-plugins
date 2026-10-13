@@ -283,8 +283,7 @@ codex exec -s <the session's own sandbox: workspace-write|read-only> \
   -c sandbox_workspace_write.network_access=false -c 'sandbox_workspace_write.writable_roots=[]' \
   -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=false \
   -c 'mcp_servers.cardinal.tools.storyboard__read_investigation_events.approval_mode="approve"' \
-  -c 'mcp_servers.cardinal.tools.storyboard__post_investigation_event.approval_mode="approve"' \
-  -c 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", "storyboard__post_investigation_event"]' \
+  -c 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events"]' \
   -c mcp_servers.<every other server>.enabled=false \
   -c 'plugins."<every non-Cardinal plugin>".enabled=false' \
   --disable apps --disable plugins --disable remote_plugin --disable image_generation \
@@ -303,9 +302,44 @@ All flags go before `resume`.
     telemetry, no owner-input capture, no investigation poller and no Stop
     reminder. The decision is not delivered by a hook any more: the wake
     prompt names the investigation and the read tool, and the agent reads
-    the decision with `storyboard__read_investigation_events` and
-    acknowledges with `storyboard__post_investigation_event`, the two MCP
-    tools the run keeps (Codex calls them itself; they are not hooks).
+    the decision with `storyboard__read_investigation_events`, the one MCP
+    tool the run keeps (Codex calls it itself; it is not a hook). With no
+    `class` or `types` the read returns every class the key may read,
+    owner decisions included (the gateway's schema: "Omit for every class
+    you may read"), and the prompt passes `after` = seq - 1 so the first
+    page starts at the decision.
+- **Acknowledgment relay (live N1 on 8654c45).** The acknowledgment can't
+  come from inside the run: the gateway's `post_investigation_event` takes
+  only cue / question / challenge ("Acknowledgments come only from the
+  investigation's own session"), the plugin's CLI ack needs network, and
+  hooks are off. So:
+  - the prompt asks the agent to write
+    `{"ack_of": <seq>, "disposition": "accepted"|"declined"|"noted",
+    "note": "..."}` to `$TMPDIR/cardinal-wake-ack.json`, the wake's private
+    0700 directory;
+  - after the child has exited (never while it runs, and a TIMED_OUT run
+    only once it exits), the waker, outside the sandbox, opens it with
+    `O_NOFOLLOW | O_NONBLOCK` in a directory that must not be a symlink,
+    requires a regular file of at most 8 KiB holding exactly those keys,
+    `ack_of` equal to the launched seq, one of the three dispositions
+    (never `conflicts`: a directive is not a wake trigger) and a note of at
+    most 2000 characters without control characters other than newline
+    and tab;
+  - it then posts that one `acknowledged` event as the session with the
+    plugin connection, exactly as `cardinal-storyboard investigation ack`
+    does (`ack_payload`, idempotency key `ack:<sid>:<seq>`, `session_id`,
+    the plugin's client). An `idempotency_conflict` means the session
+    already acknowledged and is not an error. A failed post keeps the file
+    and is tried again on the next pass;
+  - the relay never posts anything else, never for a run that failed
+    verification, and never puts the note in a notification or the
+    ledger. A missing or invalid file is FAILED ("ended without
+    acknowledging the decision (<why>)").
+  - The acknowledgment is the agent's statement, carried out by the
+    waker: it reports what the session said, as any acknowledgment does.
+- **The post tool is off.** `storyboard__post_investigation_event` is no
+  longer enabled or pre-approved: posting advisories isn't needed and
+  only widens what an unattended run can do.
   - The fallback the review allowed (refuse unless every `hooks.json` entry
     is Cardinal-managed and resolves into the `~/.cardinal/wake/lib` copy)
     was not needed.
@@ -332,7 +366,7 @@ All flags go before `resume`.
   `http_headers` in `config.toml`, so it needs no variable.
 - **Why each part is needed (live proof H1).**
   - Under `approval_policy=never` an MCP call that needs approval is
-    refused. The two Cardinal tools are therefore pre-approved
+    refused. The Cardinal read is therefore pre-approved
     (`approval_mode="approve"`); without that, read and ack are impossible.
   - Codex exposes about 90 tools that aren't in `config.toml`: ChatGPT app
     connectors (`mcp__codex_apps__*`), web search, image generation, the
@@ -386,8 +420,8 @@ All flags go before `resume`.
   the user's MCP servers, and Cardinal's own write tools (Slack, GitHub,
   SQL, Kubernetes, ServiceNow…), would be reachable by an unattended agent,
   and a grantee's advisory could steer it into them. So the woken run keeps
-  only the Cardinal server's read and post of investigation events (an
-  acknowledgment is a post). Every other server is disabled, and so is every
+  only the Cardinal server's read of investigation events (the
+  acknowledgment is relayed, above). Every other server is disabled, and so is every
   plugin except Cardinal's, since a plugin can bring its own servers.
 - Servers or plugins declared any other way (dotted keys, inline tables,
   arrays of tables), or with ids that can't be named on the command line,
@@ -593,16 +627,20 @@ is designed around that:
   the user's `DARWIN_USER_CACHE_DIR`, as Gemini's own does. Narrowing it
   belongs with the pending live proofs.
 
-**Wake prompt** (fixed except for the seq and the investigation id):
-"Cardinal resumed this session for owner decision #<seq> in Investigation
-<inv_id>. Read that investigation's events with the
-storyboard__read_investigation_events tool and act on the decision. Every
+**Wake prompt** (fixed except for the seq, the read cursor seq - 1 and the
+investigation id): "Cardinal resumed this session for owner decision
+#<seq> in Investigation <inv_id>. Read it with the
+storyboard__read_investigation_events tool (investigation_id <inv_id>,
+after <seq - 1>) and act on it. When done, write your answer to
+$TMPDIR/cardinal-wake-ack.json as {"ack_of": <seq>, "disposition":
+"accepted", "declined" or "noted", "note": "what you did or why"}. Every
 other event is advisory." The decision text is never in the prompt. Since
-review 4 a woken Codex run has no hooks, so the prompt carries the way to
-the decision: the investigation id (`inv_` + 24 hex, validated) and the
-read tool. The prompt is listed in `owner_input.MACHINE_PROMPTS` for
-Claude, Codex and Gemini (the regex pins both the seq and the id shape), so
-it is never recorded as owner input; any text added to it is.
+review 4 a woken Codex run has no hooks and no network, so the prompt
+carries the way in (the investigation id, `inv_` + 24 hex, validated, and
+the read tool) and the way out (the file the waker relays). The prompt is
+listed in `owner_input.MACHINE_PROMPTS` for Claude, Codex and Gemini (the
+regex pins the shapes, and both mentions of the seq and of the id must
+match), so it is never recorded as owner input; any text added to it is.
 
 ### 5.4 Lifecycle, liveness, one execution per decision
 
@@ -613,7 +651,8 @@ action it describes.
 
 ```
 DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, decision acked─▶ ACKNOWLEDGED (with its disposition)
-      │                   │                   ├─child exits, not acked──────────────▶ FAILED
+      │                   │                   ├─child exits, ack file relayed─▶ ACK_RELAYED ─read shows it─▶ ACKNOWLEDGED
+      │                   │                   ├─child exits, not acked, no valid ack file───────────────▶ FAILED
       │                   └─spawn error─▶ (≤2 retries, then FAILED)
       │                                        └─running > WAKE_TIMEOUT (2 h)─▶ TIMED_OUT (left running, owner notified)
       │                                                                          └─child exits─▶ verified, then ACKNOWLEDGED | FAILED
@@ -626,10 +665,16 @@ DECISION_SEEN ─claim─▶ CLAIMED ─spawn ok─▶ RESUMING ─child exits, 
   ledger. A decision whose `created_at` is older than 7 days, or missing,
   never launches; it gets one notification.
 - **One run per session.** A claim is refused while that session's ledger
-  holds an in-flight entry (`CLAIMED`, `RESUMING`, `TIMED_OUT`). A second
-  decision posted during a run is delivered *inside* that run by the hooks.
-  Only a decision still unacknowledged after the run ends is considered
-  again, and it counts against the caps.
+  holds an in-flight entry (`CLAIMED`, `RESUMING`, `TIMED_OUT`,
+  `ACK_RELAYED`). A second decision posted during a Gemini run is delivered
+  inside it by the hooks; a woken Codex run has none, so it never sees one.
+  A decision still unacknowledged after the run ends is considered again,
+  and it counts against the caps.
+- **ACK_RELAYED** is written once the waker has posted the relayed
+  acknowledgment; the next read that shows it makes the entry
+  ACKNOWLEDGED. A post that failed leaves the entry RESUMING (retried); a
+  relayed acknowledgment the reads never show within the grace period ends
+  FAILED ("could not be read").
 - **No automatic retry once anything may have run.** A retry happens only
   for a spawn error, where no child ever existed. Re-posting is the owner's
   call.
@@ -692,8 +737,8 @@ sandbox:
   any configured server, Cardinal's own write tools included (Slack,
   GitHub, SQL, Kubernetes, ServiceNow).
   - The woken run therefore keeps only `storyboard__read_investigation_events`
-    and `storyboard__post_investigation_event` on the Cardinal server, and
-    those two are pre-approved.
+    on the Cardinal server, pre-approved. The acknowledgment is relayed by
+    the waker after the run (§5.3).
   - Every other server and every non-Cardinal plugin is disabled on the
     command line.
   - Built-in tools that act outside the sandbox are off too: app
@@ -710,15 +755,14 @@ sandbox:
     reminder. The decision reaches the agent through the read tool the
     wake prompt names.
   - What the woken agent has (H1): the shell and `apply_patch` inside its
-    sandbox, goals, MCP resource reads, `view_image`, the two Cardinal tools,
-    and sub-agents that inherit the same lockdown.
-  - Posting still reaches Cardinal: the agent can post a cue, question,
-    challenge or acknowledgment to investigations its key can write. That
-    is what acknowledging needs.
+    sandbox, goals, MCP resource reads, `view_image`, the Cardinal read, and
+    sub-agents that inherit the same lockdown.
+  - Nothing it does reaches Cardinal except through the waker's relay of
+    its one acknowledgment.
 
 A woken agent that needs a consequential action does the rest of the work,
-then stops and asks (`question.opened`). That action needs a later decision
-or an interactive turn.
+then stops and says so in its acknowledgment's note. That action needs a
+later decision or an interactive turn.
 
 ### 5.6 C0 (Claude)
 
@@ -749,7 +793,7 @@ Throwaway session `01a13279-…` in a scratch directory.
 | C-14 | Duplicate decisions and a second Gemini session can't start concurrent Gemini executions (port 8877 and the global lock) | Unit tests in the C PR; owner, live | Unit tests pass; **live pending** |
 | C-15 / H1 | A woken Codex run can use only its sandbox and the Cardinal server's read/post of investigation events | Owner, live (codex-cli 0.162.1; a throwaway workspace-write session; real config with the cardinal, cardinal-behavior, computer-use and node_repl servers and 13 plugins). (1) `enabled_tools` plus per-server and per-plugin `enabled=false`. (2) Adding `tools.<t>.approval_mode="approve"`. (3) Adding `--disable apps plugins remote_plugin image_generation computer_use browser_use browser_use_external in_app_browser multi_agent tool_suggest skill_mcp_dependency_install` and `web_search="disabled"`. (4) `--disable code_mode_host`. (5) A spawned sub-agent | (1) The allow-list works (slack gone) **but** the two Cardinal tools were refused ("requires approval, but approval policy is never"), and about 90 non-config tools stayed (app connectors, web, image gen, cua REPL, plugin install). (2) The read completed. (3) Tools are exactly `exec`, `wait`, `request_user_input_async`, `clock.sleep` and `collaboration.*`; inside exec: `apply_patch`, `exec_command`, `write_stdin`, goals, MCP resource reads, `view_image`, `clock__curr_time` and the two Cardinal tools. `ls` ran, and the Cardinal hooks still fired. (4) Every tool fails, so it is never disabled. (5) The sub-agent inherits the lockdown (`touch ~/probe` not permitted, no network, same tools). **Proven** → the argv in §5.3 |
 | C-16 | The waker's own `sandbox-exec -f <copy of restrictive-proxied>` around `gemini` (no `-s`, `SANDBOX` set) runs Gemini, delivers and acknowledges through the proxy, and Gemini starts no second sandbox | Locally: the shipped profile parses with the wake parameters (`/usr/bin/true` under it), and a nested `sandbox-exec` fails. Owner, live: a woken run | Profile and nesting: **proven locally**. End to end: **live pending** |
-| C-17 | With `--disable hooks`, a woken Codex run still gets the decision and acknowledges it | Owner, live (codex-cli 0.162.1): the §5.3 argv on a throwaway workspace-write session; the rollout shows no hook ran, a `storyboard__read_investigation_events` call and an acknowledgment of #seq | Locally, no session: `features list` with the flags shows `hooks false`. End to end: **live pending** |
+| C-17 / N1-live | With `--disable hooks`, a woken Codex run still gets the decision and acknowledges it | Owner, live (codex-cli 0.162.1, 8654c45's exact flags incl. `--disable hooks` and the four sandbox pins, `env -i` allow-list, private 0700 `TMPDIR`, a throwaway workspace-write session) | Hooks off (the Cardinal evidence spool unchanged across the run); `storyboard__read_investigation_events` completes with `approval_mode=approve`; `touch /tmp/x` "Operation not permitted"; `touch "$TMPDIR/x"` ok; curl: no network; rollout `sandbox_policy` = `{type: workspace-write, network_access: false, writable_roots: None, exclude_slash_tmp: true, exclude_tmpdir_env_var: false}`. **Proven.** **But acknowledging failed:** the gateway's post refuses acknowledgments (schema: no `ack_of` / `disposition` / `note`), the CLI ack needs network → the acknowledgment relay (§5.3). The read returned 0 events (that investigation had none); an `owner.decided` in the read is for the owner's E2E. Relay end to end: **live pending** |
 | C-18 | The pre-launch probes see what a launch would load | Locally (0.162.1, the owner's real config, no session): `<codex> <flags> features list` and `<codex> <flags> mcp list --json` | features: rc 0, every disabled feature off, 45 features on (the tested set). mcp: rc 0, a JSON list of `{name, enabled, disabled_reason, transport, auth_status, startup_timeout_sec, tool_timeout_sec}`; only `cardinal` enabled (plugin servers vanish with `--disable plugins`). **Proven locally** |
 | C-19 | The sandbox pins hold | Locally: `-c sandbox_workspace_write.{network_access=false, writable_roots=[], exclude_slash_tmp=true, exclude_tmpdir_env_var=false}` through `features list`. Owner, live: a woken turn's `sandbox_policy` | All accepted (rc 0), **but so is a bogus key**; a wrong type is rc 1. So existence is proven only by the rollout: a woken `workspace-write` turn must record `exclude_slash_tmp: true` and no `writable_roots` (enforced post-run). End to end: **live pending** |
 
@@ -787,6 +831,14 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
     their assertions turned around. 29 of 33 failed on 3223d8d; the other
     four are positive controls (a native codex accepted, a non-`@openai`
     package refused, the plist's PATH-only env, an off unknown feature).
+  - The acknowledgment relay (`core/tests/test_session_wake_relay.py`): a
+    valid answer relayed once and only after the exit (also after
+    TIMED_OUT), the wrong seq, a symlink, a FIFO, an oversize file, bad
+    JSON, a missing file, a strict schema (conflicts, extra keys, a text or
+    bool seq, a long or control-character note), a failed post retried and
+    posted once, a relayed acknowledgment not yet visible, no relay after a
+    failed verification, and the post itself (`ack_payload`,
+    `ack:<sid>:<seq>`, an idempotent repost).
 - **Targeted pytest runs only.** CI is the gate.
 - **Manual (owner).** Run a Codex CLI session with `-s workspace-write`,
   quit it, and post an addressed decision from the web. Watch it resume,
@@ -815,7 +867,9 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
   directory), whose recorded sandbox could write outside its cwd, or whose
   Codex config widens workspace-write.
 - Giving a woken run any MCP server or tool beyond the Cardinal
-  investigation read/post, or any hook (Cardinal's included).
+  investigation read, or any hook (Cardinal's included).
+- Relaying anything from a woken run but its one acknowledgment of the
+  decision it was woken for.
 - Launching a codex that is a script, a version-manager shim or anything
   but the native binary that runs, or a Codex with a default-on feature
   outside the tested set.
@@ -904,3 +958,7 @@ applies to Codex CLI sessions run with `-s workspace-write` or `read-only`.
     Codex accepts unknown `-c` keys.
   - Gemini (off): the profile copy no longer writes `~/.npm` or `~/.cache`,
     only `~/.cache/cardinal/sandboxed`.
+  - Live N1 follow-up (on 8654c45): hooks off, the read and the sandbox
+    pins proven live, but no acknowledgment was possible from inside the
+    run → the waker relays the one the agent writes to its private
+    `TMPDIR` after the run; the MCP post tool is off.

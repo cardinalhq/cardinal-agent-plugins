@@ -41,9 +41,11 @@ ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "CARDINAL_STORYBOARD_SES
 
 # A native-executable header (N2: codex must be one, never a script).
 MACHO = b"\xcf\xfa\xed\xfe" + b"\0" * 60
-PROMPT5 = ("Cardinal resumed this session for owner decision #5 in Investigation " + INV + ". Read that "
-           "investigation's events with the storyboard__read_investigation_events tool and act on the decision. "
-           "Every other event is advisory.")
+PROMPT5 = ("Cardinal resumed this session for owner decision #5 in Investigation " + INV + ". Read it with the "
+           "storyboard__read_investigation_events tool (investigation_id " + INV + ", after 4) and act on it. When "
+           "done, write your answer to $TMPDIR/cardinal-wake-ack.json as {\"ack_of\": 5, \"disposition\": "
+           "\"accepted\", \"declined\" or \"noted\", \"note\": \"what you did or why\"}. Every other event is "
+           "advisory.")
 PINS = ["-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.writable_roots=[]",
         "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
         "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=false"]
@@ -117,6 +119,8 @@ class World:
         self.probes = []
         self.probe_answer = None
         self.mcp_answer = None
+        self.posted = []          # relayed acknowledgments (System.post_ack)
+        self.post_error = None
 
     def fetch(self, conn, inv, sid, after, client):
         assert conn == MEMBER
@@ -140,7 +144,7 @@ class World:
                     process_start=lambda pid: self.starts.get(pid), process_table=lambda: list(self.table),
                     launcher=self.launch, notifier=lambda title, msg: self.notes.append((title, msg)),
                     connection=lambda runtime, home: dict(MEMBER), fetch=self.fetch, environ=ENV,
-                    out=self.lines.append, run_probe=self.probe)
+                    out=self.lines.append, run_probe=self.probe, post_ack=self.post_ack)
         args.update(kw)
         return w.System(**args)
 
@@ -158,6 +162,21 @@ class World:
             return self.probe_answer
         lines = [f"{f:<40} stable             false" for f in w.CODEX_DISABLED_FEATURES]
         return 0, "\n".join(lines + ["code_mode_host                           stable             true"]) + "\n"
+
+    def post_ack(self, conn, inv, sid, seq, disposition, note, client):
+        """A fake append of the relayed acknowledgment: recorded, and seen by the next read
+        as the session's own (idempotent per session and seq, like ack:<sid>:<seq>)."""
+        assert conn == MEMBER
+        if self.post_error is not None:
+            raise self.post_error
+        self.posted.append({"inv": inv, "sid": sid, "seq": seq, "disposition": disposition, "note": note,
+                            "client": client})
+        if not any(e.get("type") == "acknowledged" and e["payload"].get("ack_of") == seq
+                   and e["producer"].get("session_id") == sid for e in self.events):
+            e = ack(max([x["seq"] for x in self.events] + [0]) + 1, seq, sid=sid, inv=inv)
+            e["payload"]["disposition"] = disposition
+            self.events.append(e)
+        return {"event": {}}
 
     def exit(self, pid=None):
         """The (last) launched child exits."""

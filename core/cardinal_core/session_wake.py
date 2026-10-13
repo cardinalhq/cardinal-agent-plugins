@@ -133,17 +133,19 @@ Lifecycle (§5.4), ledger ~/.cardinal/wake/ledger/<sid>.json keyed by
 investigation_id:seq, with a per-investigation high-water mark that is never
 pruned; every read-modify-write holds an flock on <sid>.lock, and every
 transition is written before the action it describes:
-  DECISION_SEEN -> CLAIMED -> RESUMING [-> TIMED_OUT] -> ACKNOWLEDGED | FAILED; NOTIFIED.
-A claim is refused while the session has an entry in flight (CLAIMED,
-RESUMING, TIMED_OUT). The claim (with the pre-launch snapshot), the spawn and
-the RESUMING write happen under one lock; a CLAIMED entry found later means
-the waker died mid-launch: a live process whose argv names the session and
-this decision's wake prompt is recovered as the child, else FAILED (never
-retried, never "interrupted" while a child runs). A spawn error (no child
-ever existed) is retried at most SPAWN_RETRIES times. A child that started is
-never retried. A decision posted during a run is delivered inside it by the
-hooks; one still unacknowledged after the run (and after LIVE_WINDOW) is
-considered again and counts against the caps. The caps' check and the claim
+  DECISION_SEEN -> CLAIMED -> RESUMING [-> TIMED_OUT] [-> ACK_RELAYED] -> ACKNOWLEDGED | FAILED; NOTIFIED.
+ACK_RELAYED: after the child exited, the waker posted the acknowledgment the
+agent wrote to $TMPDIR/ACK_FILE (relay_ack). A claim is refused while the
+session has an entry in flight (CLAIMED, RESUMING, TIMED_OUT, ACK_RELAYED).
+The claim (with the pre-launch snapshot), the spawn and the RESUMING write
+happen under one lock; a CLAIMED entry found later means the waker died
+mid-launch: a live process whose argv names the session and this decision's
+wake prompt is recovered as the child, else FAILED (never retried, never
+"interrupted" while a child runs). A spawn error (no child ever existed) is
+retried at most SPAWN_RETRIES times. A child that started is never retried.
+A decision posted during a run is delivered inside it by the hooks (Gemini;
+a woken Codex run has none); one still unacknowledged after the run (and
+after LIVE_WINDOW) is considered again and counts against the caps. The caps' check and the claim
 also hold ~/.cardinal/wake/ledger/.global.lock (after the session's lock).
 
 Liveness: live when ANY of: the poller status anchor pid is alive and
@@ -192,6 +194,7 @@ from typing import Any, Callable, Iterable, Iterator, List, Mapping, Optional, T
 
 from . import investigation_events as ie
 from . import investigation_poller as poller
+from . import investigation_state_sync as sync
 from . import paths
 from .owner_input import wake_prompt
 
@@ -250,14 +253,25 @@ _CODEX_WIDENING_RE = re.compile(
     r"|\[.*\bsandbox_workspace_write\b"
     r"|[\"']?" + _CODEX_WIDENING_KEYS + r"[\"']?\s*[.=]"
     r"|.*[\"']?\b(?:writable_roots|network_access)\b[\"']?\s*=)")
-# The only MCP tools a woken Codex run may call: the Cardinal server's read
-# and post of its own Investigation's events (an acknowledgment is a post).
+# The only MCP tool a woken Codex run may call: the Cardinal server's read of
+# its Investigation's events. (The gateway's post takes only cues, questions
+# and challenges, never an acknowledgment, so it is not offered: the
+# acknowledgment is relayed by the waker from ACK_FILE, see read_ack_file.)
 # Every other server is disabled and every non-Cardinal plugin is disabled
 # for the launch (codex_mcp_overrides); a call outside this list in the
 # rollout disables Codex launch (verify_after).
 CARDINAL_MCP_SERVER = "cardinal"
 CARDINAL_PLUGIN_PREFIX = "cardinal-codex-plugin@"
-CARDINAL_WAKE_TOOLS = ("storyboard__read_investigation_events", "storyboard__post_investigation_event")
+CARDINAL_WAKE_TOOLS = ("storyboard__read_investigation_events",)
+# The ack relay (live N1): with hooks off and no network in the sandbox the
+# woken agent cannot acknowledge itself, so it writes its answer to
+# $TMPDIR/ACK_FILE (the wake's private 0700 dir); after the child exits the
+# waker reads it (no symlink, a regular file, at most MAX_ACK_FILE bytes,
+# strict schema, ack_of == the launched seq) and posts that one
+# acknowledgment as the session, with the plugin's own connection.
+ACK_FILE = "cardinal-wake-ack.json"
+MAX_ACK_FILE = 8192
+RELAY_DISPOSITIONS = ("accepted", "declined", "noted")
 # The lockdown of a woken Codex run beyond MCP (live proof H1, codex-cli
 # 0.162.1): Codex exposes ~90 tools that are not in config.toml (ChatGPT app
 # connectors, web search, image generation, the browser and computer-use
@@ -333,10 +347,11 @@ DECISION_SEEN = "DECISION_SEEN"
 CLAIMED = "CLAIMED"
 RESUMING = "RESUMING"
 TIMED_OUT = "TIMED_OUT"          # still running past WAKE_TIMEOUT: left running, settled when it exits
+ACK_RELAYED = "ACK_RELAYED"      # the child exited; the waker posted the acknowledgment it wrote (ACK_FILE)
 ACKNOWLEDGED = "ACKNOWLEDGED"
 FAILED = "FAILED"
 NOTIFIED = "NOTIFIED"
-IN_FLIGHT = (CLAIMED, RESUMING, TIMED_OUT)
+IN_FLIGHT = (CLAIMED, RESUMING, TIMED_OUT, ACK_RELAYED)
 TERMINAL = (ACKNOWLEDGED, FAILED, NOTIFIED)
 NOTIFY_STATES = (NOTIFIED, RESUMING, TIMED_OUT, ACKNOWLEDGED, FAILED)
 
@@ -939,6 +954,79 @@ def fetch_events(conn: dict, investigation_id: str, sid: str, after: int, client
     return events, cursor >= head
 
 
+def post_ack_event(conn: dict, investigation_id: str, sid: str, seq: int, disposition: str, note: Optional[str],
+                   client: str, opener=None) -> dict:
+    """Post the relayed acknowledgment of #seq as session `sid`, exactly as
+    the plugin's `cardinal-storyboard investigation ack` does (ack_payload,
+    the ack:<sid>:<seq> idempotency key, session_id, the plugin's client).
+    Never conflicts_with. An idempotency_conflict (the session already
+    acknowledged #seq some other way) is not an error: the acknowledgment
+    exists, and the read that follows reports its disposition."""
+    payload = ie.ack_payload(seq, disposition, note)
+    try:
+        return ie.append_event(conn, investigation_id, ie.ACKNOWLEDGED, payload, idempotency_key=ie.ack_key(sid, seq),
+                               client=client, session_id=sid, producer_client=client, opener=opener)
+    except sync.ServerError as e:
+        if isinstance(getattr(e, "body", None), dict) and e.body.get("error") == "idempotency_conflict":
+            return {"duplicate": True}
+        raise
+
+
+def read_ack_file(tmp_dir: Any, seq: int) -> Tuple[Optional[dict], str]:
+    """({"disposition", "note"?}, "") from <tmp_dir>/ACK_FILE, the answer the
+    woken agent wrote, or (None, why it is not one). The directory must be
+    a real directory (never a symlink); the file is opened without following
+    a symlink (and without blocking on a FIFO) and must be a regular file of
+    at most MAX_ACK_FILE bytes holding exactly {"ack_of": seq, "disposition":
+    accepted|declined|noted, "note"?: text of at most ie.MAX_NOTE characters,
+    no control characters but newline and tab}. Anything else is ignored."""
+
+    if not (isinstance(tmp_dir, str) and os.path.isabs(tmp_dir)):
+        return None, "the wake had no private temp directory"
+    try:
+        if not stat.S_ISDIR(os.lstat(tmp_dir).st_mode):
+            return None, "the wake's temp directory is not a directory"
+        fd = os.open(os.path.join(tmp_dir, ACK_FILE), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None, "no acknowledgment written"
+    except OSError as e:
+        return None, f"the acknowledgment file cannot be opened ({type(e).__name__}; a symlink is never followed)"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "the acknowledgment file is not a regular file"
+        if st.st_size > MAX_ACK_FILE:
+            return None, f"the acknowledgment file is larger than {MAX_ACK_FILE} bytes"
+        data = os.read(fd, MAX_ACK_FILE + 1)
+    except OSError as e:
+        return None, f"the acknowledgment file cannot be read ({type(e).__name__})"
+    finally:
+        os.close(fd)
+    if len(data) > MAX_ACK_FILE:
+        return None, f"the acknowledgment file is larger than {MAX_ACK_FILE} bytes"
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, "the acknowledgment file is not JSON"
+    if not isinstance(doc, dict) or not set(doc) <= {"ack_of", "disposition", "note"} \
+            or "ack_of" not in doc or "disposition" not in doc:
+        return None, "the acknowledgment file is not {ack_of, disposition, note}"
+    ack_of = doc["ack_of"]
+    if not isinstance(ack_of, int) or isinstance(ack_of, bool) or ack_of != seq:
+        return None, f"the acknowledgment names #{str(ack_of)[:20]}, not the decision #{seq} it was woken for"
+    if doc["disposition"] not in RELAY_DISPOSITIONS:
+        return None, "the acknowledgment's disposition is not accepted, declined or noted"
+    out = {"disposition": doc["disposition"]}
+    note = doc.get("note")
+    if note is not None:
+        if not isinstance(note, str) or len(note) > ie.MAX_NOTE \
+                or any((ord(c) < 32 and c not in "\n\t") or ord(c) == 127 for c in note):
+            return None, f"the acknowledgment's note is not text of at most {ie.MAX_NOTE} characters"
+        if note.strip():
+            out["note"] = note
+    return out, ""
+
+
 class System:
     """Every effect the waker has on the world, injectable for tests.
 
@@ -950,7 +1038,9 @@ class System:
     hook, called right before the claim's lock); environ (the child's
     environment is derived from it); out(line) (the report);
     process_rows() -> [(pid, ppid, argv)] | None; kill(pid, signal);
-    sleep(seconds); port_busy(port) -> bool.
+    sleep(seconds); port_busy(port) -> bool; run_probe(argv, path_env) ->
+    (rc, stdout); post_ack(conn, inv, sid, seq, disposition, note, client)
+    (the relayed acknowledgment; raises on failure).
     """
 
     def __init__(self, *, now: Optional[Callable[[], float]] = None, alive: Optional[Callable[[int], bool]] = None,
@@ -967,8 +1057,11 @@ class System:
                  kill: Optional[Callable[[int, int], None]] = None,
                  sleep: Optional[Callable[[float], None]] = None,
                  port_busy: Optional[Callable[[int], bool]] = None,
-                 run_probe: Optional[Callable[[List[str], Optional[str]], Tuple[int, str]]] = None):
+                 run_probe: Optional[Callable[[List[str], Optional[str]], Tuple[int, str]]] = None,
+                 post_ack: Optional[Callable[..., dict]] = None):
         self.run_probe = run_probe or globals()["run_probe"]
+        self.post_ack = post_ack or (lambda conn, inv, sid, seq, disposition, note, client: post_ack_event(
+            conn, inv, sid, seq, disposition, note, client, opener=opener))
         self.process_rows = process_rows or globals()["process_rows"]
         self.kill = kill or os.kill
         self.sleep = sleep or time.sleep
@@ -2821,7 +2914,7 @@ def settle(home: Path, sid: str, system: System, config: dict, report: list, *, 
             binding = ie.read_binding(boxed_home if entry.get("sandboxed_state") else plain_home, sid)
             if entry.get("state") == CLAIMED:
                 _settle_claimed(home, sid, led, entry, binding, system, report)
-            if entry.get("state") in (RESUMING, TIMED_OUT):
+            if entry.get("state") in (RESUMING, TIMED_OUT, ACK_RELAYED):
                 _settle_resuming(home, sid, led, entry, binding, system, config, report)
 
 
@@ -2902,21 +2995,27 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
         conn, conn_runtime = _connection_for(home, binding, runtime, system)
         origin = conn.get("origin") if conn else None
         if conn:
+            relayed = relay_ack(home, sid, led, entry, conn, _client(conn_runtime, config), system, now)
             try:
                 events, complete = system.fetch(conn, entry["investigation_id"], sid, int(seq),
                                                 _client(conn_runtime, config))
                 disposition = acknowledged(events, sid, seq)
-                readable = disposition is not None or complete
+                # A relay that could not post yet, or a posted one the read does not show yet: asked again.
+                readable = disposition is not None or (complete and relayed is not None
+                                                       and entry.get("state") != ACK_RELAYED)
             except Exception:
                 readable = False
     if not readable and now - (_num(entry.get("exited_at")) or now) < ACK_CHECK_GRACE:
         return  # the acknowledgment could not be read: asked again next pass
     if disposition:
         entry["disposition"] = disposition
-        transition(entry, ACKNOWLEDGED, now, f"the session acknowledged the decision ({disposition})")
+        how = " (relayed by the waker)" if entry.get("state") == ACK_RELAYED else ""
+        transition(entry, ACKNOWLEDGED, now, f"the session acknowledged the decision ({disposition}){how}")
         words = f"acknowledged owner decision #{seq} ({disposition})"
     else:
-        transition(entry, FAILED, now, "the run ended without acknowledging the decision" if readable
+        relay = entry.get("relay") if isinstance(entry.get("relay"), dict) else {}
+        transition(entry, FAILED, now, ("the run ended without acknowledging the decision"
+                                        + (f" ({relay['reason']})" if relay.get("reason") else "")) if readable
                    else "the run ended; its acknowledgment could not be read")
         words = f"the run for owner decision #{seq} ended without an acknowledgment (not retried)"
     write_ledger(home, sid, led, now)
@@ -2924,6 +3023,43 @@ def _settle_resuming(home, sid, led, entry, binding, system, config, report) -> 
     remove_tmpdir(home, entry.get("tmp_dir"))
     _notify(system, binding, sid, entry["state"], words, runtime, origin)
     _report(system, report, sid, seq, entry["state"].lower(), entry.get("reason", ""))
+
+
+def relay_ack(home, sid, led, entry, conn, client, system, now) -> Optional[bool]:
+    """After the child exited (never before), relay the acknowledgment the
+    woken agent wrote to $TMPDIR/ACK_FILE: post exactly that one
+    acknowledged event of the launched seq, as the session, with the
+    plugin's connection (System.post_ack). True: posted (now or on an
+    earlier pass; ACK_RELAYED); False: nothing to relay (no file, an invalid
+    one, the wrong seq, or a run that failed verification: the reason is
+    kept in the ledger, never the note); None: the post failed, tried again
+    next pass. The content is the agent's: the waker only carries it out of
+    the sandbox (no network, no hooks in a woken Codex run)."""
+    seq = entry.get("seq")
+    relay = entry.get("relay") if isinstance(entry.get("relay"), dict) else None
+    if entry.get("state") == ACK_RELAYED or (relay and relay.get("posted")):
+        return True
+    if relay is not None:
+        return False
+    if entry.get("verified") is False:
+        ack, why = None, "the woken run failed verification, so its acknowledgment is not relayed"
+    else:
+        ack, why = read_ack_file(entry.get("tmp_dir"), seq)
+    if ack is None:
+        entry["relay"] = {"posted": False, "reason": why}
+        write_ledger(home, sid, led, now)
+        return False
+    try:
+        system.post_ack(conn, entry["investigation_id"], sid, seq, ack["disposition"], ack.get("note"), client)
+    except Exception as e:
+        note = f"the acknowledgment could not be relayed ({type(e).__name__})"
+        entry.setdefault("history", []).append({"state": entry.get("state"), "at": _iso(now), "note": note})
+        write_ledger(home, sid, led, now)
+        return None
+    entry["relay"] = {"posted": True, "disposition": ack["disposition"]}
+    transition(entry, ACK_RELAYED, now, f"the waker relayed the session's acknowledgment ({ack['disposition']})")
+    write_ledger(home, sid, led, now)
+    return True
 
 
 def _disable_launch(home, runtime, sid, binding, why, system, report, now, origin=None) -> None:

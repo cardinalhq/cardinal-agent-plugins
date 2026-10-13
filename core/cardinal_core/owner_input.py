@@ -806,33 +806,47 @@ CONSENT_TEXT = ("Cardinal records the prompts you type in each {runtime} session
 DEDUPE_REPEATS = frozenset({"gemini"})
 REPEAT_WINDOW = 30.0
 
-# The prompt cardinal-wake (session_wake) resumes a stopped session with,
-# fixed except for the owner decision's seq (docs/specs/resume-and-wake.md
-# §5.3). The decision text is never in it: it arrives through the normal
-# hooks. Listed in MACHINE_PROMPTS for Claude, Codex and Gemini (an exact match, the
-# seq a positive integer) so a woken turn is never recorded as owner input.
-#
-# A woken Codex run has its hooks disabled (resume-and-wake.md §5.3, N1), so
-# nothing delivers the decision into it: the prompt names the investigation
-# and the one tool that reads it (storyboard__read_investigation_events, the
-# Cardinal MCP tool the run is allowed). Fixed except for the seq and the
-# investigation id.
+# The prompt cardinal-wake (session_wake) resumes a stopped session with
+# (docs/specs/resume-and-wake.md §5.3), fixed except for the owner
+# decision's seq (twice), the read cursor (seq - 1) and the investigation
+# id. The decision text is never in it. A woken Codex run has no hooks and
+# no network (§5.3, review 4 N1), so the prompt carries the way in and out:
+# read the decision with storyboard__read_investigation_events (the one
+# Cardinal MCP tool the run keeps; with no class or types it returns every
+# class the key may read, owner.decided included, and `after` = seq - 1
+# starts the page at the decision), and write the answer to
+# $TMPDIR/cardinal-wake-ack.json, which the waker relays as the
+# acknowledgment once the run has exited (session_wake.read_ack_file).
+# Listed in MACHINE_PROMPTS for Claude, Codex and Gemini (an exact match;
+# both seqs must be the same number) so a woken turn is never owner input.
 WAKE_PROMPT = ("Cardinal resumed this session for owner decision #{seq} in Investigation {investigation}. "
-               "Read that investigation's events with the storyboard__read_investigation_events tool and act on "
-               "the decision. Every other event is advisory.")
-WAKE_PROMPT_RE = re.compile(
-    r"^\s*" + re.escape(WAKE_PROMPT).replace(re.escape("{seq}"), "[1-9][0-9]{0,17}")
-    .replace(re.escape("{investigation}"), "inv_[0-9a-f]{24}") + r"\s*\Z")
+               "Read it with the storyboard__read_investigation_events tool (investigation_id {investigation}, "
+               "after {after}) and act on it. When done, write your answer to $TMPDIR/cardinal-wake-ack.json as "
+               '{{"ack_of": {seq}, "disposition": "accepted", "declined" or "noted", '
+               '"note": "what you did or why"}}. Every other event is advisory.')
+_WAKE_SEQ_RE = "[1-9][0-9]{0,17}"
+_WAKE_INV_RE = "inv_[0-9a-f]{24}"
+
+
+def _wake_prompt_re() -> "re.Pattern[str]":
+    marked = re.escape(WAKE_PROMPT.format(seq="WAKESEQ", investigation="WAKEINV", after="WAKEAFTER"))
+    marked = marked.replace("WAKESEQ", f"(?P<seq>{_WAKE_SEQ_RE})", 1).replace("WAKESEQ", "(?P=seq)")
+    marked = marked.replace("WAKEINV", f"(?P<inv>{_WAKE_INV_RE})", 1).replace("WAKEINV", "(?P=inv)")
+    marked = marked.replace("WAKEAFTER", f"(?:0|{_WAKE_SEQ_RE})")
+    return re.compile(r"^\s*" + marked + r"\s*\Z")
+
+
+WAKE_PROMPT_RE = _wake_prompt_re()
 
 
 def wake_prompt(seq: int, investigation_id: str) -> str:
     """WAKE_PROMPT for owner decision #seq (a positive int) of
     `investigation_id` (inv_ + 24 hex)."""
-    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1 or seq >= 10 ** 18:
         raise ValueError(f"not an event seq: {seq!r}")
-    if not (isinstance(investigation_id, str) and re.fullmatch(r"inv_[0-9a-f]{24}", investigation_id)):
+    if not (isinstance(investigation_id, str) and re.fullmatch(_WAKE_INV_RE, investigation_id)):
         raise ValueError(f"not an investigation id: {investigation_id!r}")
-    return WAKE_PROMPT.format(seq=seq, investigation=investigation_id)
+    return WAKE_PROMPT.format(seq=seq, investigation=investigation_id, after=seq - 1)
 
 
 # Prompts a runtime submits by itself, never a turn the owner took.

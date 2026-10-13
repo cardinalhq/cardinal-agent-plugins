@@ -512,14 +512,13 @@ codex exec -s <its own sandbox> -c approval_policy="never" -c 'web_search="disab
   -c sandbox_workspace_write.network_access=false -c 'sandbox_workspace_write.writable_roots=[]' \
   -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=false \
   -c 'mcp_servers.cardinal.tools.storyboard__read_investigation_events.approval_mode="approve"' \
-  -c 'mcp_servers.cardinal.tools.storyboard__post_investigation_event.approval_mode="approve"' \
-  -c 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", "storyboard__post_investigation_event"]' \
+  -c 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events"]' \
   -c mcp_servers.<each other server>.enabled=false \
   -c 'plugins."<each non-Cardinal plugin>".enabled=false' \
   --disable apps --disable plugins --disable remote_plugin --disable image_generation \
   --disable computer_use --disable browser_use --disable browser_use_external --disable in_app_browser \
   --disable multi_agent --disable tool_suggest --disable skill_mcp_dependency_install --disable hooks \
-  resume <session id> "Cardinal resumed this session for owner decision #<seq> in Investigation <inv_id>. Read that investigation's events with the storyboard__read_investigation_events tool and act on the decision. Every other event is advisory."
+  resume <session id> "Cardinal resumed this session for owner decision #<seq> in Investigation <inv_id>. Read it with the storyboard__read_investigation_events tool (investigation_id <inv_id>, after <seq - 1>) and act on it. When done, write your answer to $TMPDIR/cardinal-wake-ack.json as {\"ack_of\": <seq>, \"disposition\": \"accepted\", \"declined\" or \"noted\", \"note\": \"what you did or why\"}. Every other event is advisory."
 ```
 
 in that working directory, never one from the Investigation binding (which
@@ -535,9 +534,10 @@ settles; the shared `/tmp` is not writable.
   and exposes tools your config doesn't list: ChatGPT app connectors, web
   search, image generation, the browser and computer-use tools, and plugin
   installs.
-  - The woken run keeps only Cardinal's investigation read and post, which
-    is how it acknowledges. Those two are pre-approved, since with
-    approvals off an unapproved MCP call is refused.
+  - The woken run keeps only Cardinal's investigation read, pre-approved,
+    since with approvals off an unapproved MCP call is refused. (The MCP
+    post takes only cues, questions and challenges, never an
+    acknowledgment, so it is off too.)
   - Every other MCP server and every plugin except Cardinal's are turned
     off, and so are the features behind those built-in tools.
   - What's left: the shell and `apply_patch` inside the sandbox, goals,
@@ -561,11 +561,23 @@ settles; the shared `/tmp` is not writable.
   workspace code running unsandboxed. The woken run has none: no evidence
   capture, telemetry or owner-input capture, no investigation poller and no
   Stop reminder during it.
-- **The prompt:** it names the decision's seq and investigation and the
-  tool that reads it; the decision text is never in it, and the prompt
-  itself is never recorded as owner input. The agent reads the decision
-  with `storyboard__read_investigation_events` and acknowledges it with
-  `storyboard__post_investigation_event`.
+- **The prompt:** it names the decision's seq and investigation, the tool
+  that reads it, and where to write the answer; the decision text is never
+  in it, and the prompt itself is never recorded as owner input. The agent
+  reads the decision with `storyboard__read_investigation_events`.
+- **The acknowledgment is relayed.** With no hooks and no network, the
+  woken agent can't acknowledge by itself. It writes
+  `{"ack_of": <seq>, "disposition": "accepted" | "declined" | "noted",
+  "note": "..."}` to `$TMPDIR/cardinal-wake-ack.json` (the wake's private
+  directory). After the run has exited, and only then, the waker reads it
+  (a regular file, never a symlink, at most 8 KiB, exactly those keys,
+  `ack_of` the decision it woke the session for) and posts that one
+  acknowledgment as the session, with this plugin's key, the same way
+  `cardinal-storyboard investigation ack` does. The content is the
+  agent's; the waker only carries it out. Anything else in the file, a
+  different seq, or a run that failed its checks: nothing is posted, and
+  the run is reported as ended without an acknowledgment. The note is
+  never shown in a notification.
 
 **Notify-only** (a macOS notification naming the runtime, the session, the
 Investigation and the state, never the decision's text):
@@ -593,8 +605,9 @@ Investigation and the state, never the decision's text):
 - everything, until you `enable --launch`.
 
 **After a woken run.** Success means the session acknowledged your decision
-(it shows on the Investigation timeline). The report includes its
-disposition (accepted, declined, noted). Only an acknowledgment from your
+(it shows on the Investigation timeline; for a Codex run the waker
+relayed it, above). The report includes its disposition (accepted,
+declined, noted). Only an acknowledgment from your
 own principal naming the session counts, never a grantee's. An agent
 holding your key could still post one, so this reports what the session
 said. Starting a process is never reported as success.
@@ -621,9 +634,10 @@ asking. A woken agent that needs a deploy, a revert, a merge or anything
 else consequential does the rest of the work, then stops and asks; that
 needs a later decision or your own turn. In `workspace-write` the
 network-bound CLIs (`cardinal-storyboard investigation ack`,
-`cardinal-evidence promote`) fail. The two allowed Cardinal MCP tools work,
-because Codex runs MCP servers outside the sandbox, and that is exactly why
-every other MCP tool is turned off for the run.
+`cardinal-evidence promote`) fail. The Cardinal read works, because Codex
+runs MCP servers outside the sandbox, and that is exactly why every other
+MCP tool is turned off for the run. A woken agent that needs you says so in
+its acknowledgment's note.
 
 **Trust boundary.** The waker uses this plugin's Cardinal key, so it sees
 only your investigations, and it only considers sessions that ran on this

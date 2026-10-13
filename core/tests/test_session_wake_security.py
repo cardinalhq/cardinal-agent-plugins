@@ -360,9 +360,7 @@ class McpRestriction(Base):
             os.path.realpath(str(self.codex)), "exec", "-s", "workspace-write", "-c", 'approval_policy="never"',
             "-c", 'web_search="disabled"', *PINS,
             "-c", 'mcp_servers.cardinal.tools.storyboard__read_investigation_events.approval_mode="approve"',
-            "-c", 'mcp_servers.cardinal.tools.storyboard__post_investigation_event.approval_mode="approve"',
-            "-c", 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events", '
-                  '"storyboard__post_investigation_event"]',
+            "-c", 'mcp_servers.cardinal.enabled_tools=["storyboard__read_investigation_events"]',
             "-c", "mcp_servers.cardinal-behavior.enabled=false",
             "-c", "mcp_servers.computer-use.enabled=false",
             "-c", "mcp_servers.node_repl.enabled=false",
@@ -394,7 +392,7 @@ class McpRestriction(Base):
 
     def test_post_run_any_other_mcp_call_disables_codex(self):
         for server, tool, disabled in (("cardinal", "storyboard__read_investigation_events", False),
-                                       ("cardinal", "storyboard__post_investigation_event", False),
+                                       ("cardinal", "storyboard__post_investigation_event", True),
                                        ("cardinal", "slack__send_message", True),
                                        ("node_repl", "js", True)):
             with self.subTest(server=server, tool=tool):
@@ -497,7 +495,7 @@ class Lockdown(Base):
             return {"timestamp": "2026-10-12T23:40:00Z", "type": "response_item", "payload": payload}
         allowed = [call("custom_tool_call", None, "exec"), call("function_call", "functions", "wait"),
                    call("function_call", "collaboration", "spawn_agent"), call("function_call", "clock", "sleep"),
-                   call("function_call", "mcp__cardinal", "storyboard__post_investigation_event")]
+                   call("function_call", "mcp__cardinal", "storyboard__read_investigation_events")]
         bad = [call("web_search_call", None, "None"), call("image_generation_call", None, "None"),
                call("function_call", "mcp__codex_apps", "sites_deploy_site_version"),
                call("function_call", "web", "run"), call("function_call", None, "request_plugin_install"),
