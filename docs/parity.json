@@ -2686,5 +2686,49 @@
         }
       ]
     }
+  },
+  "session_wake": {
+    "title": "Owner-woken sessions: cardinal-wake (Codex CLI launch, Claude notify-only)",
+    "group": "investigation",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "na:out of scope for owner-woken sessions (docs/specs/resume-and-wake.md §2 non-goals: Cursor, Gemini, OpenCode, Pi and Devin); its sessions are not resumed or notified",
+      "gemini": "na:out of scope for owner-woken sessions (docs/specs/resume-and-wake.md §2 non-goals: Cursor, Gemini, OpenCode, Pi and Devin); its sessions are not resumed or notified"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "script",
+          "path": "bin/cardinal-wake"
+        },
+        {
+          "kind": "grep",
+          "path": "bin/cardinal-wake",
+          "pattern": "session_wake\\.cli_main\\(sys\\.argv\\[1:\\], runtime=\"claude\""
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/owner_input.py",
+          "pattern": "\"claude\": \\(re\\.compile\\(.*WAKE_PROMPT_RE\\)"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "script",
+          "path": "scripts/cardinal-wake"
+        },
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-wake",
+          "pattern": "session_wake\\.cli_main\\(sys\\.argv\\[1:\\], runtime=\"codex\""
+        },
+        {
+          "kind": "grep",
+          "path": "../../core/cardinal_core/session_wake.py",
+          "pattern": "def codex_argv\\("
+        }
+      ]
+    }
   }
 }

@@ -806,11 +806,31 @@ CONSENT_TEXT = ("Cardinal records the prompts you type in each {runtime} session
 DEDUPE_REPEATS = frozenset({"gemini"})
 REPEAT_WINDOW = 30.0
 
+# The prompt cardinal-wake (session_wake) resumes a stopped session with,
+# fixed except for the owner decision's seq (docs/specs/resume-and-wake.md
+# §5.3). The decision text is never in it: it arrives through the normal
+# hooks. Listed in MACHINE_PROMPTS for Claude and Codex (an exact match, the
+# seq a positive integer) so a woken turn is never recorded as owner input.
+WAKE_PROMPT = ("Cardinal resumed this session for owner decision #{seq} in its Investigation. "
+               "Read the investigation events and act on that decision. Every other event is advisory.")
+WAKE_PROMPT_RE = re.compile(r"^\s*" + re.escape(WAKE_PROMPT).replace(re.escape("{seq}"), "[1-9][0-9]{0,17}")
+                            + r"\s*\Z")
+
+
+def wake_prompt(seq: int) -> str:
+    """WAKE_PROMPT for owner decision #seq (a positive int)."""
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+        raise ValueError(f"not an event seq: {seq!r}")
+    return WAKE_PROMPT.format(seq=seq)
+
+
 # Prompts a runtime submits by itself, never a turn the owner took.
 MACHINE_PROMPTS = {
     # Claude Code re-enters UserPromptSubmit with a synthetic body when a
     # background task finishes ("<task-notification>…" / "task-notification …").
-    "claude": (re.compile(r"^\s*<?task-notification[\s>]", re.IGNORECASE),),
+    # cardinal-wake's resume prompt (WAKE_PROMPT): Claude sessions are
+    # notify-only today; listed so a future launch is never owner input.
+    "claude": (re.compile(r"^\s*<?task-notification[\s>]", re.IGNORECASE), WAKE_PROMPT_RE),
     # gemini-cli's loop recovery sends this as the request (_recoverFromLoop),
     # and /init submits its GEMINI.md template (performInit, gemini-cli
     # 0.63.0 packages/core/src/commands/init.ts). An MCP server's prompt
@@ -831,6 +851,8 @@ MACHINE_PROMPTS = {
         re.compile(r"^Review the code changes (?:introduced by commit|against the base branch) "
                    r"[\s\S]*Provide prioritized, actionable findings\.$"),
         re.compile(r"^Generate a file named AGENTS\.md that serves as a contributor guide for this repository\."),
+        # cardinal-wake's `codex exec resume <sid> "<WAKE_PROMPT>"`.
+        WAKE_PROMPT_RE,
     ),
 }
 

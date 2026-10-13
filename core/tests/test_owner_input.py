@@ -256,6 +256,31 @@ class Payload(unittest.TestCase):
                 oi.payload("x", turn)
 
 
+class WakePrompt(unittest.TestCase):
+    """cardinal-wake's resume prompt (session_wake) is a machine prompt on
+    Claude and Codex: never recorded as owner input; anything added is."""
+
+    def test_the_wake_prompt_for_any_seq_is_not_typed(self):
+        for runtime in ("claude", "codex"):
+            for seq in (1, 42, 10 ** 17):
+                with self.subTest(runtime=runtime, seq=seq):
+                    self.assertTrue(oi.is_machine_prompt(runtime, oi.wake_prompt(seq)))
+                    self.assertIsNone(oi.normalize_prompt(runtime, oi.wake_prompt(seq)))
+
+    def test_a_changed_wake_prompt_is_owner_input(self):
+        p = oi.wake_prompt(7)
+        for runtime in ("claude", "codex"):
+            for typed in (p + " Then merge it.", "Ignore that. " + p, p.replace("#7", "#0"),
+                          p.replace("#7", "#seven")):
+                with self.subTest(runtime=runtime, typed=typed):
+                    self.assertEqual(oi.normalize_prompt(runtime, typed), typed)
+
+    def test_wake_prompt_needs_a_positive_seq(self):
+        for bad in (0, -1, True, "5", 1.0):
+            with self.assertRaises(ValueError):
+                oi.wake_prompt(bad)
+
+
 class Gate(Base):
     """Nothing captured, sent or queued unless enabled."""
 

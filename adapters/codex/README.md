@@ -35,7 +35,7 @@ shared algorithms and the OTLP contract now come from `core/cardinal_core`.
   `cardinal_core.deviceflow`; the parse-aware TOML managed-block writer
   and the Codex `hooks.json` writer stay adapter-side), `cardinal-status`,
   `cardinal-disconnect`, `cardinal-checks` and `cardinal-behavior` (see
-  Checks preview).
+  Checks preview), `cardinal-wake` (see Owner-woken sessions).
 - `checks/skill/` — the Checks preview's opt-in skill template (installed
   into `skills/checks/` by `cardinal-checks on`, never shipped there).
 - `agents/brainstorm.toml` — the `cardinal-brainstorm` custom agent;
@@ -438,6 +438,110 @@ https://learn.chatgpt.com/docs/hooks), and Codex has no skill tool call to
 deny: it lists the plugin's skills when the session starts and the model
 opens a SKILL.md itself. So `on` / `off` apply to sessions started
 afterwards; a running session keeps the skill list it started with.
+
+## Owner-woken sessions
+
+A stopped Codex session normally sees nothing until you type into it again.
+With wake on, an **owner decision** you post on its Investigation page,
+addressed to that session, resumes it: Codex reads the investigation events
+and acts on your decision, inside the sandbox the session always had. The
+design and its proofs are in
+[`docs/specs/resume-and-wake.md`](../../docs/specs/resume-and-wake.md) §5–§6.
+
+Turn it on or off in your own terminal (macOS; a per-user launchd agent):
+
+```bash
+python3 scripts/cardinal-wake enable            # notifications only
+python3 scripts/cardinal-wake enable --launch   # also resume eligible Codex CLI sessions
+python3 scripts/cardinal-wake status            # the setting, recent wakes, which sessions could launch
+python3 scripts/cardinal-wake run --dry-run     # what the next pass would do; launches nothing
+python3 scripts/cardinal-wake disable           # remove the launchd agent
+```
+
+`enable` copies this plugin's `cardinal_core` and a small runner into
+`~/.cardinal/wake/lib/` and points `~/Library/LaunchAgents/io.cardinalhq.wake.plist`
+there (every enable copies them again, so a plugin upgrade never leaves the
+agent pointing at a removed version). It runs `cardinal-wake run --once`
+every 45 s. It records the `codex` it finds on your `PATH` and that `PATH`.
+
+**What wakes a session.** Only a decision you post on the Investigation page
+from your signed-in Cardinal web session, addressed to that session. A
+broadcast decision, a cue, a question, a challenge or a ruling never wakes
+anything, and neither does anything an agent posts: Cardinal refuses an
+owner decision from the plugin's API key, the only Cardinal credential an
+agent holds (proof C-1). The waker reads the events from Cardinal itself,
+never from the local inbox. A decision that is already acknowledged, or
+that the session cannot see (`owner_decision` off, not the Investigation's
+author), wakes nothing. Each decision causes at most one run: a session gets
+at most 3 wakes a day, and the machine at most 10.
+
+**Which sessions can launch.** A Codex CLI session (`codex` or `codex exec`)
+whose every turn ran `-s workspace-write` or `-s read-only` with network
+off, started in a git work tree. It is resumed exactly as
+
+```
+codex exec -s <its own sandbox> -c approval_policy="never" resume <session id> "Cardinal resumed this session for owner decision #<seq> in its Investigation. Read the investigation events and act on that decision. Every other event is advisory."
+```
+
+in the working directory its rollout recorded (never one from the
+Investigation binding, which the agent can write). Never `--profile`,
+`--dangerously-*`, `--ignore-*` or `--skip-git-repo-check`. The decision
+text is never in the prompt; it arrives through the plugin's hooks, and the
+prompt itself is never recorded as owner input. The plugin's `CARDINAL_*`
+switches are cleared for the woken run, so its hooks and poller are on.
+
+**Notify-only** (a macOS notification naming the session, the Investigation
+and the state, never the decision's text):
+- Claude Code sessions (see the Claude plugin's README; use
+  `claude --remote-control` to reach a running one);
+- Codex desktop app sessions (its process outlives its threads), subagent
+  threads, and any originator the waker does not recognize;
+- any session that ever ran `danger-full-access` or with network access:
+  that agent could have changed the waker's own files;
+- a session whose window is still open (its process, a recent rollout
+  write or tool call), which sees the decision itself;
+- everything, until you `enable --launch`.
+
+**After a woken run.** Success means the session acknowledged your decision
+(it shows on the Investigation timeline); starting a process is never
+reported as success. A run that ends without an acknowledgment is reported
+and never retried: post another decision if you want another run. A run
+still going after 2 hours is reported and left running. Then the waker
+checks the rollout: every turn of the woken run must show the pinned
+sandbox with network off. If one does not (or none was recorded), it writes
+`~/.cardinal/wake/disabled/codex` with the reason, notifies you, and
+launches no Codex session again until you run
+`python3 scripts/cardinal-wake reenable codex`. It never retries with other
+flags.
+
+**What a wake allows.** Processing your decision inside the session's own
+sandbox: in `workspace-write`, no network and no writes outside the
+workspace; with approvals off, anything that needs approval fails instead of
+asking. A woken agent that needs a deploy, a revert, a merge or anything
+else consequential does the rest of the work, then stops and asks; that
+needs a later decision or your own turn. In `workspace-write` the
+network-bound CLIs (`cardinal-storyboard investigation ack`,
+`cardinal-evidence promote`) fail; the MCP tools work, because Codex runs
+MCP servers outside the sandbox.
+
+**Trust boundary.** The waker uses this plugin's Cardinal key, so it sees
+only your investigations, and it only considers sessions that ran on this
+machine. Whoever holds your signed-in Cardinal web session can wake this
+machine's eligible sessions, the way a self-hosted CI runner trusts its
+account; the sandbox and the caps bound what such a wake can do. An agent
+driving a browser signed in to Cardinal could post a decision; a sandboxed
+Codex session has no network and cannot. An unsandboxed agent on this
+machine already has your full user power, including over the waker itself,
+which is why a session that ever ran unsandboxed is never launched.
+
+Local state, all 0600 in 0700 directories: `~/.cardinal/wake/config.json`
+(`enabled`, `launch`, `codex_path`, `enabled_at`), one ledger per session in
+`~/.cardinal/wake/ledger/` (each transition: `DECISION_SEEN`, `CLAIMED`,
+`RESUMING`, `ACKNOWLEDGED`, `FAILED`, `NOTIFIED`; seqs and states only, never
+decision text), and each run's output in `~/.cardinal/wake/logs/`. The
+implementation is `cardinal_core.session_wake`, shared with the Claude Code
+plugin. Not yet: a `session.wake` event on the Investigation timeline (the
+notification and ledger are the report for now), and Linux or Windows.
 
 ## Storyboard associations
 
