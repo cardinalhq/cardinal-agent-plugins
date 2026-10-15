@@ -51,8 +51,8 @@ gemini -e none --policy <this-skill-directory>/stepback-policy.toml --include-di
 
 Keep every flag: the policy leaves it only file reads and searches (otherwise headless Gemini
 can write), and `-e none` drops Cardinal's tools and hooks.
-If it fails, tell the owner the step back needs a Claude supervisor, and keep the plan and its
-review.
+If one fails, tell the owner the step back needs a Claude supervisor; for a plan, answer the
+estimator copy yourself.
 
 ## Doing your own checks
 

@@ -55,8 +55,9 @@ codex exec --ignore-user-config --ignore-rules --disable hooks --disable apps --
 
 Keep every flag: the sandbox covers only shell commands; your config's MCP servers, apps and
 hooks would give the pass write tools and Cardinal context. Its final message is the answer.
-It needs network: ask once, with the Cardinal commands. Run the two passes one after the other. If it fails, tell the owner the step back
-needs a Claude supervisor, and keep the plan and its review.
+It needs network: ask once, with the Cardinal commands. Run the two passes one after the
+other. If one fails, tell the owner the step back needs a Claude supervisor; for a plan, answer
+the estimator copy yourself.
 
 ## Doing your own checks
 
