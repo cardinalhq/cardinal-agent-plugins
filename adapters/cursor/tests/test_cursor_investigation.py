@@ -298,6 +298,28 @@ class CursorInvestigationTests(unittest.TestCase):
                 self.assertEqual(res.stdout, "")
                 self.assertNotIn("followup_message", res.stdout)
 
+    # --- relayed owner decisions (owner_relay) ----------------------------------
+
+    def test_approve_relays_without_consent_prints_nothing_and_stages_the_outcome(self):
+        from cardinal_core import owner_relay
+        self.setup_live(owner_input_on=False)
+        self.start()
+        entry = owner_relay.propose(self.home, CONV, "inv_" + "e" * 24, "9a8b7c6d-worker", "Only the cache layer.")
+        self.fake.routes["relay-owner-decision"] = (201, {"event": {
+            "investigation_id": "inv_" + "e" * 24, "seq": 57, "type": "owner.decided"}, "duplicate": False})
+        res = self.run_hook({**PROMPT, "prompt": f"approve {entry['id']}"})
+        self.assertEqual(res.stdout, "")                       # never {continue: false}
+        [req] = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
+        self.assertEqual(req["body"]["relay"]["supervisor_session_id"], CONV)
+        want = f"Cardinal: relayed owner decision {entry['id']} to session 9a8b7c6d as event #57 (owner_relayed)."
+        self.assertIn(want, "\n".join(investigation_turn.consume_staged(self.home, CONV)))
+        self.assertIn(want, owner_relay.recent(self.home, CONV)[-1]["message"])
+        self.assertEqual(self.owner_records(), [])
+        # Not the owner's: a subagent payload relays nothing.
+        entry = owner_relay.propose(self.home, CONV, "inv_" + "e" * 24, "9a8b7c6d-worker", "Second.")
+        self.run_hook({**PROMPT, "prompt": "approve", "agent_id": "sub-1"})
+        self.assertEqual(len([r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]), 1)
+
     # --- owner input ----------------------------------------------------------
 
     def test_no_consent_captures_nothing_and_blocks_nothing(self):

@@ -828,6 +828,30 @@ def prompt_investigation(payload: dict[str, Any], session_id: str) -> tuple[list
     return parts, message
 
 
+def relay_owner_decision(payload: dict[str, Any], session_id: str) -> str | None:
+    """Relayed owner decisions (owner_relay.handle_prompt, runtime "codex"):
+    when the owner's whole prompt approves (`approve dp_xxxxxxxx`, or bare
+    `approve` for the only pending proposal) or rejects a decision this
+    supervisor session proposed, relay it to the worker with this machine's
+    key (bounded by START + owner_relay.BUDGET) or drop it. The outcome, for
+    the user (systemMessage) and the model (additionalContext), or None.
+    Runs whether or not owner input is on; never for a subagent's or a
+    Codex-generated prompt. Never raises."""
+    try:
+        from cardinal_core import owner_relay
+
+        if owner_relay.match(payload.get("prompt")) is None:
+            return None
+        wiring = storyboard_wiring()
+        got = owner_relay.handle_prompt(Path.home(), session_id, payload.get("prompt"), runtime="codex",
+                                        conn=wiring.connection(), client=wiring.client,
+                                        agent_id=payload.get("agent_id"),
+                                        deadline=START + min(owner_relay.BUDGET, PROMPT_DEADLINE_S))
+        return got.message
+    except Exception:
+        return None
+
+
 def mark_disclosure_shown(session_id: str) -> None:
     """The owner-input disclosure was flushed to Codex as a systemMessage:
     record it (owner_input.mark_disclosed), so capture starts with the next
@@ -902,7 +926,11 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
     blocked = isinstance(gate_out, dict) and gate_out.get("decision") == "block"
     context = None
     message = None
+    relayed = None
     if not blocked:
+        # The owner's approval of a proposed owner decision first: it is
+        # independent of owner-input capture, and its outcome is shown.
+        relayed = relay_owner_decision(payload, session_id)
         try:
             context = decision_context(paths, session_id)
         except Exception:
@@ -913,7 +941,8 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> None:
         except Exception:
             pass
     try:
-        prompt_out = merge_prompt_output(gate_out, context, message)
+        prompt_out = merge_prompt_output(gate_out, "\n\n".join(x for x in (relayed, context) if x) or None,
+                                         "\n\n".join(x for x in (relayed, message) if x) or None)
         if prompt_out:
             sys.stdout.write(json.dumps(prompt_out))
             sys.stdout.flush()

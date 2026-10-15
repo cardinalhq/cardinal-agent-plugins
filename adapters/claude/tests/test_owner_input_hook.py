@@ -65,6 +65,7 @@ class FakeMaestro:
         self.principals = None     # the read answer's `principals` map (C2)
         self.read_status = None    # answered to every read-investigation-events
         self.grant_status = None   # answered to every grant-investigation-access
+        self.relay_status = None   # answered to every relay-owner-decision
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -140,6 +141,14 @@ class FakeMaestro:
                                      "granted_by": "user:u1", "created_at": "t",
                                      "expires_at": "2026-10-07T16:00:00.000Z", "revoked_at": None,
                                      "revoked_by": None, "active": True}]}
+        if tool == "relay-owner-decision":
+            if self.relay_status:
+                return self.relay_status
+            e = {"investigation_id": body["investigation_id"], "seq": 70 + len(self.events), "type": "owner.decided",
+                 "class": "owner", "authority": "owner_relayed", "to_session_id": body["to_session_id"],
+                 "payload": body["payload"]}
+            self.events.append(e)
+            return 201, {"event": e, "duplicate": False}
         if tool == "revoke-investigation-grant":
             return 200, {"grant": {"grant_id": body["grant_id"], "active": False}, "revoked": True}
         return 404, None
@@ -607,6 +616,77 @@ class NoWritePath(Base):
             self.assertNotIn(word, res.stdout.split("{", 1)[1].split("}", 1)[0])
         self.assertEqual(self.cli("post", INV, "--type", "owner_input", "--text", "x").returncode, 2)
         self.assertNotIn("record-owner-input", self.fake.tools())
+
+
+RELAY_HOOK = HOOKS / "owner-relay.py"
+WORKER = "inv_" + "e" * 24
+WORKER_SID = "9a8b7c6d-worker"
+
+
+class OwnerRelay(Base):
+    """owner-relay.py: the owner's `approve` relays a proposed decision,
+    whatever owner input says, and the outcome reaches the user
+    (systemMessage) and the model (additionalContext)."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind(capabilities={"owner_input": {"enabled": True}, "owner_relay": {"enabled": True}})
+
+    def relay_hook(self, prompt, env=None, **extra):
+        payload = {"session_id": SID, "transcript_path": "/x.jsonl", "cwd": str(self.base),
+                   "hook_event_name": "UserPromptSubmit", "prompt": prompt, **extra}
+        return subprocess.run([str(RELAY_HOOK)], input=json.dumps(payload), capture_output=True, text=True,
+                              timeout=30, env=env or self.env, cwd=str(self.base))
+
+    def propose(self):
+        res = self.cli("propose-decision", WORKER, "--to-session", WORKER_SID, "--text", "Only the cache layer.",
+                       "--session", SID)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.fake.requests, [])   # a proposal sends nothing
+        return res.stdout.split()[1].rstrip(":")
+
+    def test_approve_relays_even_with_owner_input_off_and_reports_it(self):
+        pid = self.propose()
+        env = dict(self.env, CARDINAL_OWNER_INPUT="0")
+        res = self.relay_hook(f"approve {pid}", env=env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        out = json.loads(res.stdout)
+        msg = out["systemMessage"]
+        self.assertEqual(out["hookSpecificOutput"], {"hookEventName": "UserPromptSubmit", "additionalContext": msg})
+        self.assertIn(f"relayed owner decision {pid} to session 9a8b7c6d as event #", msg)
+        [(tool, body, headers, _)] = self.fake.requests
+        self.assertEqual(tool, "relay-owner-decision")
+        self.assertEqual(headers["x-cardinalhq-api-key"], "ck")
+        self.assertNotIn("authorization", headers)
+        self.assertEqual((body["investigation_id"], body["relay"]["supervisor_investigation_id"]), (WORKER, INV))
+        self.assertNotIn("record-owner-input", self.fake.tools())
+        self.assertFalse((self.sessions() / f"{SID}.proposals.json").exists()
+                         and json.loads((self.sessions() / f"{SID}.proposals.json").read_text())["proposals"])
+
+    def test_other_prompts_subagents_and_unbound_sessions_are_silent(self):
+        self.propose()
+        self.silent(self.relay_hook("approve the plan"))
+        self.silent(self.relay_hook("approve", agent_id="sub-1"))
+        self.assertEqual(self.fake.requests, [])
+
+    def test_not_enabled_shows_the_settings_link_and_keeps_it(self):
+        pid = self.propose()
+        self.fake.relay_status = (403, {"error": "owner_relay_not_enabled",
+                                        "settings_url": "https://app.example.invalid/settings"})
+        out = json.loads(self.relay_hook("approve").stdout)
+        self.assertIn("https://app.example.invalid/settings", out["systemMessage"])
+        self.assertIn(f"retry with `approve {pid}`", out["systemMessage"])
+        self.fake.relay_status = None
+        out = json.loads(self.relay_hook("APPROVE.").stdout)
+        self.assertIn(f"relayed owner decision {pid}", out["systemMessage"])
+
+    def test_propose_refuses_a_grant_file_and_the_hook_is_registered(self):
+        res = self.cli("propose-decision", WORKER, "--to-session", WORKER_SID, "--text", "x", "--session", SID,
+                       "--credential-file", str(self.base / "grant.json"))
+        self.assertEqual(res.returncode, 2)
+        hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]["UserPromptSubmit"]
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}/hooks/owner-relay.py",
+                      [h["command"] for g in hooks for h in g["hooks"]])
 
 
 if __name__ == "__main__":

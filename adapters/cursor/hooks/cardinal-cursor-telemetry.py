@@ -38,6 +38,10 @@ specific:
     detached), only after the user consented in their own terminal
     (`cardinal-connect --owner-input on`): Cursor has no user-visible,
     non-blocking channel for a per-session disclosure. Never blocks;
+  * relayed owner decisions on beforeSubmitPrompt (cardinal_core.owner_relay):
+    the owner's `approve|reject dp_…` relays or drops a proposed owner
+    decision (bounded, only for such a prompt); the outcome is staged for
+    the next postToolUse (no user-visible channel there). Never blocks;
   * storyboard authoring (cardinal_core.storyboard_authoring): the preview
     render and hero upload in a matcher-scoped postToolUse entry with a
     long timeout (`--role authoring`), the evidence token on every tool, the
@@ -562,9 +566,12 @@ def handle_before_submit_prompt(payload: dict[str, Any]) -> None:
     except Exception:
         pass
 
-    # Owner input (only with the user's connect-time consent) and the
-    # discovery re-look: neither waits on the network here, and neither
+    # The owner's approval of a proposed owner decision (owner_relay: a
+    # bounded request, only for such a prompt; its outcome is staged), then
+    # owner input (only with the user's connect-time consent) and the
+    # discovery re-look: neither waits on the network here. Nothing here
     # ever blocks the prompt or prints anything.
+    relay_owner_decision(payload, conv_id)
     capture_owner_input(payload, conv_id, cwd)
     spawn_relook(conv_id, cwd)
 
@@ -1520,6 +1527,40 @@ def capture_owner_input(payload: dict[str, Any], conv_id: str, cwd: str) -> str:
                                   deadline=START + owner_input.BUDGET, detached=True, cwd=cwd)
         # got.disclosure is never set on Cursor (consent stands in for it);
         # there is no channel to show it on beforeSubmitPrompt anyway.
+        return got.status
+    except Exception:
+        return "error"
+
+
+# ---------------------------------------------------------------------------
+# Relayed owner decisions (beforeSubmitPrompt): cardinal_core.owner_relay.
+# When the owner's whole prompt is `approve dp_xxxxxxxx` (bare `approve` for
+# the only pending proposal) or `reject dp_xxxxxxxx`, the decision this
+# supervisor conversation proposed is relayed to the worker with this
+# machine's key (bounded, ~3 s; only for such a prompt) or dropped. Cursor
+# has no user-visible, non-blocking message on beforeSubmitPrompt (its
+# user_message shows only for a blocked prompt, and the prompt is never
+# blocked here), so the outcome is STAGED for the next context-capable
+# boundary (the model tells the user) and kept in the proposals file's
+# recent outcomes (`cardinal-storyboard investigation proposals`).
+# Independent of owner-input capture and consent.
+# ---------------------------------------------------------------------------
+
+def relay_owner_decision(payload: dict[str, Any], conv_id: str) -> str:
+    """The relay status (a debug code). Never raises."""
+    try:
+        from cardinal_core import owner_relay
+
+        if owner_relay.match(payload.get("prompt")) is None:
+            return "no_match"
+        wiring = storyboard_wiring()
+        agent_id = next((payload.get(k) for k in SUBAGENT_KEYS if payload.get(k)), None)
+        got = owner_relay.handle_prompt(Path.home(), conv_id, payload.get("prompt"), runtime="cursor",
+                                        conn=wiring.connection(), client=wiring.client,
+                                        agent_id=agent_id if isinstance(agent_id, str) else None,
+                                        deadline=START + owner_relay.BUDGET)
+        if got.message:
+            stage_for_next_boundary(conv_id, got.message)
         return got.status
     except Exception:
         return "error"

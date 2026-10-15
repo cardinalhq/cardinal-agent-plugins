@@ -1379,6 +1379,89 @@
       ]
     }
   },
+  "relayed_owner_decisions": {
+    "title": "Relayed owner decisions (the owner approves in the supervisor terminal)",
+    "group": "investigation",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "present",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "hook",
+          "event": "UserPromptSubmit",
+          "command": "/hooks/owner-relay\\.py$"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/owner-relay.py",
+          "pattern": "owner_relay\\.handle_prompt\\("
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation propose-decision"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "hook",
+          "event": "UserPromptSubmit",
+          "command": "--event UserPromptSubmit\\b"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-codex-telemetry.py",
+          "pattern": "owner_relay\\.handle_prompt\\("
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation propose-decision"
+        }
+      ],
+      "cursor": [
+        {
+          "kind": "hook",
+          "event": "beforeSubmitPrompt",
+          "command": "--event beforeSubmitPrompt #"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-cursor-telemetry.py",
+          "pattern": "owner_relay\\.handle_prompt\\("
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation propose-decision"
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "hook",
+          "event": "BeforeAgent",
+          "command": "--event BeforeAgent #"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-gemini-telemetry.py",
+          "pattern": "owner_relay\\.handle_prompt\\("
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation propose-decision"
+        }
+      ]
+    },
+    "notes": {
+      "cursor": "Cursor's beforeSubmitPrompt has no user-visible, non-blocking message, so the outcome is staged for the next tool boundary (model context) and listed by `investigation proposals`; the supervise skill tells the agent to run it and report the outcome."
+    }
+  },
   "connection_skills": {
     "title": "connect / disconnect / status skills",
     "group": "skills",

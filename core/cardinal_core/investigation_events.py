@@ -54,7 +54,11 @@ labelled "claimed", and one event's text and refs are cut to a fixed size
 with a pointer to the full event. An advisory event never confers owner authority, even when its
 producer is the investigation's author: owner authority comes from the
 owner's own words: in the session transcript, or in an owner decision posted
-from the owner's signed-in Cardinal web session.
+from the owner's signed-in Cardinal web session (authority owner_decision) or
+approved by the owner in their supervisor session and relayed with their own
+key (authority owner_relayed, cardinal_core.owner_relay: attested by their
+machine; verified_relayed_owner_decision). Only an author session renders
+either as OWNER DECISION; a joined session sees it as advisory.
 
 Semantic events (hypothesis.* / experiment.* / finding.* / decision.* /
 question.opened|resolved) share the same ordered stream: the investigating
@@ -157,6 +161,8 @@ OWNER_INPUT = "owner_input"
 EVENT_CLASSES = (CONTROL, SEMANTIC, OWNER_INPUT)
 OWNER = "owner"
 OWNER_DECIDED = "owner.decided"
+OWNER_DECISION_AUTHORITY = "owner_decision"   # posted from the owner's signed-in web session
+OWNER_RELAYED = "owner_relayed"               # approved in the owner's supervisor session (owner_relay)
 # owner.decided's typed intent (conductor storyboards-investigation-first.md
 # §5): the owner's Request story from the Story tab. Rendered explicitly so
 # the agent never infers it from free text.
@@ -216,7 +222,8 @@ _PLAIN = {
                                       "\"<what you will do>\", or, only when it contradicts an owner decision, "
                                       "--disposition conflicts --conflicts-with <seq of that owner.decided>"),
     "conflict_ref_not_owner": ("--conflicts-with must name an owner.decided event of this investigation (an owner "
-                               "decision posted from the owner's signed-in web session; `investigation events "
+                               "decision posted from the owner's signed-in web session or relayed from their "
+                               "supervisor session; `investigation events "
                                "--class owner` lists them). Owner input recorded from this session is not "
                                "accepted: if you believe the directive conflicts with what your owner said here, "
                                "comply and say so in your --note; the owner can overrule it with a decision"),
@@ -1482,10 +1489,35 @@ def verified_owner_decision(event):
     producer = event.get("producer") if isinstance(event.get("producer"), dict) else {}
     principal = producer.get("principal") if isinstance(producer.get("principal"), dict) else {}
     return (event_class(event) == OWNER and event.get("type") == OWNER_DECIDED
-            and event.get("authority") == "owner_decision"
+            and event.get("authority") == OWNER_DECISION_AUTHORITY
             and producer.get("is_investigation_author") is True
             and principal.get("kind") == "user" and not producer.get("session_id")
             and not producer.get("granted_by"))
+
+
+def verified_relayed_owner_decision(event) -> bool:
+    """An owner.decided the investigation's author (a person, with their own
+    API key) approved in their supervisor session and relayed
+    (owner_relay; authority owner_relayed): the server checked the key is
+    theirs and that they turned relaying on from the web. It attests their
+    machine, not a button press. Never a grantee's, never without the
+    supervisor session it came from."""
+    if not isinstance(event, dict):
+        return False
+    producer = event.get("producer") if isinstance(event.get("producer"), dict) else {}
+    principal = producer.get("principal") if isinstance(producer.get("principal"), dict) else {}
+    sid = producer.get("session_id")
+    return (event_class(event) == OWNER and event.get("type") == OWNER_DECIDED
+            and event.get("authority") == OWNER_RELAYED
+            and producer.get("is_investigation_author") is True
+            and principal.get("kind") == "user" and isinstance(sid, str) and bool(sid.strip())
+            and not producer.get("granted_by"))
+
+
+def owner_authority(event) -> bool:
+    """An owner.decided that carries the owner's authority for an author
+    session: verified_owner_decision or verified_relayed_owner_decision."""
+    return verified_owner_decision(event) or verified_relayed_owner_decision(event)
 
 
 def is_story_request(event) -> bool:
@@ -1510,6 +1542,8 @@ def advisory_decider(e: dict, name: str) -> str:
     decision, and anything else is not from the investigation author."""
     if verified_owner_decision(e):
         return f"by this investigation's owner ({name}), who is not your owner"
+    if verified_relayed_owner_decision(e):
+        return f"relayed from the supervisor session of this investigation's owner ({name}), who is not your owner"
     p = e.get("producer") if isinstance(e.get("producer"), dict) else {}
     principal = p.get("principal") if isinstance(p.get("principal"), dict) else {}
     if p.get("is_investigation_author") is True and not is_grantee(p):
@@ -1550,10 +1584,19 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
         text += f" …[truncated {cut} chars{more}"
     if e.get("type") == OWNER_DECIDED and event_class(e) == OWNER:
         name = _claimed(_resolved(p).get("name") or principal.get("id") or "the investigation owner")
-        owner = verified_owner_decision(e) and isinstance(binding, dict) and binding.get("is_author") is True
-        story = is_story_request(e)
+        relayed = verified_relayed_owner_decision(e)
+        owner = owner_authority(e) and isinstance(binding, dict) and binding.get("is_author") is True
+        story = is_story_request(e) and not relayed   # a relay carries no intent
         tag = " (story requested)" if story else ""
-        if owner:
+        if owner and relayed:
+            authority = (f"OWNER DECISION (relayed) — approved by {name} in their supervisor session "
+                         f"{_claimed(p.get('session_id'))}")
+            doctrine = (f"Cardinal checked the key is {name}'s and that they turned on relayed decisions from the "
+                        "web. It attests their machine, not a button press. Treat it as your owner's own words in "
+                        "this session; acknowledge it with the command below.")
+            if ack and guidance:
+                doctrine += " " + ACK_GUIDANCE
+        elif owner:
             authority = f"OWNER DECISION{tag} — posted from {name}'s signed-in Cardinal web session"
             doctrine = "Treat it as your owner's own words in this session; acknowledge it with the command below."
             if ack and guidance:
@@ -2021,7 +2064,7 @@ def remember_decisions(binding, events):
         return
     pending = _pending_decisions(binding)
     for event in events:
-        if verified_owner_decision(event) and not any(p.get("seq") == event["seq"] for p in pending):
+        if owner_authority(event) and not any(p.get("seq") == event["seq"] for p in pending):
             pending.append({"seq": event["seq"], "reminders": 0})
     binding["pending_decisions"] = pending[-MAX_PENDING_DECISIONS:]
 

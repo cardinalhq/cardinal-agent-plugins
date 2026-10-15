@@ -124,6 +124,10 @@ class FakeMaestro:
                  "type": "owner_input.recorded", "class": "owner_input", "payload": body["payload"]}
             self.events.append(e)
             return 201, {"event": e, "duplicate": False}
+        if tool == "relay-owner-decision":
+            e = {"investigation_id": body["investigation_id"], "seq": 57, "type": "owner.decided",
+                 "class": "owner", "authority": "owner_relayed"}
+            return 201, {"event": e, "duplicate": False}
         if tool == "read-investigation-events":
             return 200, {"investigation_id": body.get("investigation_id"), "events": [], "head_seq": 0}
         if tool == "find" and (body.get("refs") or {}).get("paths"):
@@ -517,6 +521,40 @@ class OwnerInputTests(GeminiInvestigationTests):
         self.assertIn(DISCLOSURE, self.prompt("told again").get("systemMessage", ""))
         time.sleep(0.5)
         self.assertEqual(self.fake.records(), [])
+
+
+class OwnerRelayTests(GeminiInvestigationTests):
+    """The owner's `approve` of a proposed owner decision (owner_relay) on
+    BeforeAgent: relayed whether or not owner input is on, hook context
+    removed before matching, the outcome as systemMessage and context, and a
+    re-fired BeforeAgent repeats it without relaying twice."""
+    owner_input = False
+
+    def test_approve_relays_once_and_reports_to_user_and_model(self):
+        from cardinal_core import owner_relay
+        self.start()
+        worker = "inv_" + "e" * 24
+        entry = owner_relay.propose(self.home, SID, worker, "9a8b7c6d-worker", "Only the cache layer.")
+        raw = f"approve {entry['id']}\n<hook_context>Cardinal session id for this session: x.</hook_context>"
+        out = self.prompt(raw)
+        want = f"Cardinal: relayed owner decision {entry['id']} to session 9a8b7c6d as event #57 (owner_relayed)."
+        self.assertIn(want, out["systemMessage"])
+        self.assertIn(want, out["hookSpecificOutput"]["additionalContext"])
+        again = self.prompt(raw)   # gemini-cli re-fires BeforeAgent for one prompt
+        self.assertIn(want, again["systemMessage"])
+        relays = [r for r in self.fake.requests if r["tool"] == "relay-owner-decision"]
+        self.assertEqual(len(relays), 1)
+        self.assertEqual(relays[0]["body"]["relay_key"], entry["id"])
+        self.assertEqual(relays[0]["headers"]["x-cardinalhq-api-key"], "ck_gemini_test")
+        self.assertEqual(self.fake.records(), [])
+
+    def test_unrelated_prompts_relay_nothing(self):
+        from cardinal_core import owner_relay
+        self.start()
+        owner_relay.propose(self.home, SID, "inv_" + "e" * 24, "9a8b7c6d-worker", "Only the cache layer.")
+        out = self.prompt("approve the plan")
+        self.assertNotIn("systemMessage", out)
+        self.assertFalse([r for r in self.fake.requests if r["tool"] == "relay-owner-decision"])
 
 
 class CapabilityOffTests(GeminiInvestigationTests):

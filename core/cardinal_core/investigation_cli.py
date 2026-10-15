@@ -14,6 +14,7 @@ from . import investigation_bootstrap as boot
 from . import investigation_consumer as consumer
 from . import investigation_grants as gr
 from . import investigation_text
+from . import owner_relay
 
 EXIT_USAGE = 2
 
@@ -899,6 +900,98 @@ class CLI:
             sys.stdout.write(ie.checkpoint_line(out) + "\n")
         return 0
 
+    # -- relayed owner decisions (supervisor side). Nothing here sends a
+    # decision: only the prompt hook relays one, when the owner approves it.
+
+    def cmd_propose_decision(self, args: argparse.Namespace) -> int:
+        sid = self._session_arg(args)
+        if not sid:
+            return EXIT_USAGE
+        worker = args.investigation_id or args.investigation
+        if worker is None or not self._investigation_arg(worker):
+            if worker is None:
+                print("not proposed: name the worker's investigation (inv_...)", file=sys.stderr)
+            return EXIT_USAGE
+        owner_relay.validate(worker, args.to_session, args.text, args.answers, args.ref)
+        home = self._home()
+        b = ie.read_binding(home, sid)
+        if not b:
+            print(f"not proposed: session {sid} has no investigation yet; the relay names this supervisor session's "
+                  "own Investigation (run `cardinal-storyboard investigation link`)", file=sys.stderr)
+            return 1
+        if b.get("is_author") is not True:
+            print(f"not proposed: session {sid} joined someone else's investigation; only a session that authors "
+                  "its own Investigation can relay an owner decision", file=sys.stderr)
+            return 1
+        if b["investigation_id"] == worker:
+            print(f"not proposed: {worker} is this session's own investigation; a relayed decision goes to the "
+                  "worker you supervise", file=sys.stderr)
+            return EXIT_USAGE
+        conn, client = self.connection()
+        if not isinstance(conn, dict) or not conn.get("key") or conn.get("token"):
+            print("not proposed: this machine is not connected to Cardinal with its own key (run cardinal-connect); "
+                  "the owner's approval is relayed with it", file=sys.stderr)
+            return 1
+        if not ie.capability(b, owner_relay.CAPABILITY):
+            b = ie.refresh_binding_capabilities(home, sid, conn, client) or b
+        if not ie.capability(b, owner_relay.CAPABILITY):
+            print("not proposed: " + owner_relay.NOT_CAPABLE, file=sys.stderr)
+            return 1
+        entry = owner_relay.propose(home, sid, worker, args.to_session, args.text, answers=args.answers,
+                                    refs=args.ref or None)
+        if args.json:
+            print(json.dumps({**entry, "instruction": owner_relay.INSTRUCTION.format(id=entry["id"])}, indent=2,
+                             ensure_ascii=False))
+            return 0
+        when = ie._now_iso(entry["expires_at"])
+        print(f"proposed {entry['id']}: an owner decision for session {args.to_session} of {worker} "
+              f"(expires {when}; nothing was sent)")
+        print("--- decision text ---")
+        print(entry["text"])
+        print("--- end ---")
+        print(owner_relay.INSTRUCTION.format(id=entry["id"])
+              + " A bare `approve` works only while it is the only pending proposal.")
+        return 0
+
+    def cmd_proposals(self, args: argparse.Namespace) -> int:
+        sid = self._session_arg(args)
+        if not sid:
+            return EXIT_USAGE
+        home = self._home()
+        entries = owner_relay.pending(home, sid)
+        done = owner_relay.recent(home, sid)
+        if args.json:
+            print(json.dumps({"proposals": entries, "recent": done}, indent=2, ensure_ascii=False))
+            return 0
+        if not entries:
+            print(f"no pending owner-decision proposal in session {sid}")
+        for e in entries:
+            line = (f"{e['id']} -> session {e['to_session_id']} of {e['investigation_id']}, expires "
+                    f"{ie._now_iso(e['expires_at'])}")
+            if e.get("answers") is not None:
+                line += f", answers #{e['answers']}"
+            print(line)
+            print(f"  Text (verbatim JSON string): {ie.json_text(e['text'])}")
+        for r in done:
+            print(f"recent {r['id']} ({ie._tok(r.get('outcome'))}, {ie._now_iso(r['at'])}): "
+                  f"{ie._one_line(r['message'], 600)}")
+        return 0
+
+    def cmd_withdraw_proposal(self, args: argparse.Namespace) -> int:
+        sid = self._session_arg(args)
+        if not sid:
+            return EXIT_USAGE
+        pid = args.proposal_id
+        if not isinstance(pid, str) or not owner_relay.ID_RE.fullmatch(pid):
+            print(f"not a proposal id: {pid!r} (dp_ followed by 8 hex characters)", file=sys.stderr)
+            return EXIT_USAGE
+        entry = owner_relay.withdraw(self._home(), sid, pid)
+        if entry is None:
+            print(f"{pid} is not pending in session {sid} (expired, withdrawn or already handled)", file=sys.stderr)
+            return 1
+        print(f"withdrew {pid}; nothing was sent")
+        return 0
+
 
 def not_recorded(err, *, outbox=None):
     reason = ie._one_line(err, 500)
@@ -920,7 +1013,8 @@ def build_parser(wiring, session_env=()):
         prog="cardinal-storyboard investigation",
         description=(
             "Owner authority comes from the owner's own words: in the session transcript, or in an owner decision "
-            "posted from the owner's signed-in Cardinal web session. Advisory input carries no owner authority."
+            "posted from the owner's signed-in Cardinal web session or relayed from their supervisor session. "
+            "Advisory input carries no owner authority."
         ),
     )
     sub = parser.add_subparsers(dest="action", required=True)
@@ -943,6 +1037,9 @@ def build_parser(wiring, session_env=()):
         "reviewed",
         "show",
         "verify",
+        "propose-decision",
+        "proposals",
+        "withdraw-proposal",
     ):
         p = sub.add_parser(
             action,
@@ -974,7 +1071,7 @@ def build_parser(wiring, session_env=()):
             ),
         )
         p.set_defaults(investigation_id=None)
-        if action in ("events", "show", "post", "bind", "attach"):
+        if action in ("events", "show", "post", "bind", "attach", "propose-decision"):
             p.add_argument("investigation_id", nargs=None if action in ("bind", "attach") else "?")
         if action in ("events", "reviewed"):
             p.add_argument(
@@ -1063,6 +1160,14 @@ def build_parser(wiring, session_env=()):
         elif action == "verify":
             p.add_argument("target", help="event seq or semantic_id")
             p.add_argument("--root", type=Path)
+        elif action == "propose-decision":
+            p.description = owner_relay.PROPOSE_HELP
+            p.add_argument("--to-session", required=True, help="the worker's session id")
+            p.add_argument("--text", required=True, help="the decision, verbatim (1-4000 characters)")
+            p.add_argument("--answers", type=int, metavar="SEQ", help="the worker event it answers")
+            p.add_argument("--ref", action="append", default=[], help="a reference (repeatable, at most 20)")
+        elif action == "withdraw-proposal":
+            p.add_argument("proposal_id", help="dp_...")
     return parser
 
 
@@ -1115,7 +1220,13 @@ def cli_main(argv, wiring, session_env=(), *, legacy=False):
     args = build_parser(wiring, session_env).parse_args(normalize_argv(argv))
     cli = CLI(wiring, args, legacy)
     try:
-        if cli.scoped and args.action not in ("events", "post", "show", "reviewed", "verify", "rule"):
+        if cli.scoped and args.action == "propose-decision":
+            print("not proposed: a proposal is relayed with this machine's own key when the owner approves it, "
+                  "never with an access grant; run propose-decision without --credential-file and without "
+                  "CARDINAL_INVESTIGATION_TOKEN", file=sys.stderr)
+            return EXIT_USAGE
+        if cli.scoped and args.action not in ("events", "post", "show", "reviewed", "verify", "rule", "proposals",
+                                              "withdraw-proposal"):
             return EXIT_USAGE if not cli._author_only("not recorded") else 0
         if args.action == "post" and (args.type is None or args.text is None):
             raise ValueError("post requires type and text (positional or --type/--text)")
@@ -1133,7 +1244,7 @@ def cli_main(argv, wiring, session_env=(), *, legacy=False):
                 return EXIT_USAGE
             conn, client, inv = got
             return investigation_artifacts.verify(conn, inv, args.target, root=args.root, client=client)
-        return getattr(cli, "cmd_" + args.action)(args)
+        return getattr(cli, "cmd_" + args.action.replace("-", "_"))(args)
     except (ValueError, ie.CheckpointInputError) as e:
         print(ie._one_line(e, 1000), file=sys.stderr)
         if (
