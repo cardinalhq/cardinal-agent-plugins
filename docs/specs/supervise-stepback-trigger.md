@@ -540,11 +540,11 @@ X ≥ T, the first firing comes at about
     c* = max( F,  min( Z · e,  X · e / k ) )
 
 That is, at the zero-progress bar if the first deliverable takes longer than Z·e, otherwise when
-the first deliverable lands, and never before F. For wingbeat's chunked-lane (e = 2, k = 4, an
-actual pace of about X = 2.3): X·e/k ≈ 1.16 h < Z·e = 1.0? No, 1.16 > 1.0. So the zero-progress
-bar would have come first at 1.0 h, but the first deliverable landed earlier in the record (it was
-reached faster than the average pace), and the ratio rule fired at 1.16 h. Deliverables don't
-arrive evenly, so read c* as a rough guide.
+the first deliverable lands, and never before F. Example: e = 2 h, k = 4, a true 3× overrun. The
+first deliverable would land at 3 × 2 / 4 = 1.5 h, so the zero-progress rule fires first, at
+Z·e = 1.0 h. With k = 6 it lands at 1.0 h and the ratio rule fires at about the same time.
+Deliverables don't arrive evenly: in wingbeat the first chunked-lane deliverable landed early and
+the ratio rule fired at 1.16 h. So read c* as a rough guide, not a guarantee.
 
 ### A.10 Calibration (`budget calibrate`)
 
