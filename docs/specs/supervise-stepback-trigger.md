@@ -114,6 +114,11 @@ unfinished milestone, and stale starts spread it six ways. 2× then fired first 
 (#232), and on chunked-lane-implementation only at #332. Per-event tags put the firing on the
 milestone that was actually burning.
 
+**Ref readability**: a ref into another investigation is readable when the caller authored it,
+when org members can see it, or when `subject_grant` is a live grant on that investigation with
+`read` or `supervise`. The plugin sends the grant it reads the worker with. The token is left out
+of the idempotency hash and never stored.
+
 **Limits**:
 
 - **One case.** n=1, and the marks and tags are LLM-made.
@@ -254,7 +259,7 @@ Both repos build to this; neither changes it without the other.
 
 ```
 {investigation_id, session_id, idempotency_key: [A-Za-z0-9_.:-]{1,128},
- events: [{type, payload}]  (1–50)}
+ events: [{type, payload}]  (1–50), subject_grant?: <grant token>}
 → 200 {investigation_id, duplicate: bool, events: [{seq, type, at}], head_seq}
 ```
 
