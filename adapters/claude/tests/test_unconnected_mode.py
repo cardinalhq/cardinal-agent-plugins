@@ -297,7 +297,8 @@ class SessionTextFromCoreTests(unittest.TestCase):
 class HookRegistrationTests(unittest.TestCase):
     def test_every_hook_is_classified_and_every_gated_hook_checks_the_connection(self):
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
-        commands = {h["command"].rsplit("/", 1)[-1] for groups in hooks.values() for g in groups for h in g["hooks"]}
+        commands = {h["command"].rsplit("/", 1)[-1].split()[0] for groups in hooks.values() for g in groups
+                    for h in g["hooks"]}
         self.assertEqual(commands, set(GATED_HOOKS) | set(STORYBOARD_HOOKS) | set(LOCAL_ONLY_HOOKS) | set(FAST_PATH_HOOKS),
                          "a new hook must be gated on _connection or listed as working unconnected")
         for sh in FAST_PATH_HOOKS:

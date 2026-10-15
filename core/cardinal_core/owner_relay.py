@@ -12,53 +12,88 @@ Two ways, and nothing but the prompt hook calls the route:
   proposal: the supervisor drafts (`cardinal-storyboard investigation
       propose-decision`, a local PROPOSAL dp_ + 16 hex; nothing is sent: a
       proposal never approves itself) and the owner types `approve
-      dp_xxxxxxxxxxxxxxxx` (bare `approve` while it is the only pending
-      proposal) or `reject dp_xxxxxxxxxxxxxxxx`. The hook relays it (relay
-      source "proposal", relay key = the proposal id) or drops it.
+      dp_xxxxxxxxxxxxxxxx` (bare `approve` for the one draft made since the
+      owner's previous prompt) or `reject dp_xxxxxxxxxxxxxxxx`. The hook
+      relays it (relay source "proposal", relay key = the proposal id) or
+      drops it.
 
 Either way the hook posts maestro's relay-owner-decision with this
-machine's API key (bounded, BUDGET) and reports the outcome to the user and
-to the model. No CLI subcommand and no MCP tool calls relay().
+machine's API key and reports the outcome to the user and to the model. No
+CLI subcommand and no MCP tool calls relay().
 
-Trust (say exactly this, never more): the server checks that the key
+Trust (say exactly this, never more). The server checks that the key
 belongs to a person who authors the worker's investigation, that this
-person turned on "accept owner decisions approved in my supervisor
-sessions" from their signed-in web session, that the claimed supervisor
-session is an author-claimed session of an investigation the same person
-authors, and that the stored text is the text whose sha256 the relay
-carries. It cannot verify that a human typed the prompt: the agent holds
-the same key. The worker's event is authority `owner_relayed` (attested by
-the owner's machine), weaker than `owner_decision` (web session).
+person turned on relayed decisions from their signed-in web session, that
+the claimed supervisor session is an author-claimed session of an
+investigation the same person authors, and that the stored text is the
+text whose sha256 the relay carries. It cannot tell who made the request:
+the agent holds the same key and can always call the route itself. What
+this plugin guarantees is narrower: it never relays a prompt it cannot
+confirm a human typed in this terminal, and it refuses every prompt a model
+created (scheduled tasks, /loop, peer messages, subagent prompts, task
+notifications).
+
+  Claude Code fires its prompt hook for model-created prompts too (a
+  scheduled task's prompt arrives exactly like a typed one), and its
+  payload says nothing about origin. The session transcript does: the user
+  entry whose promptId is the hook's prompt_id carries origin.kind "human"
+  only for what the person typed. That entry is written after the hook
+  returns, so the Claude hook defers (handle_prompt_deferred): it records
+  the prompt as pending and starts a detached verifier (verify) that waits
+  up to VERIFY_WINDOW for the entry and acts only when it is human-typed;
+  anything else (another origin, not found in time, unreadable, unknown
+  shape) is "not sent". The outcome is shown at the turn's end (at_stop)
+  or with the next prompt, exactly once. Codex, Gemini CLI and Cursor give
+  no origin signal and, as far as their documentation and our payload
+  captures show, no model-schedulable prompts: they relay synchronously
+  (handle_prompt), trusting that their prompt hook sees what the person
+  typed (the spec's trust section lists what is unknown).
+
+The worker's event is authority `owner_relayed` (attested by the owner's
+machine), weaker than `owner_decision` (web session).
 
 Local state, one file per supervisor session, next to its binding:
 
   ~/.cardinal/investigations/sessions/<sid>.proposals.json   (0600, under the binding's flock)
   {"proposals": [{id, investigation_id, to_session_id, text, sha256, answers?, refs,
-                  created_at, expires_at}],
+                  created_at, expires_at, uncertain?}],
    "targets":   [{name?, investigation_id, to_session_id, created_at}],
+   "targets_changed_at": when an existing target set last changed,
    "verbatim":  [{key, investigation_id, to_session_id, sha256, at}],
-   "recent":    [{id, outcome, message, prompt_sha256, at}]}
+   "recent":    [{id, outcome, message, prompt_sha256, at}],
+   "prompt":    {at, sha, prev}                        (synchronous runtimes)
+   "prompts":   [{id, at, off, human?}]                (Claude: prompts seen, origin once known)
+   "pending":   [{pid, at, state}]                     (Claude: prompts being confirmed)
+   "outcomes":  [{pid, message, context, at, owner, model}]}  (Claude: to show once)
 
 A proposal expires after PROPOSAL_TTL (30 min); at most MAX_PROPOSALS
-pending (the oldest goes). Targets (at most MAX_TARGETS; the oldest goes)
-are the workers this session supervises: `supervising` registers one,
-propose-decision registers its own. `verbatim` remembers the relay key of a
-`decide` that was not relayed (transient, not enabled) for RECENT_TTL, so
-retyping the same decision for the same target reuses its key: the server
-answers a duplicate instead of storing it twice. `recent` keeps the last
-outcomes for RECENT_TTL: `investigation proposals` lists them (Cursor has
-no user-visible channel on its prompt hook), and on a runtime that re-fires
-its prompt hook (Gemini) the same prompt seen again within REFIRE_WINDOW
-repeats a final outcome instead of acting twice.
+pending (the oldest goes). `uncertain` marks a draft whose send got no
+answer: it may have been delivered, and approving it again is safe (same
+relay key). Targets (at most MAX_TARGETS; the oldest goes) are the workers
+this session supervises: `supervising` registers one, propose-decision
+registers its own. `verbatim` remembers the relay key of a `decide` that
+was not relayed (no answer, or not enabled) for RECENT_TTL, so retyping the
+same decision for the same target reuses its key: the server answers a
+duplicate instead of storing it twice. `recent` keeps the last outcomes for
+RECENT_TTL: `investigation proposals` lists them, and on a runtime that
+re-fires its prompt hook (Gemini) the same prompt seen again within
+REFIRE_WINDOW repeats a final outcome instead of acting twice.
 
-The prompt hook (handle_prompt) runs before, and independently of,
-owner-input capture: owner input may be off. It refuses a subagent's prompt
-(a non-empty agent_id) and a machine prompt (owner_input.normalize_prompt
-must reduce it to typed text), and acts only on a whole stripped prompt
-matching APPROVAL_RE or DECIDE_RE (case-insensitive). Anything else is left
-untouched and the prompt always reaches the model.
+Freshness: a bare `approve` / `reject` applies only to a draft made after
+the owner's previous prompt (and before this one); a bare `decide:` is
+refused when the target set changed since then. On Claude only a prompt
+confirmed human counts as the owner's previous prompt, so a scheduled
+prompt cannot make a draft drafted in its own turn look fresh.
 
-Standard library only. handle_prompt never raises.
+The prompt hook runs before, and independently of, owner-input capture:
+owner input may be off. It refuses a subagent's prompt (a non-empty
+agent_id) and a machine prompt (owner_input.normalize_prompt must reduce it
+to typed text), and acts only on a whole stripped prompt matching
+APPROVAL_RE or DECIDE_RE (case-insensitive; a peer message arrives wrapped
+in <cross-session-message …>, so it never matches). Anything else is left
+untouched.
+
+Standard library only. handle_prompt / handle_prompt_deferred never raise.
 """
 
 from __future__ import annotations
@@ -66,8 +101,11 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import re
 import secrets
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -91,6 +129,15 @@ MAX_RECENT = 10
 MAX_VERBATIM = 5
 REFIRE_WINDOW = 30.0
 BUDGET = 3.0                          # wall-clock of the relay request, from the hook's start
+VERIFY_WINDOW = 20.0                  # Claude: how long the verifier waits for the prompt's transcript entry
+VERIFY_POLL = 0.2
+VERIFY_BUDGET = 8.0                   # Claude: the verifier's relay request
+PENDING_STALE = 60.0                  # a pending prompt older than this has no verifier left
+STOP_WAIT = 3.0                       # the Stop hook waits this long for a pending outcome
+TRANSCRIPT_SLACK = 256 * 1024         # read this much before the prompt's offset too
+MAX_PROMPTS = 20
+MAX_SENT = 50                         # the server's cap of relayed decisions per investigation
+MAX_OUTCOMES = 10
 MAX_TEXT = 4000
 MAX_REFS = 20
 MAX_REF = 300
@@ -121,8 +168,14 @@ UNSUPPORTED = NOT_CAPABLE
 TOGGLE = "Accept owner decisions I send from my supervisor sessions"   # the web setting's label
 CREDENTIAL = ("Cardinal: your decision looks like it contains a credential, so nothing was sent. Remove it and type "
               "the decision again; give the worker secrets through its environment, not a decision.")
-QUESTION = ("Cardinal: that reads as a question, so it was not sent to the worker. Rephrase it as a decision to send "
-            "it.")
+QUESTION = "Cardinal: not sent: a decision is not a question; to ask the worker something, tell the supervisor."
+ONE_AT_A_TIME = "Cardinal: not sent: send one decision at a time, as one paragraph (no blank line)."
+UNSTORABLE = ("Cardinal: not sent: the decision contains a character Cardinal does not accept (a NUL, or an "
+              "invisible direction or zero-width character). Type it again without it.")
+NOT_CONFIRMED = "Cardinal: not sent: Cardinal could not confirm you typed this prompt in this terminal."
+PENDING_CONTEXT = ("Cardinal is confirming the owner typed this prompt and then acts on it itself; the outcome comes "
+                   "with the owner's next prompt.")
+MAYBE_SENT = "may not have been sent: Cardinal did not answer in time or could not be reached"
 NO_DRAFT = "Cardinal: no draft is waiting for your approval (drafts expire after 30 minutes); nothing was sent."
 NO_WORKER = ("Cardinal: no worker is registered here yet; ask the supervisor to register the one it watches. Nothing "
              "was sent.")
@@ -137,7 +190,6 @@ REFUSALS = {
     "owner_relay_requires_api_key": "it needs this machine's Cardinal API key, not a web session or an access grant",
     "owner_relay_requires_user_key": ("this machine's Cardinal API key belongs to no person; reconnect it with a key "
                                       "of your own"),
-    "invalid_owner_relay": "Cardinal could not read the request",
     "investigation_not_found": "the worker's Investigation is not in this org",
     "owner_relay_requires_investigation_author": ("only the person who owns the worker's Investigation can send it "
                                                   "decisions, and this machine's key is not theirs"),
@@ -149,7 +201,18 @@ REFUSALS = {
     "idempotency_conflict": "this draft was already sent with different text",
     "owner_decision_limit_reached": "the worker's Investigation reached its limit of owner decisions",
     "event_limit_reached": "the worker's Investigation reached its limit of events",
+    "Org mismatch": "this machine's Cardinal connection is for another org",
+    "owner_relay_answers_ruling": ("it answers a supervisor's challenge or ruling, which only a decision posted from "
+                                   "the Investigation page on the web can overrule"),
+    "owner_relay_not_member": "this machine's key belongs to someone who is not a member of the worker's Cardinal org",
 }
+# event_limit_reached by scope (the body's `scope`).
+LIMIT_SCOPES = {
+    "owner_relayed_investigation": ("the worker's Investigation reached its limit of 50 relayed decisions; post it "
+                                    "from the Investigation page on the web"),
+    "owner_decision_investigation": "the worker's Investigation reached its limit of owner decisions",
+}
+UNAVAILABLE = "owner_relay_unavailable"   # 503: this Cardinal cannot store relayed decisions yet (certainly not stored)
 
 
 # ---------------------------------------------------------------------------
@@ -224,12 +287,56 @@ def _read(home: Path, sid: str, now: float) -> dict:
     expired = kept("expired", lambda x: isinstance(x, dict) and isinstance(x.get("id"), str)
                    and bool(ID_RE.fullmatch(x["id"])) and _num(x.get("at")), MAX_RECENT)
     expired = [x for x in expired + gone if 0 <= now - x["at"] < RECENT_TTL][-MAX_RECENT:]
+    changed = data.get("targets_changed_at")
     return {"proposals": kept("proposals", lambda e: _entry_ok(e, now), MAX_PROPOSALS),
             "expired": expired,
             "targets": kept("targets", _target_ok, MAX_TARGETS),
+            "targets_changed_at": changed if _num(changed) else 0,
             "verbatim": kept("verbatim", lambda v: _verbatim_ok(v, now), MAX_VERBATIM),
             "recent": kept("recent", lambda r: _recent_ok(r, now), MAX_RECENT),
-            "prompt": prompt}
+            "prompt": prompt,
+            "prompts": kept("prompts", _prompt_ok, MAX_PROMPTS),
+            "pending": kept("pending", _pending_ok, MAX_OUTCOMES),
+            "outcomes": kept("outcomes", lambda o: _outcome_ok(o, now), MAX_OUTCOMES),
+            "sent": kept("sent", lambda x: isinstance(x, dict) and ie.valid_investigation(x.get("investigation_id"))
+                         and isinstance(x.get("seq"), int) and not isinstance(x["seq"], bool), MAX_SENT)}
+
+
+def _sent(store: dict, outcome: dict) -> None:
+    """Remember a relayed decision this session's hook sent (its event), so
+    the supervisor can tell it from a relayed decision it did not send."""
+    if isinstance(outcome.get("seq"), int) and outcome.get("investigation_id"):
+        store["sent"] = (store["sent"] + [{"investigation_id": outcome["investigation_id"], "seq": outcome["seq"],
+                                           "at": outcome["at"]}])[-MAX_SENT:]
+
+
+def sent_by(home: Path, sid: Any) -> set:
+    """{(investigation_id, seq)} of the relayed decisions supervisor session
+    `sid`'s prompt hook sent (empty when unknown). Never raises."""
+    try:
+        if not ie.valid_session(sid):
+            return set()
+        return {(x["investigation_id"], x["seq"]) for x in _read(home, sid, time.time())["sent"]}
+    except Exception:
+        return set()
+
+
+def _prompt_ok(p: Any) -> bool:
+    return (isinstance(p, dict) and (p.get("id") is None or (isinstance(p["id"], str) and 0 < len(p["id"]) <= 128))
+            and _num(p.get("at")) and (p.get("off") is None or (isinstance(p["off"], int) and p["off"] >= 0))
+            and p.get("human") in (None, True, False))
+
+
+def _pending_ok(p: Any) -> bool:
+    return (isinstance(p, dict) and isinstance(p.get("pid"), str) and 0 < len(p["pid"]) <= 128 and _num(p.get("at"))
+            and p.get("state") in ("verifying", "sending"))
+
+
+def _outcome_ok(o: Any, now: float) -> bool:
+    return (isinstance(o, dict) and isinstance(o.get("message"), str) and isinstance(o.get("context"), str)
+            and _num(o.get("at")) and 0 <= now - o["at"] < RECENT_TTL
+            and isinstance(o.get("owner"), bool) and isinstance(o.get("model"), bool)
+            and not (o["owner"] and o["model"]))
 
 
 def _write(home: Path, sid: str, store: dict) -> None:
@@ -287,14 +394,14 @@ def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any 
              refs: Any = None) -> None:
     """Raises ValueError (in words) when the proposal cannot be relayed as
     given."""
-    from .owner_input import wire_safe
     validate_target(investigation_id, to_session_id)
     if not isinstance(text, str) or not text.strip():
         raise ValueError("--text is the decision, 1 to 4000 characters")
     if len(text) > MAX_TEXT:
         raise ValueError(f"--text is at most {MAX_TEXT} characters")
-    if wire_safe(text) != text:
-        raise ValueError("--text contains a NUL or an unpaired surrogate")
+    if not storable(text):
+        raise ValueError("--text contains a NUL, an unpaired surrogate, or an invisible direction or zero-width "
+                         "character")
     if has_credential(text):
         raise ValueError("not proposed: the decision looks like it contains a credential. Remove it; the worker gets "
                          "secrets through its environment, never through an owner decision")
@@ -304,8 +411,26 @@ def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any 
     if not isinstance(refs, list) or len(refs) > MAX_REFS:
         raise ValueError(f"at most {MAX_REFS} --ref")
     for r in refs:
-        if not isinstance(r, str) or not r.strip() or len(r) > MAX_REF or wire_safe(r) != r:
-            raise ValueError(f"each --ref is 1 to {MAX_REF} characters")
+        if not isinstance(r, str) or not r.strip() or len(r) > MAX_REF or not storable(r):
+            raise ValueError(f"each --ref is 1 to {MAX_REF} characters, none of them invisible")
+
+
+def storable(text: str) -> bool:
+    """Whether the server accepts `text` in a relay: no NUL or unpaired
+    surrogate (wire_safe), and none of the invisible characters its
+    invalid_owner_relay rule refuses (INVISIBLE: direction controls, tag
+    characters, zero-width space / word joiner / BOM; ZWJ and ZWNJ are
+    fine)."""
+    from .owner_input import wire_safe
+    return wire_safe(text) == text and not any(_invisible(c) for c in text)
+
+
+INVISIBLE = frozenset((0x200B, 0x200E, 0x200F, 0x061C, 0x2060, 0xFEFF))
+
+
+def _invisible(c: str) -> bool:
+    o = ord(c)
+    return o in INVISIBLE or 0x202A <= o <= 0x202E or 0x2066 <= o <= 0x2069 or 0xE0000 <= o <= 0xE007F
 
 
 def has_credential(text: str) -> bool:
@@ -324,12 +449,30 @@ def validate_target(investigation_id: Any, to_session_id: Any, name: Any = None)
         raise ValueError("--name is 1 to 32 characters: a-z, 0-9 and -")
 
 
+def _targets_sig(ts: list) -> list:
+    return sorted((t["investigation_id"], t["to_session_id"], t.get("name") or "") for t in ts)
+
+
+def _targets_changed(store: dict, before: list, now: float) -> None:
+    """Note when a non-empty target set changed (a bare `decide:` typed
+    before then is refused: the owner may not know where it goes now)."""
+    if before and before != _targets_sig(store["targets"]):
+        store["targets_changed_at"] = now
+
+
 def _upsert_target(store: dict, investigation_id: str, to_session_id: str, name: Optional[str],
-                   now: float) -> dict:
+                   now: float, replace: bool = False) -> dict:
     """The target for (investigation, session), registered or renamed
     (no name given: an existing name is kept). A name names one target
-    only: another target holding it is dropped. Keeps the newest
-    MAX_TARGETS."""
+    only: one held by a target of another investigation moves only with
+    `replace` (else ValueError); one held by another session of the same
+    investigation moves. Keeps the newest MAX_TARGETS."""
+    before = _targets_sig(store["targets"])
+    holder = next((t for t in store["targets"] if name is not None and t.get("name") == name
+                   and t["investigation_id"] != investigation_id), None)
+    if holder is not None and not replace:
+        raise ValueError(f"--name {name} already names the worker session {holder['to_session_id']} of "
+                         f"{holder['investigation_id']}; pass --replace to move the name here, or choose another")
     old = next((t for t in store["targets"] if t["investigation_id"] == investigation_id
                 and t["to_session_id"] == to_session_id), None)
     entry = {"investigation_id": investigation_id, "to_session_id": to_session_id,
@@ -340,18 +483,19 @@ def _upsert_target(store: dict, investigation_id: str, to_session_id: str, name:
     store["targets"] = [t for t in store["targets"] if t is not old
                         and not (keep_name is not None and t.get("name") == keep_name)] + [entry]
     store["targets"] = store["targets"][-MAX_TARGETS:]
+    _targets_changed(store, before, now)
     return entry
 
 
 def add_target(home: Path, sid: str, investigation_id: str, to_session_id: str, name: Optional[str] = None,
-               now: Optional[float] = None) -> dict:
+               now: Optional[float] = None, replace: bool = False) -> dict:
     """Register (or rename) the worker target (investigation, session) of
-    supervisor session `sid`. A name already on another target moves here
-    (that target is dropped). Sends nothing. Raises ValueError / OSError."""
+    supervisor session `sid` (_upsert_target says when a name moves). Sends
+    nothing. Raises ValueError / OSError."""
     validate_target(investigation_id, to_session_id, name)
     now = time.time() if now is None else now
     with _updating(home, sid, now, wait=2.0) as store:
-        return _upsert_target(store, investigation_id, to_session_id, name, now)
+        return _upsert_target(store, investigation_id, to_session_id, name, now, replace)
 
 
 def remove_target(home: Path, sid: str, *, name: Optional[str] = None, investigation_id: Optional[str] = None,
@@ -367,8 +511,10 @@ def remove_target(home: Path, sid: str, *, name: Optional[str] = None, investiga
                                                               or t["to_session_id"] == to_session_id)
 
     with _updating(home, sid, now) as store:
+        before = _targets_sig(store["targets"])
         gone = [t for t in store["targets"] if hit(t)]
         store["targets"] = [t for t in store["targets"] if not hit(t)]
+        _targets_changed(store, before, now)
         return gone
 
 
@@ -406,6 +552,7 @@ def _take(home: Path, sid: str, pid: str, now: float, outcome: Optional[dict] = 
         store["proposals"] = [e for e in store["proposals"] if e["id"] != pid]
         if outcome is not None:
             store["recent"] = (store["recent"] + [outcome])[-MAX_RECENT:]
+            _sent(store, outcome)
         return entry
 
 
@@ -416,6 +563,7 @@ def _note(home: Path, sid: str, outcome: dict, now: float, verbatim: Optional[di
     with contextlib.suppress(Exception):
         with _updating(home, sid, now) as store:
             store["recent"] = (store["recent"] + [outcome])[-MAX_RECENT:]
+            _sent(store, outcome)
             if verbatim is not None or forget_key is not None:
                 key = verbatim["key"] if verbatim is not None else forget_key
                 store["verbatim"] = [v for v in store["verbatim"] if v["key"] != key]
@@ -500,6 +648,11 @@ def refusal(err: "sync.ServerError") -> tuple:
     if unsupported(err):
         return "this Cardinal cannot send owner decisions from here yet (it needs a newer Maestro)", safe
     said = REFUSALS.get(code) if isinstance(code, str) else None
+    if code == "event_limit_reached" and isinstance(err.body.get("scope"), str):
+        said = LIMIT_SCOPES.get(err.body["scope"], said)
+    if code == "invalid_owner_relay":
+        said = ("Cardinal could not read the request (a decision cannot contain invisible direction or zero-width "
+                "characters)")
     return said or "the reason is one this plugin version does not know", safe
 
 
@@ -521,20 +674,29 @@ def _off_line(link: Optional[str]) -> str:
 
 
 def _send(conn: dict, body: dict, client: str, deadline: float, opener) -> tuple:
-    """("ok", answer) | ("transient", None) | ("not_enabled", the line for
-    the owner) | ("refused", (reason in words, code))."""
-    timeout = max(0.1, min(BUDGET, deadline - time.monotonic()))
+    """("ok", answer) | ("transient", None): no answer in time, a network
+    error, 5xx, 408 or 429: it may have reached the server | ("unavailable",
+    None): 503 owner_relay_unavailable, certainly not stored |
+    ("not_enabled", the line for the owner) | ("refused", (reason in words,
+    code))."""
+    timeout = max(0.1, min(VERIFY_BUDGET, deadline - time.monotonic()))
     state, value = _bounded(lambda: relay(conn, body, client=client, opener=opener, timeout=timeout), deadline)
     if state == "done":
         return "ok", value
     err = value if state == "raised" else None
+    code = err.body.get("error") if isinstance(err, sync.ServerError) and isinstance(err.body, dict) else None
+    if isinstance(err, sync.ServerError) and err.status == 503 and code == UNAVAILABLE:
+        return "unavailable", None
     if err is None or transient(err) or not isinstance(err, sync.ServerError):
         return "transient", None
-    code = err.body.get("error") if isinstance(err.body, dict) else None
     if err.status == 403 and code == NOT_ENABLED:
         body_url = err.body.get("settings_url") if isinstance(err.body, dict) else None
         return "not_enabled", _off_line(settings_link(body_url, conn.get("origin")))
     return "refused", refusal(err)
+
+
+UNAVAILABLE_LINE = ("this Cardinal cannot store relayed decisions yet (its server needs an update); post it from the "
+                    "Investigation page on the web, or try again later")
 
 
 _WHY = {
@@ -567,15 +729,19 @@ def _precheck(home: Path, sid: str, worker_inv: str, conn: Any) -> tuple:
 
 @dataclass
 class RelayResult:
-    """What handle_prompt did. status: a debug code (code: the server's
+    """What the prompt hook did. status: a debug code (code: the server's
     refusal code, for the debug log only). message: the outcome to show the
-    user (systemMessage, or the runtime's equivalent) AND to give the model
-    (additional context), or None (the prompt is not an approval or a
-    decision: nothing to say)."""
+    user (systemMessage, or the runtime's equivalent), or None (the prompt
+    is not an approval or a decision: nothing to say). context: what the
+    model is given, when it differs from message."""
     status: str
     message: Optional[str] = None
     ids: list = field(default_factory=list)
     code: Optional[str] = None
+    context: Optional[str] = None
+
+    def model_text(self) -> Optional[str]:
+        return self.context if self.context is not None else self.message
 
 
 def maybe(prompt: Any) -> bool:
@@ -649,10 +815,12 @@ def _drafts_line(entries: list) -> str:
 
 
 def _seen_prompt(home: Path, sid: str, sha: str, runtime: str, now: float) -> float:
-    """Note an owner prompt (the store's `prompt`: {at, sha, prev}) and
-    return the time of the owner's PREVIOUS prompt (0: unknown). A re-fired
-    prompt hook (DEDUPE_REPEATS) for the same prompt keeps the previous one.
-    Only for a session that keeps relay state. Never raises."""
+    """Synchronous runtimes: note an owner prompt (the store's `prompt`:
+    {at, sha, prev}) and return the time of the owner's PREVIOUS prompt (0:
+    none noted). A re-fired prompt hook (DEDUPE_REPEATS) for the same prompt
+    keeps the previous one. Only for a session that keeps relay state. When
+    the store cannot be read or locked: `now` (fail closed: no draft counts
+    as fresh). Never raises."""
     from .owner_input import DEDUPE_REPEATS
     try:
         if not has_store(home, sid):
@@ -665,16 +833,51 @@ def _seen_prompt(home: Path, sid: str, sha: str, runtime: str, now: float) -> fl
             store["prompt"] = {"at": now, "sha": sha, "prev": prev}
             return prev
     except Exception:
-        return 0.0
+        return now
+
+
+def _classify(runtime: str, prompt: Any, agent_id: Any):
+    """(typed text, its scrubbed sha256), or a silent RelayResult for a
+    subagent's or a machine prompt."""
+    from . import owner_input
+    if agent_id:
+        return RelayResult("subagent")
+    typed = owner_input.normalize_prompt(runtime, prompt)
+    if typed is None:
+        return RelayResult("not_typed")
+    return typed, hashlib.sha256(owner_input.scrubbed_of(typed)[0].encode("utf-8", "replace")).hexdigest()
+
+
+def _ordinary(decision: Optional[tuple], store: dict) -> bool:
+    """`decide <word>: …` while no target has a name: an ordinary prompt."""
+    return decision is not None and decision[0] is not None and not any(t.get("name") for t in store["targets"])
+
+
+def _text_refusal(text: str) -> Optional[RelayResult]:
+    """Why `decide:` text is not sent (nothing sent, nothing read), or None."""
+    if not text:
+        return RelayResult("bad_text", "Cardinal: not sent: `decide:` needs your decision after the colon.")
+    if len(text) > MAX_TEXT:
+        return RelayResult("bad_text", f"Cardinal: not sent: a decision is at most {MAX_TEXT} characters (this one "
+                                       f"has {len(text)}). Shorten it and type it again.")
+    if not storable(text):
+        return RelayResult("bad_text", UNSTORABLE)
+    if re.search(r"\n\s*\n", text):
+        return RelayResult("several", ONE_AT_A_TIME)
+    if "?" in text:
+        return RelayResult("question", QUESTION)
+    if has_credential(text):
+        return RelayResult("credential", CREDENTIAL)
+    return None
 
 
 def handle_prompt(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[dict], client: str,
                   agent_id: Optional[str] = None, deadline: float, now: Optional[float] = None,
                   opener=None) -> RelayResult:
-    """The relay half of every runtime's prompt hook (see the module doc).
-    Every owner prompt of a session with relay state is noted (the
-    stale-approve rule: a bare `approve` / `reject` applies only to a draft
-    made after the owner's previous prompt). Statuses:
+    """The relay half of a SYNCHRONOUS runtime's prompt hook (Codex, Gemini,
+    Cursor; Claude uses handle_prompt_deferred): matches, and acts at once.
+    Every owner prompt of a session with relay state is noted (freshness).
+    Statuses:
 
       invalid / subagent / not_typed / no_match / none
                       nothing said: not an approval or a decision here (a
@@ -684,21 +887,24 @@ def handle_prompt(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Opti
                       again within REFIRE_WINDOW after a final outcome, with
                       no newer draft: the outcome is repeated, nothing is
                       sent again
-      no_draft        approve / reject matched no waiting draft
+      no_draft        approve / reject matched no fresh draft
       ambiguous       approve: several fresh drafts; decide: several targets
                       and no name. Says which
       unknown_id      approve: the id is not waiting (expired, rejected, sent)
-      no_target / unknown_target
-                      decide: no target registered, or none by that name
-      bad_text / question / credential
-                      decide: empty, too long, NUL; ends with "?"; the
-                      scrubber would change it
+      no_target / unknown_target / target_changed
+                      decide: no target, none by that name, or (bare) the
+                      target set changed since the owner's previous prompt
+      bad_text / several / question / credential
+                      decide: empty, too long, a character the server
+                      refuses; a blank line; a "?"; the scrubber would change it
       rejected        removed; nothing sent
       relayed / duplicate
                       sent (201 / 200); a draft is removed
-      transient       network, timeout, 5xx, 408, 429: a draft is kept; a
-                      decide's relay key is kept for its retry
-      not_enabled     403 owner_relay_not_enabled: as transient, with the settings link
+      transient       no answer, network, 5xx, 408, 429: it may have been
+                      sent; a draft is kept (marked uncertain); a decide's
+                      relay key is kept, so repeating it is safe
+      unavailable     503 owner_relay_unavailable: not stored; a draft is kept
+      not_enabled     403 owner_relay_not_enabled: kept, with the settings link
       refused         any other refusal: a draft is removed
       unbound / not_author / own_investigation / no_connection / busy
                       not sent; a draft is kept
@@ -714,19 +920,17 @@ def _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline, now, o
     from . import owner_input
     if runtime not in owner_input.RUNTIMES or not ie.valid_session(sid):
         return RelayResult("invalid")
-    if agent_id:
-        return RelayResult("subagent")
-    typed = owner_input.normalize_prompt(runtime, prompt)
-    if typed is None:
-        return RelayResult("not_typed")
-    typed_sha = hashlib.sha256(owner_input.scrubbed_of(typed)[0].encode("utf-8", "replace")).hexdigest()
+    got = _classify(runtime, prompt, agent_id)
+    if isinstance(got, RelayResult):
+        return got
+    typed, typed_sha = got
     previous = _seen_prompt(home, sid, typed_sha, runtime, now)
     approval, decision = match(typed), match_decide(typed)
     if approval is None and decision is None:
         return RelayResult("no_match")
     store = _read(home, sid, now)
-    if decision is not None and decision[0] is not None and not any(t.get("name") for t in store["targets"]):
-        return RelayResult("no_match")   # `decide later: …` with no named worker: an ordinary prompt
+    if _ordinary(decision, store):
+        return RelayResult("no_match")
     if runtime in owner_input.DEDUPE_REPEATS:
         # A runtime that re-fires its prompt hook for one prompt: the same
         # prompt seen again moments later repeats its final outcome.
@@ -737,15 +941,26 @@ def _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline, now, o
         if again is not None and not any(e["id"] == again["id"] or e["created_at"] > again["at"]
                                          for e in store["proposals"]):
             return RelayResult("repeat", again["message"], [again["id"]])
+    return _act(home, sid, approval, decision, store, previous, now, typed_sha, conn, client, deadline, now, opener)
+
+
+def _act(home, sid, approval, decision, store, previous, prompt_at, typed_sha, conn, client, deadline, now,
+         opener) -> RelayResult:
+    """Act on an owner's approval or decision. `previous`: when the owner's
+    previous prompt was; `prompt_at`: when this one was seen."""
     if decision is not None:
-        return _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, opener)
-    return _approve(home, sid, approval, store, previous, typed_sha, conn, client, deadline, now, opener)
+        refused = _text_refusal(decision[1])
+        if refused is not None:
+            return refused
+        return _decide(home, sid, decision, store, previous, prompt_at, typed_sha, conn, client, deadline, now,
+                       opener)
+    return _approve(home, sid, approval, store, previous, prompt_at, typed_sha, conn, client, deadline, now, opener)
 
 
-def _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, opener) -> RelayResult:
+def _decide(home, sid, decision, store, previous, prompt_at, typed_sha, conn, client, deadline, now,
+            opener) -> RelayResult:
     """`decide: <text>` / `decide <name>: <text>`: the owner's own words,
     sent verbatim to the registered target."""
-    from .owner_input import wire_safe
     name, text = decision
     ts = store["targets"]
     if name is not None:
@@ -760,18 +975,14 @@ def _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, 
                                         f"`decide <name>: …`: {_targets_line(ts)}. Nothing was sent.")
     else:
         target = ts[0]
-    if not text:
-        return RelayResult("bad_text", "Cardinal: not sent: `decide:` needs your decision after the colon.")
-    if len(text) > MAX_TEXT:
-        return RelayResult("bad_text", f"Cardinal: not sent: a decision is at most {MAX_TEXT} characters (this one "
-                                       f"has {len(text)}). Shorten it and type it again.")
-    if wire_safe(text) != text:
-        return RelayResult("bad_text", "Cardinal: not sent: the decision contains a character Cardinal cannot "
-                                       "store. Type it again without it.")
-    if text.endswith("?"):
-        return RelayResult("question", QUESTION)
-    if has_credential(text):
-        return RelayResult("credential", CREDENTIAL)
+    if store["targets_changed_at"] > prompt_at:
+        return RelayResult("target_changed", "Cardinal: not sent: the workers registered here changed after you "
+                                             f"typed this; now: {_targets_line(ts)}. Type it again to send it.")
+    if name is None and store["targets_changed_at"] > previous:
+        again = f"as `decide {target['name']}: …`" if target.get("name") else "to send it there"
+        return RelayResult("target_changed", "Cardinal: not sent: the worker registered here changed since your "
+                                             f"last message; it is now {_target_label(target)}. Type it again "
+                                             f"{again}.")
     who = _who(store, target["investigation_id"], target["to_session_id"])
     retry = "Type the same decide: again to retry; it will not be sent twice."
     status, b = _precheck(home, sid, target["investigation_id"], conn)
@@ -788,7 +999,8 @@ def _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, 
     got, detail = _send(conn, body, client, deadline, opener)
 
     def outcome(s: str, message: str, seq: Optional[int] = None) -> dict:
-        out = {"id": key, "outcome": s, "message": message, "prompt_sha256": typed_sha, "at": now}
+        out = {"id": key, "outcome": s, "message": message, "prompt_sha256": typed_sha, "at": now,
+               "investigation_id": target["investigation_id"]}
         if seq is not None:
             out["seq"] = seq
         return out
@@ -801,15 +1013,17 @@ def _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, 
                    f"#{ev['seq']}: {excerpt(text)}. {SEES_IT}")
         status = "duplicate" if dup else "relayed"
         _note(home, sid, outcome(status, message, ev["seq"]), now, forget_key=key)
-        return RelayResult(status, message, [key])
-    if got == "transient":
-        message = f"Cardinal: not sent: Cardinal did not answer in time or could not be reached. {retry}"
-        _note(home, sid, outcome("transient", message), now, verbatim=unsent)
-        return RelayResult("transient", message, [key])
-    if got == "not_enabled":
-        message = f"Cardinal: not sent: {detail}; then {retry[0].lower()}{retry[1:]}"
-        _note(home, sid, outcome("not_enabled", message), now, verbatim=unsent)
-        return RelayResult("not_enabled", message, [key])
+        return RelayResult(status, message, [key], context=message.replace(" " + SEES_IT, ""))
+    if got in ("transient", "unavailable", "not_enabled"):
+        if got == "transient":
+            message = f"Cardinal: your decision for {who} {MAYBE_SENT}. Type the same decide: again; it will not " \
+                      "be sent twice."
+        elif got == "unavailable":
+            message = f"Cardinal: not sent: {UNAVAILABLE_LINE}."
+        else:
+            message = f"Cardinal: not sent: {detail}; then {retry[0].lower()}{retry[1:]}"
+        _note(home, sid, outcome(got, message), now, verbatim=unsent)
+        return RelayResult(got, message, [key])
     reason, code = detail
     if code == "idempotency_conflict":
         reason = "a decision with different text was already sent under the same key"
@@ -833,14 +1047,27 @@ def _unknown_id(home, sid, pid, store, now) -> str:
     return "it is not waiting here (it expired, was withdrawn, or was never made in this session)"
 
 
-def _approve(home, sid, approval, store, previous, typed_sha, conn, client, deadline, now, opener) -> RelayResult:
+def _mark_uncertain(home: Path, sid: str, pid: str, outcome: dict, now: float) -> None:
+    """Draft `pid`'s send got no answer: it stays, marked uncertain (it may
+    have been delivered). Never raises."""
+    with contextlib.suppress(Exception):
+        with _updating(home, sid, now) as store:
+            for e in store["proposals"]:
+                if e["id"] == pid:
+                    e["uncertain"] = True
+            store["recent"] = (store["recent"] + [outcome])[-MAX_RECENT:]
+
+
+def _approve(home, sid, approval, store, previous, prompt_at, typed_sha, conn, client, deadline, now,
+             opener) -> RelayResult:
     """`approve [dp_…]` / `reject [dp_…]` of a supervisor's draft. A bare one
-    applies only to a draft made after the owner's previous prompt."""
+    applies only to a draft made after the owner's previous prompt and
+    before this one."""
     verb, pid = approval
     entries = store["proposals"]
     known = has_store(home, sid)
     if pid is None:
-        fresh = [e for e in entries if e["created_at"] > previous]
+        fresh = [e for e in entries if previous < e["created_at"] <= prompt_at]
         if not fresh:
             return RelayResult("no_draft", NO_DRAFT) if known else RelayResult("none")
         if len(fresh) > 1:
@@ -858,13 +1085,17 @@ def _approve(home, sid, approval, store, previous, typed_sha, conn, client, dead
     who = _who(store, entry["investigation_id"], entry["to_session_id"])
 
     def outcome(status: str, message: str, seq: Optional[int] = None) -> dict:
-        out = {"id": pid, "outcome": status, "message": message, "prompt_sha256": typed_sha, "at": now}
+        out = {"id": pid, "outcome": status, "message": message, "prompt_sha256": typed_sha, "at": now,
+               "investigation_id": entry["investigation_id"]}
         if seq is not None:
             out["seq"] = seq
         return out
 
     if verb == "reject":
         message = f"Cardinal: discarded your draft {pid} for {who}; nothing was sent."
+        if entry.get("uncertain"):
+            message = (f"Cardinal: discarded your draft {pid} for {who}. It may already have been delivered (an "
+                       "earlier send got no answer); check the worker's Investigation.")
         try:
             _take(home, sid, pid, now, outcome("rejected", message))
         except OSError:
@@ -882,23 +1113,394 @@ def _approve(home, sid, approval, store, previous, typed_sha, conn, client, dead
     got, detail = _send(conn, body, client, deadline, opener)
     if got == "ok":
         ev, dup = detail["event"], detail.get("duplicate") is True
+        answers = f" (answers #{entry['answers']})" if entry.get("answers") is not None else ""
         message = (f"Cardinal: {'already sent' if dup else 'sent'} your approved draft {pid} to {who} as owner "
-                   f"decision #{ev['seq']}: {excerpt(entry['text'])}. {SEES_IT}")
+                   f"decision #{ev['seq']}{answers}: {excerpt(entry['text'])}. {SEES_IT}")
         with contextlib.suppress(OSError):
             _take(home, sid, pid, now, outcome("duplicate" if dup else "relayed", message, ev["seq"]))
-        return RelayResult("duplicate" if dup else "relayed", message, [pid])
+        return RelayResult("duplicate" if dup else "relayed", message, [pid],
+                           context=message.replace(" " + SEES_IT, ""))
     if got == "transient":
-        message = (f"Cardinal: not sent: Cardinal did not answer in time or could not be reached. Your draft {pid} "
-                   f"is still waiting; {retry}.")
-        _note(home, sid, outcome("transient", message), now)
+        message = (f"Cardinal: your approved draft {pid} for {who} {MAYBE_SENT}. It is still waiting: type "
+                   f"`approve {pid}` again; it will not be sent twice.")
+        _mark_uncertain(home, sid, pid, outcome("transient", message), now)
         return RelayResult("transient", message, [pid])
-    if got == "not_enabled":
-        message = f"Cardinal: not sent: {detail}; then {retry}. Your draft {pid} is still waiting."
-        _note(home, sid, outcome("not_enabled", message), now)
-        return RelayResult("not_enabled", message, [pid])
+    if got in ("unavailable", "not_enabled"):
+        line = UNAVAILABLE_LINE if got == "unavailable" else f"{detail}; then {retry}"
+        message = f"Cardinal: not sent: {line}. Your draft {pid} is still waiting."
+        _note(home, sid, outcome(got, message), now)
+        return RelayResult(got, message, [pid])
     reason, code = detail
     message = (f"Cardinal refused your draft {pid} for {who}: {reason}. Nothing was sent; ask the supervisor to "
                "draft it again, or type it in the worker's terminal.")
     with contextlib.suppress(OSError):
         _take(home, sid, pid, now, outcome("refused", message))
     return RelayResult("refused", message, [pid], code)
+
+
+# ---------------------------------------------------------------------------
+# Claude: confirm the prompt's origin in the transcript, then act (deferred)
+# ---------------------------------------------------------------------------
+
+def handle_prompt_deferred(home: Path, sid: str, prompt: Any, *, prompt_id: Any, transcript_path: Any,
+                           conn: Optional[dict], client: str, agent_id: Optional[str] = None,
+                           now: Optional[float] = None, spawn: Optional[Callable[[dict], bool]] = None,
+                           blocked: bool = False) -> RelayResult:
+    """Claude Code's prompt hook. Its prompt hook also fires for prompts no
+    person typed (a scheduled task, /loop, a peer message), with no origin
+    in the payload; the transcript records the origin, but only after the
+    hook returns. So nothing is sent here: a matching prompt is recorded as
+    pending and a detached verifier (spawn, default spawn_verifier) waits
+    for its transcript entry and acts only when it is human-typed (verify).
+    Text refusals and "nothing to act on" answer at once (nothing is sent).
+    Outcomes of earlier prompts not shown yet are shown now: message (the
+    owner's systemMessage) and context (the model's) each carry them once.
+    `blocked`: another hook blocked this prompt (nothing is acted on).
+    Never raises."""
+    now = time.time() if now is None else now
+    shown, told = [], []
+    with contextlib.suppress(Exception):
+        shown, told = take_outcomes(home, sid, now)
+    try:
+        got = RelayResult("blocked") if blocked else _defer(home, sid, prompt, prompt_id, transcript_path, conn,
+                                                            client, agent_id, now, spawn or spawn_verifier)
+    except Exception:
+        got = RelayResult("error")
+    owner = [m for m in shown + [got.message] if m]
+    model = [m for m in told + [got.model_text()] if m]
+    return RelayResult(got.status, "\n".join(owner) or None, got.ids, got.code, "\n".join(model) or None)
+
+
+def _transcript_size(path: Any) -> Optional[int]:
+    try:
+        return os.stat(path).st_size if isinstance(path, str) and path else None
+    except (OSError, ValueError):
+        return None
+
+
+def _defer(home, sid, prompt, prompt_id, path, conn, client, agent_id, now, spawn) -> RelayResult:
+    if not ie.valid_session(sid):
+        return RelayResult("invalid")
+    got = _classify("claude", prompt, agent_id)
+    if isinstance(got, RelayResult):
+        return got
+    typed, typed_sha = got
+    pid = prompt_id if isinstance(prompt_id, str) and 0 < len(prompt_id) <= 128 else None
+    off = _transcript_size(path)
+    if has_store(home, sid):
+        with contextlib.suppress(Exception):
+            with _updating(home, sid, now) as st:   # every prompt; its origin is looked up when it matters
+                st["prompts"] = (st["prompts"] + [{"id": pid, "at": now, "off": off}])[-MAX_PROMPTS:]
+    approval, decision = match(typed), match_decide(typed)
+    if approval is None and decision is None:
+        return RelayResult("no_match")
+    store = _read(home, sid, now)
+    if _ordinary(decision, store):
+        return RelayResult("no_match")
+    if decision is not None:
+        refused = _text_refusal(decision[1])
+        if refused is not None:
+            return refused
+        if not store["targets"]:
+            return RelayResult("no_target", NO_WORKER)
+    elif not store["proposals"]:   # nothing to act on: says so (or nothing), sends nothing
+        return _approve(home, sid, approval, store, now, now, typed_sha, conn, client, 0.0, now, None)
+    if pid is None or off is None:
+        return RelayResult("unconfirmed", NOT_CONFIRMED)
+    if approval is None or approval[0] == "approve":
+        status, _ = _precheck(home, sid, None, conn)
+        if status:
+            return RelayResult(status, f"Cardinal: not sent: {_WHY[status]}.")
+    what = _pending_what(store, approval, decision)
+    with _updating(home, sid, now) as st:
+        st["pending"] = (st["pending"] + [{"pid": pid, "at": now, "state": "verifying"}])[-MAX_OUTCOMES:]
+    job = {"home": str(home), "sid": sid, "prompt_id": pid, "transcript_path": path, "offset": off,
+           "prompt": prompt, "typed": typed, "typed_sha": typed_sha, "at": now, "conn": conn, "client": client}
+    if not spawn(job):
+        with contextlib.suppress(Exception):
+            with _updating(home, sid, now) as st:
+                st["pending"] = [p for p in st["pending"] if p["pid"] != pid]
+        return RelayResult("unconfirmed", NOT_CONFIRMED)
+    return RelayResult("verifying", f"Cardinal: confirming you typed this in this terminal, then {what}.",
+                       context=PENDING_CONTEXT)
+
+
+def _pending_what(store: dict, approval: Optional[tuple], decision: Optional[tuple]) -> str:
+    """What the verifier will do, as far as can be told now."""
+    if decision is not None:
+        ts, name = store["targets"], decision[0]
+        t = next((t for t in ts if t.get("name") == name), None) if name else (ts[0] if len(ts) == 1 else None)
+        return f"sending your decision to {_who(store, t['investigation_id'], t['to_session_id'])}" if t \
+            else "sending your decision"
+    verb, pid = approval
+    e = next((e for e in store["proposals"] if e["id"] == pid), None) if pid else None
+    if verb == "reject":
+        return f"discarding draft {pid}" if e else "discarding the draft"
+    return f"sending draft {pid} to {_who(store, e['investigation_id'], e['to_session_id'])}" if e \
+        else "sending the draft"
+
+
+_VERIFY_CODE = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                "from cardinal_core import owner_relay; owner_relay._verify_detached(sys.stdin.read())")
+
+
+def spawn_verifier(job: dict) -> bool:
+    """Start the detached verifier (its own session; isolated Python; no
+    stdout or stderr; the job, connection included, on a pipe, never on its
+    command line or in its environment), like owner_input.spawn_flush.
+    Whether it started. Never raises."""
+    try:
+        root = str(Path(__file__).resolve().parent.parent)
+        proc = subprocess.Popen([sys.executable, "-I", "-c", _VERIFY_CODE, root], stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                                start_new_session=True)
+        try:
+            proc.stdin.write(json.dumps(job).encode())
+        finally:
+            proc.stdin.close()
+        return True
+    except Exception:
+        return False
+
+
+def _verify_detached(raw: str) -> None:
+    with contextlib.suppress(Exception):
+        verify(json.loads(raw))
+
+
+def _content_text(message: Any) -> Optional[str]:
+    """The text of a transcript user message, None when it is not plain
+    text (or holds a tool result)."""
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    if any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+        return None
+    texts = [c.get("text") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+    return "".join(t for t in texts if isinstance(t, str)) if texts else None
+
+
+def entry_origin(obj: Any, prompt_id: str, typed: Optional[str] = None) -> Optional[str]:
+    """For one transcript line: None when it is not the user entry of prompt
+    `prompt_id` (another entry, a tool result); else "human" when the
+    person typed it in this terminal (origin.kind "human", and no machine
+    marker: isMeta, promptSource "system", a turnOrigin other than
+    "human"; with `typed`, its text must be that prompt) or "other"."""
+    if not isinstance(obj, dict) or obj.get("type") != "user" or obj.get("promptId") != prompt_id \
+            or "toolUseResult" in obj:
+        return None
+    content = obj["message"].get("content") if isinstance(obj.get("message"), dict) else None
+    if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+        return None
+    origin = obj.get("origin")
+    human = (isinstance(origin, dict) and origin.get("kind") == "human" and obj.get("isMeta") is not True
+             and obj.get("promptSource") != "system" and obj.get("turnOrigin", "human") == "human")
+    if human and typed is not None:
+        said = _content_text(obj.get("message"))
+        human = isinstance(said, str) and said.strip() == typed.strip()
+    return "human" if human else "other"
+
+
+def _lines_from(path: str, start: int):
+    """The complete lines of `path` from byte `start` on, and where the
+    unread rest begins."""
+    with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        if start > size:
+            start = 0
+        f.seek(start)
+        data = f.read()
+    cut = data.rfind(b"\n") + 1
+    return data[:cut].split(b"\n"), start + cut
+
+
+def find_origin(path: str, offset: int, prompt_id: str, prompt: str, *, window: float = VERIFY_WINDOW,
+                poll: float = VERIFY_POLL, sleep: Callable[[float], None] = time.sleep) -> Optional[str]:
+    """Wait up to `window` seconds for prompt `prompt_id`'s user entry in
+    the transcript at `path` (appended after `offset`, the size when the
+    hook ran; TRANSCRIPT_SLACK before it is read too): "human" / "other"
+    (entry_origin), or None (not found in time, unreadable)."""
+    deadline = time.monotonic() + window
+    pos = max(0, offset - TRANSCRIPT_SLACK)
+    needle = prompt_id.encode()
+    while True:
+        try:
+            lines, pos = _lines_from(path, pos)
+        except OSError:
+            return None
+        for raw in lines:
+            if needle not in raw:
+                continue
+            try:
+                got = entry_origin(json.loads(raw), prompt_id, prompt)
+            except ValueError:
+                continue
+            if got:
+                return got
+        if time.monotonic() >= deadline:
+            return None
+        sleep(poll)
+
+
+def scan_origins(path: str, offset: int, ids: set) -> dict:
+    """{prompt id: "human"|"other"} for the earlier prompts `ids`, read once
+    from `offset`. Raises OSError."""
+    found: dict = {}
+    lines, _ = _lines_from(path, max(0, offset - TRANSCRIPT_SLACK))
+    for raw in lines:
+        hit = next((i for i in ids if i not in found and i.encode() in raw), None)
+        if hit is None:
+            continue
+        try:
+            got = entry_origin(json.loads(raw), hit)
+        except ValueError:
+            continue
+        if got:
+            found[hit] = got
+    return found
+
+
+def _previous_human(home: Path, sid: str, prompt_at: float, path: str) -> float:
+    """When the owner's previous HUMAN-typed prompt was (before
+    `prompt_at`), from the noted prompts whose transcript entries say
+    origin human. A scheduled or peer prompt never counts, so it cannot make
+    a draft from its own turn look fresh. No noted prompt: 0 (nothing seen
+    since this session began supervising). Noted prompts, none confirmed
+    human, or any failure: `prompt_at` (fail closed: nothing is fresh)."""
+    try:
+        cands = [p for p in _read(home, sid, time.time())["prompts"] if p["at"] < prompt_at]
+        if not cands:
+            return 0.0
+        todo = [p for p in cands if p.get("human") is None and p.get("id") and p.get("off") is not None]
+        if todo:
+            found = scan_origins(path, min(p["off"] for p in todo), {p["id"] for p in todo})
+            for p in todo:
+                p["human"] = found.get(p["id"]) == "human"
+            with contextlib.suppress(Exception):
+                with _updating(home, sid, time.time()) as st:
+                    for p in st["prompts"]:
+                        if p.get("human") is None and p.get("id") in found:
+                            p["human"] = found[p["id"]] == "human"
+        human = [p["at"] for p in cands if p.get("human") is True]
+        return max(human) if human else prompt_at
+    except Exception:
+        return prompt_at
+
+
+def _set_human(home: Path, sid: str, prompt_id: str, human: bool) -> None:
+    with contextlib.suppress(Exception):
+        with _updating(home, sid, time.time(), wait=5.0) as st:
+            for p in st["prompts"]:
+                if p.get("id") == prompt_id:
+                    p["human"] = human
+
+
+def _claim(home: Path, sid: str, prompt_id: str) -> bool:
+    """Mark pending prompt `prompt_id` as being sent; False when it is no
+    longer pending (reported as stale meanwhile) or the store is locked."""
+    try:
+        with _updating(home, sid, time.time(), wait=5.0) as st:
+            p = next((p for p in st["pending"] if p["pid"] == prompt_id and p["state"] == "verifying"), None)
+            if p is None:
+                return False
+            p["state"] = "sending"
+            return True
+    except Exception:
+        return False
+
+
+def _finish(home: Path, sid: str, prompt_id: str, res: RelayResult, now: float) -> None:
+    """Pending prompt `prompt_id` is done: its outcome waits to be shown
+    (nothing when it is no longer pending: already reported)."""
+    with contextlib.suppress(Exception):
+        with _updating(home, sid, now, wait=5.0) as st:
+            if any(p["pid"] == prompt_id for p in st["pending"]):
+                st["pending"] = [p for p in st["pending"] if p["pid"] != prompt_id]
+                if res.message:
+                    st["outcomes"] = (st["outcomes"] + [{"pid": prompt_id, "message": res.message,
+                                                         "context": res.model_text() or res.message, "at": now,
+                                                         "owner": False, "model": False}])[-MAX_OUTCOMES:]
+
+
+STOPPED = ("Cardinal: your last decision may not have been sent (Cardinal stopped before it got an answer). Check the "
+           "worker's Investigation before sending it again.")
+
+
+def verify(job: dict, *, window: float = VERIFY_WINDOW, poll: float = VERIFY_POLL,
+           sleep: Callable[[float], None] = time.sleep, opener=None) -> RelayResult:
+    """The detached verifier (spawn_verifier): find the prompt's transcript
+    entry; act (_act) only when it is human-typed; else "not sent". The
+    outcome waits in the store for take_outcomes / at_stop. Never raises."""
+    try:
+        home, sid, pid = Path(job["home"]), job["sid"], job["prompt_id"]
+        origin = None
+        with contextlib.suppress(Exception):
+            origin = find_origin(job["transcript_path"], int(job["offset"]), pid, job["prompt"], window=window,
+                                 poll=poll, sleep=sleep)
+        _set_human(home, sid, pid, origin == "human")
+        if origin != "human":
+            res = RelayResult("unconfirmed", NOT_CONFIRMED)
+        elif not _claim(home, sid, pid):
+            return RelayResult("stale")
+        else:
+            now = time.time()
+            previous = _previous_human(home, sid, job["at"], job["transcript_path"])
+            typed = job["typed"]
+            try:
+                res = _act(home, sid, match(typed), match_decide(typed), _read(home, sid, now), previous, job["at"],
+                           job["typed_sha"], job["conn"], job["client"], time.monotonic() + VERIFY_BUDGET, now,
+                           opener)
+            except Exception:
+                res = RelayResult("error", "Cardinal: not sent: Cardinal failed before sending it. Type it again.")
+        _finish(home, sid, pid, res, time.time())
+        return res
+    except Exception:
+        return RelayResult("error")
+
+
+def _expire_pending(store: dict, now: float) -> None:
+    """A pending prompt whose verifier is gone (PENDING_STALE): reported as
+    not confirmed, or as perhaps sent when it had started sending."""
+    for p in [p for p in store["pending"] if now - p["at"] >= PENDING_STALE]:
+        store["pending"].remove(p)
+        message = STOPPED if p["state"] == "sending" else NOT_CONFIRMED
+        store["outcomes"] = (store["outcomes"] + [{"pid": p["pid"], "message": message, "context": message,
+                                                   "at": now, "owner": False, "model": False}])[-MAX_OUTCOMES:]
+
+
+def take_outcomes(home: Path, sid: str, now: float, *, model: bool = True) -> tuple:
+    """(owner lines, model lines) not shown yet, now marked shown (each
+    outcome reaches each once). model=False (the Stop hook: no model
+    channel) leaves the model's. Raises OSError when locked."""
+    if not has_store(home, sid):
+        return [], []
+    with _updating(home, sid, now) as st:
+        _expire_pending(st, now)
+        owner = [o["message"] for o in st["outcomes"] if not o["owner"]]
+        told = [o["context"] for o in st["outcomes"] if model and not o["model"]]
+        for o in st["outcomes"]:
+            o["owner"] = True
+            o["model"] = o["model"] or model
+        st["outcomes"] = [o for o in st["outcomes"] if not (o["owner"] and o["model"])]
+    return owner, told
+
+
+def at_stop(home: Path, sid: str, *, wait: float = STOP_WAIT, sleep: Callable[[float], None] = time.sleep) -> Optional[str]:
+    """The Stop hook: wait up to `wait` seconds for a pending prompt's
+    outcome, then the owner lines not shown yet (None: nothing). Never
+    raises."""
+    try:
+        if not ie.valid_session(sid) or not has_store(home, sid):
+            return None
+        end = time.monotonic() + wait
+        while time.monotonic() < end:
+            now = time.time()
+            if not any(now - p["at"] < PENDING_STALE for p in _read(home, sid, now)["pending"]):
+                break
+            sleep(0.1)
+        owner, _ = take_outcomes(home, sid, time.time(), model=False)
+        return "\n".join(owner) or None
+    except Exception:
+        return None

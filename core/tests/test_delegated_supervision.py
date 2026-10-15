@@ -75,7 +75,7 @@ class FixtureParity(unittest.TestCase):
 
     def test_every_fixture_case(self):
         data = json.loads(FIXTURE.read_text(encoding="utf-8"))
-        self.assertEqual(data["version"], 1)
+        self.assertEqual(data["version"], 2)
         self.assertGreater(len(data["cases"]), 10)
         for case in data["cases"]:
             with self.subTest(case["name"]):
@@ -395,7 +395,7 @@ class AckCli(Base):
     def test_server_refusals_are_said_in_words(self):
         for code_, said in (("challenge_requires_position", "`noted` is not an answer to a challenge"),
                             ("directive_requires_compliance", "a directive (an upheld ruling) is binding"),
-                            ("conflict_ref_not_owner", "must name an owner.decided event"),
+                            ("conflict_ref_not_owner", "must name an owner decision of this investigation posted from"),
                             ("position_already_taken", "a position is final")):
             err = sync.ServerError(422, {"error": code_}, "refused")
             with patch.object(ie, "append_event", side_effect=err):

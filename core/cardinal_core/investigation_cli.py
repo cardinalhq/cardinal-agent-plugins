@@ -917,11 +917,18 @@ class CLI:
         code = self._can_relay(home, sid, worker, "not proposed")
         if code is not None:
             return code
+        answers = None
+        if args.answers is not None:
+            answers = self._answered(worker, args.answers)
+            if answers is None:
+                return EXIT_USAGE
         entry = owner_relay.propose(home, sid, worker, args.to_session, args.text, answers=args.answers,
                                     refs=args.ref or None)
         if args.json:
-            print(json.dumps({**entry, "instruction": owner_relay.INSTRUCTION.format(id=entry["id"])}, indent=2,
-                             ensure_ascii=False))
+            out = {**entry, "instruction": owner_relay.INSTRUCTION.format(id=entry["id"])}
+            if answers:
+                out["answers_line"] = answers
+            print(json.dumps(out, indent=2, ensure_ascii=False))
             return 0
         when = time.strftime("%H:%M", time.localtime(entry["expires_at"]))
         print(f"proposed {entry['id']}: an owner decision for session {args.to_session} of {worker} "
@@ -929,11 +936,39 @@ class CLI:
         print("--- decision text ---")
         print(entry["text"])
         print("--- end ---")
+        if answers:
+            print(answers)
         print(owner_relay.INSTRUCTION.format(id=entry["id"]) + f" Tell the owner it expires at {when}.")
         off = self._relay_off_line()
         if off:
             print("Tell the owner too: " + off)
         return 0
+
+    def _answered(self, worker: str, seq: int):
+        """The line saying what --answers points at ("answers #N: <type>
+        <excerpt>"), read with this machine's key; None (printed why) when it
+        is a supervisor's challenge or ruling, which a relayed decision
+        cannot answer (the server refuses it: only a web decision overrules
+        those). Unreadable: a line saying so (the server checks it)."""
+        conn, client = self.connection()
+        try:
+            page = ie.read_events(conn, worker, after=seq - 1, limit=1, client=client, timeout=5.0)
+            e = next((e for e in page["events"] if e.get("seq") == seq), None)
+        except Exception:
+            e = None
+        if e is None:
+            return f"answers #{seq} (not read here; Cardinal checks it when the owner approves)"
+        typ = e.get("type") if isinstance(e.get("type"), str) else "event"
+        if typ in (ie.CHALLENGE, ie.RULING):
+            print(f"not proposed: #{seq} is a supervisor's {'challenge' if typ == ie.CHALLENGE else 'ruling'}; a "
+                  "relayed decision cannot answer or overrule it (only a decision posted from the Investigation "
+                  "page on the web can). Drop --answers, or tell the owner to overrule it on the web.",
+                  file=sys.stderr)
+            return None
+        payload = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+        text = payload.get("text") if isinstance(payload.get("text"), str) else ""
+        return f"answers #{seq}: {ie._tok(typ)} {owner_relay.excerpt(text, 80)}" if text \
+            else f"answers #{seq}: {ie._tok(typ)}"
 
     def _can_relay(self, home: Path, sid: str, worker: str, what: str):
         """None when supervisor session `sid` can relay owner decisions to
@@ -1009,7 +1044,7 @@ class CLI:
         code = self._can_relay(home, sid, worker, "not registered")
         if code is not None:
             return code
-        t = owner_relay.add_target(home, sid, worker, args.to_session, args.name)
+        t = owner_relay.add_target(home, sid, worker, args.to_session, args.name, replace=args.replace)
         if args.json:
             print(json.dumps(t, indent=2))
             return 0
@@ -1046,6 +1081,8 @@ class CLI:
                     f"{ie._now_iso(e['expires_at'])}")
             if e.get("answers") is not None:
                 line += f", answers #{e['answers']}"
+            if e.get("uncertain"):
+                line += ", may already have been delivered (a send got no answer)"
             print(line)
             print(f"  Text (verbatim JSON string): {ie.json_text(e['text'])}")
         for r in done:
@@ -1065,7 +1102,11 @@ class CLI:
         if entry is None:
             print(f"{pid} is not pending in session {sid} (expired, withdrawn or already handled)", file=sys.stderr)
             return 1
-        print(f"withdrew {pid}; nothing was sent")
+        if entry.get("uncertain"):
+            print(f"withdrew {pid}; it may already have been delivered (an earlier send got no answer): check the "
+                  "worker's Investigation")
+        else:
+            print(f"withdrew {pid}; nothing was sent")
         return 0
 
 
@@ -1248,6 +1289,8 @@ def build_parser(wiring, session_env=()):
             p.add_argument("--to-session", help="the worker's session id")
             p.add_argument("--name", help="a short name for `decide <name>: …` (a-z, 0-9, -; at most 32)")
             p.add_argument("--remove", action="store_true", help="drop the target (by --name, or by id and session)")
+            p.add_argument("--replace", action="store_true",
+                           help="move --name here from a target of another investigation")
         elif action == "withdraw-proposal":
             p.add_argument("proposal_id", help="dp_...")
     return parser
@@ -1270,6 +1313,7 @@ def normalize_argv(argv):
         "--include-self",
         "--owner-input",
         "--remove",
+        "--replace",
         "--help",
         "-h",
     }

@@ -1396,9 +1396,14 @@
           "command": "/hooks/owner-relay\\.py$"
         },
         {
+          "kind": "hook",
+          "event": "Stop",
+          "command": "/hooks/owner-relay\\.py stop$"
+        },
+        {
           "kind": "grep",
           "path": "hooks/owner-relay.py",
-          "pattern": "owner_relay\\.handle_prompt\\("
+          "pattern": "owner_relay\\.handle_prompt_deferred\\("
         },
         {
           "kind": "grep",
@@ -1459,7 +1464,8 @@
       ]
     },
     "notes": {
-      "cursor": "Cursor's beforeSubmitPrompt has no user-visible, non-blocking message, so the outcome is staged for the next tool boundary (model context) and listed by `investigation proposals`; the supervise skill tells the agent to run it and report the outcome."
+      "cursor": "Cursor's beforeSubmitPrompt shows the user a hook's words only for a blocked prompt, so a relay-form prompt is blocked with the outcome as user_message (the model never sees that prompt; the outcome is staged for its next tool call).",
+      "claude": "Claude Code fires UserPromptSubmit for scheduled-task, /loop and peer prompts too, with no origin in the payload: a detached verifier confirms from the transcript that a person typed it before anything is sent; the outcome is shown at Stop or with the next prompt."
     }
   },
   "connection_skills": {

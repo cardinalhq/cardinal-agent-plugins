@@ -22,6 +22,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -624,19 +625,52 @@ WORKER_SID = "9a8b7c6d-worker"
 
 
 class OwnerRelay(Base):
-    """owner-relay.py: the owner's `approve` relays a proposed decision,
-    whatever owner input says, and the outcome reaches the user
-    (systemMessage) and the model (additionalContext)."""
+    """owner-relay.py: a relay form is confirmed from the transcript (a
+    person typed it here) by a detached verifier before anything is sent,
+    whatever owner input says; the outcome reaches the user at Stop
+    (systemMessage) and the model with the next prompt."""
 
     def setUp(self):
         super().setUp()
         self.bind(capabilities={"owner_input": {"enabled": True}, "owner_relay": {"enabled": True}})
+        self.transcript = self.base / "transcript.jsonl"
+        self.transcript.write_text(json.dumps({"type": "summary"}) + "\n")
+        self.n = 0
 
     def relay_hook(self, prompt, env=None, **extra):
-        payload = {"session_id": SID, "transcript_path": "/x.jsonl", "cwd": str(self.base),
-                   "hook_event_name": "UserPromptSubmit", "prompt": prompt, **extra}
-        return subprocess.run([str(RELAY_HOOK)], input=json.dumps(payload), capture_output=True, text=True,
-                              timeout=30, env=env or self.env, cwd=str(self.base))
+        self.n += 1
+        payload = {"session_id": SID, "transcript_path": str(self.transcript), "cwd": str(self.base),
+                   "hook_event_name": "UserPromptSubmit", "prompt": prompt,
+                   "prompt_id": f"5b0c-{self.n:04d}-prompt", **extra}
+        res = subprocess.run([str(RELAY_HOOK)], input=json.dumps(payload), capture_output=True, text=True,
+                             timeout=30, env=env or self.env, cwd=str(self.base))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res, payload["prompt_id"]
+
+    def written(self, prompt_id, prompt, human=True):
+        """The user entry Claude Code appends after the hook returns."""
+        e = {"type": "user", "promptId": prompt_id, "message": {"role": "user", "content": prompt}}
+        e.update({"origin": {"kind": "human"}, "promptSource": "typed", "turnOrigin": "human"} if human else
+                 {"promptSource": "system", "turnOrigin": "scheduled", "isMeta": True, "scheduledTaskId": "t1"})
+        with self.transcript.open("a") as f:
+            f.write(json.dumps(e) + "\n")
+
+    def stop(self):
+        payload = {"session_id": SID, "hook_event_name": "Stop", "stop_hook_active": False}
+        res = subprocess.run([str(RELAY_HOOK), "stop"], input=json.dumps(payload), capture_output=True, text=True,
+                             timeout=30, env=self.env, cwd=str(self.base))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(res.stdout)["systemMessage"] if res.stdout else None
+
+    def settled(self, timeout=15.0):
+        """The detached verifier finished (no prompt left pending)."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            data = json.loads((self.sessions() / f"{SID}.proposals.json").read_text())
+            if not data.get("pending"):
+                return
+            time.sleep(0.1)
+        self.fail("the verifier did not finish")
 
     def propose(self):
         res = self.cli("propose-decision", WORKER, "--to-session", WORKER_SID, "--text", "Only the cache layer.",
@@ -645,46 +679,63 @@ class OwnerRelay(Base):
         self.assertEqual(self.fake.requests, [])   # a proposal sends nothing
         return res.stdout.split()[1].rstrip(":")
 
-    def test_approve_relays_even_with_owner_input_off_and_reports_it(self):
+    def test_a_typed_approve_is_confirmed_then_sent_even_with_owner_input_off(self):
         pid = self.propose()
         env = dict(self.env, CARDINAL_OWNER_INPUT="0")
-        res = self.relay_hook(f"approve {pid}", env=env)
-        self.assertEqual(res.returncode, 0, res.stderr)
+        res, prompt_id = self.relay_hook(f"approve {pid}", env=env)
         out = json.loads(res.stdout)
-        msg = out["systemMessage"]
-        self.assertEqual(out["hookSpecificOutput"], {"hookEventName": "UserPromptSubmit", "additionalContext": msg})
+        self.assertEqual(out["systemMessage"], f"Cardinal: confirming you typed this in this terminal, then sending "
+                                               f"draft {pid} to the worker (session 9a8b7c6d).")
+        self.assertIn("confirming the owner typed this prompt", out["hookSpecificOutput"]["additionalContext"])
+        self.written(prompt_id, f"approve {pid}")
+        self.settled()
+        msg = self.stop()
         self.assertIn(f"sent your approved draft {pid} to the worker (session 9a8b7c6d) as owner decision #", msg)
         self.assertIn(': "Only the cache layer.".', msg)
+        self.assertIsNone(self.stop())                       # shown once
         [(tool, body, headers, _)] = self.fake.requests
         self.assertEqual(tool, "relay-owner-decision")
         self.assertEqual(headers["x-cardinalhq-api-key"], "ck")
         self.assertNotIn("authorization", headers)
         self.assertEqual((body["investigation_id"], body["relay"]["supervisor_investigation_id"]), (WORKER, INV))
         self.assertNotIn("record-owner-input", self.fake.tools())
-        self.assertFalse((self.sessions() / f"{SID}.proposals.json").exists()
-                         and json.loads((self.sessions() / f"{SID}.proposals.json").read_text())["proposals"])
+        res, _ = self.relay_hook("thanks")                   # the model hears it with the next prompt
+        out = json.loads(res.stdout)
+        self.assertNotIn("systemMessage", out)
+        self.assertIn(f"sent your approved draft {pid}", out["hookSpecificOutput"]["additionalContext"])
+
+    def test_a_scheduled_approve_is_never_sent(self):
+        pid = self.propose()
+        res, prompt_id = self.relay_hook("approve")          # e.g. a model-created CronCreate firing `approve`
+        self.assertIn("confirming you typed this", json.loads(res.stdout)["systemMessage"])
+        self.written(prompt_id, "approve", human=False)
+        self.settled()
+        self.assertEqual(self.stop(), "Cardinal: not sent: Cardinal could not confirm you typed this prompt in this "
+                                      "terminal.")
+        self.assertEqual(self.fake.requests, [])
+        self.assertIn(pid, (self.sessions() / f"{SID}.proposals.json").read_text())   # still waiting
 
     def test_other_prompts_subagents_and_unbound_sessions_are_silent(self):
         self.propose()
-        self.silent(self.relay_hook("approve the plan"))
-        self.silent(self.relay_hook("approve", agent_id="sub-1"))
+        self.silent(self.relay_hook("approve the plan")[0])
+        self.silent(self.relay_hook("approve", agent_id="sub-1")[0])
         self.assertEqual(self.fake.requests, [])
 
     def test_not_enabled_shows_the_settings_link_and_keeps_it(self):
         pid = self.propose()
         self.fake.relay_status = (403, {"error": "owner_relay_not_enabled",
                                         "settings_url": "https://app.example.invalid/settings"})
-        out = json.loads(self.relay_hook("approve").stdout)
-        self.assertIn("https://app.example.invalid/settings", out["systemMessage"])
-        self.assertIn(f"type `approve {pid}` to try again", out["systemMessage"])
-        self.fake.relay_status = None
-        out = json.loads(self.relay_hook(f"APPROVE {pid.upper()}.").stdout)
-        self.assertIn(f"sent your approved draft {pid}", out["systemMessage"])
+        _, prompt_id = self.relay_hook("approve")
+        self.written(prompt_id, "approve")
+        self.settled()
+        msg = self.stop()
+        self.assertIn("https://app.example.invalid/settings", msg)
+        self.assertIn(f"type `approve {pid}` to try again", msg)
 
     def test_never_silent_on_an_unconnected_machine(self):
         self.propose()
         (self.home / ".claude" / "settings.json").write_text("{}")
-        out = json.loads(self.relay_hook("decide: Stop now.").stdout)
+        out = json.loads(self.relay_hook("decide: Stop now.")[0].stdout)
         self.assertIn("Cardinal: not sent: this machine is not connected to Cardinal.", out["systemMessage"])
         self.assertEqual(self.fake.requests, [])
 
@@ -692,19 +743,28 @@ class OwnerRelay(Base):
         res = self.cli("supervising", WORKER, "--to-session", WORKER_SID, "--name", "codex", "--session", SID)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("`decide codex: <text>`", res.stdout)
-        out = json.loads(self.relay_hook("decide: Keep the scope to the cache layer.").stdout)
-        self.assertIn("sent your decision to codex (session 9a8b7c6d) as owner decision #", out["systemMessage"])
+        _, prompt_id = self.relay_hook("decide: Keep the scope to the cache layer.")
+        self.written(prompt_id, "decide: Keep the scope to the cache layer.")
+        self.settled()
+        self.assertIn("sent your decision to codex (session 9a8b7c6d) as owner decision #", self.stop())
         [(tool, body, _, _)] = self.fake.requests
         self.assertEqual((tool, body["payload"]["text"], body["relay"]["source"]),
                          ("relay-owner-decision", "Keep the scope to the cache layer.", "verbatim"))
 
-    def test_propose_refuses_a_grant_file_and_the_hook_is_registered(self):
+    def test_propose_refuses_a_grant_file_and_both_hooks_are_registered(self):
         res = self.cli("propose-decision", WORKER, "--to-session", WORKER_SID, "--text", "x", "--session", SID,
                        "--credential-file", str(self.base / "grant.json"))
         self.assertEqual(res.returncode, 2)
-        hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]["UserPromptSubmit"]
+        hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
         self.assertIn("${CLAUDE_PLUGIN_ROOT}/hooks/owner-relay.py",
-                      [h["command"] for g in hooks for h in g["hooks"]])
+                      [h["command"] for g in hooks["UserPromptSubmit"] for h in g["hooks"]])
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}/hooks/owner-relay.py stop",
+                      [h["command"] for g in hooks["Stop"] for h in g["hooks"]])
+
+    def test_stop_without_relay_state_is_silent(self):
+        payload = {"session_id": SID, "hook_event_name": "Stop"}
+        self.silent(subprocess.run([str(RELAY_HOOK), "stop"], input=json.dumps(payload), capture_output=True,
+                                   text=True, timeout=30, env=self.env, cwd=str(self.base)))
 
 
 if __name__ == "__main__":

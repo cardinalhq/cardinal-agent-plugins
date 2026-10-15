@@ -40,8 +40,8 @@ then re-arm it. Never write sleep-and-reread loops.
 ## Owner decisions
 
 When the owner types `decide: …`, `approve <id>` or `reject <id>`, Cardinal's prompt hook
-shows them the outcome and gives you the same line. Confirm it in one line; run nothing to
-send or approve it. No Cardinal line means nothing was sent; say so.
+confirms they typed it, acts, and shows them the outcome when your turn ends; you get it with
+their next prompt. Run nothing to send or approve it. No Cardinal line means nothing was sent.
 
 ## Doing your own checks
 

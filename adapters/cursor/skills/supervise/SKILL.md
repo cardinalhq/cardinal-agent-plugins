@@ -38,9 +38,8 @@ again. Never write sleep-and-reread loops.
 ## Owner decisions
 
 When the owner types `decide: …`, `approve <id>` or `reject <id>`, Cardinal's prompt hook
-relays or drops it but Cursor shows the owner nothing. Right after such a prompt, run
-`cardinal-storyboard investigation proposals --session <your_sid>` and quote the newest
-Cardinal outcome line to the owner verbatim. Run nothing else to send or approve it.
+acts on it and shows them the outcome instead of passing the prompt to you; you get the
+outcome at your next tool call. Run nothing to send or approve it.
 
 ## Doing your own checks
 

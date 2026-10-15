@@ -17,27 +17,59 @@ the supervisor's terminal.
 
 ## Trust model (say it exactly; never claim more)
 
-The owner approves by typing `approve` as a prompt in the supervisor session.
-The runtime's prompt hook (harness-run; the model cannot produce a user prompt)
-sees it and relays the drafted decision with the owner's API key. The server
-can verify:
+The owner approves by typing `approve` (or `decide: …`) as a prompt in the
+supervisor session; the runtime's prompt hook relays it with the owner's API
+key. The server can verify:
 
-- the key belongs to a person (a `user:` principal), who authors the worker's
-  investigation;
-- that person turned on "accept owner decisions approved in my supervisor
+- the key belongs to a person (a `user:` principal), still a writing member of
+  the org, who authors the worker's investigation;
+- that person turned on "accept owner decisions I send from my supervisor
   sessions" from their signed-in web session (a per-user, per-org setting that
   only a web session can change; off by default);
 - the claimed supervisor session belongs to an investigation the same person
   authors;
 - the text it stores is the text whose hash the relay carries.
 
-It cannot verify that a human typed `approve`: the agent holds the same key and
-could call the route itself. The resulting authority is `owner_relayed`, i.e.
-attested by the owner's machine, the same trust level as text pasted into the
-worker's terminal, and weaker than `owner_decision` (web session). Workers treat
-it as the owner's own words; the label says how it arrived. The opt-in is the
-owner's explicit acceptance of that level. Later hardening (out of scope): a
-local user-presence gesture (Touch ID) the agent cannot perform.
+The server cannot tell who made the request: the agent holds the same key and
+can always call the route directly, naming any supervisor session. The
+plugin's guarantee is narrower and is all it claims: **it never relays a prompt
+it cannot confirm a person typed in this terminal, and it refuses every prompt
+a model created** (scheduled tasks, /loop iterations, peer messages, subagent
+prompts, task notifications).
+
+- **Claude Code** fires UserPromptSubmit for prompts no person typed, with no
+  origin in the payload (verified in 2.1.300: a model-created one-shot
+  scheduled task with prompt `approve` arrived exactly like a typed one; a
+  cross-session message arrived wrapped in `<cross-session-message …>`, which
+  never matches the forms). The session transcript records the origin on the
+  user entry whose `promptId` is the hook's `prompt_id`: `origin.kind:
+  "human"` (with `promptSource: "typed"`, `turnOrigin: "human"`) for what the
+  person typed; scheduled and peer prompts carry `isMeta`, `promptSource:
+  "system"` and another `turnOrigin`; tool results share the promptId but carry
+  `toolUseResult`. That entry is written after the hook returns, so the hook
+  defers: it records the prompt as pending and a detached verifier waits up to
+  20 s for the entry and acts only when it is human-typed (below).
+- **Codex, Gemini CLI, Cursor**: their prompt payloads carry no origin field
+  (payload captures in this repo). Neither their documentation nor our captures
+  show a model-schedulable prompt, so they relay synchronously, trusting that
+  the prompt hook sees what the person typed. Known hook-made prompts: Gemini
+  re-fires BeforeAgent with an AfterAgent block's reason as the prompt, and
+  Cursor submits a `stop` hook's `followup_message` as the next user prompt
+  (this plugin uses neither; another extension could). Unknown: whether a
+  future scheduling feature of those runtimes would fire the prompt hook
+  without saying so. Revisit when one ships.
+
+The resulting authority is `owner_relayed`, attested by the owner's machine,
+the same trust level as text pasted into the worker's terminal, and weaker than
+`owner_decision` (web session). Workers treat it as the owner's own words; the
+label says how it arrived. It never overrules a supervisor's challenge or
+ruling and cannot be cited by `--conflicts-with` (server: 422
+`owner_relay_answers_ruling` / `conflict_ref_not_owner`): only a web decision
+does. A supervisor defers to a relayed decision only when its own session's
+hook sent it (the reader marks it `relayed: by_you`); any other is unverified
+and reported to the owner. The opt-in is the owner's explicit acceptance of
+that level. Later hardening (out of scope): a local user-presence gesture
+(Touch ID) the agent cannot perform.
 
 Not used, on purpose: Claude's AskUserQuestion. Its input schema has an
 `answers` field the model can fill, and we have not shown a hook can tell a
@@ -52,8 +84,8 @@ verified.
    `cardinal-storyboard investigation propose-decision <worker_inv> --to-session <worker_sid> --text "<decision>" [--answers <seq>] [--ref <r>]... --session <supervisor_sid>`.
    The CLI stores a local proposal and prints its id (`dp_` + 16 hex) and the
    instruction to show the text verbatim and ask the owner to reply
-   `approve dp_xxxxxxxxxxxxxxxx` (bare `approve` works when it is the only pending
-   proposal) or `reject dp_xxxxxxxxxxxxxxxx`.
+   `approve dp_xxxxxxxxxxxxxxxx` (bare `approve` works for the one draft made
+   since the owner's previous prompt) or `reject dp_xxxxxxxxxxxxxxxx`.
 3. The owner types `approve`. The supervisor's prompt hook matches it, relays
    the proposal to `relay-owner-decision`, deletes the proposal, and tells the
    user and the model the outcome ("Relayed owner decision dp_… to session
@@ -175,7 +207,7 @@ route; the per-user setting is reported by the route's 403 and by
 - Store: `~/.cardinal/investigations/sessions/<supervisor_sid>.proposals.json`
   (0600, flock like the binding): entries `{id, investigation_id,
   to_session_id, text, sha256, answers?, refs, created_at, expires_at}`;
-  `id` = `dp_` + 8 random hex; expiry 30 min; at most 5 pending (oldest
+  `id` = `dp_` + 16 random hex; expiry 30 min; at most 5 pending (oldest
   dropped). `investigation proposals [--session]` lists them;
   `investigation withdraw-proposal <id>` removes one.
 - Output: the id, the text verbatim, and: "Show the owner this text verbatim and
@@ -188,9 +220,9 @@ route; the per-user setting is reported by the route's 403 and by
   (owner input may be off; prod has it off): refuse subagent prompts (non-empty
   agent_id) and machine prompts (`normalize_prompt` must reduce it to typed
   text). Match the whole stripped prompt, case-insensitive:
-  `^(approve|reject)(\s+dp_[0-9a-f]{16})?[.!]?$`. Bare form only when exactly
-  one unexpired proposal is pending; otherwise tell the user which ids are
-  pending.
+  `^(approve|reject)(\s+dp_[0-9a-f]{16})?[.!]?$`. Bare form only for a draft
+  made since the owner's previous prompt (see "Stale bare approve"); several
+  such drafts: tell the user which ids are pending.
 - approve: POST `relay-owner-decision` synchronously with a bounded wall clock
   (~3 s). Success (201 or 200 duplicate) removes the proposal. Transient
   failure keeps it and says "not relayed — retry with `approve <id>`". 403
@@ -329,3 +361,106 @@ this section and the text above differ, this section wins.
 - Cursor has no user-visible channel on its prompt hook: the outcome is staged
   for the next tool call and listed by `investigation proposals`; the skill
   tells the agent to quote it verbatim.
+
+## Revision 2026-10-15 (review): origin, uncertainty, and the server's new refusals
+
+Where this section and the text above differ, this section wins.
+
+### Claude: confirm the prompt's origin before acting
+
+- UserPromptSubmit (`owner-relay.py`, `owner_relay.handle_prompt_deferred`)
+  sends nothing. For a relay form it answers at once only what needs no
+  origin (a text refusal; no worker; no draft; not connected) and otherwise
+  records `{pid: prompt_id, at, state}` under `pending` in the session's store
+  (`<sid>.proposals.json`, 0600, flock), starts a detached verifier (own
+  session, isolated Python, the job on a pipe, as owner-input's flush), and
+  tells the owner "Cardinal: confirming you typed this in this terminal, then
+  sending draft dp_… to <name>." (the model: the outcome comes with the
+  owner's next prompt).
+- The verifier reads the transcript from the size it had at hook time (minus
+  256 KiB of slack) for up to 20 s, for the user entry with that promptId that
+  is not a tool result. It acts only when `origin.kind == "human"`, no machine
+  marker is present (`isMeta`, `promptSource: "system"`, a `turnOrigin` other
+  than `"human"`) and the entry's text is the prompt the hook saw. Any
+  `promptSource` other than `"system"` is accepted with a human origin: we have
+  only observed `"typed"`, and a pasted prompt should count if Claude marks it
+  differently; `origin.kind` is the attribution. Not found in time,
+  unreadable, another origin, an unknown shape: "Cardinal: not sent: Cardinal
+  could not confirm you typed this prompt in this terminal." The prompt text
+  is the owner's; no missing payload field (`prompt_id`, `transcript_path`) is
+  guessed: then it is not sent.
+- Outcomes are kept under `outcomes` and shown once per channel: the Stop hook
+  (`owner-relay.py stop`, waiting at most 3 s while a prompt is pending) shows
+  them to the owner (systemMessage); the next UserPromptSubmit shows the ones
+  not shown yet (systemMessage) and gives the model each once
+  (additionalContext). A pending prompt older than 60 s has lost its verifier:
+  reported as not confirmed, or, if it had started sending, as "may not have
+  been sent".
+- Freshness counts only human prompts: every prompt of a supervising session is
+  noted with its promptId; the verifier resolves earlier prompts' origins from
+  the transcript. A bare `approve` takes a draft made after the owner's
+  previous human prompt and before this one; noted prompts none of which is
+  human (or any failure): nothing is fresh. So a scheduled prompt cannot make a
+  draft written in its own turn look like the one the owner just read.
+- The limits gate runs in parallel. A prompt it blocks is erased from the
+  context and, as we understand Claude Code, never written to the transcript as
+  a user entry, so the verifier would not find it and nothing is sent; the hook
+  also reads the same verdict and does not act on a blocked prompt.
+
+### Uncertain sends, unavailable server
+
+- No answer in time, a network error, 5xx, 408, 429: "may not have been sent:
+  Cardinal did not answer in time or could not be reached"; repeating is safe
+  (same relay key: the server answers a duplicate). The draft stays, marked
+  `uncertain`; rejecting or withdrawing it warns it may already have been
+  delivered.
+- 503 `owner_relay_unavailable`: not stored; "this Cardinal cannot store relayed
+  decisions yet"; the draft stays.
+
+### Text, targets, answers
+
+- `decide:` is refused (nothing sent) with a blank line ("send one decision at
+  a time"), any `?` ("a decision is not a question; to ask the worker
+  something, tell the supervisor"), and the server's invisible characters
+  (U+202A–202E, U+2066–2069, U+200E, U+200F, U+061C, U+E0000–E007F, U+200B,
+  U+2060, U+FEFF; ZWJ/ZWNJ are fine), which propose-decision also refuses in
+  `--text` and `--ref`.
+- `supervising --name N` refuses a name held by a target of another
+  investigation unless `--replace` (another session of the same investigation
+  takes it). A bare `decide:` is refused when the target set changed (other
+  than the first registration) since the owner's previous prompt ("it is now
+  codex (session …); type it again as `decide codex: …`"), and any `decide:`
+  when the targets changed after it was typed.
+- propose-decision with `--answers N` reads event N with this machine's key and
+  prints `answers #N: <type> "<excerpt, ≤80 chars>"`; it refuses a
+  `challenge.added` / `ruling.issued` (a relayed decision cannot answer or
+  overrule one). Unreadable: says so; the server checks. The approve outcome
+  says `(answers #N)`.
+
+### Server refusals, one owner line each
+
+`owner_relay_not_member` (the key's person is not a member of the worker's org),
+`owner_relay_answers_ruling` (only a web decision overrules a challenge or
+ruling), `invalid_owner_relay` (incl. invisible characters),
+`event_limit_reached` by `scope` (`owner_relayed_investigation`: the 50
+relayed-decision cap, post from the web; `owner_decision_investigation`),
+`Org mismatch`, `owner_relay_unavailable`. Unknown codes: "a reason this plugin
+version does not know".
+
+### Cursor
+
+A relay-form prompt is blocked with `{"continue": false, "user_message":
+<outcome>}`: the only way Cursor shows a hook's words to the user. The model
+never sees that prompt; the outcome is staged for its next tool call.
+
+### Worker and supervisor
+
+- Verbatim label: "OWNER DECISION (relayed) — sent as <name>'s own words from
+  their supervisor session <sid>"; the trust line is unchanged.
+- Delegated supervision: only `owner_decision` overrules (shared fixture v2,
+  `supervision_status.overrules_supervision`); `--conflicts-with` text names a
+  web owner decision.
+- A supervisor's (grantee) event reads mark each `owner_relayed` decision
+  `relayed: by_you` when its own session's hook recorded sending that event
+  (the store's `sent`, at most 50), else `unverified`. A local check: a process
+  running as the same OS user could write that file too.

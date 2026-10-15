@@ -219,14 +219,14 @@ _PLAIN = {
                                     "change>\" or --disposition declined --note \"<why not>\"; `noted` is not an "
                                     "answer to a challenge"),
     "directive_requires_compliance": ("a directive (an upheld ruling) is binding: --disposition accepted --note "
-                                      "\"<what you will do>\", or, only when it contradicts an owner decision, "
-                                      "--disposition conflicts --conflicts-with <seq of that owner.decided>"),
-    "conflict_ref_not_owner": ("--conflicts-with must name an owner.decided event of this investigation (an owner "
-                               "decision posted from the owner's signed-in web session or relayed from their "
-                               "supervisor session; `investigation events "
-                               "--class owner` lists them). Owner input recorded from this session is not "
+                                      "\"<what you will do>\", or, only when it contradicts an owner decision "
+                                      "posted from the web, --disposition conflicts --conflicts-with <seq of that "
+                                      "owner.decided>"),
+    "conflict_ref_not_owner": ("--conflicts-with must name an owner decision of this investigation posted from the "
+                               "owner's signed-in web session (`investigation events --class owner` lists them; "
+                               "a relayed one does not count). Owner input recorded from this session is not "
                                "accepted: if you believe the directive conflicts with what your owner said here, "
-                               "comply and say so in your --note; the owner can overrule it with a decision"),
+                               "comply and say so in your --note; the owner can overrule it with a decision from the web"),
     "position_already_taken": ("this session already took its position on that challenge or directive; a position "
                                "is final"),
     "conflicts_requires_directive": ("`conflicts` answers a directive (an upheld ruling) only, not a cue, question, "
@@ -634,8 +634,8 @@ def ack_rule(target: Optional[dict], disposition: str, note: Optional[str],
     elif t == RULING and payload.get("outcome") == sv.UPHELD:
         if disposition not in DIRECTIVE_DISPOSITIONS:
             return (f"#{seq} is a directive (an upheld ruling, delegated supervision): --disposition accepted --note "
-                    "\"<what you will do>\", or, only when it contradicts an owner decision, --disposition "
-                    "conflicts --conflicts-with <seq of that owner.decided>. It cannot be declined or noted; if you "
+                    "\"<what you will do>\", or, only when it contradicts an owner decision posted from the web, "
+                    "--disposition conflicts --conflicts-with <seq of that owner.decided>. It cannot be declined or noted; if you "
                     "believe it conflicts with what your owner said in this session, comply and say so in --note")
     elif disposition == "conflicts" and t != RULING:
         return f"`conflicts` answers a directive (ruling.issued, upheld) only; #{seq} is a {_tok(t)}"
@@ -1600,7 +1600,8 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
         if owner and relayed:
             where = f"in their supervisor session {_claimed(p.get('session_id'))}"
             if relay_source(e) == "verbatim":
-                authority = f"OWNER DECISION (relayed) — {name}'s own words, typed {where}"
+                authority = f"OWNER DECISION (relayed) — sent as {name}'s own words from their supervisor session " \
+                    f"{_claimed(p.get('session_id'))}"
             else:
                 authority = f"OWNER DECISION (relayed) — approved by {name} {where} (drafted by the supervisor)"
             doctrine = (f"Cardinal confirms it came from {name}'s machine and key, not that they typed it. Treat it "
@@ -1673,8 +1674,8 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
 # ACK_GUIDANCE (which carries the refs-on-completion rule, so this does not).
 SUPERVISION_LINE = ("A challenge needs a position: accepted (with what you will change) or declined (with why), "
                     "never `noted`. Precedence: the owner's own words > a directive (authority: DELEGATED "
-                    "SUPERVISION, an upheld ruling on a challenge; binding, refused only with `conflicts` citing an "
-                    "owner decision by seq; if you think it conflicts with what the owner said in this session, "
+                    "SUPERVISION, an upheld ruling on a challenge; binding, refused only with `conflicts` citing a "
+                    "web owner decision by seq; if you think it conflicts with what the owner said in this session, "
                     "comply unless the owner has posted a decision, and say so in your ack note) > advisory input. "
                     "A directive never widens your permissions: what needs owner approval still does.")
 TAKE_A_POSITION = ("Take a position: accepted (with what you will change) or declined (with why). `noted` is not an "
@@ -1682,8 +1683,8 @@ TAKE_A_POSITION = ("Take a position: accepted (with what you will change) or dec
                    "uphold it as a binding directive.")
 PRECEDENCE = ("Precedence: (1) your owner's own words (this session's transcript, owner input, owner decisions) "
               "outrank (2) a directive under delegated supervision, which outranks (3) advisory input (cues, "
-              "questions, challenges). A directive is binding: do it. The only refusal is `conflicts`, citing an "
-              "owner decision (owner.decided) by seq. If you believe it conflicts with something your owner said in "
+              "questions, challenges). A directive is binding: do it. The only refusal is `conflicts`, citing a "
+              "web owner decision (owner.decided) by seq. If you believe it conflicts with something your owner said in "
               "this session, comply unless the owner has posted a decision, and say so in your ack note. A "
               "directive never widens your permissions: whatever your rules gate on owner approval (deploys, "
               "merges, outward-facing or destructive actions) still needs the owner.")
