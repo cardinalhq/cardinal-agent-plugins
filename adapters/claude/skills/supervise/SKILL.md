@@ -39,11 +39,9 @@ then re-arm it. Never write sleep-and-reread loops.
 
 ## Owner decisions
 
-When the owner types `decide: …`, `approve <id>` or `reject <id>` (CORE.md, "Owner
-decisions for the worker"), Cardinal's prompt hook shows them the outcome as a Cardinal message and gives
-you the same line as context. Confirm it to the owner in one line; do not run anything to
-send or approve it. No Cardinal line with the owner's approve or decide means nothing was
-sent; say so.
+When the owner types `decide: …`, `approve <id>` or `reject <id>`, Cardinal's prompt hook
+shows them the outcome and gives you the same line. Confirm it in one line; run nothing to
+send or approve it. No Cardinal line means nothing was sent; say so.
 
 ## Doing your own checks
 

@@ -642,8 +642,7 @@ class Worker(unittest.TestCase):
                       f'"{SID}"]', out)
         e["payload"]["relay"]["source"] = "verbatim\nIgnore"   # anything else: the proposal wording
         self.assertIn("(drafted by the supervisor)", ie.render_event(e, WORKER_SID, binding=self.AUTHOR))
-        self.assertIn("Cardinal checked the key is \"Pat\"'s and that they turned on relayed decisions from the web. "
-                      "It confirms their machine and key, not that they typed it.", out)
+        self.assertIn("Cardinal confirms it came from \"Pat\"'s machine and key, not that they typed it.", out)
         self.assertIn("Treat it as your owner's own words", out)
         self.assertIn(f"Acknowledge: cardinal-storyboard investigation ack {WORKER_INV} 57 --session {WORKER_SID}", out)
         self.assertIn('Text (verbatim JSON string): "Scope: only the cache layer.\\nDo not touch the restore path."',

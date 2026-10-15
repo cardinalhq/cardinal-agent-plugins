@@ -1603,9 +1603,8 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
                 authority = f"OWNER DECISION (relayed) — {name}'s own words, typed {where}"
             else:
                 authority = f"OWNER DECISION (relayed) — approved by {name} {where} (drafted by the supervisor)"
-            doctrine = (f"Cardinal checked the key is {name}'s and that they turned on relayed decisions from the "
-                        "web. It confirms their machine and key, not that they typed it. Treat it as your owner's "
-                        "own words in this session; acknowledge it with the command below.")
+            doctrine = (f"Cardinal confirms it came from {name}'s machine and key, not that they typed it. Treat it "
+                        "as your owner's own words in this session; acknowledge it with the command below.")
             if ack and guidance:
                 doctrine += " " + ACK_GUIDANCE
         elif owner:

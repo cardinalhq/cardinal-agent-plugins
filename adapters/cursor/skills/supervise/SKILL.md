@@ -37,12 +37,10 @@ again. Never write sleep-and-reread loops.
 
 ## Owner decisions
 
-When the owner types `decide: …`, `approve <id>` or `reject <id>` (CORE.md, "Owner
-decisions for the worker"), Cardinal's prompt hook relays or drops it, but Cursor shows the owner nothing
-from that hook. Right after such a prompt, run `cardinal-storyboard investigation proposals
---session <your_sid>` (it lists the latest outcomes) and quote the Cardinal outcome line
-verbatim to the owner; the same outcome also reaches you at your next tool call. Do not run anything to
-send or approve it.
+When the owner types `decide: …`, `approve <id>` or `reject <id>`, Cardinal's prompt hook
+relays or drops it but Cursor shows the owner nothing. Right after such a prompt, run
+`cardinal-storyboard investigation proposals --session <your_sid>` and quote the newest
+Cardinal outcome line to the owner verbatim. Run nothing else to send or approve it.
 
 ## Doing your own checks
 

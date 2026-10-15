@@ -929,9 +929,7 @@ class CLI:
         print("--- decision text ---")
         print(entry["text"])
         print("--- end ---")
-        print(owner_relay.INSTRUCTION.format(id=entry["id"])
-              + f" Tell the owner it expires at {when} (30 minutes). A bare `approve` works only for a draft made "
-              "since the owner's last prompt.")
+        print(owner_relay.INSTRUCTION.format(id=entry["id"]) + f" Tell the owner it expires at {when}.")
         off = self._relay_off_line()
         if off:
             print("Tell the owner too: " + off)
@@ -1019,12 +1017,10 @@ class CLI:
         form = f"decide {t['name']}: <text>" if t.get("name") else "decide: <text>"
         print(f"registered {owner_relay._target_label(t)} of {worker} as a worker target ({n} in this session; "
               "nothing was sent).")
-        print(f"The owner can now type `{form}` as a prompt in this session to send that worker their own words, "
-              "verbatim, as an owner decision" + (" (bare `decide:` works while it is the only target)."
-                                                  if t.get("name") else
-                                                  " (while it is the only target; add --name to tell several "
-                                                  "apart).")
-              + " Tell the owner this once. Never type it for them.")
+        print(f"The owner can now type `{form}` here to send that worker their own words as an owner decision"
+              + (" (bare `decide:` while it is the only target)." if t.get("name") else
+                 " (while it is the only target; add --name to tell several apart).")
+              + " Never type it for them.")
         off = self._relay_off_line()
         if off:
             print("Tell the owner too: " + off)

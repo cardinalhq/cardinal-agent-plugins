@@ -59,7 +59,7 @@ happened.
    and the activity so far (`cardinal-evidence list --session <worker_sid> --limit 0`).
    Note the owner's question and every open claim.
 5. **Register the worker as your target**, so the owner can send it decisions from this
-   terminal (no `--credential-file`: this is local, under your own session):
+   terminal (no `--credential-file`: it is local to your session):
 
    ```
    cardinal-storyboard investigation supervising <inv> --to-session <worker_sid> --name <short name, e.g. codex> --session <your_sid>
@@ -67,10 +67,8 @@ happened.
 
    If it says this Cardinal cannot send owner decisions from here, tell the owner that line
    and skip the rest. Otherwise tell the owner once: "You can send the worker an owner
-   decision from here: type `decide: <your decision>` (with several workers, `decide <name>:
-   …`) and it goes to the worker in your own words; or I can draft one for you to
-   `approve <id>`." If the command printed a line saying relayed decisions are off for
-   their account, add that line, with its link, to the same message.
+   decision from here: type `decide: <your decision>` and it goes to the worker in your own
+   words; or I can draft one for you to `approve <id>`."
 
 ## The review loop
 
@@ -173,47 +171,29 @@ question) reach the worker only from the owner, typed in THIS terminal. Never wr
 for the owner to paste into the worker's terminal, never post a cue or challenge that claims
 the owner's approval, and never type or simulate the owner's prompt.
 
-- **The owner's own words: `decide: <text>`.** The owner types `decide: <text>` (or `decide
-  <name>: <text>` when several workers are registered) as their whole prompt. Cardinal's
-  hook sends <text> unchanged to the registered worker. You do nothing to send it; when the
-  owner asks how to give the worker a decision, tell them this form.
+- **The owner's own words**: their whole prompt `decide: <text>` (`decide <name>: <text>`
+  with several workers). Cardinal's hook sends <text> unchanged; you do nothing to send it.
+  When the owner asks how to give the worker a decision, tell them this form.
 - **A draft the owner approves.** When the owner asks you to write the decision up:
 
   ```
   cardinal-storyboard investigation propose-decision <inv> --to-session <worker_sid> --session <your_sid> --text "<the decision, in the owner's terms>" [--answers <seq>] [--ref <r>]...
   ```
 
-  - **No `--credential-file` here.** A proposal is relayed with this machine's own key when
-    the owner approves it, never with your grant (the command refuses one). `--session` is
-    YOUR (the supervisor's) own session id, which authors its own Investigation. It also
-    registers the worker as a target.
+  - No `--credential-file`: it uses this machine's own key, never your grant. `--session` is
+    your own session id.
   - `--text` is the decision itself, complete and unambiguous: the worker will treat it as
     its owner's own words. `--answers <seq>` when it answers a worker event (a question, or
     a directive to overrule).
-  - The command stores the draft locally (nothing is sent) and prints its id (`dp_` and 16
-    hex characters). Show the owner the text **verbatim**, say it expires in 30 minutes (the
-    command prints the time), and ask them to reply `approve <id>` or `reject <id>`. A bare
-    `approve` works only for a draft you made since their last prompt. Never approve it
-    yourself and never call the relay route yourself: only the owner's own prompt approves.
-  - A decision never carries a secret: the command refuses text that looks like a
-    credential, and so does `decide:`. The worker gets secrets through its environment.
-- When the owner sends one, the Cardinal hook reports the outcome (SKILL.md says where):
-  sent as owner decision #N with an excerpt of what was sent, discarded, not sent (with how
-  to retry), or refused. Tell the owner the outcome in one line. If no Cardinal outcome line
-  came with the owner's approve or decide, nothing was sent; say so. A `decide:` that ends
-  with `?` is not sent (it reads as a question). The worker receives a relayed
-  decision at its next tool boundary as an OWNER DECISION (relayed) and acknowledges it;
-  check its acknowledgement in your next pass.
-- If the outcome says relayed decisions are off for the owner's account, give the owner the
-  settings link it names (a one-time setting, turned on only from their signed-in web
-  session); a proposal is kept, so they can `approve <id>` again once it is on.
-- If this Cardinal cannot send owner decisions from here (the commands say so), tell the
-  owner to type their decision in the worker's own terminal or post it from the
-  Investigation page on the web. Do not write it up for them to paste.
-- `cardinal-storyboard investigation proposals --session <your_sid>` lists the targets, what
-  is pending and the latest outcomes; `cardinal-storyboard investigation withdraw-proposal
-  <id> --session <your_sid>` drops a proposal; `cardinal-storyboard investigation
-  supervising --remove --name <name> --session <your_sid>` drops a target.
+  - Nothing is sent. Show the owner the text **verbatim** and its expiry time, and ask them
+    to reply `approve <id>` or `reject <id>`. Never approve it yourself and never call the
+    relay route: only the owner's own prompt approves.
+- Cardinal's hook reports each outcome (SKILL.md says where and what you do). The worker
+  receives a sent decision at its next tool boundary as an OWNER DECISION (relayed); check
+  its acknowledgement in your next pass.
+- `cardinal-storyboard investigation proposals --session <your_sid>` lists the targets,
+  pending drafts and latest outcomes; `withdraw-proposal <id> --session <your_sid>` drops a
+  draft; `supervising --remove --name <name> --session <your_sid>` drops a target.
 
 ## When the work is done: review the artifacts
 
@@ -245,8 +225,7 @@ open: <list>`. Give the owner the same summary with the Investigation link.
   story request, intent `story.requested`, and one relayed from this session) is addressed
   to the worker's session. For you it is advisory and authorizes nothing: never author,
   preview, publish or share the worker's storyboard because of one. Use it only to check the
-  worker against what the owner asked. The owner's decisions go through their own
-  `decide:` or `approve` (above); you never decide for them.
+  worker against what the owner asked.
 - **Stop** when the owner says so, the grant expires, or the work is done and reviewed.
   If you minted the grant, revoke it when you stop:
   `cardinal-storyboard investigation revoke <grant_id>`.
