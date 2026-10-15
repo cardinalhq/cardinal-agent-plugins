@@ -274,7 +274,9 @@ class Plan(unittest.TestCase):
             (plan(("A", 1, 2, 2)), "1-24 of a-z"),
             (plan(("a" * 25, 1, 2, 2)), "1-24 of a-z"),
             (plan(("a", 2, 1, 2)), "P80 >= P50"),
-            (plan(("a", 0, 1, 2)), "above 0"),
+            (plan(("a", 0, 1, 2)), "from 0.001 to 5000"),
+            (plan(("a", 0.0001, 1, 2)), "from 0.001 to 5000"),
+            (plan(("a", 1, 6000, 2)), "from 0.001 to 5000"),
             (plan(("a", 1, 2, 1)), "2-6 deliverables"),
             (plan(("a", 1, 2, 7)), "2-6 deliverables"),
             (plan(("a", 1, 2, 2), ("a", 1, 2, 2)), "repeats"),
@@ -355,67 +357,238 @@ class TagsAndMarks(unittest.TestCase):
         self.assertIn("latest mark is at #8, after #6", str(cm.exception))
 
 
+DIR_RE, MID_RE = r"dir_[0-9a-f]{16}", r"[a-z0-9-]{1,24}"
+
+
 class FakeServer:
-    """maestro's record-supervision as built (spec 4a): author key, sup: keys,
-    subject_grant for refs into the worker's investigation, strict payload
-    rules, idempotency, refusals."""
+    """maestro's record-supervision as built (conductor routes/investigation-
+    supervision.ts): strict schemas, the author key only, the ref rule (own
+    investigation, or the worker's with a live subject_grant), fired_seq /
+    verdict_seq targets, work.attributed's direction.set prerequisite, the
+    20 live milestone cap, idempotency on the hash of (investigation, key,
+    events), and the refusals the plugin maps."""
 
-    def __init__(self):
-        self.events, self.keys, self.fail, self.bodies = [], {}, None, []
+    def __init__(self, worker_head):
+        self.store, self.keys, self.fail, self.bodies, self.limit = {}, {}, None, [], 5000
+        self.unreadable = None
+        self.worker_head = worker_head
 
-    def bad(self, path):
-        return sync.ServerError(400, {"error": "invalid_payload", "path": path}, "invalid")
+    @property
+    def events(self):
+        return [{"type": e["type"], "payload": e["payload"]} for inv in sorted(self.store) for e in self.store[inv]]
 
-    def check(self, body):
-        if not body["idempotency_key"].startswith("sup:") or not 1 <= len(body["events"]) <= 50:
-            raise self.bad("idempotency_key")
-        dirs = {e["payload"]["direction_id"] for e in self.events if e["type"] == "direction.set"}
-        cross = False
+    def types(self):
+        return [e["type"] for e in self.events]
+
+    # -- validation -------------------------------------------------------
+    def bad(self, path, msg="invalid"):
+        return sync.ServerError(400, {"error": "invalid_payload", "path": path, "message": msg}, msg)
+
+    def strict(self, o, req, opt=(), path=""):
+        import re as _re
+        if not isinstance(o, dict) or not set(req) <= set(o) or not set(o) <= set(req) | set(opt):
+            raise self.bad(path, f"keys {sorted(o) if isinstance(o, dict) else o}")
+
+    def text(self, v, path, cap=1000):
+        if not isinstance(v, str) or not 1 <= len(v) <= cap:
+            raise self.bad(path)
+
+    def num(self, v, path, lo=0, hi=100_000, gt=False, integer=False):
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and (v > lo if gt else v >= lo) and v <= hi
+        if not ok or (integer and int(v) != v):
+            raise self.bad(path)
+
+    def rx(self, v, pattern, path):
+        import re as _re
+        if not isinstance(v, str) or not _re.fullmatch(pattern, v):
+            raise self.bad(path)
+
+    def ref(self, r, path):
+        if isinstance(r, dict) and "evidence_id" in r:
+            self.strict(r, ("evidence_id",), path=path)
+            self.rx(r["evidence_id"], r"ev_[0-9a-f]{12}", path)
+        else:
+            self.strict(r, ("investigation_id", "seq"), path=path)
+            self.num(r["seq"], path, lo=1, hi=999_999, integer=True)
+
+    def payload(self, t, p, path):
+        if t == "direction.set":
+            self.strict(p, ("direction_id", "question", "subject", "worker_session_id", "reference_class",
+                            "calibration", "thresholds"), ("worker_estimate",), path)
+            self.rx(p["direction_id"], DIR_RE, path)
+            self.strict(p["subject"], ("investigation_id", "since_seq"), path=path + ".subject")
+            self.num(p["subject"]["since_seq"], path, integer=True, hi=999_999)
+            th = p["thresholds"]
+            self.strict(th, ("T", "Z", "rearm", "backstop", "idle_min", "min_spent_h"), path=path + ".thresholds")
+            for k in ("T", "Z", "rearm", "backstop"):
+                self.num(th[k], path, gt=True, hi=100)
+            self.num(th["idle_min"], path + ".thresholds.idle_min", lo=1, hi=1440, integer=True)
+            self.num(th["min_spent_h"], path, hi=1000)
+            if p["calibration"] not in ("calibrated", "uncalibrated"):
+                raise self.bad(path)
+        elif t == "milestone.planned":
+            self.strict(p, ("direction_id", "milestone_id", "title", "p50_h", "p80_h", "basis", "deliverables"),
+                        ("replaces",), path)
+            self.num(p["p50_h"], path, gt=True)
+            self.num(p["p80_h"], path, gt=True)
+            if p["p80_h"] < p["p50_h"] or not 2 <= len(p["deliverables"]) <= 6:
+                raise self.bad(path)
+            for x in p["deliverables"]:
+                self.strict(x, ("id", "done_when"), path=path)
+                self.rx(x["id"], re_escape(p["milestone_id"]) + r"\.[1-9][0-9]{0,2}", path)
+        elif t == "work.attributed":
+            self.strict(p, ("direction_id", "batch", "through_seq", "tags", "charged_h"), path=path)
+            for k, v in p["tags"].items():
+                self.rx(k, r"[1-9][0-9]{0,5}", path + ".tags")
+                if int(k) > p["through_seq"] or not (v == "none" or (isinstance(v, list) and 1 <= len(v) <= 20)):
+                    raise self.bad(path + ".tags." + k)
+            for v in p["charged_h"].values():
+                self.num(v, path + ".charged_h")
+        elif t == "deliverable.marked":
+            self.strict(p, ("direction_id", "milestone_id", "deliverable_id", "mark", "refs"), path=path)
+            if not 1 <= len(p["refs"]) <= 20:
+                raise self.bad(path + ".refs")
+            for r in p["refs"]:
+                self.ref(r, path + ".refs")
+        elif t == "stepback.fired":
+            self.strict(p, ("direction_id", "scope", "snapshot", "worker_active_h"), ("milestone_id",), path)
+            if (p["scope"] == "milestone") != ("milestone_id" in p):
+                raise self.bad(path + ".milestone_id")
+            sn = p["snapshot"]
+            self.strict(sn, ("spent_h", "estimate_h", "delivered", "ratio", "threshold"), path=path + ".snapshot")
+            self.num(sn["delivered"], path, hi=1)
+            if sn["ratio"] is not None:
+                self.num(sn["ratio"], path, hi=1_000_000)
+            self.num(sn["threshold"], path, hi=1_000_000)
+            self.num(sn["estimate_h"], path)
+            self.num(sn["spent_h"], path)
+        elif t == "stepback.verdict":
+            self.strict(p, ("fired_seq", "verdict", "routed_to"), ("post_ref",), path)
+            if "post_ref" in p:
+                self.ref(p["post_ref"], path + ".post_ref")
+        elif t == "stepback.outcome":
+            self.strict(p, ("verdict_seq", "outcome", "refs"), path=path)
+            if len(p["refs"]) > 20:
+                raise self.bad(path + ".refs")
+            for r in p["refs"]:
+                self.ref(r, path + ".refs")
+        elif t == "direction.closed":
+            self.strict(p, ("direction_id", "outcome", "per_milestone", "missed"), path=path)
+            if len(set(p["missed"])) != len(p["missed"]):
+                raise self.bad(path + ".missed")
+            for x in p["per_milestone"]:
+                self.strict(x, ("id", "estimate_h", "spent_h", "delivered"), path=path)
+        else:
+            raise sync.ServerError(400, {"error": "unknown_event_type"}, "type")
+
+    def check(self, body, conn):
+        self.strict(body, ("investigation_id", "session_id", "idempotency_key", "events"), ("client", "subject_grant"))
+        self.rx(body["idempotency_key"], r"[A-Za-z0-9_.:-]{1,128}", "idempotency_key")
+        if not 1 <= len(body["events"]) <= 50:
+            raise self.bad("events")
         for i, e in enumerate(body["events"]):
-            t, p = e["type"], e["payload"]
+            self.strict(e, ("type", "payload"), path=f"events.{i}")
+            self.payload(e["type"], e["payload"], f"events.{i}.payload")
+
+    def refs(self, body):
+        inv, own = body["investigation_id"], self.store.get(body["investigation_id"], [])
+
+        def readable(target):
+            return target == inv or (target == INV and body.get("subject_grant") == GRANT["token"])
+
+        def head(target):
+            return len(own) if target == inv else self.worker_head()
+
+        def no(path, target, sq):
+            if not readable(target):
+                return sync.ServerError(400, {"error": "ref_not_readable", "path": path}, "nr")
+            if sq > head(target):
+                return sync.ServerError(400, {"error": "ref_out_of_range", "path": path}, "oor")
+
+        dirs = {e["payload"]["direction_id"]: e["payload"] for e in own if e["type"] == "direction.set"}
+        live = {}
+        for e in own:
+            if e["type"] == "milestone.planned":
+                q = e["payload"]
+                ids = live.setdefault(q["direction_id"], set())
+                if q.get("replaces") and q["replaces"] != q["milestone_id"]:
+                    ids.discard(q["replaces"])
+                ids.add(q["milestone_id"])
+        for i, e in enumerate(body["events"]):
+            t, q, path = e["type"], e["payload"], f"events.{i}.payload"
+            cited = ([(q["subject"]["investigation_id"], q["subject"]["since_seq"])] if t == "direction.set" else []) \
+                + [(r["investigation_id"], r["seq"]) for r in q.get("refs", []) + ([q["post_ref"]] if "post_ref" in q
+                                                                                   else []) if "seq" in r]
+            for target, sq in cited:
+                err = no(path, target, sq)
+                if err:
+                    raise err
             if t == "direction.set":
-                dirs.add(p["direction_id"])
-                cross = cross or p["subject"]["investigation_id"] != body["investigation_id"]
-            if t == "work.attributed" and p["direction_id"] not in dirs:
-                raise self.bad(f"events[{i}].payload.direction_id")
-            if t == "stepback.fired":
-                if ("milestone_id" in p) != (p["scope"] == "milestone"):
-                    raise self.bad(f"events[{i}].payload.milestone_id")
-                snap = p["snapshot"]
-                if not 0 <= snap["delivered"] <= 1 or not (snap["ratio"] is None or snap["ratio"] >= 0):
-                    raise self.bad(f"events[{i}].payload.snapshot")
-            if t == "deliverable.marked" and not p["refs"]:
-                raise self.bad(f"events[{i}].payload.refs")
-            refs = p.get("refs", []) + ([p["post_ref"]] if "post_ref" in p else [])
-            cross = cross or any(r.get("investigation_id") not in (None, body["investigation_id"]) for r in refs)
-        if cross and body.get("subject_grant") != GRANT["token"]:
-            raise sync.ServerError(400, {"error": "ref_not_readable", "path": "events"}, "not readable")
+                dirs[q["direction_id"]] = q
+            if t == "work.attributed":
+                subj = dirs.get(q["direction_id"])
+                if not subj:
+                    raise self.bad(path + ".direction_id", "no direction.set for it in this investigation")
+                err = no(path + ".through_seq", subj["subject"]["investigation_id"], q["through_seq"])
+                if err:
+                    raise err
+            if t in ("stepback.verdict", "stepback.outcome"):
+                k, want = ("fired_seq", "stepback.fired") if t == "stepback.verdict" else ("verdict_seq",
+                                                                                         "stepback.verdict")
+                if not any(x["seq"] == q[k] and x["type"] == want for x in own):
+                    raise self.bad(f"{path}.{k}", f"{k} must be a {want} of this investigation")
+            if t == "milestone.planned":
+                ids = live.setdefault(q["direction_id"], set())
+                if q.get("replaces") and q["replaces"] != q["milestone_id"]:
+                    ids.discard(q["replaces"])
+                ids.add(q["milestone_id"])
+                if len(ids) > 20:
+                    raise self.bad(path + ".milestone_id", "more than 20 live milestones")
 
     def __call__(self, conn, tool, body, *, client, **_):
         assert tool == "record-supervision", tool
         assert conn.get("key") and not conn.get("token"), "written with this machine's own key"
-        self.bodies.append(body)
+        self.bodies.append(json.loads(json.dumps(body)))
         if self.fail:
             err, self.fail = self.fail, None
             raise err
-        self.check(body)
-        k = body["idempotency_key"]
-        material = json.dumps(body["events"], sort_keys=True)
+        self.check(body, conn)
+        k = (body["investigation_id"], body["idempotency_key"])
+        material = json.dumps([body["investigation_id"], body["idempotency_key"], body["events"]], sort_keys=True)
         if k in self.keys:
             if self.keys[k][0] != material:
                 raise sync.ServerError(409, {"error": "idempotency_conflict"}, "conflict")
             return {"investigation_id": body["investigation_id"], "duplicate": True, "events": self.keys[k][1],
-                    "head_seq": len(self.events)}
+                    "head_seq": len(self.store[body["investigation_id"]])}
+        self.refs(body)
+        own = self.store.setdefault(body["investigation_id"], [])
+        if len(own) + len(body["events"]) > self.limit:
+            raise sync.ServerError(409, {"error": "event_limit_reached"}, "limit")
         stored = []
         for e in body["events"]:
-            stored.append({"seq": len(self.events) + 1, "type": e["type"], "at": "x"})
-            self.events.append(e)
+            own.append({"seq": len(own) + 1, "type": e["type"], "payload": json.loads(json.dumps(e["payload"])),
+                        "at": at(0)})
+            stored.append({"seq": own[-1]["seq"], "type": e["type"], "at": at(0)})
         self.keys[k] = (material, stored)
         return {"investigation_id": body["investigation_id"], "duplicate": False, "events": stored,
-                "head_seq": len(self.events)}
+                "head_seq": len(own)}
 
-    def types(self):
-        return [e["type"] for e in self.events]
+    def read(self, inv, after, limit, class_):
+        assert class_ == "supervision", class_
+        shown = [{"investigation_id": inv, "seq": e["seq"], "type": e["type"], "class": "supervision",
+                  "payload": e["payload"], "created_at": e["at"]} for e in self.store.get(inv, []) if e["seq"] > after]
+        shown = shown[:limit]
+        head = len(self.store.get(inv, []))
+        return {"investigation_id": inv, "events": shown, "last_seq": shown[-1]["seq"] if shown else head,
+                "page_size": len(shown), "head_seq": head}
+
+
+_REAL_READ = ie.read_events
+
+
+def re_escape(x):
+    import re as _re
+    return _re.escape(x)
 
 
 class CLIBase(unittest.TestCase):
@@ -442,13 +615,16 @@ class CLIBase(unittest.TestCase):
             x = patch.object(target, name, side_effect=fn)
             x.start()
             self.addCleanup(x.stop)
-        self.server = FakeServer()
+        self.server = FakeServer(lambda: max([e["seq"] for e in self.events], default=0))
         x = patch.object(sync, "_post", side_effect=self.server)
         x.start()
         self.addCleanup(x.stop)
 
-    def read(self, conn, inv, *, after=0, limit=200, client, **_):
-        assert inv == INV
+    def read(self, conn, inv, *, after=0, limit=200, client, class_=None, **_):
+        if inv != INV:
+            if self.server.unreadable:
+                raise self.server.unreadable
+            return self.server.read(inv, after, limit, class_)
         self.reads += 1
         shown = [e for e in self.events if e["seq"] > after][:min(limit, self.page)]
         head = max([e["seq"] for e in self.events], default=0)
@@ -572,8 +748,9 @@ class BudgetSet(CLIBase):
                                             "bad")
         code, _, err = self.set()
         self.assertEqual(code, 1)
-        self.assertIn("not recorded: Cardinal refused a supervision record as invalid", err)
-        self.assertFalse(self.file.exists())
+        self.assertIn("not recorded: Cardinal refused the record as invalid (events[0].payload.question", err)
+        st = self.state()
+        self.assertEqual((st["current"], st.get("sent_set")), (None, None), "a definite refusal leaves nothing pending")
 
     def test_amend_replans_and_rearms(self):
         self.events = [wev(1, 0)]
@@ -705,6 +882,7 @@ class Review(CLIBase):
 
     def test_without_a_direction_reviewed_is_unchanged(self):
         self.file.unlink()
+        bud.marker_path(self.file).unlink()
         self.events += [wev(2, 10)]
         code, out, err = self.reviewed()
         self.assertEqual((code, json.loads(out)), (0, {"investigation_id": INV, "after": 2}))
@@ -770,6 +948,7 @@ class VerdictsAndClose(CLIBase):
         self.page_read()
         self.reviewed("--tag", "all:a", "--done", "a.1@#2")
         fired_seq = self.state()["current"]["firings"][-1]["fired_seq"]
+        self.events += [wev(5, 80, grantee=True), wev(6, 90)]           # the supervisor's post, the worker's answer
         code, out, err = self.budget("verdict", "a", "worker_choice", "--post-ref", "#5", "--session", SUP)
         self.assertEqual(code, 0, err)
         self.assertEqual(out.strip(), "verdict on the a step back (#4): worker_choice, routed to worker")
@@ -893,6 +1072,306 @@ class WingbeatThroughReviewed(CLIBase):
         self.assertEqual([f["at_seq"] for f in st["firings"]], [199, 270, 306, 323, 330])
         self.assertEqual(self.server.types().count("work.attributed"), 11)
         self.assertEqual(self.server.types().count("deliverable.marked"), len(fx["marks"]))
+
+
+def page_of(seqs, b):
+    """Worker seq -> its page index when the cursor reads pages of b."""
+    b = min(b, 100)                       # consumer.read asks for at most 100
+    return {sq: i // b for i, sq in enumerate(seqs)}
+
+
+class PageSizeSweep(CLIBase):
+    """C2: one firing per milestone per pass, a later crossing in the pass
+    moving it there; so every per-event crossing survives any page size."""
+
+    def drive(self, fx, size):
+        self.events = [{**wev(sq, 0), "created_at": t} for sq, t in fx["worker_times"]]
+        self.page = size
+        for f in (self.file, bud.marker_path(self.file), self.cursor):
+            if f.exists():
+                f.unlink()
+        self.server = FakeServer(lambda: max(e["seq"] for e in self.events))
+        sync._post.side_effect = self.server
+        code, _, err = self.set("--since-seq", str(fx["worker_times"][0][0]), p=fx["plan"])
+        assert code == 0, err
+        prev = fx["worker_times"][0][0] - 1
+        while True:
+            page = self.page_read()
+            if not page["events"]:
+                break
+            flags = tag_flags(fx, [e["seq"] for e in page["events"]])
+            for did, mark, sq in fx["marks"]:
+                if prev < sq <= page["next_after"]:
+                    flags += [{"done": "--done", "reopened": "--reopen", "redone": "--redone"}[mark], f"{did}@#{sq}"]
+            code, _, err = self.reviewed(*flags, batch=page["batch"])
+            assert code == 0, (size, err)
+            prev = page["next_after"]
+        return [f for f in self.state()["current"]["firings"] if f["scope"] != "opening"]
+
+    def test_wingbeat_at_every_page_size(self):
+        fx = fixture("wingbeat")
+        per_event = replay(fx)[0]
+        self.assertEqual([sq for sq, _, _ in per_event], [270, 306, 323, 330])
+        seqs = [sq for sq, _ in fx["worker_times"]]
+        rows = {}
+        for size in list(range(1, 41)) + [50, 80, 100, 140]:
+            pg = page_of(seqs, size)
+            got = self.drive(fx, size)
+            want = sorted({(pg[sq], m) for sq, m, _ in per_event})
+            self.assertEqual(sorted((pg[f["at_seq"]], f["milestone_id"]) for f in got), want, size)
+            self.assertTrue(all(pg[f["last_seq"]] == pg[f["at_seq"]] for f in got), size)
+            rows.setdefault(tuple((f["at_seq"], f["last_seq"], f["milestone_id"][:5]) for f in got), []).append(size)
+        if os.environ.get("STEPBACK_SWEEP_OUT"):
+            Path(os.environ["STEPBACK_SWEEP_OUT"]).write_text(
+                "\n".join(f"{v}: {list(k)}" for k, v in rows.items()) + "\n")
+
+    def test_engine_sweep_both_fixtures(self):
+        for name, kw in (("wingbeat", {}), ("healthy", {"scale": 0.1, "min_spent_h": 0}),
+                         ("healthy", {"scale": 0.15, "min_spent_h": 0})):
+            fx = fixture(name)
+            seqs = [sq for sq, _ in fx["worker_times"]]
+            per_event = replay(fx, **kw)[0]
+            for size in list(range(1, 41)) + [50, 80, 100, 140]:
+                pg = {sq: i // size for i, sq in enumerate(seqs)}
+                got = replay(fx, batch=size, **kw)[0]
+                self.assertEqual(sorted((pg[sq], m) for sq, m, _ in got),
+                                 sorted({(pg[sq], m) for sq, m, _ in per_event}), (name, kw, size))
+
+
+class FixRound(CLIBase):
+    def setUp(self):
+        super().setUp()
+        self.events = [wev(1, 0)]
+
+    def opened(self, *extra, p=None):
+        code, out, err = self.set("--since-seq", "1", *extra, p=p)
+        assert code == 0, err
+        return out
+
+    # C1 --------------------------------------------------------------------
+    def test_a_definite_refusal_never_locks_the_page(self):
+        self.opened()
+        self.events += [wev(2, 10)]
+        batch = self.page_read()["batch"]
+        self.server.fail = sync.ServerError(400, {"error": "ref_not_readable", "path": "events.1.payload.refs.0"}, "x")
+        code, _, err = self.reviewed("--tag", "all:a", "--done", "a.1@#2", batch=batch)
+        self.assertEqual(code, 1)
+        self.assertIn("cannot let this machine cite the worker's investigation", err)
+        self.assertIsNone(self.state().get("sent"))
+        code, out, err = self.reviewed("--tag", "all:b", batch=batch)          # other flags: accepted now
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(self.cursor.read_text())["after"], 2)
+
+    def test_an_ambiguous_failure_keeps_the_body(self):
+        from cardinal_core import investigation_state as ist
+        self.opened()
+        self.events += [wev(2, 10)]
+        batch = self.page_read()["batch"]
+        self.server.fail = sync.ServerError(503, {"error": "unavailable"}, "x")
+        self.assertEqual(self.reviewed("--tag", "all:a", batch=batch)[0], 1)
+        self.assertIsNotNone(self.state()["sent"])
+        self.server.fail = ist.FetchError("timed out")
+        self.assertEqual(self.reviewed("--tag", "all:a", batch=batch)[0], 1)
+        self.assertIn("repeat them: --tag all:a", self.reviewed("--tag", "all:b", batch=batch)[2])
+
+    # K4 --------------------------------------------------------------------
+    def test_a_retry_resends_the_exact_body(self):
+        from cardinal_core import investigation_state as ist
+        self.opened()
+        self.reviewed("--tag", "all:a")
+        self.events += [wev(2, 40)]
+        batch = self.page_read()["batch"]
+        self.server.fail = ist.FetchError("timed out")
+        self.assertEqual(self.reviewed("--tag", "all:a", batch=batch)[0], 1)
+        first = self.server.bodies[-1]["events"]
+        root = evidence.default_root(self.home)                 # a captured call lands before the retry
+        evidence.write_entry(root, evidence.build_entry(server="builtin:codex", tool="shell", tool_name="shell",
+                                                        tool_input={}, tool_response="ok", session_id=WORKER,
+                                                        called_at=at(20)))
+        code, _, err = self.reviewed("--tag", "all:a", batch=batch)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.server.bodies[-1]["events"], first)
+
+    # C3 --------------------------------------------------------------------
+    def test_since_seq_behind_the_cursor(self):
+        self.events += [wev(2, 10), wev(3, 20)]
+        self.page_read()
+        self.reviewed()                                          # no direction yet: #1-#3 committed
+        code, _, err = self.set("--since-seq", "1")
+        self.assertEqual(code, 2)
+        self.assertIn("--since-seq 1 is before your review cursor (#3 is committed)", err)
+        self.assertIn("use --since-seq 3 or later", err)
+        code, _, err = self.set()                                # the head (#3): its time is the start
+        self.assertEqual(code, 0, err)
+        self.events += [wev(4, 30)]
+        self.assertEqual(self.reviewed("--tag", "all:a")[0], 0)
+        self.assertAlmostEqual(self.state()["current"]["charged"]["a"], 1 / 6)
+
+    # C4 --------------------------------------------------------------------
+    def test_a_lost_cache_is_rebuilt_from_the_records(self):
+        self.opened()
+        self.events += [wev(2, 25), wev(3, 50), wev(4, 75)]
+        self.reviewed("--tag", "all:a", "--done", "a.1@#2")
+        self.events += [wev(5, 80, grantee=True)]
+        self.budget("verdict", "a", "worker_choice", "--post-ref", "#5")
+        before = self.state()["current"]
+        self.file.unlink()
+        self.events += [wev(6, 90)]
+        code, out, err = self.reviewed("--tag", "6:b")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.splitlines()[0], "rebuilt budget.json from your supervision records")
+        after = self.state()["current"]
+        for k in ("direction_id", "since_seq", "milestones", "thresholds", "calibration"):
+            self.assertEqual(after[k], before[k], k)
+        self.assertAlmostEqual(after["charged"]["a"], before["charged"]["a"])
+        self.assertAlmostEqual(after["charged"]["b"], 0.25)
+        self.assertEqual(after["marks"]["a.1"][0]["seq"], 2)
+        fired = [f for f in after["firings"] if f["scope"] == "milestone"]
+        self.assertEqual([(f["at_seq"], f["fired_seq"], f["verdict"]["verdict"]) for f in fired],
+                         [(4, before["firings"][1]["fired_seq"], "worker_choice")])
+
+    def test_a_lost_cache_that_cannot_be_read_back_refuses(self):
+        self.opened()
+        self.file.unlink()
+        self.events += [wev(2, 10)]
+        batch = self.page_read()["batch"]
+        self.server.unreadable = sync.ServerError(403, {"error": "supervision_not_readable"}, "x")
+        code, _, err = self.reviewed(batch=batch)
+        self.assertEqual(code, 2)
+        self.assertIn("budget.json is missing and your supervision records could not be read back", err)
+        self.assertIn("budget-supervisor.json to go on without the direction", err)
+        self.assertIsNotNone(json.loads(self.cursor.read_text())["pending"])
+        bud.marker_path(self.file).unlink()
+        self.assertEqual(self.reviewed(batch=batch)[0], 0)
+
+    # C6 --------------------------------------------------------------------
+    def test_set_retry_is_the_same_direction_when_the_head_moved(self):
+        from cardinal_core import investigation_state as ist
+        self.server.fail = ist.FetchError("timed out")
+        self.assertEqual(self.set()[0], 1)
+        first = self.server.bodies[-1]
+        self.events += [wev(2, 10)]                              # the head moved
+        code, out, err = self.set()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.server.bodies[-1]["events"], first["events"])
+        self.assertEqual(self.server.types().count("direction.set"), 1)
+
+    def test_a_retroactive_mark_must_cite_a_worker_event(self):
+        self.opened()
+        self.events += [wev(2, 10, grantee=True), wev(3, 20)]
+        self.reviewed("--tag", "all:a")
+        self.events += [wev(4, 30)]
+        code, _, err = self.reviewed("--tag", "all:a", "--done", "a.1@#2")
+        self.assertEqual(code, 2)
+        self.assertIn("#2 is not a worker event of this direction", err)
+        self.assertEqual(self.reviewed("--tag", "all:a", "--done", "a.1@#3")[0], 0)
+
+    def test_stale_batch_and_busy_cursor_name_the_fix(self):
+        self.opened()
+        self.events += [wev(2, 10)]
+        self.page_read()
+        code, _, err = self.reviewed("--tag", "all:a", batch="0" * 64)
+        self.assertIn("pass the batch of the page you read last, or read it again with --cursor-file", err)
+        batch = self.page_read()["batch"]
+        with consumer.locked(self.cursor):
+            code, _, err = self.reviewed("--tag", "all:a", batch=batch)
+        self.assertEqual((code, err.strip()), (2, "the cursor file is in use by another command (a watch or another "
+                                                  "review); retry"))
+
+    # K1 --------------------------------------------------------------------
+    def test_a_cache_only_direction_is_recorded_once_the_server_can(self):
+        self.server.fail = sync.ServerError(400, {"error": "supervision_unsupported"}, "old")
+        self.opened()
+        self.assertEqual(self.server.types(), [])
+        self.events += [wev(2, 10)]
+        code, out, err = self.reviewed("--tag", "all:a")       # the server is migrated now
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.server.types(), ["direction.set", "milestone.planned", "milestone.planned",
+                                               "work.attributed"])
+
+    def test_a_new_session_gets_the_direction_first_and_a_verdict_its_firing(self):
+        self.opened()
+        self.events += [wev(2, 25), wev(3, 50), wev(4, 75)]
+        self.reviewed("--tag", "all:a", "--done", "a.1@#2")
+        other = "inv_" + "6" * 24
+        ie.write_binding(self.home, "sup-2", {"investigation_id": other, "cursor": 0, "is_author": True})
+        code, out, err = self.budget("verdict", "a", "on_track", "--session", "sup-2")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([e["type"] for e in self.server.store[other]],
+                         ["direction.set", "milestone.planned", "milestone.planned", "stepback.fired",
+                          "stepback.verdict"])
+        self.events += [wev(5, 80)]
+        self.assertEqual(self.reviewed("--tag", "all:a")[0], 0)
+        self.assertEqual(self.server.store[other][-1]["type"], "work.attributed")
+
+    # K3 --------------------------------------------------------------------
+    def test_amend_puts_new_milestones_in_dropped_places_and_refuses_past_the_cap(self):
+        self.opened(p=plan(*[(f"m{i}", 1, 2, 2) for i in range(20)]))
+        p2 = plan(*[(f"m{i}", 1, 2, 2) for i in range(19)], ("n0", 1, 2, 2))
+        code, out, err = self.budget("--set", "--amend", "--plan", str(self.write_plan(p2, "p2")))
+        self.assertEqual(code, 0, err)
+        last = self.server.events[-1]["payload"]
+        self.assertEqual((last["milestone_id"], last.get("replaces")), ("n0", "m19"))
+        p3 = plan(*[(f"m{i}", 1, 2, 2) for i in range(18)], ("n0", 1, 2, 2), ("n1", 1, 2, 2), ("n2", 1, 2, 2))
+        code, _, err = self.budget("--set", "--amend", "--plan", str(self.write_plan(p3, "p3")))
+        self.assertEqual(code, 2, "21 milestones fail the plan check itself")
+        p4 = plan(*[(f"m{i}", 1, 2, 2) for i in range(17)], ("n0", 1, 2, 2), ("n1", 1, 2, 2), ("n2", 1, 2, 2))
+        code, out, err = self.budget("--set", "--amend", "--plan", str(self.write_plan(p4, "p4")))
+        self.assertEqual(code, 0, err)
+        self.assertEqual([(e["payload"]["milestone_id"], e["payload"].get("replaces"))
+                          for e in self.server.events[-2:]], [("n1", "m17"), ("n2", "m18")])
+
+    def test_amend_past_the_live_cap_is_refused(self):
+        # Every dropped milestone a new one can replace is replaced, so a consistent plan never passes 20 live;
+        # the guard holds when Cardinal counts more (here a drop the cache knows of and cannot replace).
+        self.opened(p=plan(*[(f"m{i}", 1, 2, 2) for i in range(20)]))
+        p2 = plan(*[(f"m{i}", 1, 2, 2) for i in range(19)])
+        n = len(self.server.events)
+        self.assertEqual(self.budget("--set", "--amend", "--plan", str(self.write_plan(p2, "p2")))[0], 0)
+        self.assertEqual(len(self.server.events), n, "a pure drop sends nothing: m19 stays live on Cardinal")
+        p3 = plan(*[(f"m{i}", 1, 2, 2) for i in range(19)], ("n0", 1, 2, 2))
+        p3["milestones"][0]["p50_h"] = 1.5
+        st = self.state()
+        st["current"]["live_ids"] = [f"x{i}" for i in range(20)]
+        consumer.private_write(self.file, st)
+        code, _, err = self.budget("--set", "--amend", "--plan", str(self.write_plan(p3, "p3")))
+        self.assertEqual(code, 2)
+        self.assertIn("Cardinal would hold 21 live milestones (a dropped one stays until a new one takes its place)",
+                      err)
+
+    # K5 / K6 -----------------------------------------------------------------
+    def test_bounds(self):
+        code, _, err = self.set("--threshold", "idle_min=30.5")
+        self.assertIn("idle_min is a whole number of minutes", err)
+        self.assertEqual(self.set("--since-seq", "1", "--threshold", "idle_min=45")[0], 0)
+        self.assertEqual(self.server.events[0]["payload"]["thresholds"]["idle_min"], 45)
+        self.events += [wev(2, 10)]
+        code, _, err = self.reviewed("--tag", "1234567:a")
+        self.assertIn("<seq>[-<seq>]:<milestone>", err)
+        code, _, err = self.reviewed("--tag", "all:a", "--done", "a.1@#1234567")
+        self.assertIn("<milestone>.<n>@#<seq>", err)
+        self.assertEqual(self.reviewed("--tag", "all:a")[0], 0)
+        code, _, err = self.budget("outcome", "opening", "accepted", *sum((["--ref", "#1"] for _ in range(21)), []))
+        self.assertIn("at most 20 --ref", err)
+        self.assertEqual(self.budget("--close", "--outcome", "done", "--missed", "a,b,a")[0], 0)
+        self.assertEqual(self.server.events[-1]["payload"]["missed"], ["a", "b"])
+
+    def test_the_read_route_takes_the_supervision_class(self):
+        sent = {}
+
+        def post(conn, tool, body, **_):
+            sent.update(tool=tool, body=body)
+            return {"investigation_id": SUP_INV, "events": [], "head_seq": 0}
+
+        with patch.object(sync, "_post", side_effect=post):
+            _REAL_READ(MEMBER, SUP_INV, after=0, client="t", class_="supervision")
+        self.assertEqual((sent["tool"], sent["body"]["class"]), ("read-investigation-events", "supervision"))
+
+    def test_storyboards_unavailable_is_the_old_server_path(self):
+        self.server.fail = sync.ServerError(501, {"error": "storyboards_unavailable"}, "x")
+        code, out, err = self.set()
+        self.assertEqual(code, 0, err)
+        self.assertIn(bud.SERVER_TOO_OLD, out)
 
 
 if __name__ == "__main__":

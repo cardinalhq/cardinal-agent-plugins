@@ -55,9 +55,13 @@ MAX_EVENTS = 50                      # record-supervision accepts 1-50 events
 MILESTONE_ID = r"[a-z0-9-]{1,24}"
 MILESTONE_ID_RE = re.compile(MILESTONE_ID)
 DIRECTION_ID_RE = re.compile(r"dir_[0-9a-f]{16}")
-REF_RE = re.compile(r"#[1-9][0-9]{0,17}|ev_[0-9a-f]{12}")
-TAG_RE = re.compile(rf"(all|[1-9][0-9]{{0,17}}(?:-[1-9][0-9]{{0,17}})?):(none|{MILESTONE_ID}(?:\+{MILESTONE_ID})*)")
-MARK_RE = re.compile(rf"({MILESTONE_ID})\.([1-9])@(#[1-9][0-9]{{0,17}}|ev_[0-9a-f]{{12}})")
+SEQ = r"[1-9][0-9]{0,5}"             # Cardinal's seqs (and work.attributed tag keys) have at most 6 digits
+REF_RE = re.compile(rf"#{SEQ}|ev_[0-9a-f]{{12}}")
+TAG_RE = re.compile(rf"(all|{SEQ}(?:-{SEQ})?):(none|{MILESTONE_ID}(?:\+{MILESTONE_ID})*)")
+MARK_RE = re.compile(rf"({MILESTONE_ID})\.([1-9])@(#{SEQ}|ev_[0-9a-f]{{12}})")
+MAX_REFS = 20
+MAX_HOURS = 5000                     # per milestone: 20 of them stay under Cardinal's 100,000 h bound
+MAX_RATIO = 1_000_000
 OUTCOMES = ("done", "stopped", "replaced")
 VERDICTS = {"on_track": "none", "worker_choice": "worker", "owner_constraint": "owner"}
 ROUTES = ("none", "worker", "owner")
@@ -211,8 +215,8 @@ def _text(name: str, value, cap: int = MAX_TEXT, required: bool = True) -> Optio
 
 
 def _hours(value, what: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 10000:
-        raise BudgetError(f"{what} is a number of hours above 0, not {json.dumps(value)}")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.001 <= value <= MAX_HOURS:
+        raise BudgetError(f"{what} is a number of hours from 0.001 to {MAX_HOURS}, not {json.dumps(value)}")
     return round(float(value), 3)
 
 
@@ -348,6 +352,10 @@ def thresholds(overrides: Iterable[str] = ()) -> dict:
         lo, hi = THRESHOLD_BOUNDS[k]
         if not lo <= x <= hi:
             raise BudgetError(f"--threshold {k} is {lo} to {hi}")
+        if k == "idle_min":
+            if x != int(x):
+                raise BudgetError("--threshold idle_min is a whole number of minutes")
+            x = int(x)
         th[k] = x
     return th
 
@@ -415,7 +423,22 @@ def _ratio(spent: float, est: float, p: float) -> float:
     return math.inf if p == 0 else (spent / est) / p
 
 
-def _evaluate(d: dict, mid: str, seq: int, fired_now: set) -> Optional[dict]:
+def rearm_threshold(last: list, r: float, s: float, p: float, e: float, th: dict) -> Optional[float]:
+    """HOLD (owner decision pending): THE place for the re-arm rule. After
+    a firing `last` = [r_f (None: infinite), s_f, p_f], the threshold m now
+    crosses, or None while it is not re-armed: at 0% after a 0% firing,
+    spent >= rearm x s_f; otherwise ratio >= rearm x r_f. A firing at 0%
+    has r_f infinite, so once progress makes the ratio finite the ratio rule
+    stays silent until m is re-planned (spec section 1, as accepted)."""
+    rf, sf, pf = (math.inf if last[0] is None else last[0]), last[1], last[2]
+    if p == 0 and pf == 0:
+        return th["rearm"] * sf / e if s >= th["rearm"] * sf else None
+    if r < th["rearm"] * rf:
+        return None
+    return th["rearm"] * rf if p > 0 else th["Z"]
+
+
+def _evaluate(d: dict, mid: str, seq: int) -> Optional[dict]:
     """A firing of mid at seq, or None (records it in last_fire)."""
     m, th = milestone(d, mid), d["thresholds"]
     if not m:
@@ -431,22 +454,14 @@ def _evaluate(d: dict, mid: str, seq: int, fired_now: set) -> Optional[dict]:
     crossed = th["T"] if p > 0 else th["Z"]
     last = d["last_fire"].get(mid)
     if last:
-        rf, sf, pf = (math.inf if last[0] is None else last[0]), last[1], last[2]
-        if p == 0 and pf == 0:
-            if s < th["rearm"] * sf:
-                return None
-            crossed = th["rearm"] * sf / e
-        elif r < th["rearm"] * rf:
+        crossed = rearm_threshold(last, r, s, p, e, th)
+        if crossed is None:
             return None
-        elif p > 0:
-            crossed = th["rearm"] * rf
-    if mid in fired_now:
-        return None
     d["last_fire"][mid] = [None if r == math.inf else round(r, 6), round(s, 6), round(p, 6)]
-    fired_now.add(mid)
-    return {"scope": "milestone", "milestone_id": mid, "at_seq": seq,
+    return {"scope": "milestone", "milestone_id": mid, "at_seq": seq, "last_seq": seq,
             "snapshot": {"spent_h": round(s, 4), "estimate_h": e, "delivered": round(p, 4),
-                         "ratio": None if r == math.inf else round(r, 4), "threshold": round(crossed, 4)},
+                         "ratio": None if r == math.inf else round(min(r, MAX_RATIO), 4),
+                         "threshold": round(min(crossed, MAX_RATIO), 4)},
             "worker_active_h": round(d["active_h"], 4), "fired_seq": None, "verdict": None, "outcome": None}
 
 
@@ -468,7 +483,7 @@ def apply_batch(d: dict, wt: list, spool: list, tags: dict, marks: list) -> tupl
     th = d["thresholds"]
     for mk in marks:
         d["marks"].setdefault(mk["deliverable_id"], []).append({"mark": mk["mark"], "seq": mk["seq"], "ref": mk["ref"]})
-    charged, none_h, firings, fired_now = {}, 0.0, [], set()
+    charged, none_h, firings, fired_now = {}, 0.0, [], {}
     prev = d["last_t"]
     spool = sorted(spool)
     _, p80 = totals(d)
@@ -489,21 +504,27 @@ def apply_batch(d: dict, wt: list, spool: list, tags: dict, marks: list) -> tupl
                 d["none_h"] += gap
                 none_h += gap
         for mid in (tg if isinstance(tg, list) else []):
-            f = _evaluate(d, mid, seq, fired_now)
-            if f:
+            f = _evaluate(d, mid, seq)
+            if f and mid in fired_now:
+                # One firing per milestone per pass: a later crossing in the same pass moves it there (the
+                # first at_seq stays), so a page's size never drops a crossing.
+                fired_now[mid].update(snapshot=f["snapshot"], worker_active_h=f["worker_active_h"], last_seq=seq)
+            elif f:
+                fired_now[mid] = f
                 firings.append(f)
         if not d["backstop_fired"] and p80 and d["active_h"] >= th["backstop"] * p80:
             d["backstop_fired"] = True
             p = direction_delivered(d, seq)
-            firings.append({"scope": "backstop", "milestone_id": None, "at_seq": seq,
+            firings.append({"scope": "backstop", "milestone_id": None, "at_seq": seq, "last_seq": seq,
                             "snapshot": {"spent_h": round(d["active_h"], 4), "estimate_h": p80, "delivered": round(p, 4),
-                                         "ratio": None if p == 0 else round((d["active_h"] / p80) / p, 4),
+                                         "ratio": None if p == 0 else round(min((d["active_h"] / p80) / p, MAX_RATIO), 4),
                                          "threshold": th["backstop"]},
                             "worker_active_h": round(d["active_h"], 4), "fired_seq": None, "verdict": None,
                             "outcome": None})
     d["last_t"] = prev
     if wt:
         d["through_seq"] = max(s for s, _ in wt)
+        d["worker_seqs"] = sorted(set(d.get("worker_seqs", [])) | {s for s, _ in wt})
     end = max([s for s, _ in wt] + [mk["seq"] for mk in marks] + [0])
     active = [m["id"] for m in d["milestones"]
               if (charged.get(m["id"], 0) > 0 and delivered(d, m["id"], end)[0] < len(m["deliverables"]))
@@ -593,9 +614,9 @@ def parse_marks(args, d: dict, wseqs: list, page_lo: int, through: int, worker_i
                     raise BudgetError(f"--{flag} {spec}: #{seq} is past this page (through #{through})")
                 if seq < d["since_seq"]:
                     raise BudgetError(f"--{flag} {spec}: #{seq} is before this direction (from #{d['since_seq']})")
-                if seq >= page_lo and seq not in wseqs:
-                    raise BudgetError(f"--{flag} {spec}: #{seq} is not a worker event; cite the worker's own event "
-                                      "or its ev_ call")
+                if seq not in wseqs and (seq >= page_lo or seq not in d.get("worker_seqs", [])):
+                    raise BudgetError(f"--{flag} {spec}: #{seq} is not a worker event of this direction; cite the "
+                                      "worker's own event or its ev_ call")
                 refs = [{"investigation_id": worker_inv, "seq": seq}]
             else:
                 seq, refs = through, [{"evidence_id": ref}]
@@ -657,19 +678,29 @@ def ev_closed(d: dict, outcome: str, missed: list) -> dict:
 
 
 def _route_missing(err: "sync.ServerError") -> bool:
+    """A Cardinal without record-supervision (or without its storyboards
+    store): the plugin key's allowlist refuses it, the route is missing, or
+    501 storyboards_unavailable."""
     code = err.body.get("error")
-    return (err.status == 403 and code == "insufficient_scope") or \
-        (err.status in (404, 405) and code != "investigation_not_found")
+    return (err.status == 403 and code == "insufficient_scope") or err.status == 501 or \
+        code == "storyboards_unavailable" or (err.status in (404, 405) and code != "investigation_not_found")
 
 
 _REFUSED = {
     "not_author": "--session is not an author of its investigation: pass your own session id",
-    "unknown_event_type": "this Cardinal does not know that supervision event type (update the plugin or Maestro)",
-    "invalid_payload": "Cardinal refused a supervision record as invalid (a plugin bug; report it)",
-    "ref_not_readable": "a ref names an investigation this machine's key cannot read",
-    "ref_out_of_range": "a ref is past the worker investigation's head",
+    "unknown_event_type": "this Cardinal does not know that supervision event type: update the plugin",
+    "invalid_payload": "Cardinal refused the record as invalid",
+    "ref_not_readable": "Cardinal cannot let this machine cite the worker's investigation: check --credential-file",
+    "ref_out_of_range": "a #seq is past the worker investigation's head",
     "idempotency_conflict": "this record was already sent with other content",
 }
+
+
+def definite(err: Exception) -> bool:
+    """A refusal the same body will always get (a 4xx other than an
+    idempotency conflict): nothing is pending after it."""
+    status = getattr(err, "status", None)
+    return isinstance(status, int) and 400 <= status < 500 and getattr(err, "code", None) != "idempotency_conflict"
 
 
 def record(own: dict, key: str, events: list) -> Optional[list]:
@@ -677,7 +708,8 @@ def record(own: dict, key: str, events: list) -> Optional[list]:
     seqs of the stored events, or None when this Cardinal has no supervision
     class or the investigation is at its limit (own["why"] says which; the
     caller keeps its cache). subject_grant (the grant token that reads the
-    worker's investigation) lets refs into it pass; it is never stored."""
+    worker's investigation) lets refs into it pass; it is never stored. A
+    refusal raises FetchError with .code and .status."""
     if not events:
         return []
     if own.get("capable") is False:
@@ -698,9 +730,11 @@ def record(own: dict, key: str, events: list) -> Optional[list]:
             own["why"] = LIMIT_REACHED
             return None
         said = _REFUSED.get(code) or sync.plain(e)
-        issues = sync._issues(e.body) or (e.body.get("path") if isinstance(e.body.get("path"), str) else "")
-        err = ist_fetch(f"not recorded: {said}{' (' + ie._one_line(issues, 200) + ')' if issues else ''}")
-        err.code = code
+        where = e.body.get("path") if isinstance(e.body.get("path"), str) else ""
+        msg = e.body.get("message") if isinstance(e.body.get("message"), str) else ""
+        detail = ": ".join(x for x in (where, msg) if x)
+        err = ist_fetch(f"not recorded: {said}{' (' + ie._one_line(detail, 200) + ')' if detail else ''}")
+        err.code, err.status = code, e.status
         raise err from None
     got = out.get("events")
     if out.get("investigation_id") != own["investigation_id"] or not isinstance(got, list) or len(got) != len(events) \
@@ -717,6 +751,54 @@ def ist_fetch(msg: str) -> Exception:
 
 def key_for(prefix: str, material) -> str:
     return f"sup:{prefix}:" + hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()[:48]
+
+
+def _planned_all(d: dict, inv: str) -> list:
+    return [ev_direction_set(d, inv)] + [ev_milestone_planned(d, m) for m in d["milestones"]]
+
+
+def ensure_direction(own: dict, d: dict, inv: str) -> bool:
+    """The direction's own records (direction.set, milestone.planned) in
+    own's investigation, sent now when they are not there: it was set while
+    this Cardinal had no supervision class, or from another session's
+    investigation. False: the cache stays the only copy."""
+    if d.get("recorded_in") == own["investigation_id"]:
+        return True
+    pre = _planned_all(d, inv)
+    if record(own, key_for("dir", [own["investigation_id"], pre]), pre) is None:
+        return False
+    d["recorded_in"], d["live_ids"] = own["investigation_id"], [m["id"] for m in d["milestones"]]
+    return True
+
+
+def ensure_fired(own: dict, d: dict, f: dict, inv: str) -> bool:
+    """f's stepback.fired in own's investigation (a verdict needs its seq there)."""
+    if f.get("fired_seq") is not None and f.get("recorded_in") == own["investigation_id"]:
+        return True
+    if not ensure_direction(own, d, inv):
+        return False
+    ev = ev_fired(d, f)
+    seqs = record(own, key_for("fired", [own["investigation_id"], ev, f["at_seq"]]), [ev])
+    if seqs is None:
+        return False
+    f["fired_seq"], f["recorded_in"] = seqs[0], own["investigation_id"]
+    return True
+
+
+def ensure_verdict(own: dict, d: dict, f: dict, inv: str) -> bool:
+    """f's stepback.verdict in own's investigation (an outcome needs its seq there)."""
+    v = f["verdict"]
+    if v.get("verdict_seq") is not None and v.get("recorded_in") == own["investigation_id"]:
+        return True
+    if not ensure_fired(own, d, f, inv):
+        return False
+    p = {k: v[k] for k in ("verdict", "routed_to", "post_ref") if k in v}
+    p = {"fired_seq": f["fired_seq"], **p}
+    seqs = record(own, key_for("verdict", [own["investigation_id"], p]), [{"type": "stepback.verdict", "payload": p}])
+    if seqs is None:
+        return False
+    f["verdict"] = {**p, "verdict_seq": seqs[0], "recorded_in": own["investigation_id"]}
+    return True
 
 
 # -- the cache (budget.json) -------------------------------------------------------------
@@ -791,8 +873,24 @@ def load(path: Path, investigation_id: Optional[str]) -> dict:
     return state
 
 
+def marker_path(path: Path) -> Path:
+    """Beside the cache: which investigation holds its records, so a lost
+    budget.json is rebuilt from them (the server's records are the truth)."""
+    return path.with_name(path.stem + "-supervisor.json")
+
+
 def save(path: Path, state: dict) -> None:
     consumer.private_write(path, state)
+    sup = state.get("supervisor")
+    if sup:
+        want = {"version": 1, "investigation_id": state.get("investigation_id"), "supervisor": sup}
+        m = marker_path(path)
+        try:
+            same = consumer.private_read(m) == want
+        except (OSError, ValueError):
+            same = False
+        if not same:
+            consumer.private_write(m, want)
 
 
 @contextlib.contextmanager
@@ -1052,6 +1150,129 @@ def _own(state: dict, args, home: Path, own_conn: Callable, grant_token: Optiona
     return own
 
 
+def rebuild(path: Path, grant: dict, own_conn: Callable, home: Path) -> dict:
+    """budget.json from the supervisor's own records (class supervision),
+    after it was lost: the open direction of this worker investigation, its
+    milestones, and every review pass replayed from its tags and marks over
+    the worker's event times (read with the grant). Raises on any read."""
+    mk = consumer.private_read(marker_path(path))
+    inv, sup = mk["investigation_id"], mk["supervisor"]
+    if inv != grant.get("investigation_id"):
+        raise BudgetError(f"{marker_path(path)} is for {inv}, not {grant.get('investigation_id')}")
+    conn, client = own_conn()
+    evs, after = [], 0
+    for _ in range(MAX_PAGES):
+        page = ie.read_events(conn, sup["investigation_id"], after=after, limit=ie.PAGE_LIMIT, client=client,
+                              class_="supervision")
+        evs += [e for e in page["events"] if isinstance(e.get("payload"), dict)]
+        if page["page_size"] < ie.PAGE_LIMIT or page["last_seq"] >= page["head_seq"] or page["last_seq"] <= after:
+            break
+        after = page["last_seq"]
+    state = {"version": VERSION, "investigation_id": inv, "supervisor": sup, "current": None, "history": []}
+    closed = {e["payload"].get("direction_id"): e for e in evs if e.get("type") == "direction.closed"}
+    sets = [e for e in evs if e.get("type") == "direction.set"
+            and (e["payload"].get("subject") or {}).get("investigation_id") == inv]
+    for e in sets:
+        c = closed.get(e["payload"]["direction_id"])
+        if c:
+            pm = c["payload"].get("per_milestone") or []
+            state["history"].append({
+                "direction_id": c["payload"]["direction_id"], "question": e["payload"].get("question", ""),
+                "outcome": c["payload"]["outcome"], "closed_at": c.get("created_at"),
+                "since_seq": e["payload"]["subject"]["since_seq"], "thresholds": e["payload"].get("thresholds"),
+                "p50_total_h": round(sum(x.get("estimate_h", 0) for x in pm), 3), "p80_total_h": 0,
+                "spent_h": round(sum(x.get("spent_h", 0) for x in pm), 4), "none_h": 0,
+                "missed": c["payload"].get("missed", []), "firings": [],
+                "per_milestone": [{**x, "deliverables": 0} for x in pm]})
+    state["history"] = state["history"][-HISTORY_MAX:]
+    open_ = [e for e in sets if e["payload"]["direction_id"] not in closed]
+    if not open_:
+        return state
+    ds = open_[-1]
+    p, did = ds["payload"], ds["payload"]["direction_id"]
+    mine = [e for e in evs if e["seq"] > ds["seq"] and (e["payload"].get("direction_id") == did
+                                                        or e.get("type") in ("stepback.verdict", "stepback.outcome"))]
+    ms = {}
+    for e in [x for x in mine if x["type"] == "milestone.planned"]:
+        q = e["payload"]
+        if q.get("replaces") and q["replaces"] != q["milestone_id"]:
+            ms.pop(q["replaces"], None)
+        ms[q["milestone_id"]] = {"id": q["milestone_id"], "title": q["title"], "p50_h": q["p50_h"], "p80_h": q["p80_h"],
+                                 "basis": q["basis"], "deliverables": [dict(x) for x in q["deliverables"]]}
+    since = p["subject"]["since_seq"]
+    events, _ = read_worker_events(grant, inv, max(0, since - 1), client=client)
+    times = dict(worker_times(events, p["worker_session_id"], since))
+    t0 = times.get(since) or parse_time(ds.get("created_at")) or time.time()
+    we = p.get("worker_estimate")
+    d = new_direction(inv=inv, question=p["question"], since_seq=since, set_at=t0, worker_session=p["worker_session_id"],
+                      worker_estimate=we if isinstance(we, str) else None if we is None else f"{we} h",
+                      plan={"reference_class": p["reference_class"], "pace": None, "milestones": list(ms.values()),
+                            "unknowns": []}, th=dict(p["thresholds"]))
+    d.update(direction_id=did, calibration=p["calibration"], recorded_in=sup["investigation_id"], live_ids=list(ms))
+    entries = spool_entries(home, d["worker_session"]) or []
+    batches, last_batch, through = [], None, None
+    for e in mine:
+        if e["type"] == "work.attributed":
+            batches.append((e["payload"], []))
+        elif e["type"] == "deliverable.marked" and batches:
+            batches[-1][1].append(e["payload"])
+    for wa, mks in batches:
+        tags = {int(k): v for k, v in wa["tags"].items()}
+        wt = sorted((sq, times[sq]) for sq in tags if sq in times)
+        marks = []
+        for m in mks:
+            r = m["refs"][0]
+            sq = r["seq"] if "seq" in r else wa["through_seq"]
+            marks.append({"deliverable_id": m["deliverable_id"], "milestone_id": m["milestone_id"], "mark": m["mark"],
+                          "seq": sq, "ref": f"#{r['seq']}" if "seq" in r else r["evidence_id"], "refs": m["refs"]})
+        spool = [t for t in spool_times(entries, d["last_t"]) if wt and t < wt[-1][1]] if d["last_t"] else []
+        d, _ = apply_batch(d, wt, spool, tags, marks)
+        last_batch, through = wa["batch"], wa["through_seq"]
+    stored = [e for e in mine if e["type"] == "stepback.fired"]
+    for f in d["firings"]:
+        hit = next((e for e in stored if e["payload"]["scope"] == f["scope"]
+                    and e["payload"].get("milestone_id") == f.get("milestone_id")), None)
+        if hit:
+            stored.remove(hit)
+            f.update(fired_seq=hit["seq"], recorded_in=sup["investigation_id"], snapshot=hit["payload"]["snapshot"])
+    opening = next((e for e in stored if e["payload"]["scope"] == "opening"), None)
+    if opening:
+        d["firings"].insert(0, {"scope": "opening", "milestone_id": None, "at_seq": since, "last_seq": since,
+                                "snapshot": opening["payload"]["snapshot"], "worker_active_h": 0,
+                                "fired_seq": opening["seq"], "recorded_in": sup["investigation_id"],
+                                "verdict": None, "outcome": None})
+    by_fired = {f["fired_seq"]: f for f in d["firings"] if f.get("fired_seq") is not None}
+    by_verdict = {}
+    for e in mine:
+        q = e["payload"]
+        if e["type"] == "stepback.verdict" and q.get("fired_seq") in by_fired:
+            f = by_fired[q["fired_seq"]]
+            f["verdict"] = {**q, "verdict_seq": e["seq"], "recorded_in": sup["investigation_id"]}
+            by_verdict[e["seq"]] = f
+        elif e["type"] == "stepback.outcome" and q.get("verdict_seq") in by_verdict:
+            by_verdict[q["verdict_seq"]]["outcome"] = q
+    state["current"] = d
+    if last_batch:
+        state["applied_batch"], state["applied_lines"] = last_batch, [f"reviewed through #{through}"]
+    return state
+
+
+def _restored(path: Path, grant: Optional[dict], own_conn: Callable, home: Path) -> Optional[dict]:
+    """The cache rebuilt from the server when budget.json is gone but its
+    marker says records exist (None: nothing to rebuild); a read that fails
+    refuses, never a silent empty cache."""
+    if path.exists() or not marker_path(path).exists():
+        return None
+    try:
+        if not grant:
+            raise BudgetError("no --credential-file to read the worker's investigation with")
+        return rebuild(path, grant, own_conn, home)
+    except Exception as e:          # any failure to read them back refuses; never a silently empty cache
+        why = sync.plain(e) if isinstance(e, sync.ServerError) else ie._one_line(e, 160)
+        raise BudgetError(f"{path.name} is missing and your supervision records could not be read back ({why}): "
+                          f"retry, restore it, or delete {marker_path(path)} to go on without the direction") from None
+
+
 def run(args, *, target: Callable, own_conn: Callable, home: Path, client: str, out: Callable = print,
         now: Callable = time.time, reader: Callable = None, grant_token: Optional[Callable] = None) -> int:
     """`investigation budget`. target() -> (conn, client, inv) or None (the
@@ -1084,18 +1305,19 @@ def run(args, *, target: Callable, own_conn: Callable, home: Path, client: str, 
                                                                                 lambda: conn.get("token")),
                         reader, out, now(), as_json)
     with _locked(path):
+        lines = []
+        if not path.exists() and marker_path(path).exists():
+            got = target()
+            state = _restored(path, got[0] if got and got[0].get("token") else None, own_conn, home)
+            save(path, state)
+            lines.append(f"rebuilt {path.name} from your supervision records")
         state = load(path, hint)
         d = state.get("current")
         if not d:
             raise BudgetError("no open direction: `budget --set --plan <file>` first")
         own = _own(state, args, home, own_conn, grant_token)
-        if args.set:
-            return _amend(args, state, path, own, out)
-        if args.close:
-            return _close(args, state, path, own, out, now())
-        if args.verdict:
-            return _verdict(args, state, path, own, out)
-        return _outcome(args, state, path, own, out)
+        mode = _set_amend if args.set else _close if args.close else _verdict if args.verdict else _outcome
+        return mode(args, state, path, own, lambda x: out("\n".join(lines + [x])), now())
 
 
 MODES = ("set", "show", "close", "pass_", "calibrate", "verdict", "stepback_outcome")
@@ -1126,6 +1348,8 @@ def _only(args) -> None:
         raise BudgetError(f"--close needs --outcome {'|'.join(OUTCOMES)}")
     if mode == "pass_" and not args.brief:
         raise BudgetError("pass needs --brief <the facts brief you wrote>")
+    if mode == "stepback_outcome" and len(args.ref or []) > MAX_REFS:
+        raise BudgetError(f"at most {MAX_REFS} --ref")
 
 
 def _pass(args, path, hint, target, home, reader, out) -> int:
@@ -1166,49 +1390,78 @@ def _pass(args, path, hint, target, home, reader, out) -> int:
     return 0
 
 
+def _committed(conn: dict, cursor: Path) -> Optional[int]:
+    """The review cursor's committed seq beside the budget file, when it is
+    this grant's (None: no cursor here, or another identity's)."""
+    try:
+        return consumer.committed(conn, cursor) if cursor.exists() else None
+    except (OSError, ValueError):
+        return None
+
+
 def _set(args, state, path, conn, inv, rclient, home, own_fn, reader, out, t, as_json) -> int:
     plan = load_plan(args.plan)
     th = thresholds(args.threshold)
-    if args.since_seq is not None:
-        if args.since_seq < 1:
-            raise BudgetError("--since-seq is a positive event seq")
-        page = reader(conn, inv, after=args.since_seq - 1, limit=1, client=rclient)
-        if args.since_seq > page["head_seq"]:
-            raise BudgetError(f"--since-seq {args.since_seq} is past the head (#{page['head_seq']})")
-        first = page["events"][0] if page["events"] else None
-        since, set_at = args.since_seq, (parse_time(first.get("created_at")) if first else None) or t
+    material = [inv, args.question, plan, args.since_seq, args.worker_session, args.worker_estimate, th]
+    sent = state.get("sent_set")
+    if sent and sent.get("material") == material:
+        # A retry after an answer that never came: the same direction and body, wherever the head moved.
+        d, events, key = sent["direction"], sent["events"], sent["key"]
     else:
-        page = reader(conn, inv, after=0, limit=1, client=rclient)
-        since, set_at = max(1, page["head_seq"]), t
-    d = new_direction(inv=inv, question=args.question, plan=plan, since_seq=since, set_at=set_at,
-                      worker_session=args.worker_session, worker_estimate=args.worker_estimate, th=th)
+        head = reader(conn, inv, after=0, limit=1, client=rclient)["head_seq"]
+        if args.since_seq is not None and args.since_seq < 1:
+            raise BudgetError("--since-seq is a positive event seq")
+        since = args.since_seq if args.since_seq is not None else head
+        if since > head:
+            raise BudgetError(f"--since-seq {since} is past the head (#{head})")
+        after = _committed(conn, path.parent / "cursor.json")
+        if after is not None and since < after:
+            raise BudgetError(f"--since-seq {since} is before your review cursor (#{after} is committed), so those "
+                              f"events cannot be tagged: use --since-seq {after} or later, or set the direction "
+                              "before reviewing them")
+        page = reader(conn, inv, after=max(0, since - 1), limit=1, client=rclient)
+        first = page["events"][0] if page["events"] else None
+        set_at = (parse_time(first.get("created_at")) if first else None) or t
+        d = new_direction(inv=inv, question=args.question, plan=plan, since_seq=since, set_at=set_at,
+                          worker_session=args.worker_session, worker_estimate=args.worker_estimate, th=th)
+        if after is not None and since <= after:
+            d["last_t"] = set_at            # its start is already reviewed: the next worker event counts from it
+        old = state.get("current")
+        if old and old["direction_id"] == d["direction_id"]:
+            raise BudgetError(f"{d['direction_id']} is already the open direction; a correction is --set --amend")
+        p50, _ = totals(d)
+        d["firings"] = [{"scope": "opening", "milestone_id": None, "at_seq": since, "last_seq": since,
+                         "snapshot": {"spent_h": 0, "estimate_h": p50, "delivered": 0, "ratio": None, "threshold": 0},
+                         "worker_active_h": 0, "fired_seq": None, "verdict": None, "outcome": None}]
+        events = ([ev_closed(old, "replaced", [])] if old else []) + _planned_all(d, inv) + [ev_fired(d, d["firings"][0])]
+        key = key_for("set", events)
     own = own_fn()
-    old = state.get("current")
-    if old and old["direction_id"] == d["direction_id"]:
-        raise BudgetError(f"{d['direction_id']} is already the open direction; a correction is --set --amend")
-    p50, p80 = totals(d)
-    opening = {"scope": "opening", "milestone_id": None, "at_seq": since,
-               "snapshot": {"spent_h": 0, "estimate_h": p50, "delivered": 0, "ratio": None, "threshold": 0},
-               "worker_active_h": 0, "fired_seq": None, "verdict": None, "outcome": None}
-    events = ([ev_closed(old, "replaced", [])] if old else []) + [ev_direction_set(d, inv)] + \
-        [ev_milestone_planned(d, m) for m in d["milestones"]] + [ev_fired(d, opening)]
-    seqs = record(own, key_for("set", events), events)
+    state["sent_set"] = {"material": material, "direction": d, "events": events, "key": key}
+    save(path, state)
+    try:
+        seqs = record(own, key, events)
+    except Exception as e:
+        if definite(e):
+            state["sent_set"] = None
+            save(path, state)
+        raise
     if seqs:
-        opening["fired_seq"] = seqs[-1]
-    d["firings"].append(opening)
+        d["firings"][0].update(fired_seq=seqs[-1], recorded_in=own["investigation_id"])
+        d["recorded_in"], d["live_ids"] = own["investigation_id"], [m["id"] for m in d["milestones"]]
     lines = []
-    if old:
+    old = state.get("current")
+    if old and old["direction_id"] != d["direction_id"]:
         _to_history(state, old, "replaced", [], t)
         lines.append(f"closed {old['direction_id']} as replaced ({old['active_h']:.2f} h active)")
-    state["current"] = d
-    state["applied_batch"] = None
+    state.update(current=d, applied_batch=None, sent_set=None, sent=None)
     _recorded(state, seqs, lines.append, own)
     save(path, state)
     if as_json:
         out(json.dumps({"direction": d, "recorded": seqs is not None}, indent=2, ensure_ascii=False))
         return 0
+    p50, p80 = totals(d)
     lines.append(f"{d['direction_id']} set: {len(d['milestones'])} milestones, P50 {_n(p50)} h / P80 {_n(p80)} h, "
-                 f"counting from #{since}; {d['calibration']}"
+                 f"counting from #{d['since_seq']}; {d['calibration']}"
                  + ("" if d["calibration"] == "calibrated" else " (no measured pace)"))
     out("\n".join(lines))
     return 0
@@ -1227,23 +1480,45 @@ def _to_history(state: dict, d: dict, outcome: str, missed: list, t: float) -> d
     return entry
 
 
-def _amend(args, state, path, own, out) -> int:
-    """Re-plan within the same direction: new or changed milestones get a
-    milestone.planned (a changed one `replaces` itself, which re-arms it);
-    charges, marks of deliverables that remain, and firings stay."""
+def _set_amend(args, state, path, own, out, t) -> int:
+    """Re-plan within the same direction: changed milestones `replace`
+    themselves (which re-arms them); a new milestone takes a dropped one's
+    place (`replaces` it) on Cardinal, where every milestone not replaced
+    stays live within the cap of 20. Charges, marks of deliverables that
+    remain, and firings stay."""
     d = state["current"]
+    inv = state["investigation_id"]
     plan = load_plan(args.plan)
     old = {m["id"]: m for m in d["milestones"]}
+    new_ids = [m["id"] for m in plan["milestones"]]
     changed = [m for m in plan["milestones"] if old.get(m["id"]) != m]
-    if not changed and len(plan["milestones"]) == len(d["milestones"]):
+    if not changed and len(new_ids) == len(old):
         raise BudgetError("--amend: the plan is the same as the open direction's")
-    events = [ev_milestone_planned(d, m, m["id"] if m["id"] in old else None) for m in changed]
-    seqs = record(own, key_for("amend", [d["direction_id"], events]), events) if events else []
+    recorded = d.get("recorded_in") == own["investigation_id"]
+    events = []
+    if recorded:
+        live = list(d.get("live_ids") or list(old))
+        free = [x for x in live if x not in new_ids]           # live on Cardinal, gone from the plan
+        for m in changed:
+            rep = m["id"] if m["id"] in old else (free.pop(0) if free else None)
+            if rep and rep != m["id"]:
+                live.remove(rep)
+            if m["id"] not in live:
+                live.append(m["id"])
+            events.append(ev_milestone_planned(d, m, rep))
+        if len(live) > MAX_MILESTONES:
+            raise BudgetError(f"--amend: Cardinal would hold {len(live)} live milestones (a dropped one stays until a "
+                              f"new one takes its place), at most {MAX_MILESTONES}: drop fewer new ones or merge some")
+    seqs = record(own, key_for("amend", [own["investigation_id"], d["direction_id"], events]), events) \
+        if events else []
     keep = {x["id"] for m in plan["milestones"] for x in m["deliverables"]}
-    d["milestones"] = plan["milestones"]
-    d["unknowns"] = plan["unknowns"]
-    d["reference_class"] = plan["reference_class"]
-    d["marks"] = {k: v for k, v in d["marks"].items() if k in keep}
+    d.update(milestones=plan["milestones"], unknowns=plan["unknowns"], reference_class=plan["reference_class"],
+             marks={k: v for k, v in d["marks"].items() if k in keep})
+    if recorded and seqs is not None:
+        d["live_ids"] = live
+    elif not recorded:
+        d["recorded_in"] = None                  # the next write sends the whole new plan first
+        seqs = [] if ensure_direction(own, d, inv) else None
     for m in plan["milestones"]:
         d["charged"].setdefault(m["id"], 0.0)
         if m["id"] in old and m in changed:
@@ -1252,10 +1527,10 @@ def _amend(args, state, path, own, out) -> int:
     if d["active_h"] < d["thresholds"]["backstop"] * p80:
         d["backstop_fired"] = False
     lines = []
-    _recorded(state, seqs if events else [], lines.append, own)
+    _recorded(state, seqs, lines.append, own)
     save(path, state)
     p50, p80 = totals(d)
-    dropped = sorted(set(old) - {m["id"] for m in plan["milestones"]})
+    dropped = sorted(set(old) - set(new_ids))
     lines.append(f"{d['direction_id']} re-planned: {len(changed)} milestone(s) new or changed; P50 {_n(p50)} h / "
                  f"P80 {_n(p80)} h" + (f"; dropped {', '.join(dropped)}" if dropped else ""))
     out("\n".join(lines))
@@ -1264,12 +1539,14 @@ def _amend(args, state, path, own, out) -> int:
 
 def _close(args, state, path, own, out, t) -> int:
     d = state["current"]
-    missed = [x for x in (args.missed or "").split(",") if x]
+    missed = list(dict.fromkeys(x for x in (args.missed or "").split(",") if x))
     bad = [x for x in missed if not milestone(d, x)]
     if bad:
         raise BudgetError(f"--missed {bad[0]!r}: one of {', '.join(m['id'] for m in d['milestones'])}")
     ev = ev_closed(d, args.outcome, missed)
-    seqs = record(own, key_for("close", ev), [ev])
+    seqs = None
+    if ensure_direction(own, d, state["investigation_id"]):
+        seqs = record(own, key_for("close", [own["investigation_id"], ev]), [ev])
     lines = []
     _recorded(state, seqs, lines.append, own)
     entry = _to_history(state, d, args.outcome, missed, t)
@@ -1301,8 +1578,8 @@ def _ref(r: str, inv: str) -> dict:
     return {"investigation_id": inv, "seq": int(r[1:])} if r.startswith("#") else {"evidence_id": r}
 
 
-def _verdict(args, state, path, own, out) -> int:
-    d = state["current"]
+def _verdict(args, state, path, own, out, t) -> int:
+    d, inv = state["current"], state["investigation_id"]
     scope, verdict = args.verdict
     if verdict not in VERDICTS:
         raise BudgetError(f"verdict {verdict!r}: one of {', '.join(VERDICTS)}")
@@ -1310,33 +1587,30 @@ def _verdict(args, state, path, own, out) -> int:
     if routed not in ROUTES:
         raise BudgetError(f"--routed-to: one of {', '.join(ROUTES)}")
     f = _firing(d, scope, "verdict")
-    p = {"fired_seq": f["fired_seq"], "verdict": verdict, "routed_to": routed}
+    f["verdict"] = {"verdict": verdict, "routed_to": routed}
     if args.post_ref:
-        p["post_ref"] = _ref(args.post_ref, state["investigation_id"])
-    seqs = None
-    if f["fired_seq"] is not None:
-        seqs = record(own, key_for("verdict", p), [{"type": "stepback.verdict", "payload": p}])
-    f["verdict"] = {**p, "verdict_seq": seqs[0] if seqs else None}
+        f["verdict"]["post_ref"] = _ref(args.post_ref, inv)
+    ok = ensure_verdict(own, d, f, inv)
     lines = []
-    _recorded(state, seqs, lines.append, own)
+    _recorded(state, None if not ok else [], lines.append, own)
     save(path, state)
     lines.append(f"verdict on the {scope} step back (#{f['at_seq']}): {verdict}, routed to {routed}")
     out("\n".join(lines))
     return 0
 
 
-def _outcome(args, state, path, own, out) -> int:
-    d = state["current"]
+def _outcome(args, state, path, own, out, t) -> int:
+    d, inv = state["current"], state["investigation_id"]
     scope, outcome = args.stepback_outcome
     if outcome not in STEPBACK_OUTCOMES:
         raise BudgetError(f"outcome {outcome!r}: one of {', '.join(STEPBACK_OUTCOMES)}")
     f = _firing(d, scope, "outcome")
-    p = {"verdict_seq": f["verdict"].get("verdict_seq"), "outcome": outcome,
-         "refs": [_ref(r, state["investigation_id"]) for r in args.ref or []]}
+    refs = [_ref(r, inv) for r in args.ref or []]
     seqs = None
-    if p["verdict_seq"] is not None:
-        seqs = record(own, key_for("outcome", p), [{"type": "stepback.outcome", "payload": p}])
-    f["outcome"] = p
+    if ensure_verdict(own, d, f, inv):
+        p = {"verdict_seq": f["verdict"]["verdict_seq"], "outcome": outcome, "refs": refs}
+        seqs = record(own, key_for("outcome", [own["investigation_id"], p]), [{"type": "stepback.outcome", "payload": p}])
+    f["outcome"] = {"verdict_seq": f["verdict"].get("verdict_seq"), "outcome": outcome, "refs": refs}
     lines = []
     _recorded(state, seqs, lines.append, own)
     save(path, state)
@@ -1347,39 +1621,48 @@ def _outcome(args, state, path, own, out) -> int:
 
 # -- the CLI: investigation reviewed (the review pass) ----------------------------------------
 
+def _cursor(fn, *a):
+    try:
+        return fn(*a)
+    except BlockingIOError:
+        raise BudgetError("the cursor file is in use by another command (a watch or another review); retry") from None
+
+
 def reviewed(args, *, grant: dict, own_conn: Callable, home: Path, out: Callable = print) -> int:
     """Commit the outstanding page. With an open direction in the budget file
     (--budget-file, default budget.json beside the cursor file): its worker
     events must all be tagged; the tags, the marks and any firings are
-    recorded (idempotent on the batch hash) before the cursor moves."""
+    recorded (idempotent on the batch hash) before the cursor moves. A lost
+    budget.json is rebuilt from those records first."""
     cursor = Path(args.cursor_file)
     bfile = Path(args.budget_file) if getattr(args, "budget_file", None) else cursor.parent / "budget.json"
     flags = [f"--{k} {v}" for k in ("tag", "done", "reopen", "redone") for v in (getattr(args, k, None) or [])]
     inv = grant["investigation_id"]
-    if not bfile.exists() and not getattr(args, "budget_file", None):
-        if flags:
-            raise BudgetError("no open direction for --tag/--done: `budget --set --plan <file>` first, or drop them")
-        out(json.dumps(consumer.reviewed(grant, cursor, args.batch), indent=2))
-        return 0
     with _locked(bfile):
+        pre = []
+        state = _restored(bfile, grant, own_conn, home)
+        if state is not None:
+            save(bfile, state)
+            pre.append(f"rebuilt {bfile.name} from your supervision records")
         state = load(bfile, inv)
         d = state.get("current")
         if not d:
             if flags:
                 raise BudgetError("no open direction for --tag/--done: `budget --set --plan <file>` first, or drop "
                                   "them")
-            out(json.dumps(consumer.reviewed(grant, cursor, args.batch), indent=2))
+            out("\n".join(pre + [json.dumps(_cursor(consumer.reviewed, grant, cursor, args.batch), indent=2)]))
             return 0
-        page = consumer.pending(grant, cursor)
+        page = _cursor(consumer.pending, grant, cursor)
         if not page or page.get("batch") != args.batch:
-            raise BudgetError("batch is not the outstanding read; cursor unchanged")
+            raise BudgetError("--batch is not the outstanding read (cursor unchanged): pass the batch of the page you "
+                              "read last, or read it again with --cursor-file")
         through = page["next_after"]
         if state.get("applied_batch") == args.batch:
             lines = state.get("applied_lines") or [f"reviewed through #{through}"]
         else:
             lines = _apply(args, state, bfile, d, page, grant, flags, home, own_conn)
-    consumer.reviewed(grant, cursor, args.batch)
-    out("\n".join(lines))
+    _cursor(consumer.reviewed, grant, cursor, args.batch)
+    out("\n".join(pre + lines))
     return 0
 
 
@@ -1390,18 +1673,25 @@ def _apply(args, state, bfile, d, page, grant, flags, home, own_conn) -> list:
     wseqs = [s for s, _ in wt]
     tags = parse_tags(getattr(args, "tag", None), wseqs, d)
     marks = parse_marks(args, d, wseqs, page["after"] + 1, through, inv)
-    spool = []
-    if wt and d["last_t"] is not None:
-        entries = spool_entries(home, d["worker_session"]) or []
-        spool = [t for t in spool_times(entries, d["last_t"]) if t < wt[-1][1]]
-    new, res = apply_batch(d, wt, spool, tags, marks)
-    lines = pass_lines(new, res, through)
-    if wt or marks:
-        own = _own(state, args, home, own_conn, lambda: grant.get("token"))
-        sent = state.get("sent")
-        if sent and sent.get("batch") == args.batch and sent.get("flags") != flags:
+    if not (wt or marks):
+        state.update(applied_batch=args.batch, applied_lines=[f"reviewed through #{through}"])
+        save(bfile, state)
+        return state["applied_lines"]
+    own = _own(state, args, home, own_conn, lambda: grant.get("token"))
+    sent = state.get("sent")
+    if sent and sent.get("batch") == args.batch and sent.get("investigation_id") == own["investigation_id"]:
+        if sent.get("flags") != flags:
             raise BudgetError("this page was already sent with other flags (the commit failed after): repeat them: "
                               + " ".join(sent["flags"]))
+        # A retry resends the exact body: Cardinal hashes it, charged_h included.
+        new, events, lines, nfired = sent["new"], sent["events"], sent["lines"], sent["nfired"]
+    else:
+        spool = []
+        if wt and d["last_t"] is not None:
+            entries = spool_entries(home, d["worker_session"]) or []
+            spool = [t for t in spool_times(entries, d["last_t"]) if t < wt[-1][1]]
+        new, res = apply_batch(d, wt, spool, tags, marks)
+        lines, nfired = pass_lines(new, res, through), len(res["firings"])
         events = [{"type": "work.attributed", "payload": {
             "direction_id": d["direction_id"], "batch": args.batch, "through_seq": through,
             "tags": {str(s): tags[s] for s in wseqs},
@@ -1411,25 +1701,29 @@ def _apply(args, state, bfile, d, page, grant, flags, home, own_conn) -> list:
             "mark": mk["mark"], "refs": mk["refs"]}} for mk in marks]
         events += [ev_fired(new, f) for f in res["firings"]]
         if len(events) > MAX_EVENTS:
-            raise BudgetError(f"at most {MAX_EVENTS - 1 - len(res['firings'])} marks in one pass")
-        state["sent"] = {"batch": args.batch, "flags": flags}
+            raise BudgetError(f"at most {MAX_EVENTS - 1 - nfired} marks in one pass")
+    seqs = None
+    if ensure_direction(own, new, inv):
+        state["sent"] = {"batch": args.batch, "flags": flags, "investigation_id": own["investigation_id"],
+                         "events": events, "new": new, "lines": lines, "nfired": nfired}
         save(bfile, state)
         try:
             seqs = record(own, "sup:rv:" + args.batch[:64], events)
         except Exception as e:
+            if definite(e):
+                state["sent"] = None            # refused for good: nothing pending, the page can be fixed
+                save(bfile, state)
             if getattr(e, "code", None) == "idempotency_conflict":
-                raise BudgetError("this page was already recorded with other tags or marks; repeat the ones sent "
-                                  "first") from None
+                raise BudgetError("Cardinal already holds this page with other tags or marks (budget.json lost them?); "
+                                  "repeat the flags you sent first") from None
+            e.args = (f"{e}; cursor unchanged",)
             raise
-        if seqs:
-            for f, s in zip(res["firings"], seqs[-len(res["firings"]):] if res["firings"] else []):
-                f["fired_seq"] = s
-        pre = []
-        _recorded(state, seqs, pre.append, own)
-        lines = pre + lines
-    state["current"] = new
-    state["applied_batch"] = args.batch
-    state["applied_lines"] = lines
-    state["sent"] = None
+    if seqs and nfired:
+        for f, sq in zip(new["firings"][-nfired:], seqs[-nfired:]):
+            f.update(fired_seq=sq, recorded_in=own["investigation_id"])
+    pre = []
+    _recorded(state, seqs, pre.append, own)
+    lines = pre + lines
+    state.update(current=new, applied_batch=args.batch, applied_lines=lines, sent=None)
     save(bfile, state)
     return lines
