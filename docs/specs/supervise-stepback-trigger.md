@@ -40,7 +40,8 @@ document. Backtest artifacts:
 - **Floor**: no firing while spent_m < min_spent_h. It starts at 0.5 h (owner, 2026-10-15; §2a).
 - **Re-fire**: once per milestone per crossing. After a firing at ratio r_f, m re-arms only when:
   - ratio_m ≥ 1.5 × r_f (at 0% delivered: spent ≥ 1.5 × the spent at that firing; a reopen that
-    drops m to 0% counts as an infinite ratio); or
+    drops m to 0% counts as an infinite ratio). A zero-progress firing counts as r_f = T, so once
+    something is delivered the next firing needs ratio ≥ 1.5 × T (owner, 2026-10-15); or
   - m is re-planned (a `milestone.planned` that replaces it).
 
 ### Attribution
