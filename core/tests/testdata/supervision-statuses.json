@@ -1,6 +1,6 @@
 {
-  "description": "Delegated supervision: event streams -> challengeStatuses (packages/shared/src/investigation/supervision.ts). The Cardinal plugin's Python mirror runs the same cases. expected: every challenge.added of the stream, by seq, -> {status, ruling_seq, owner_seq}. Events carry the wire fields the derivation reads (seq, type, class, payload, producer.is_investigation_author).",
-  "version": 1,
+  "description": "Delegated supervision: event streams -> challengeStatuses (packages/shared/src/investigation/supervision.ts). The Cardinal plugin's Python mirror runs the same cases. expected: every challenge.added of the stream, by seq, -> {status, ruling_seq, owner_seq}. Events carry the wire fields the derivation reads (seq, type, class, payload, producer.is_investigation_author, and authority on owner.decided: only owner_decision overrules).",
+  "version": 2,
   "cases": [
     {
       "name": "no challenges: nothing to report",
@@ -189,7 +189,7 @@
     {
       "name": "conflicted: the worker names an owner decision (one that answers nothing does not overrule)",
       "events": [
-        { "seq": 1, "type": "owner.decided", "class": "owner", "payload": { "text": "Refactor the shared restore code while you are there." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } },
+        { "seq": 1, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Refactor the shared restore code while you are there." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } },
         { "seq": 2, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 3, "type": "acknowledged", "class": "control", "payload": { "ack_of": 2, "disposition": "declined", "note": "The owner asked for it (#1)." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 4, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 2, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
@@ -202,8 +202,8 @@
       "events": [
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
-        { "seq": 3, "type": "owner.decided", "class": "owner", "payload": { "text": "Keep the refactor.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } },
-        { "seq": 4, "type": "owner.decided", "class": "owner", "payload": { "text": "Really, keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
+        { "seq": 3, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Keep the refactor.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } },
+        { "seq": 4, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Really, keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
       "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 3 } }
     },
@@ -214,19 +214,19 @@
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "In scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 3, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting now." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
-        { "seq": 5, "type": "owner.decided", "class": "owner", "payload": { "text": "Do not revert.", "answers": 3 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
+        { "seq": 5, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Do not revert.", "answers": 3 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
       "expected": { "1": { "status": "overruled", "ruling_seq": 3, "owner_seq": 5 } }
     },
     {
       "name": "overruled: wins over conflicted",
       "events": [
-        { "seq": 1, "type": "owner.decided", "class": "owner", "payload": { "text": "Refactor it." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } },
+        { "seq": 1, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Refactor it." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } },
         { "seq": 2, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 3, "type": "acknowledged", "class": "control", "payload": { "ack_of": 2, "disposition": "declined", "note": "Owner asked." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 4, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 2, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 5, "type": "acknowledged", "class": "control", "payload": { "ack_of": 4, "disposition": "conflicts", "conflicts_with": 1, "note": "Owner asked." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
-        { "seq": 6, "type": "owner.decided", "class": "owner", "payload": { "text": "Keep it.", "answers": 2 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
+        { "seq": 6, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Keep it.", "answers": 2 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
       "expected": { "2": { "status": "overruled", "ruling_seq": 4, "owner_seq": 6 } }
     },
@@ -236,7 +236,7 @@
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
-        { "seq": 4, "type": "owner.decided", "class": "owner", "payload": { "text": "Put it back.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
+        { "seq": 4, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Put it back.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
       "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 4 } }
     },
@@ -246,7 +246,7 @@
         { "seq": 1, "type": "question.added", "class": "control", "payload": { "text": "Why restore?" }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 3, "type": "acknowledged", "class": "control", "payload": { "ack_of": 2, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
-        { "seq": 4, "type": "owner.decided", "class": "owner", "payload": { "text": "Because of the outage.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
+        { "seq": 4, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Because of the outage.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
       "expected": { "2": { "status": "accepted", "ruling_seq": null, "owner_seq": null } }
     },
@@ -259,6 +259,34 @@
         { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "Session b disagrees: it is in scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-b", "is_investigation_author": true } }
       ],
       "expected": { "1": { "status": "declined", "ruling_seq": null, "owner_seq": null } }
+    },
+    {
+      "name": "a relayed owner decision (owner_relayed) answering a challenge or its ruling does not overrule",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "It is in scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 4, "type": "owner.decided", "class": "owner", "authority": "owner_relayed", "payload": { "text": "Keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-sup", "is_investigation_author": true } },
+        { "seq": 5, "type": "owner.decided", "class": "owner", "authority": "owner_relayed", "payload": { "text": "Do not revert.", "answers": 3 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-sup", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "directive", "ruling_seq": 3, "owner_seq": null } }
+    },
+    {
+      "name": "an owner.decided without an authority does not overrule",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "owner.decided", "class": "owner", "payload": { "text": "Keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-sup", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null } }
+    },
+    {
+      "name": "the lowest web owner decision overrules, after a relayed one",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "owner.decided", "class": "owner", "authority": "owner_relayed", "payload": { "text": "Keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-sup", "is_investigation_author": true } },
+        { "seq": 3, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 3 } }
     },
     {
       "name": "several challenges in one stream are independent",

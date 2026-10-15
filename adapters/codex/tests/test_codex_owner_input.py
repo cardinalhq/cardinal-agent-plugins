@@ -234,6 +234,56 @@ class PromptCaptureTests(OwnerInputBase):
                          ["STAGED: waits for a prompt that reaches the model"])
 
 
+class OwnerRelayTests(OwnerInputBase):
+    """The owner's `approve` of a proposed owner decision (owner_relay): relayed
+    with this machine's key whether or not owner input is on; the outcome is
+    the systemMessage AND model context."""
+
+    def propose(self):
+        from cardinal_core import owner_relay
+        return owner_relay.propose(self.home, SESSION, "inv_" + "e" * 24, "9a8b7c6d-worker", "Only the cache layer.")
+
+    def test_approve_relays_and_reports_to_user_and_model(self):
+        self.setup_live(owner_input=False)
+        self.start()
+        entry = self.propose()
+        self.fake.routes["relay-owner-decision"] = (201, {"event": {
+            "investigation_id": "inv_" + "e" * 24, "seq": 57, "type": "owner.decided"}, "duplicate": False})
+        res = self.prompt(f"approve {entry['id']}")
+        out = self.out(res)
+        want = (f"Cardinal: sent your approved draft {entry['id']} to the worker (session 9a8b7c6d) as owner "
+                'decision #57: "Only the cache layer.".')
+        from cardinal_core import owner_relay
+        self.assertIn(want + " " + owner_relay.SEES_IT, out["systemMessage"])
+        self.assertIn(want, self.context(res))
+        self.assertNotIn(owner_relay.SEES_IT, self.context(res))   # the model gets the terse line
+        [req] = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
+        self.assertEqual(req["body"]["relay"]["supervisor_session_id"], SESSION)
+        self.assertEqual(req["headers"]["x-cardinalhq-api-key"], "ck_codex_test")
+        self.assertEqual(self.records(), [])
+
+    def test_decide_relays_the_owners_words(self):
+        from cardinal_core import owner_relay
+        self.setup_live(owner_input=False)
+        self.start()
+        owner_relay.add_target(self.home, SESSION, "inv_" + "e" * 24, "9a8b7c6d-worker")
+        self.fake.routes["relay-owner-decision"] = (201, {"event": {
+            "investigation_id": "inv_" + "e" * 24, "seq": 58, "type": "owner.decided"}, "duplicate": False})
+        out = self.out(self.prompt("decide: Stop after the cache fix."))
+        self.assertIn("sent your decision to the worker (session 9a8b7c6d) as owner decision #58", out["systemMessage"])
+        [req] = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
+        self.assertEqual(req["body"]["relay"]["source"], "verbatim")
+
+    def test_a_subagent_or_unrelated_prompt_relays_nothing(self):
+        self.setup_live(owner_input=False)
+        self.start()
+        self.propose()
+        self.prompt("approve", payload={**PROMPT, "agent_id": "01a12f88-a66f-7161-a44d-890bf33ab468"})
+        res = self.prompt("approve the plan")
+        self.assertNotIn("systemMessage", self.out(res))
+        self.assertFalse([r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")])
+
+
 class PromptContextTests(OwnerInputBase):
     def test_guidance_is_sent_once_and_again_only_when_it_changes(self):
         self.setup_live(owner_input=False)

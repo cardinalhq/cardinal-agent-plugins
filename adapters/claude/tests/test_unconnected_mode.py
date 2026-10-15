@@ -43,7 +43,7 @@ SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
 GATED_HOOKS = (
     "initiative-convention.py", "plan-state.py", "git-state.py", "limits-gate.py", "decision-prompt.py",
     "turn-usage.py", "plan-usage.py", "subagent-usage.py", "storyboard-discovery.py", "storyboard-edit-lookup.py",
-    "owner-input.py",
+    "owner-input.py", "owner-relay.py",
 )
 # Run in both modes: storyboards work before connect. storyboard-context.py
 # only rewrites a storyboard tool call's input locally (no network).
@@ -297,7 +297,8 @@ class SessionTextFromCoreTests(unittest.TestCase):
 class HookRegistrationTests(unittest.TestCase):
     def test_every_hook_is_classified_and_every_gated_hook_checks_the_connection(self):
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
-        commands = {h["command"].rsplit("/", 1)[-1] for groups in hooks.values() for g in groups for h in g["hooks"]}
+        commands = {h["command"].rsplit("/", 1)[-1].split()[0] for groups in hooks.values() for g in groups
+                    for h in g["hooks"]}
         self.assertEqual(commands, set(GATED_HOOKS) | set(STORYBOARD_HOOKS) | set(LOCAL_ONLY_HOOKS) | set(FAST_PATH_HOOKS),
                          "a new hook must be gated on _connection or listed as working unconnected")
         for sh in FAST_PATH_HOOKS:

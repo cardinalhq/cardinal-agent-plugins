@@ -1379,6 +1379,95 @@
       ]
     }
   },
+  "relayed_owner_decisions": {
+    "title": "Relayed owner decisions (the owner approves in the supervisor terminal)",
+    "group": "investigation",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "present",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "hook",
+          "event": "UserPromptSubmit",
+          "command": "/hooks/owner-relay\\.py$"
+        },
+        {
+          "kind": "hook",
+          "event": "Stop",
+          "command": "/hooks/owner-relay\\.py stop$"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/owner-relay.py",
+          "pattern": "owner_relay\\.handle_prompt_deferred\\("
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation propose-decision"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "hook",
+          "event": "UserPromptSubmit",
+          "command": "--event UserPromptSubmit\\b"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-codex-telemetry.py",
+          "pattern": "owner_relay\\.handle_prompt\\("
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation propose-decision"
+        }
+      ],
+      "cursor": [
+        {
+          "kind": "hook",
+          "event": "beforeSubmitPrompt",
+          "command": "--event beforeSubmitPrompt #"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-cursor-telemetry.py",
+          "pattern": "owner_relay\\.handle_prompt\\("
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation propose-decision"
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "hook",
+          "event": "BeforeAgent",
+          "command": "--event BeforeAgent #"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/cardinal-gemini-telemetry.py",
+          "pattern": "owner_relay\\.handle_prompt\\("
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "investigation propose-decision"
+        }
+      ]
+    },
+    "notes": {
+      "cursor": "Cursor's beforeSubmitPrompt shows the user a hook's words only for a blocked prompt, so a relay-form prompt is blocked with the outcome as user_message (the model never sees that prompt; the outcome is staged for its next tool call).",
+      "claude": "Claude Code fires UserPromptSubmit for scheduled-task, /loop and peer prompts too, with no origin in the payload: a detached verifier confirms from the transcript that a person typed it before anything is sent; the outcome is shown at Stop or with the next prompt."
+    }
+  },
   "connection_skills": {
     "title": "connect / disconnect / status skills",
     "group": "skills",
