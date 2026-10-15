@@ -424,15 +424,19 @@ def _ratio(spent: float, est: float, p: float) -> float:
 
 
 def rearm_threshold(last: list, r: float, s: float, p: float, e: float, th: dict) -> Optional[float]:
-    """HOLD (owner decision pending): THE place for the re-arm rule. After
-    a firing `last` = [r_f (None: infinite), s_f, p_f], the threshold m now
-    crosses, or None while it is not re-armed: at 0% after a 0% firing,
-    spent >= rearm x s_f; otherwise ratio >= rearm x r_f. A firing at 0%
-    has r_f infinite, so once progress makes the ratio finite the ratio rule
-    stays silent until m is re-planned (spec section 1, as accepted)."""
+    """THE place for the re-arm rule (owner, 2026-10-15). After a firing
+    `last` = [r_f (None: infinite), s_f, p_f], the threshold m now crosses,
+    or None while it is not re-armed:
+    - at 0% after a 0% firing: spent >= rearm x s_f;
+    - after a 0% firing, once something is delivered: ratio >= rearm x T (a
+      zero-progress firing counts as one at ratio T);
+    - otherwise ratio >= rearm x r_f, and a reopen back to 0% after a >0%
+      firing is an infinite ratio (it re-arms)."""
     rf, sf, pf = (math.inf if last[0] is None else last[0]), last[1], last[2]
-    if p == 0 and pf == 0:
-        return th["rearm"] * sf / e if s >= th["rearm"] * sf else None
+    if pf == 0:
+        if p == 0:
+            return th["rearm"] * sf / e if s >= th["rearm"] * sf else None
+        rf = th["T"]
     if r < th["rearm"] * rf:
         return None
     return th["rearm"] * rf if p > 0 else th["Z"]

@@ -129,11 +129,23 @@ class Engine(unittest.TestCase):
         self.assertEqual(r["firings"], [])
         d, r = step(d, 6, 90, ["b"])                # 1.5 h = 1.5 x 1.0
         self.assertEqual(len(r["firings"]), 1)
-        # After a 0% firing, progress makes the ratio finite: never >= 1.5 x infinity.
+        # After a 0% firing, progress re-arms the ratio rule at rearm x T (3x): 1.83 h at 25% is 3.67x.
         d, r = step(d, 7, 110, ["b"], [mk("b.1", "redone", 7)])
-        d, r = step(d, 8, 130, ["b"])
+        self.assertEqual([(f["at_seq"], f["snapshot"]["threshold"]) for f in r["firings"]], [(7, 3.0)])
+        d, r = step(d, 8, 130, ["b"])                # 2.17 h, 4.33x < 1.5 x 3.67x
         self.assertEqual(r["firings"], [])
-        self.assertGreater(r["firings"] or d["charged"]["b"] / 2 / 0.25, 3)
+
+    def test_a_zero_progress_firing_counts_as_one_at_T(self):
+        d = direction(plan(("a", 1, 2, 2), ("b", 2, 4, 4)))
+        fired = []
+        for seq, minutes in ((1, 0), (2, 20), (3, 40), (4, 60)):
+            d, r = step(d, seq, minutes, ["b"])
+            fired += [(f["at_seq"], f["snapshot"]["delivered"], f["snapshot"]["threshold"]) for f in r["firings"]]
+        self.assertEqual(fired, [(4, 0, 0.5)])                  # 1.0 h >= Z x 2 h at 0%
+        d, r = step(d, 5, 80, ["b"], [mk("b.1", "done", 5)])    # 1.33 h at 25%: 2.67x, past T but under 3x
+        self.assertEqual(r["firings"], [])
+        d, r = step(d, 6, 100, ["b"])                           # 1.67 h: 3.33x >= rearm x T
+        self.assertEqual([(f["at_seq"], f["snapshot"]["threshold"]) for f in r["firings"]], [(6, 3.0)])
 
     def test_done_milestones_are_not_active_and_backstop(self):
         d = direction(plan(("a", 0.1, 0.2, 2), ("b", 4, 8, 4)))
@@ -206,7 +218,8 @@ class WingbeatReplay(unittest.TestCase):
 
     def test_other_thresholds(self):
         fx = fixture("wingbeat")
-        self.assertEqual([s for s, _, _ in replay(fx, T=1.5)[0]], [255, 276, 280, 299, 320, 330])
+        # #333: chunked-lane after its 0% firing at #330 (#332 re-met .3), 2.86x >= rearm x T (owner's re-arm rule).
+        self.assertEqual([s for s, _, _ in replay(fx, T=1.5)[0]], [255, 276, 280, 299, 320, 330, 333])
         self.assertEqual([s for s, _, _ in replay(fx, T=3.0)[0]], [323, 330])
         self.assertEqual([s for s, _, _ in replay(fx, T=2.0, min_spent_h=0)[0]], [270, 306, 323, 330])
 
@@ -247,7 +260,8 @@ class HealthyReplay(unittest.TestCase):
 
     def test_at_01_scale(self):
         fx = fixture("healthy")
-        self.assertEqual([s for s, _, _ in replay(fx, scale=0.1, min_spent_h=0)[0]], [19, 69, 97, 99])
+        # #73 and #102: progress after a 0% firing re-arms at rearm x T (3.56x, 3.85x).
+        self.assertEqual([s for s, _, _ in replay(fx, scale=0.1, min_spent_h=0)[0]], [19, 69, 73, 97, 99, 102])
         self.assertEqual([s for s, _, _ in replay(fx, scale=0.1)[0]], [77, 99, 115])
 
     def test_fixtures_hold_no_event_text(self):
@@ -1366,6 +1380,18 @@ class FixRound(CLIBase):
         with patch.object(sync, "_post", side_effect=post):
             _REAL_READ(MEMBER, SUP_INV, after=0, client="t", class_="supervision")
         self.assertEqual((sent["tool"], sent["body"]["class"]), ("read-investigation-events", "supervision"))
+
+    def test_the_retry_hash_leaves_out_session_and_client(self):
+        self.opened()
+        ev = [{"type": "stepback.fired", "payload": {"direction_id": self.state()["current"]["direction_id"],
+                                                     "scope": "backstop", "worker_active_h": 1, "snapshot": {
+                                                         "spent_h": 1, "estimate_h": 1, "delivered": 0, "ratio": None,
+                                                         "threshold": 999_999}}}]
+        own = {"investigation_id": SUP_INV, "session_id": SUP, "conn": MEMBER, "client": "codex/1"}
+        first = bud.record(own, "sup:t:1", ev)
+        again = bud.record({**own, "session_id": "sup-other", "client": "codex/2"}, "sup:t:1", ev)
+        self.assertEqual(first, again)
+        self.assertEqual(self.server.types().count("stepback.fired"), 2)      # the opening one and this one
 
     def test_storyboards_unavailable_is_the_old_server_path(self):
         self.server.fail = sync.ServerError(501, {"error": "storyboards_unavailable"}, "x")
