@@ -37,6 +37,8 @@ document. Backtest artifacts:
   and less than 100% delivered.
 - **Fire** when ratio_m ≥ T. T starts at 2.
 - **Zero progress**: when delivered_m = 0, fire when spent_m ≥ Z × estimate_m. Z starts at 0.5.
+- **Floor**: no firing while spent_m < min_spent_h. It starts at 0 (the rule as accepted); §2a
+  shows the case for 0.5, which awaits the owner.
 - **Re-fire**: once per milestone per crossing. After a firing at ratio r_f, m re-arms only when:
   - ratio_m ≥ 1.5 × r_f (at 0% delivered: spent ≥ 1.5 × the spent at that firing; a reopen that
     drops m to 0% counts as an infinite ratio); or
@@ -124,6 +126,41 @@ milestone that was actually burning.
   #323 and #330: 4 step backs over about 3 active hours. Only #270 was run.
 - **Next.** Before shipping, backtest one healthy session to measure false alarms (§6).
 
+## 2a. Backtest: a healthy session (lakerunner topm P0, inv_125102bcc5c974f4fffd5150, #1–#140)
+
+The same method. The blind planner saw only BOOTSTRAP.md and PLAN.md (both written before the
+session), events #1–#2 and the code at 5d65a5129. The session has 118 worker events, 5.34
+worker-active hours, no revised or retracted events, and steady red→green progress.
+
+- **Plan**: 9 milestones (one per P0 item), 37 deliverables, P50 46 h, P80 78.5 h.
+- **Marks**: 32 of 37 met. **Tags**: 18 `none` (15% of active time) and 15 multi-tagged.
+- **As planned**: 0 firings at 1.5×, 2× and 3×. The backstop is at 157 h. The §6 gate passes.
+- **But the plan is 8.6× the actual hours**: per milestone, actual ÷ P50 runs from 0.01 to 0.16. The
+  planner had no agent pace to anchor on, so it planned at human pace. At that calibration the
+  trigger has no power either way. The wingbeat planner had agent timings from the record before
+  #199.
+- **Sensitivity** (the one plan scaled uniformly, not a re-plan):
+
+| Plan scale (P50 total) | 2× firings | Detail |
+|---|---|---|
+| 1.0–0.2 (46–9.2 h) | 0 | — |
+| 0.15 (6.9 h) | 2 | Both zero-progress firings: p0-7 at #69 (0.45 h, after the worker's own red test reopened its only done item) and p0-8 at #101 (0.27 h) |
+| 0.1 (4.6 h, about the actual) | 4 | #19, #69, #97, #99 |
+| 0.15 with `min_spent_h` 0.5 | 0 | — |
+| 0.1 with `min_spent_h` 0.5 | 3 | #77, #99, #115 |
+
+- **Wingbeat with `min_spent_h` 0.5**: unchanged, #270, #306, #323, #330. The smallest charge at a
+  firing was 1.16 h.
+
+**Consequences**:
+
+- The estimator prompt (§3, written by `budget pass estimator`) asks for agent-active hours and
+  gives the worker's measured pace: hours per deliverable from the record so far, and from
+  `direction.closed` across the owner's investigations. With neither, the direction is marked
+  `uncalibrated` in `direction.set`, and the CLI says so on its status line.
+- `min_spent_h` is pinned in `direction.set`. Recommendation: 0.5. Until the owner adopts it, the
+  default is 0.
+
 ## 3. Milestones and supervisor duties
 
 **Estimator rules.** `budget --set --plan <file>` validates the estimator's JSON. Each error names
@@ -173,7 +210,7 @@ The existing semantic types do not fit, for the earlier proposal's reasons:
 
 | Type | Payload (server-validated) |
 |---|---|
-| `direction.set` | `{direction_id, question, subject:{investigation_id, since_seq}, worker_session_id, reference_class, worker_estimate?, thresholds:{T, Z, rearm, backstop, idle_min}}` |
+| `direction.set` | `{direction_id, question, subject:{investigation_id, since_seq}, worker_session_id, reference_class, calibration: calibrated\|uncalibrated, worker_estimate?, thresholds:{T, Z, rearm, backstop, idle_min, min_spent_h}}` |
 | `milestone.planned` | `{direction_id, milestone_id, title, p50_h, p80_h, basis, deliverables:[{id, done_when}], replaces?}` |
 | `work.attributed` | One per review batch: `{direction_id, batch, through_seq, tags:{"<seq>": [milestone…] or "none"}, charged_h:{milestone: h}}`. `charged_h` is derived and can be recomputed. |
 | `deliverable.marked` | `{direction_id, milestone_id, deliverable_id, mark: done\|reopened\|redone, refs:[{investigation_id, seq} or {evidence_id}]}` |
@@ -209,6 +246,39 @@ The existing semantic types do not fit, for the earlier proposal's reasons:
   - the route and its validation;
   - the `reader.ts` scope;
   - the search and projection exclusions.
+
+### 4a. Wire contract (v1)
+
+Both repos build to this; neither changes it without the other.
+
+**Write**: `record-supervision`, modeled on `checkpoint-investigation` (batch, idempotent) and
+`record-owner-input` (author-only).
+
+```
+{investigation_id, session_id, idempotency_key: [A-Za-z0-9_.:-]{1,128},
+ events: [{type, payload}]  (1–50)}
+→ 200 {investigation_id, duplicate: bool, events: [{seq, type, at}], head_seq}
+```
+
+| Condition | Response |
+|---|---|
+| caller is not an author of `investigation_id` | 403 `not_author` |
+| a type outside class `supervision` | 400 `unknown_event_type` |
+| a payload fails its strict schema | 400 `invalid_payload` with the path |
+| a cross-investigation ref the caller cannot read, or `seq > head_seq` | 400 `ref_not_readable` / `ref_out_of_range` |
+| `fired_seq` / `verdict_seq` not a `stepback.fired` / `stepback.verdict` in this investigation | 400 `invalid_payload` |
+| same key and same body | 200 with the stored events, `duplicate: true` |
+| same key, different body | 409 `idempotency_conflict` |
+| database not migrated (CHECK violation) | 400 `supervision_unsupported`; the plugin keeps its cache and says once that the server is too old |
+
+**Limits**: `direction_id` is `dir_[0-9a-f]{16}`; milestone ids `[a-z0-9-]{1,24}`, deliverable ids
+`<milestone>.<n>`; text ≤ 1,000 characters, titles ≤ 200; 1–20 milestones per direction; 2–6
+deliverables each; `work.attributed.tags` ≤ 500 keys, every key ≤ `through_seq` ≤ the subject's
+`head_seq`; refs are `{investigation_id, seq}` (checked) or `{evidence_id: ev_[0-9a-f]{12}}`
+(passed through). `thresholds` is `{T, Z, rearm, backstop, idle_min, min_spent_h}`.
+
+**Read**: the existing read route with `class: "supervision"`. The author sees the class, a grantee
+only with `supervision:read`, and org members never.
 
 ## 5. Timeline visualization (v1, author-only)
 
@@ -252,7 +322,7 @@ It moves T by 0.25×, within 1.5–3×:
 Z moves within 0.3–0.8. The owner approves each change, and new directions pin the thresholds in
 `direction.set`, so any firing replays under its own rule.
 
-**Before shipping.** Run the wingbeat method on one healthy session: a ≥100-event investigation
+**Before shipping** (done, §2a). Run the wingbeat method on one healthy session: a ≥100-event investigation
 with no rework or pivot. It passes when 2× fires at most once per 3 worker-active hours, and each
 fresh pass answers `on_track` or finds something real.
 
@@ -263,7 +333,8 @@ becomes a core test:
 - at 1.5×, the first firing is at #255;
 - the re-arm sequence is #270, #306, #323, #330.
 
-The healthy fixture joins it, and expects no firing at 2×.
+The healthy fixture joins it: no firing at 2× as planned, 2 firings at 0.15× scale, and 0 at 0.15×
+with `min_spent_h` 0.5.
 
 ## 7. Token bloat
 
