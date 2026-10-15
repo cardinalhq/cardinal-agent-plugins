@@ -410,3 +410,155 @@ About 60 come back: one sentence on `reviewed` tagging and marking. Its errors t
 | 3 | Re-fire rule | **As specified.** It gives 4 firings in wingbeat's 6.1 h. Add a 1-active-hour cooldown per direction only if the pilot shows clustering. |
 | 4 | Same-person visibility caveat | **Accept and document.** No session-level access control. |
 | 5 | Tagging cost in the review loop | **Required on every commit**, with ranges and `all:<m>`. 99 of 103 wingbeat events took a single tag (6 of them `none`). Without tags, rates blur (§2). |
+| 6 | Floor `min_spent_h` (added after §2a) | **0.5 h.** |
+| 7 | Re-arm after a zero-progress firing (added after review) | **Counts as a firing at T**: once something is delivered, the next needs ratio ≥ 1.5 × T. |
+
+## Appendix A. The math, as built
+
+This states exactly what `core/cardinal_core/investigation_budget.py` computes (`delivered`,
+`_ratio`, `rearm_threshold`, `_evaluate`, `apply_batch`, `calibrate_lines`).
+
+### A.1 Notation
+
+| Symbol | Meaning | Default |
+|---|---|---|
+| i = 1…n | the worker's events since `since_seq`, in order, at times t_i | — |
+| τ(i) | the milestones event i was tagged with in review (`none` = ∅) | — |
+| e_m, u_m | milestone m's P50 and P80 hours | — |
+| k_m | m's number of deliverables (2–6) | — |
+| T | ratio threshold | 2 |
+| Z | zero-progress share of the estimate | 0.5 |
+| F | floor: minimum hours charged before any milestone firing | 0.5 h |
+| ρ | re-arm multiple | 1.5 |
+| β | backstop multiple of total P80 | 2 |
+| I | idle gap | 30 min |
+
+### A.2 Active time and charging
+
+The gap before event i is the active time between t_{i−1} and t_i. Every captured tool call (the
+spool) between them is a timestamp too, so a quiet stretch with tool calls still counts:
+
+    points  = sorted{ t_{i−1}, spool times in (t_{i−1}, t_i), t_i }
+    g_i     = Σ over consecutive points (a, b) of (b − a) · [b − a ≤ I]
+
+The gap is charged to the milestones that event i advances, split evenly:
+
+    c_m(i) = Σ_{j ≤ i, m ∈ τ(j)}  g_j / |τ(j)|        (hours charged to m)
+    A(i)   = Σ_{j ≤ i} g_j                              (all active hours, incl. none)
+
+Example: event #255 arrives 12 minutes after #254, with tool calls in between, and is tagged
+`chunked-lane+ci-image`. Each milestone gets 0.1 h. A 45-minute gap with no tool calls in it
+counts 0.
+
+### A.3 Delivered
+
+    p_m(i) = |{ d ∈ D_m : d's latest mark at or before event i is done or redone }| / k_m
+
+A mark is done → reopened → redone, and each carries a ref. A reopen takes the deliverable back out
+of p.
+
+### A.4 The ratio
+
+    r_m = (c_m / e_m) / p_m            (∞ when p_m = 0)
+
+Equivalently, with **earned hours** E_m = e_m · p_m (what the plan says the delivered part should
+have cost):
+
+    r_m = c_m / E_m        and        r_m ≥ T  ⇔  c_m ≥ T · e_m · p_m
+
+So the trigger fires when a milestone has spent T times the hours it has earned. On the burn chart
+(x = hours charged, y = % delivered), the plan is the line y = x / e_m and the threshold line is
+y = x / (T · e_m). It fires when the step line of actuals crosses to the right of the threshold
+line.
+
+### A.5 First firing
+
+Evaluated at each event i, for each m ∈ τ(i) with p_m < 1:
+
+    fire  ⇔  c_m ≥ F  ∧  [ (p_m > 0 ∧ r_m ≥ T)  ∨  (p_m = 0 ∧ c_m ≥ Z · e_m) ]
+
+Only milestones charged at event i are evaluated, so a milestone nobody is working on never fires.
+
+### A.6 Re-arm
+
+After m fires with (r_f, c_f, p_f), it fires again only when the A.5 condition holds **and**:
+
+| Last firing | Now | Also needs |
+|---|---|---|
+| p_f = 0 | p = 0 | c_m ≥ ρ · c_f (50% more hours, still nothing delivered) |
+| p_f = 0 | p > 0 | r_m ≥ ρ · T (a zero-progress firing counts as one at T: 3× at the defaults) |
+| p_f > 0 | p > 0 | r_m ≥ ρ · r_f |
+| p_f > 0 | p = 0 (reopened to nothing) | always (r = ∞) |
+
+A re-plan (`--amend`, a `milestone.planned` that replaces m) clears the last firing.
+
+**One firing per milestone per review pass.** If m crosses again later in the same pass, that
+firing moves to the later crossing: it keeps its first `at_seq`, gains `last_seq`, and takes the
+later snapshot and baseline. So the size of the page never drops a crossing. A large page merges
+crossings into one step back, which sees the state at the end of the page.
+
+### A.7 Backstop
+
+    A ≥ β · Σ_m u_m      → one direction-wide step back (once per direction; a re-plan resets it)
+
+It is the only rule that counts `none` time. Per-milestone rates cannot see work outside the
+plan.
+
+### A.8 Worked examples (the fixtures)
+
+**Wingbeat chunked-lane at #270**: e = 2.0 h, k = 4, 1 done, c = 1.16 h.
+
+    p = 1/4,  E = 2.0 × 0.25 = 0.5 h,  r = 1.16 / 0.5 = 2.32 (2.33 from unrounded c)
+    c ≥ F (1.16 ≥ 0.5) and r ≥ 2  → FIRE
+
+At that pace the milestone would take 2.32 × 2.0 ≈ 4.6 h.
+
+**Wingbeat aws-native re-fire**: e = 3.0 h, 1 of 4 done.
+
+    #306: c = 1.61 → r = (1.61/3)/0.25 = 2.15 → FIRE (first); next bar ρ · 2.15 = 3.22
+    #323: c = 2.50 → r = (2.50/3)/0.25 = 3.33 ≥ 3.22 → FIRE
+
+**Wingbeat chunked-lane at #330**: its only done deliverable was reopened, so p = 0 and r = ∞, and
+c = 1.42 ≥ Z · e = 1.0. Its last firing (#270) was at p > 0, so it re-arms → FIRE.
+
+**Healthy p0-8 with the plan scaled to 0.15×** (what the floor stops): e = 3.5 × 0.15 = 0.525 h,
+nothing delivered, c = 0.27 h.
+
+    Z · e = 0.26 ≤ 0.27  → would fire after 16 minutes of work
+    c < F = 0.5          → no firing
+
+### A.9 Two properties worth knowing
+
+**Scale.** Multiply every estimate by k and every ratio is divided by k (r = c / (k·e·p)). The
+zero-progress bar Z·k·e and the backstop β·k·Σu scale by k. A plan that is 8.6× too generous (§2a)
+needs 8.6× the real overrun before it fires. That is why the estimator's pace matters more than T.
+
+**Earliest detection of a steady overrun.** Suppose a milestone really takes X × e_m, with its k
+deliverables landing evenly (one every X·e/k hours). Then r = X from the first deliverable on. For
+X ≥ T, the first firing comes at about
+
+    c* = max( F,  min( Z · e,  X · e / k ) )
+
+That is, at the zero-progress bar if the first deliverable takes longer than Z·e, otherwise when
+the first deliverable lands, and never before F. For wingbeat's chunked-lane (e = 2, k = 4, an
+actual pace of about X = 2.3): X·e/k ≈ 1.16 h < Z·e = 1.0? No, 1.16 > 1.0. So the zero-progress
+bar would have come first at 1.0 h, but the first deliverable landed earlier in the record (it was
+reached faster than the average pace), and the ratio rule fired at 1.16 h. Deliverables don't
+arrive evenly, so read c* as a rough guide.
+
+### A.10 Calibration (`budget calibrate`)
+
+Each firing is labeled from its verdict v and outcome o:
+
+    noise   ⇔  v = on_track  ∨  o = declined
+    useful  ⇔  v ≠ on_track  ∧  o ∈ {accepted, changed_constraint}
+    other   ⇔  any other recorded outcome
+
+With L = the last 5 labeled firings, and misses = milestones listed in `direction.closed.missed`:
+
+    T ← min(3,   T + 0.25)   if noise(L) ≥ 4
+    T ← max(1.5, T − 0.25)   if misses > 0 ∧ noise(L) ≤ 1
+    Z: the same rule over the last 5 labeled zero-progress firings, in steps of 0.1 within [0.3, 0.8]
+
+Each change is a suggestion that the owner approves. The thresholds in force are pinned in each
+`direction.set`, so a firing always replays under its own rule.
