@@ -49,8 +49,8 @@ on stdin:
 gemini -e none --policy <this-skill-directory>/stepback-policy.toml --include-directories <code checkout> --skip-trust --approval-mode default -p "Answer the question at the end of the brief above." < <the copy>
 ```
 
-Keep every flag: the policy leaves it only file reads and searches (headless Gemini can
-otherwise leave plan mode into YOLO and write), and `-e none` drops Cardinal's tools and hooks.
+Keep every flag: the policy leaves it only file reads and searches (otherwise headless Gemini
+can write), and `-e none` drops Cardinal's tools and hooks.
 If it fails, tell the owner the step back needs a Claude supervisor, and keep the plan and its
 review.
 

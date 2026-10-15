@@ -40,8 +40,8 @@ refs: earlier ids or "#<seq>". An id stays the same in its later events. Text <=
 
 BUDGET_HELP = """\
 The supervisor's plan for the worker's current direction and its step-back trigger (supervise
-skill, "Step backs"; docs/specs/supervise-stepback-trigger.md). The worker never sees it. Records
-go to your own investigation (--session) as supervision events; --budget-file is their cache.
+skill, "Step backs"). The worker never sees it. Records go to your own investigation (--session);
+--budget-file is their cache.
   --set --plan F --question Q --worker-session W --session S [--since-seq N]   a new direction
   --set --amend --plan F                                                      re-plan its milestones
   pass estimator|stepback --brief F [--milestone M|all]                       write a fresh pass's brief copy

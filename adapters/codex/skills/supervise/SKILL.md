@@ -53,11 +53,9 @@ wrote:
 codex exec --ignore-user-config --ignore-rules --disable hooks --disable apps --disable plugins --sandbox read-only --ephemeral -C <code checkout> - < <the copy>
 ```
 
-Keep every flag: the sandbox covers only shell commands, and your config's MCP servers, apps
-and hooks would give the pass write tools and Cardinal context.
-
-Its final message is the answer. It needs network: ask for it once, with the Cardinal
-commands. Run the two passes one after the other. If it fails, tell the owner the step back
+Keep every flag: the sandbox covers only shell commands; your config's MCP servers, apps and
+hooks would give the pass write tools and Cardinal context. Its final message is the answer.
+It needs network: ask once, with the Cardinal commands. Run the two passes one after the other. If it fails, tell the owner the step back
 needs a Claude supervisor, and keep the plan and its review.
 
 ## Doing your own checks

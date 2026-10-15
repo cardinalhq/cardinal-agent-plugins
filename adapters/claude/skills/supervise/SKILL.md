@@ -45,10 +45,9 @@ their next prompt. Run nothing to send or approve it. No Cardinal line means not
 
 ## Fresh-context passes (step backs)
 
-Run each pass (CORE.md, Step backs) as a `cardinal:stepback` subagent (it can only read and
-search files, and gets no storyboard context). Its prompt is only the path of the copy `budget
-pass` wrote and the code's path: never the event stream or your own view. Start the estimator and the opening step
-back in one message so they run in parallel.
+Run each pass (CORE.md, Step backs) as a `cardinal:stepback` subagent whose prompt is only the
+path of the copy `budget pass` wrote and the code's path: never the event stream or your own
+view. Start the estimator and the opening step back in one message so they run in parallel.
 
 ## Doing your own checks
 
