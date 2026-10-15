@@ -88,10 +88,10 @@ class ClaudeText(unittest.TestCase):
         self.assertNotIn("sandbox", text)
 
     def test_the_question_line_only_until_it_is_stated(self):
-        self.assertIn("record it with", claude())
-        self.assertNotIn("record it with", claude(binding(question_status="stated")))
-        self.assertNotIn("record it with", claude(question_stated=True))
-        self.assertIn("record it with", claude(binding(question_status="stated"), question_stated=False))
+        self.assertIn("record a concise, one-line description", claude())
+        self.assertNotIn("record a concise, one-line description", claude(binding(question_status="stated")))
+        self.assertNotIn("record a concise, one-line description", claude(question_stated=True))
+        self.assertIn("record a concise, one-line description", claude(binding(question_status="stated"), question_stated=False))
 
     def test_owner_input_sentence_only_when_recorded(self):
         told = owner_input.DISCLOSURE.format(inv=INV)

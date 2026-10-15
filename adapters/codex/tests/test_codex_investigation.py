@@ -137,6 +137,27 @@ class InvestigationTests(unittest.TestCase):
         self.assertNotIn("Do not offer again", ctx)
         self.assertNotIn("automatically projects", ctx)
 
+    def test_provisional_title_is_reminded_until_cli_names_it(self):
+        self.setup_live()
+        self.fake.routes["ensure-session-investigation"][1]["question_status"] = "provisional"
+        self.start()
+        post = {**SESSION_START, "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "git status --short"}, "tool_response": "",
+                "tool_use_id": "call_title"}
+        delivered = self.run_hook("ToolEvidence", post, CARDINAL_INVESTIGATION_POLLER="0")
+        self.assertIn("default title", delivered.stdout)
+        self.assertIn(str(CLI), delivered.stdout)
+        self.assertNotIn("default title", self.run_hook("ToolEvidence", post,
+                                                       CARDINAL_INVESTIGATION_POLLER="0").stdout)
+        self.fake.routes["set-investigation-question"] = (200, {
+            "investigation_id": INV, "question_status": "stated"})
+        named = self.cli("question", "Fix missing investigation titles", "--json")
+        self.assertEqual(named.returncode, 0, named.stderr)
+        binding_path = self.home / ".cardinal" / "investigations" / "sessions" / f"{SESSION}.json"
+        self.assertEqual(json.loads(binding_path.read_text())["question_status"], "stated")
+        self.assertNotIn("default title", self.run_hook("ToolEvidence", post,
+                                                       CARDINAL_INVESTIGATION_POLLER="0").stdout)
+
     def test_joined_non_author_cannot_checkpoint(self):
         self.setup_live(author=False)
         ctx = self.start()
