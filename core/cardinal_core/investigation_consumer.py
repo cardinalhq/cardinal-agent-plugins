@@ -123,7 +123,8 @@ def reviewed(conn: dict, path: Path, batch: str) -> dict:
         state = load(path, conn)
         pending = state.get("pending")
         if not pending or pending.get("batch") != batch:
-            raise ValueError("batch is not the outstanding read; cursor unchanged")
+            raise ValueError("--batch is not the outstanding read (cursor unchanged): pass the batch of the page you "
+                             "read last, or read it again with --cursor-file")
         state["after"] = pending["next_after"]
         state["pending"] = None
         private_write(path, state)
