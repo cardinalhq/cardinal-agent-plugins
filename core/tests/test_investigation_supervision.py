@@ -3,12 +3,15 @@
 import contextlib
 import hashlib
 import http.client
+import http.server
 import io
 import json
 import os
 import socket
 import ssl
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -573,10 +576,112 @@ class FollowReader(Base):
         self.assertIn("#2", out.getvalue())
         self.assertNotIn("#1 ", out.getvalue())
 
-    def test_cursor_requires_auto_review_and_grant_partial_display_never_skips(self):
-        args = self.args("--cursor-file", str(self.home / "cursor"), "--follow")
-        with self.assertRaisesRegex(ValueError, "--auto-review"):
+    def test_watch_starts_at_committed_review_and_never_writes(self):
+        path = self.home / "cursor"
+        first = dict(investigation_id=INV, events=[event(1), event(2)], last_seq=2, head_seq=2, page_size=2)
+        with patch.object(ie, "read_events", return_value=first), contextlib.redirect_stdout(io.StringIO()):
+            consumer.reviewed(GRANT, path, consumer.read(GRANT, path, client="test")["batch"])
+        before = path.read_bytes()
+        args = self.args("--cursor-file", str(path), "--follow", "--timeout", "60")
+        # Re-armed twice: each arm starts after #2 (reviewed), never at 0, and stops on the idle pause.
+        for _ in range(2):
+            with patch.object(ie, "read_events", return_value=dict(
+                investigation_id=INV, events=[event(3)], last_seq=3, head_seq=3, page_size=1)) as read, patch.object(
+                reader, "pause", side_effect=KeyboardInterrupt
+            ), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(reader.run(args, GRANT, INV, client="test"), 0)
+            self.assertEqual(read.call_args_list[0].kwargs["after"], 2)
+            self.assertIn("#3", out.getvalue())
+            self.assertNotIn("#1 ", out.getvalue())
+        self.assertEqual(path.read_bytes(), before)
+
+    def watch(self, path, page, conn=GRANT):
+        """One watch arm over `page`, stopped on its idle pause: (after it read from, its output)."""
+        args = self.args("--cursor-file", str(path), "--follow", "--timeout", "60")
+        with patch.object(ie, "read_events", side_effect=lambda *a, **k: dict(page)) as read, patch.object(
+            reader, "pause", side_effect=KeyboardInterrupt
+        ), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(reader.run(args, conn, INV, client="test"), 0)
+        return read.call_args_list[0].kwargs["after"], out.getvalue()
+
+    def test_watch_signals_a_pending_page_until_it_is_committed(self):
+        path = self.home / "cursor"
+        first = dict(investigation_id=INV, events=[event(1), event(2)], last_seq=2, head_seq=2, page_size=2)
+        third = dict(investigation_id=INV, events=[event(3)], last_seq=3, head_seq=3, page_size=1)
+        with patch.object(ie, "read_events", return_value=first):
+            consumer.reviewed(GRANT, path, consumer.read(GRANT, path, client="test")["batch"])
+        with patch.object(ie, "read_events", return_value=third):
+            batch = consumer.read(GRANT, path, client="test")["batch"]   # read, not yet reviewed
+        pending = path.read_bytes()
+        for _ in range(2):   # re-armed before the review commits: #3 is signalled again
+            after, out = self.watch(path, third)
+            self.assertEqual(after, 2)
+            self.assertIn("#3", out)
+        self.assertEqual(path.read_bytes(), pending)
+        consumer.reviewed(GRANT, path, batch)
+        after, out = self.watch(path, dict(investigation_id=INV, events=[], last_seq=3, head_seq=3, page_size=0))
+        self.assertEqual((after, out), (3, ""))
+
+    def test_watch_without_a_cursor_file_starts_at_0_and_creates_nothing(self):
+        path = self.home / "absent" / "cursor.json"
+        after, out = self.watch(path, dict(investigation_id=INV, events=[event(1)], last_seq=1, head_seq=1,
+                                           page_size=1))
+        self.assertEqual(after, 0)
+        self.assertIn("#1", out)
+        self.assertFalse(path.parent.exists())
+        path = self.home / "cursor.json"
+        self.watch(path, dict(investigation_id=INV, events=[], last_seq=0, head_seq=0, page_size=0))
+        self.assertEqual(sorted(p.name for p in self.home.iterdir() if p.name.startswith("cursor")), [])
+
+    def test_watch_refuses_another_investigations_cursor(self):
+        path = self.home / "cursor"
+        other = {**GRANT, "investigation_id": OTHER}
+        with patch.object(ie, "read_events", return_value=dict(
+                investigation_id=OTHER, events=[event(1)], last_seq=1, head_seq=1, page_size=1)):
+            consumer.read(other, path, client="test")
+        args = self.args("--cursor-file", str(path), "--follow", "--timeout", "60")
+        with patch.object(ie, "read_events") as read, self.assertRaisesRegex(ValueError, "another investigation"):
             reader.run(args, GRANT, INV, client="test")
+        read.assert_not_called()
+
+    def test_watch_max_1_returns_with_the_whole_first_page_from_a_server(self):
+        events = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+                shown = [e for e in events if e["seq"] > body["after"]][: body["limit"]]
+                data = json.dumps({"investigation_id": INV, "events": shown,
+                                   "next_after": shown[-1]["seq"] if shown else body["after"],
+                                   "head_seq": len(events)}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        conn = {**GRANT, "origin": f"http://127.0.0.1:{server.server_port}"}
+        path = self.home / "cursor"
+        events.extend(event(n, "cue.added") for n in (1, 2))
+        consumer.reviewed(conn, path, consumer.read(conn, path, client="test")["batch"])
+        # Three events arrive while the watch waits; it returns on that page, all three printed.
+        threading.Timer(0.5, lambda: events.extend(event(n, "cue.added") for n in (3, 4, 5))).start()
+        args = self.args("--cursor-file", str(path), "--follow", "--timeout", "600", "--max", "1", "--interval", "2")
+        started = time.monotonic()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(reader.run(args, conn, INV, client="test"), 0)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual([line.split()[0] for line in out.getvalue().splitlines()], ["#3", "#4", "#5"])
+        self.assertEqual(consumer.private_read(path)["after"], 2)
+
+    def test_cursor_requires_grant_partial_display_never_skips(self):
+        args = self.args("--cursor-file", str(self.home / "cursor"), "--follow")
         with self.assertRaisesRegex(ValueError, "scoped credential"):
             reader.run(args, MEMBER, INV, client="test")
         args.auto_review, args.max = True, 1

@@ -177,9 +177,10 @@ class AckAndSupervisionWording(unittest.TestCase):
 
 class WatchGuidance(unittest.TestCase):
     def test_the_watch_command(self):
-        self.assertEqual(it.watch_command(INV),
-                         f"cardinal-storyboard investigation events {INV} --follow --json --fields compact")
-        self.assertIn("--credential-file '/tmp/my grant.json' --follow", it.watch_command(INV, credential_file="/tmp/my grant.json"))
+        self.assertEqual(it.watch_command(INV), f"cardinal-storyboard investigation events {INV} "
+                         f"--cursor-file ~/.cardinal/supervise/{INV}/cursor.json --follow")
+        self.assertIn("--credential-file '/tmp/my grant.json' --cursor-file /tmp/cursor.json --follow",
+                      it.watch_command(INV, credential_file="/tmp/my grant.json"))
 
     def test_the_guidance_says_everything_a_supervisor_needs(self):
         g = " ".join(it.WATCH_GUIDANCE.split())   # as one line, whatever the wrapping
@@ -238,6 +239,9 @@ class GrantPrintsTheWatchLine(unittest.TestCase):
         code, _, err = self.run_grant("--out", str(path))
         self.assertEqual(code, 0, err)
         self.assertIn(it.watch_command(INV, credential_file=str(path)), err)
+        line = next(x for x in err.splitlines() if "watches it with" in x)
+        self.assertIn(f"--credential-file {path} --cursor-file {self.home / 'cursor.json'} --follow`", line)
+        self.assertNotIn("--json", line)
 
 
 if __name__ == "__main__":
