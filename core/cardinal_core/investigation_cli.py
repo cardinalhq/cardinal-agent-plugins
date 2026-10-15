@@ -979,8 +979,9 @@ def build_parser(wiring, session_env=()):
         if action in ("events", "reviewed"):
             p.add_argument(
                 "--cursor-file", type=Path,
-                help="#190 durable pending-page review state (requires grant); with --follow and no "
-                     "--auto-review, a watch from the committed position",
+                help="#190 durable pending-page review state (requires grant)"
+                     + ("; with --follow and no --auto-review, a watch from the committed position"
+                        if action == "events" else ""),
             )
         if action == "repos":
             p.add_argument("--cwd", action="append", default=[], help="checkout to attach; repeat for multiple repos; saved edits are replayed too")

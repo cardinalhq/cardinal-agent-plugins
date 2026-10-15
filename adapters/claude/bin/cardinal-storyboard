@@ -104,7 +104,7 @@ Commands:
       Watching another session's investigation (a grantee): run
       `investigation events <inv> --cursor-file <dir>/cursor.json --follow`,
       ONE per watched investigation: a line per event the review cursor has
-      not committed (re-running it replays nothing); it never commits.
+      not committed (re-running it skips what you committed); it never commits.
       --follow replaces hand-written polling loops (every --interval
       seconds, default 5) until --timeout, --max or Ctrl-C. Under --follow
       with a session (--session or $CLAUDE_CODE_SESSION_ID) or a grant,

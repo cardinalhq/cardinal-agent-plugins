@@ -203,7 +203,7 @@ def watch_command(investigation_id: str, *, credential_file: Optional[str] = Non
     """The one command a grantee runs to watch an investigation: a line per
     event its review cursor (next to a grant's `--out` file, else in the
     supervise skill's default directory) has not committed, so re-running it
-    never replays what was reviewed."""
+    skips what was committed."""
     if credential_file:
         cred = f" --credential-file {shlex.quote(credential_file)}"
         cursor = shlex.quote(os.path.join(os.path.dirname(credential_file), "cursor.json"))
@@ -216,7 +216,7 @@ WATCH_GUIDANCE = """\
 Watching another session's investigation (supervising, with a grant):
   cardinal-storyboard investigation events <inv> --cursor-file <dir>/cursor.json --follow
   prints a line per event your review cursor has not committed (re-running
-  it replays nothing) and never commits. --follow replaces hand-written
+  it skips what you committed) and never commits. --follow replaces hand-written
   polling loops: it reads every --interval seconds (default 5) until
   --timeout, --max or Ctrl-C. Run ONE --follow per watched investigation.
   --exclude-self is the default under --follow with a session (--session,
