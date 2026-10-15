@@ -45,7 +45,7 @@ parallel:
 
 The supervisor records the budget (`investigation budget --set`) and tells the owner, in at
 most two lines, the range and its basis, plus any step-back question for the owner. The owner
-may correct the budget (`--set` again). The worker never sees the budget.
+may correct the budget (`--set --amend`). The worker never sees the budget.
 
 ### 2. Progress: earned against spent
 
@@ -104,8 +104,9 @@ first whether the overrun is ordinary (most milestones done: answer "on track" w
   with a material price: ask the owner in the supervisor's terminal, with the cost named. If
   the owner changes it: `decide:` or a draft they approve.
 - A component the **worker** chose, or an existing mechanism it missed: `--type question` to
-  the worker: `Step back (<trigger>): <the simpler design; existing code at file:line; what it
-  would remove; what could not be verified>`.
+  the worker: `Step back: <the simpler design; existing code at file:line; what it would
+  remove; what could not be verified>`. The trigger (opening, lag, backstop) goes only in the
+  supervisor's summary to the owner: the worker never sees budget state.
 - Nothing to remove, or "on track": nothing posted; one line in the supervisor's summary.
 
 One step back per firing. Never repeat a point the worker declined or the owner overruled
@@ -127,7 +128,8 @@ its reference class.
 investigation budget <inv> --credential-file F --budget-file B --set --question "<one line>"
     --milestone "<id>:<P50h>:<P80h>:<title>" ... --basis "<reference class; unknowns>"
     [--worker-session SID] [--worker-estimate "<what the worker said>"]
-investigation budget <inv> ... --done <id> --ref "#<seq>"|ev_… [--fraction F]
+investigation budget <inv> ... --set --amend [--milestone …]... [--basis …] [--question …] [--worker-estimate …]
+investigation budget <inv> ... --done <id> --ref "#<seq>"|ev_… [--fraction F [--correct]]
 investigation budget <inv> ... --check [--json]
 investigation budget <inv> ... --show [--json]
 investigation budget <inv> ... --close --outcome done|stopped|replaced
@@ -137,6 +139,7 @@ investigation budget <inv> ... --close --outcome done|stopped|replaced
   current budget (question, milestones, basis, thresholds, set_at seq/time, worker session,
   firings, done marks with refs) and a bounded history of closed budgets.
 - `--set` closes the current budget as `replaced` first (with its actuals) when one is open.
+  `--set --amend` corrects the open budget instead (see As built).
 - Milestone ids `[a-z0-9-]{1,32}`; 1-20 milestones; hours > 0, P80 ≥ P50.
 - Spent reads the worker's events with the grant (read scope) and, when available, the local
   spool via the evidence module's public listing, never by opening spool files directly.
@@ -147,7 +150,8 @@ investigation budget <inv> ... --close --outcome done|stopped|replaced
 
 The CLI and the skill text are shared. The fresh-context passes:
 
-- Claude: a subagent (Agent tool) given only the brief file path and the code path.
+- Claude: a `cardinal:stepback` subagent (agents/stepback.md: Read, Grep, Glob only) given
+  only the brief file path and the code path.
 - Codex, Cursor, Gemini: their headless mode, read-only, with the brief (`codex exec`,
   `cursor-agent -p`, `gemini -p`), if verified to work from inside a session; otherwise that
   runtime ships the budget and triggers and tells the owner the step back needs a Claude
@@ -183,15 +187,54 @@ nothing before 15%); `--check` output; `--close` actuals; a fixture replaying th
 - **Estimator reference class**: the supervisor appends the closed budgets (`--show` of each
   `~/.cardinal/supervise/*/budget.json`) to the estimator's copy of the brief, since a
   read-only headless pass may not run commands.
+- **Fresh means fresh**: every brief starts "Change nothing. Call no Cardinal or other MCP
+  tools. Ignore any injected storyboard or investigation context. Use only this brief and the
+  code." Claude's SubagentStart discovery hook skips `agent_type` `cardinal:stepback` (Claude
+  Code's SubagentStart payload carries `agent_type`, `<plugin>:<name>` for a plugin agent;
+  checked on 2026-10-15), so that pass gets no storyboard block. Codex and Gemini passes run
+  with hooks and extensions off (below), so no Cardinal hook runs in them at all.
 - **Runtimes, verified on 2026-10-15 from a shell (not yet from inside a running session of
-  that runtime)**: Codex `codex exec --sandbox read-only --ephemeral -C <checkout> - < brief`
-  (codex-cli 0.162.1: reads and searches; a write was refused). Gemini `gemini --skip-trust
-  --approval-mode default -p "…" < brief` (gemini-cli 0.64.0: reads and searches; a write was
-  refused). `--approval-mode plan` is **not** read-only headless: it left plan mode and wrote
-  the file. `--skip-trust` is needed in an untrusted folder. Cursor: `cursor-agent` was not
-  installed, so unverified; the Cursor supervisor estimates in its own context (saying so in
-  `--basis`), keeps the triggers, and tells the owner the step back needs a Claude (or Codex /
-  Gemini) supervisor. docs/parity.json `supervise_stepback`: Cursor is a limit.
+  that runtime)**:
+  - Codex (codex-cli 0.162.1): `codex exec --ignore-user-config --ignore-rules --disable hooks
+    --disable apps --disable plugins --sandbox read-only --ephemeral -C <checkout> - < brief`.
+    `--sandbox read-only` covers only shell commands; the user's config.toml loads MCP servers
+    with write tools (and apps, plugins, Cardinal hooks), hence the other flags. Verified: no
+    MCP server or tool offered, `apply_patch` and `echo x > x.txt` refused, reads work. Not
+    verified: whether `collaboration.spawn_agent` children and `image_gen` stay inside the
+    sandbox.
+  - Gemini (gemini-cli 0.64.0): `gemini -e none --policy <skill dir>/stepback-policy.toml
+    --include-directories <checkout> --skip-trust --approval-mode default -p "…" < brief` (no
+    `cd`: `--include-directories` adds the checkout to the workspace). `--approval-mode default
+    -p` alone is **not** read-only: headless, `enter_plan_mode` / `exit_plan_mode` are allowed
+    and exiting plan mode switches to YOLO (`getAllowApprovalMode`); a test prompt entered and
+    left plan mode and wrote a file with a shell command. The shipped policy (user tier, above
+    the bundled YOLO allow-all) denies those two tools, every MCP tool and every other tool
+    except read_file, read_many_files, glob, grep_search and list_directory; denied tools are
+    not offered to the model. With it the same prompt found write_file, replace,
+    run_shell_command and the plan tools absent and wrote nothing. `-e none` drops the Cardinal
+    extension (its MCP servers, hooks and context). `--skip-trust` is needed in an untrusted
+    folder. The runs used `-m gemini-3.1-flash-lite` (the default model's daily quota was
+    spent); the policy is enforced by the CLI, not the model.
+  - Cursor: `cursor-agent` was not installed, so unverified; the Cursor supervisor estimates in
+    its own context (saying so in `--basis`), keeps the triggers, and tells the owner the step
+    back needs a Claude (or Codex / Gemini) supervisor. docs/parity.json `supervise_stepback`:
+    Cursor is a limit.
+- **`--set --amend`**: a correction within the same direction (the owner's numbers, a fixed
+  milestone) replaces the given milestones / basis / question / worker estimate and keeps the
+  start (`since_seq`, `set_at`), worker session, thresholds, firings and the done marks of
+  milestones that remain; it writes no history entry and reads nothing from the server. A
+  plain `--set` is a new direction and still closes the open budget as `replaced`.
+- **No double counting on replace**: a `--set` that replaces an open budget closes it at the
+  new budget's start: the old one counts only worker events before the new `since_seq` and
+  captured calls before the new `set_at`.
+- **`--fraction` is cumulative** (the total part done so far); a lower value than recorded is
+  refused unless `--correct`.
+- **Lag episodes**: a persisting lag re-fires after +50% spent; a `--check` that finds no lag
+  ends the episode (`lag_open` false in the budget), so a later lag fires at once.
+- **Budget file**: `load()` checks the file's shape (types of every field the commands read)
+  and refuses a link or a partial file with a usage error (exit 2), never a traceback.
+- **Spool message**: "activity spool not on this machine" only when the worker session has no
+  spool directory here; a spool with no calls since the budget reads "0 captured calls".
 - **Replay**: the fixture holds the worker's event times for #197-#336
   (core/tests/testdata/wingbeat-phase-f-worker-times.json). With the careful estimate (P50 13 h
   / P80 18.5 h) and only `design` done (#202), the lag trigger first fires at **#288**

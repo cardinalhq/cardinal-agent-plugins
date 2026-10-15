@@ -1312,11 +1312,14 @@ def build_parser(wiring, session_env=()):
             p.add_argument("--budget-file", type=Path, required=True, help="private 0600 budget state, e.g. "
                            "~/.cardinal/supervise/<inv>/budget.json")
             mode = p.add_mutually_exclusive_group(required=True)
-            mode.add_argument("--set", action="store_true", help="record a budget for the current direction")
+            mode.add_argument("--set", action="store_true", help="record a budget for a new direction (closes the "
+                              "open one as replaced)")
             mode.add_argument("--done", metavar="ID", help="mark a milestone done (needs --ref)")
             mode.add_argument("--check", action="store_true", help="spent vs earned; FIRE <reason> or ok")
             mode.add_argument("--show", action="store_true", help="the budget, its marks, firings and history")
             mode.add_argument("--close", action="store_true", help="record actuals against the estimate")
+            p.add_argument("--amend", action="store_true", help="--set: correct the open budget in place (same "
+                           "direction: keeps its start, done marks and firings; no history entry)")
             p.add_argument("--question", help="--set: the owner's question for this direction, one line")
             p.add_argument("--milestone", action="append", default=[], metavar="ID:P50H:P80H:TITLE",
                            help="--set: one milestone (repeat, 1-20)")
@@ -1326,7 +1329,9 @@ def build_parser(wiring, session_env=()):
             p.add_argument("--since-seq", type=int, metavar="SEQ",
                            help="--set: count from this event (the new direction's start); default: from now")
             p.add_argument("--ref", help="--done: \"#<seq>\" or ev_<12 hex> proving it")
-            p.add_argument("--fraction", type=float, help="--done: the measurable part done (0-1]")
+            p.add_argument("--fraction", type=float, help="--done: the total part done so far (0-1], not an "
+                           "increment; default 1")
+            p.add_argument("--correct", action="store_true", help="--done: allow a lower --fraction than recorded")
             p.add_argument("--outcome", choices=("done", "stopped", "replaced"), help="--close")
     return parser
 
@@ -1353,6 +1358,8 @@ def normalize_argv(argv):
         "--check",
         "--show",
         "--close",
+        "--amend",
+        "--correct",
         "--help",
         "-h",
     }

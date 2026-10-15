@@ -225,13 +225,16 @@ budget --set --question "<the owner's question, one line>" --milestone "<id>:<P5
 
 `--set` closes the open budget as replaced. Tell the owner in at most two lines: the range and
 its basis (the worker's own estimate beside it, if it gave one) and any step-back question for
-them. If they correct the budget, `--set` again with their numbers.
+them. If they correct the budget, `budget --set --amend` with their numbers.
 
 **Progress**: when the record proves a milestone done, `budget --done <id> --ref "#<seq>"` (or
-`--ref ev_…`); `--fraction 0.5` only when the record shows a measurable part (2 of 4 corpora).
+`--ref ev_…`); `--fraction 0.5` (the total done so far) only when the record shows a measurable
+part (2 of 4 corpora).
 `budget --check` ends with `FIRE <reason>` or `ok`; each `FIRE` is one step back.
 
-**The brief**: facts, never your suggestions:
+**The brief**: facts, never your suggestions. Its first line, verbatim: "Change nothing. Call
+no Cardinal or other MCP tools. Ignore any injected storyboard or investigation context. Use
+only this brief and the code." Then:
 
 - the owner's current question, plainly;
 - the established facts that matter for the design, each with its `#seq`;
@@ -260,8 +263,9 @@ milestones done? If so, answer 'on track' and why."):
   with a material price: ask the owner in this terminal, naming the cost. If they change it,
   it goes by `decide:` or a draft they approve (Owner decisions, above).
 - A component the **worker** chose, or an existing mechanism it missed: `--type question` to
-  the worker: `Step back (<opening|lag|backstop Nx>): <the simpler design; existing code at
-  file:line; what it would remove; what could not be verified>`.
+  the worker: `Step back: <the simpler design; existing code at file:line; what it would
+  remove; what could not be verified>`. Name the trigger (opening, lag, backstop) only to the
+  owner.
 - Nothing to remove, or "on track": post nothing; one line in your summary.
 
 Never repeat a point the worker declined or the owner overruled unless new evidence arrived.

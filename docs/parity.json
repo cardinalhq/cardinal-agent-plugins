@@ -1487,7 +1487,16 @@
         {
           "kind": "grep",
           "path": "skills/supervise/SKILL.md",
-          "pattern": "`Plan` subagent"
+          "pattern": "`cardinal:stepback` subagent"
+        },
+        {
+          "kind": "agent",
+          "path": "agents/stepback.md"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/storyboard-discovery.py",
+          "pattern": "FRESH_AGENTS = \\(\"stepback\",\\)"
         }
       ],
       "codex": [
@@ -1499,7 +1508,7 @@
         {
           "kind": "grep",
           "path": "skills/supervise/SKILL.md",
-          "pattern": "codex exec --sandbox read-only"
+          "pattern": "codex exec --ignore-user-config .*--disable hooks .*--sandbox read-only"
         }
       ],
       "gemini": [
@@ -1511,13 +1520,18 @@
         {
           "kind": "grep",
           "path": "skills/supervise/SKILL.md",
-          "pattern": "gemini --skip-trust --approval-mode default"
+          "pattern": "gemini -e none --policy <this-skill-directory>/stepback-policy.toml"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/stepback-policy.toml",
+          "pattern": "toolName = \\[\"enter_plan_mode\", \"exit_plan_mode\"\\]"
         }
       ]
     },
     "notes": {
-      "codex": "The step back runs as `codex exec --sandbox read-only` (verified from a shell on 2026-10-15, codex-cli 0.162.1; not yet from inside a Codex session).",
-      "gemini": "The step back runs as `gemini --approval-mode default -p` (verified from a shell on 2026-10-15, gemini-cli 0.64.0; `plan` mode is not read-only headless; not yet from inside a Gemini session)."
+      "codex": "The step back runs as `codex exec --ignore-user-config --ignore-rules --disable hooks --disable apps --disable plugins --sandbox read-only --ephemeral` (the sandbox covers only shell commands; the flags drop the user's MCP servers, apps and hooks). Verified from a shell on 2026-10-15, codex-cli 0.162.1: no MCP tools, apply_patch and a shell write refused; not yet from inside a Codex session.",
+      "gemini": "The step back runs as `gemini -e none --policy skills/supervise/stepback-policy.toml ... --approval-mode default -p`: headless, enter_plan_mode/exit_plan_mode are allowed and leaving plan mode switches to YOLO, so the policy denies them and every tool but file reads and searches (denied tools are not offered). Verified from a shell on 2026-10-15, gemini-cli 0.64.0: without the policy a shell write succeeded via plan mode; with it only read_file/grep_search/glob/list_directory exist; not yet from inside a Gemini session."
     }
   },
   "connection_skills": {

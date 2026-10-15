@@ -47,11 +47,14 @@ send or approve it. No Cardinal line means nothing was sent; say so.
 ## Fresh-context passes (step backs)
 
 Run each pass (CORE.md, Step backs) as a separate read-only Codex: put the pass's question at
-the end of a copy of the brief, then, from the code's checkout:
+the end of a copy of the brief, then:
 
 ```
-codex exec --sandbox read-only --ephemeral -C <code checkout> - < <dir>/brief-<n>-<pass>.md
+codex exec --ignore-user-config --ignore-rules --disable hooks --disable apps --disable plugins --sandbox read-only --ephemeral -C <code checkout> - < <dir>/brief-<n>-<pass>.md
 ```
+
+Keep every flag: the sandbox covers only shell commands, and your config's MCP servers, apps
+and hooks would give the pass write tools and Cardinal context.
 
 Its final message is the answer. It needs network: ask for it once, with the Cardinal
 commands. Run the two passes one after the other. If it fails, tell the owner the step back

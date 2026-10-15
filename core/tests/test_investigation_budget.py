@@ -20,6 +20,7 @@ from cardinal_core import investigation_agent as agent
 from cardinal_core import investigation_budget as bud
 from cardinal_core import investigation_consumer as consumer
 from cardinal_core import investigation_events as ie
+from cardinal_core import investigation_state_sync as ist
 
 INV = "inv_" + "b" * 24
 WORKER = "worker-sid"
@@ -97,6 +98,17 @@ class Earned(unittest.TestCase):
         bud.mark_done(b, "b", "ev_" + "a" * 12, 0.5)
         self.assertEqual(bud.earned_hours(b), 1 + 1.5)
 
+    def test_fraction_is_cumulative(self):
+        b = budget()
+        bud.mark_done(b, "b", "#2", 0.5)
+        with self.assertRaises(bud.BudgetError) as cm:
+            bud.mark_done(b, "b", "#3", 0.25)                         # an increment would be a mistake
+        self.assertIn("not an increment", str(cm.exception))
+        bud.mark_done(b, "b", "#3", 0.5)                              # same total, a newer ref
+        bud.mark_done(b, "b", "#4", 0.75)
+        bud.mark_done(b, "b", "#5", 0.25, correct=True)
+        self.assertEqual(b["done"]["b"]["fraction"], 0.25)
+
 
 class Triggers(unittest.TestCase):
     # P80 total 10 h: lag can fire from 1.5 h spent.
@@ -130,6 +142,18 @@ class Triggers(unittest.TestCase):
         self.assertEqual(self.fire(b, 3.0), ["lag"])
         self.assertEqual(self.fire(b, 4.4), [])
         self.assertEqual(self.fire(b, 4.5), ["lag"])
+
+    def test_a_lag_episode_ends_when_a_check_finds_no_lag(self):
+        b = self.b()
+        self.assertEqual(self.fire(b, 2.0), ["lag"])
+        self.assertTrue(bud.lag_open(b))
+        self.assertEqual(self.fire(b, 2.2), [])                       # same episode: waits for 3.0
+        b["lag_open"] = False                                         # what --check records when lag is gone
+        self.assertEqual(self.fire(b, 2.2), ["lag"])                  # a fresh episode fires at once
+        self.assertTrue(bud.lag_open(b))
+        # Files from before the key: an episode is open when lag ever fired.
+        del b["lag_open"]
+        self.assertTrue(bud.lag_open(b))
 
     def test_backstops_fire_once_each(self):
         b = self.b()
@@ -188,15 +212,22 @@ class CLIBase(unittest.TestCase):
         self.dir.mkdir(mode=0o700)
         self.file = self.dir / "budget.json"
         self.events = []
+        self.reads = 0
         self.wiring = SimpleNamespace(paths=SimpleNamespace(home=self.home / ".codex"), environ={},
                                       client="codex/test", cli=str(self.home / "scripts/cli"),
                                       connection=Mock(return_value=MEMBER), _off=lambda name: False)
         reader = patch.object(ie, "read_events", side_effect=self.read)
         reader.start()
         self.addCleanup(reader.stop)
+        # Budget commands read; they never write to the investigation.
+        for target, name in ((ist, "_post"), (ie, "append_event")):
+            w = patch.object(target, name, side_effect=AssertionError(f"budget called {name}"))
+            w.start()
+            self.addCleanup(w.stop)
 
     def read(self, conn, inv, *, after=0, limit=200, client, **_):
         assert inv == INV
+        self.reads += 1
         shown = [e for e in self.events if e["seq"] > after][:limit]
         head = max([e["seq"] for e in self.events], default=0)
         return {"investigation_id": inv, "events": shown, "last_seq": shown[-1]["seq"] if shown else head,
@@ -336,6 +367,131 @@ class CLI(CLIBase):
         self.wiring.connection.assert_not_called()
 
 
+class CLICorrections(CLIBase):
+    def test_amend_keeps_the_direction(self):
+        self.events = [wev(1, 0)] + [wev(2 + i, i * 10) for i in range(11)]
+        self.set("--since-seq", "1")
+        self.assertIn("FIRE", self.cli("--check")[1])
+        self.cli("--done", "a", "--ref", "#4")
+        before = consumer.private_read(self.file)["current"]
+        reads = self.reads
+        code, out, err = self.cli("--set", "--amend", "--milestone", "a:3:5:first", "--milestone", "c:4:9:third",
+                                  "--basis", "owner: more for c")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.reads, reads, "--amend reads nothing from the server")
+        self.assertIn("budget amended: P50 7.00 h / P80 14.00 h over 2 milestones; still counting from #1", out)
+        state = consumer.private_read(self.file)
+        b = state["current"]
+        self.assertEqual(state["history"], [], "a correction is not a closed budget")
+        for k in ("since_seq", "set_at", "firings", "question", "thresholds", "worker_session"):
+            self.assertEqual(b[k], before[k], k)
+        self.assertEqual((list(b["done"]), b["basis"]), (["a"], "owner: more for c"))
+        self.assertEqual(json.loads(self.cli("--check", "--json")[1])["earned_h"], 3.0)
+        code, out, _ = self.cli("--set", "--amend", "--milestone", "c:4:9:third")
+        self.assertIn("dropped the done marks of a", out)
+        self.assertEqual(consumer.private_read(self.file)["current"]["done"], {})
+        for argv, said in ((["--since-seq", "2", "--basis", "x"], "--since-seq does not go with --amend"),
+                           (["--worker-session", WORKER, "--basis", "x"], "--worker-session does not go with --amend"),
+                           ([], "--amend needs at least one of")):
+            code, _, err = self.cli("--set", "--amend", *argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn(said, err)
+        self.assertIn("--amend does not go with --check", self.cli("--check", "--amend")[2])
+        self.cli("--close", "--outcome", "done")
+        self.assertIn("no open budget to amend", self.cli("--set", "--amend", "--basis", "x")[2])
+
+    def test_a_replaced_budget_ends_where_the_new_one_starts(self):
+        # Worker events every 10 min from #1; the new direction starts at #7 (50 min in).
+        self.events = [wev(1 + i, i * 10) for i in range(13)]
+        self.set("--since-seq", "1")
+        code, out, err = self.set("--since-seq", "7", milestones=("c:1:2:third",))
+        self.assertEqual(code, 0, err)
+        h = consumer.private_read(self.file)["history"][-1]
+        self.assertEqual((h["outcome"], h["spent_h"]), ("replaced", round(50 / 60, 3)))   # #1-#6 only
+        r = json.loads(self.cli("--check", "--json")[1])
+        self.assertEqual(r["spent_h"], 1.0)                                                # #7-#13
+        self.assertIn("a correction of this direction is --set --amend", out)
+
+    def test_cumulative_fraction_through_the_cli(self):
+        self.events = [wev(1, 0)]
+        self.set()
+        self.assertEqual(self.cli("--done", "b", "--ref", "#1", "--fraction", "0.5")[0], 0)
+        code, _, err = self.cli("--done", "b", "--ref", "#1", "--fraction", "0.25")
+        self.assertEqual(code, 2)
+        self.assertIn("--fraction is the total done so far", err)
+        self.assertIn("marked b done (25%", self.cli("--done", "b", "--ref", "#1", "--fraction", "0.25",
+                                                     "--correct")[1])
+        self.assertIn("--correct does not go with --check", self.cli("--check", "--correct")[2])
+
+    def test_a_fresh_lag_episode_fires_without_waiting_for_growth(self):
+        # P80 10 h: lag from 1.5 h. 100 min, nothing done: FIRE lag at 1.67 h.
+        self.events = [wev(1 + i, i * 10) for i in range(11)]
+        self.set("--since-seq", "1")
+        self.assertIn("FIRE lag", self.cli("--check")[1])
+        # Half of a done: earned 1 h >= 0.5 x 1.67 h; the check ends the episode.
+        self.cli("--done", "a", "--ref", "#5", "--fraction", "0.5")
+        self.assertEqual(self.cli("--check")[1].splitlines()[-1], "ok")
+        self.assertFalse(consumer.private_read(self.file)["current"]["lag_open"])
+        # 130 min: lag again (1 h < 0.5 x 2.17 h), below the old episode's re-fire point (2.5 h).
+        self.events += [wev(12 + i, 110 + i * 10) for i in range(3)]
+        r = json.loads(self.cli("--check", "--json")[1])
+        self.assertEqual((r["fire"], r["spent_h"]), (["lag"], round(130 / 60, 3)))
+
+    def test_spool_message(self):
+        self.events = [wev(1, -5), wev(2, 0), wev(3, 50)]
+        self.set("--since-seq", "2")
+        self.assertIn("activity spool not on this machine", self.cli("--check")[1])
+        root = evidence.default_root(self.home)
+        e = evidence.build_entry(server="builtin:codex", tool="shell", tool_name="shell", tool_input={"cmd": "ls"},
+                                 tool_response="ok", session_id=WORKER, called_at=at(-30))   # before the budget
+        evidence.write_entry(root, e)
+        out = self.cli("--check")[1]
+        self.assertIn("(2 worker events; 0 captured calls)", out)
+        self.assertEqual(json.loads(self.cli("--check", "--json")[1])["captured_calls"], 0)
+
+    def test_a_partial_or_mistyped_file_is_a_usage_error(self):
+        self.events = [wev(1, 0)]
+        self.set()
+        good = consumer.private_read(self.file)
+        broken = []
+        for path in (("current", "milestones"), ("current", "thresholds"), ("current", "done"),
+                     ("current", "firings"), ("current", "since_seq"), ("current", "set_at")):
+            st = json.loads(json.dumps(good))
+            holder = st
+            for k in path[:-1]:
+                holder = holder[k]
+            del holder[path[-1]]
+            broken.append(st)
+        for change in ({"milestones": [{"id": "a"}]}, {"done": {"a": {"fraction": "half", "ref": "#1"}}},
+                       {"done": {"a": {"fraction": 1, "ref": "#x"}}}, {"thresholds": {"lag_start": 0.1}},
+                       {"firings": [{"reasons": "lag"}]}, {"since_seq": True}, {"lag_open": "yes"}):
+            st = json.loads(json.dumps(good))
+            st["current"].update(change)
+            broken.append(st)
+        broken += [{**good, "current": []}, {**good, "history": [{"outcome": "done"}]}, {**good, "history": "x"}]
+        for st in broken:
+            consumer.private_write(self.file, st)
+            for argv in (["--show"], ["--check"], ["--done", "a", "--ref", "#1"], ["--close", "--outcome", "done"],
+                         ["--set", "--amend", "--basis", "x"]):
+                code, _, err = self.cli(*argv)
+                self.assertEqual(code, 2, (argv, st))
+                self.assertIn("is not a valid budget file", err)
+                self.assertNotIn("Traceback", err)
+        self.file.write_text("{not json")
+        self.assertEqual(self.cli("--show")[0], 2)
+
+    def test_a_linked_budget_file_is_refused(self):
+        self.events = [wev(1, 0)]
+        self.set()
+        real = self.dir / "real.json"
+        os.replace(self.file, real)
+        os.symlink(real, self.file)
+        for argv in (["--show"], ["--check"], ["--done", "a", "--ref", "#1"]):
+            code, _, err = self.cli(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn("not a link", err)
+
+
 class WingbeatReplay(unittest.TestCase):
     """inv_cab0d4ba690509cd646915c2 phase F: the worker's real event times
     #197-#336, the careful estimate's milestones, `design` done at #202 and
@@ -344,27 +500,28 @@ class WingbeatReplay(unittest.TestCase):
 
     def test_lag_fires_before_336(self):
         data = json.loads(FIXTURE.read_text(encoding="utf-8"))
-        rows = [(s, bud.parse_time(t)) for s, t in data["events"]]
-        self.assertTrue(all(197 <= s <= 336 for s, _ in rows) and len(rows) > 100)
-        b = bud.new_budget(question="phase F", milestones=WINGBEAT, basis="careful estimate", set_at=rows[0][1],
-                           since_seq=197, worker_session="w")
+        events = [{"seq": s, "class": "semantic", "type": "finding.proposed", "created_at": t,
+                   "producer": {"principal": {"kind": "user", "id": "u"}, "session_id": "w"}}
+                  for s, t in data["events"]]
+        self.assertTrue(all(197 <= e["seq"] <= 336 for e in events) and len(events) > 100)
+        b = bud.new_budget(question="phase F", milestones=WINGBEAT, basis="careful estimate",
+                           set_at=bud.parse_time(events[0]["created_at"]), since_seq=197, worker_session="w")
         self.assertEqual(bud.totals(b), (13.0, 18.5))
         fired = []
-        for i, (seq, _) in enumerate(rows):
-            if seq >= 202 and "design" not in b["done"]:
+        for i, e in enumerate(events):
+            if e["seq"] >= 202 and "design" not in b["done"]:
                 bud.mark_done(b, "design", "#202")
-            spent = bud.active_hours([t for _, t in rows[: i + 1]], 30)
-            d = bud.evaluate(b, spent, bud.earned_hours(b))
+            # What --check sees after event i: the worker's events through measure().
+            m = bud.measure(b, events[: i + 1], [])
+            self.assertEqual(len(m["worker_times"]), i + 1)
+            d = bud.evaluate(b, m["spent"], m["earned"])
             if d["fire"]:
-                bud.record_firing(b, d, spent, bud.earned_hours(b), now=rows[i][1], head_seq=seq)
-                fired.append((seq, d["fire"], round(spent, 2)))
-        self.assertTrue(fired)
-        first_seq, reasons, spent = fired[0]
-        self.assertEqual(reasons, ["lag"])
-        self.assertLess(first_seq, 336)
-        self.assertGreater(spent, 4.0)          # earned 2 h (design): lag needs spent > 4 h
-        # At #288 (10:59Z, 4.1 active hours in); the REWORK came at #330, the owner's pivot at #336.
-        self.assertEqual(first_seq, 288)
+                bud.record_firing(b, d, m["spent"], m["earned"], now=bud.parse_time(e["created_at"]),
+                                  head_seq=e["seq"])
+                fired.append((e["seq"], d["fire"], round(m["spent"], 2)))
+        # At #288 (10:59Z, 4.10 active hours in; earned 2 h: lag needs spent > 4 h); the REWORK came at
+        # #330, the owner's pivot at #336, where the persisting lag re-fires (1.5 x 4.10 h).
+        self.assertEqual(fired, [(288, ["lag"], 4.10), (336, ["lag"], 6.15)])
 
 
 if __name__ == "__main__":

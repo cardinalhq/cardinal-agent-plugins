@@ -10,8 +10,12 @@ milestones done with a ref, and asks `--check` whether a step back is due:
   gap between consecutive timestamps is not counted;
 - earned: the P50 hours of the milestones marked done (times a fraction);
 - lag: spent >= lag_start x P80 total and earned < lag_ratio x spent;
-  re-fires only once spent has grown by refire_growth since the last lag
-  firing; backstop: spent first crosses a multiple of the P80 total.
+  while one lag episode persists it re-fires only once spent has grown by
+  refire_growth since its last firing (a check without lag ends the
+  episode); backstop: spent first crosses a multiple of the P80 total.
+
+`--set --amend` corrects the open budget in place (same direction: its
+start, done marks and firings stay; no history entry).
 
 The budget file (0600, flock'd) holds the current budget and a bounded
 history of closed ones. The worker never sees it. Read-only on the server;
@@ -193,13 +197,20 @@ def totals(budget: dict) -> tuple:
             round(sum(m["p80"] for m in budget["milestones"]), 3))
 
 
-def mark_done(budget: dict, mid: str, ref: str, fraction: float = 1.0, *, now: Optional[float] = None) -> dict:
+def mark_done(budget: dict, mid: str, ref: str, fraction: float = 1.0, *, now: Optional[float] = None,
+              correct: bool = False) -> dict:
+    """`fraction` is cumulative: the part done so far, never an increment.
+    Lowering a recorded fraction needs `correct`."""
     if mid not in {m["id"] for m in budget["milestones"]}:
         raise BudgetError(f"no milestone {mid!r} in this budget ({', '.join(m['id'] for m in budget['milestones'])})")
     if not isinstance(ref, str) or not REF_RE.fullmatch(ref):
         raise BudgetError("--done needs --ref \"#<seq>\" or ev_<12 hex>: the event or captured call proving it")
     if not 0 < fraction <= 1:
         raise BudgetError("--fraction is more than 0 and at most 1")
+    before = budget["done"].get(mid)
+    if before and round(fraction, 3) < before["fraction"] and not correct:
+        raise BudgetError(f"{mid} is already {before['fraction']:.0%} done ({before['ref']}); --fraction is the total "
+                          "done so far, not an increment. To lower it, add --correct")
     budget["done"][mid] = {"fraction": round(fraction, 3), "ref": ref, "at": iso(now if now is not None else time.time())}
     return budget
 
@@ -218,7 +229,9 @@ def evaluate(budget: dict, spent: float, earned: float) -> dict:
     crossed = [m for m in th["backstops"] if spent >= m * p80 and m not in fired_backstops]
     lagging = spent >= th["lag_start"] * p80 and earned < th["lag_ratio"] * spent
     lag_spents = [f["spent_h"] for f in budget["firings"] if "lag" in f.get("reasons", [])]
-    refire_at = th["refire_growth"] * lag_spents[-1] if lag_spents else 0.0
+    # Within one lag episode a re-fire needs refire_growth more spent; a check
+    # without lag ends the episode, so the next lag fires at once.
+    refire_at = th["refire_growth"] * lag_spents[-1] if lag_spents and lag_open(budget) else 0.0
     lag_fires = lagging and spent >= refire_at
     reasons = []
     if crossed:
@@ -236,8 +249,16 @@ def evaluate(budget: dict, spent: float, earned: float) -> dict:
     }
 
 
+def lag_open(budget: dict) -> bool:
+    """A lag episode is open from a lag firing until a check finds no lag
+    (files from before the key: open when lag ever fired)."""
+    return budget.get("lag_open", any("lag" in f.get("reasons", []) for f in budget["firings"]))
+
+
 def record_firing(budget: dict, decision: dict, spent: float, earned: float, *, now: float,
                   head_seq: Optional[int]) -> None:
+    if "lag" in decision["fire"]:
+        budget["lag_open"] = True
     budget["firings"].append({
         "reasons": ["lag" if r == "lag" else "backstop" for r in decision["fire"]],
         "backstops": decision["crossed"],
@@ -293,13 +314,68 @@ def close(state: dict, outcome: str, spent: float, earned: float, actuals: list,
 
 # -- the budget file ---------------------------------------------------------
 
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _shape_errors(state: dict) -> list:
+    """What is missing or mistyped in a budget file (empty: usable)."""
+    errs = []
+
+    def need(cond, what):
+        if not cond:
+            errs.append(what)
+
+    need(isinstance(state.get("investigation_id"), (str, type(None))), "investigation_id")
+    need(isinstance(state.get("history", []), list), "history")
+    for i, h in enumerate(state.get("history") or [] if isinstance(state.get("history"), list) else []):
+        need(isinstance(h, dict) and all(isinstance(h.get(k), str) for k in ("outcome", "closed_at", "question"))
+             and all(_num(h.get(k)) for k in ("p50_total_h", "p80_total_h", "spent_h", "earned_h")), f"history[{i}]")
+    b = state.get("current")
+    if b is None:
+        return errs
+    if not isinstance(b, dict):
+        return errs + ["current"]
+    for k in ("question", "basis", "set_at"):
+        need(isinstance(b.get(k), str), f"current.{k}")
+    need(parse_time(b.get("set_at")) is not None, "current.set_at (a UTC time)")
+    need(isinstance(b.get("since_seq"), int) and not isinstance(b.get("since_seq"), bool) and b["since_seq"] >= 1,
+         "current.since_seq")
+    for k in ("worker_session", "worker_estimate"):
+        need(isinstance(b.get(k), (str, type(None))), f"current.{k}")
+    ms = b.get("milestones")
+    need(isinstance(ms, list) and ms and all(
+        isinstance(m, dict) and isinstance(m.get("id"), str) and isinstance(m.get("title"), str)
+        and _num(m.get("p50")) and _num(m.get("p80")) for m in ms), "current.milestones")
+    th = b.get("thresholds")
+    need(isinstance(th, dict) and all(_num(th.get(k)) for k in ("lag_start", "lag_ratio", "refire_growth",
+                                                                   "idle_gap_minutes"))
+         and isinstance(th.get("backstops"), list) and all(_num(x) for x in th["backstops"]), "current.thresholds")
+    done = b.get("done")
+    need(isinstance(done, dict) and all(isinstance(d, dict) and _num(d.get("fraction"))
+                                        and isinstance(d.get("ref"), str) and REF_RE.fullmatch(d["ref"])
+                                        for d in done.values()), "current.done")
+    fs = b.get("firings")
+    need(isinstance(fs, list) and all(isinstance(f, dict) and isinstance(f.get("reasons"), list)
+                                      and isinstance(f.get("backstops"), list) and _num(f.get("spent_h"))
+                                      for f in fs), "current.firings")
+    need(isinstance(b.get("lag_open", False), bool), "current.lag_open")
+    return errs
+
+
 def load(path: Path, investigation_id: Optional[str]) -> dict:
     try:
         state = consumer.private_read(path)
     except FileNotFoundError:
         return {"version": VERSION, "investigation_id": investigation_id, "current": None, "history": []}
+    except OSError as e:
+        raise BudgetError(f"{path}: cannot open the budget file ({e.strerror}); it must be a regular file "
+                          "you own, not a link") from None
     if state.get("version") != VERSION:
         raise BudgetError(f"{path} is not a version {VERSION} budget file")
+    errs = _shape_errors(state)
+    if errs:
+        raise BudgetError(f"{path} is not a valid budget file (bad or missing: {', '.join(errs[:5])})")
     if investigation_id and state.get("investigation_id") not in (None, investigation_id):
         raise BudgetError(f"{path} is the budget of {state.get('investigation_id')}, not {investigation_id}")
     return state
@@ -325,20 +401,33 @@ def read_worker_events(conn: dict, inv: str, since_seq: int, *, client: str, rea
     return events, head
 
 
-def measure(budget: dict, events: list, spool_entries: list) -> dict:
+def measure(budget: dict, events: list, spool_entries: list, *, before_seq: Optional[int] = None,
+            before: Optional[float] = None) -> dict:
+    """Spent and earned; with before_seq / before, only the worker's events
+    before that seq and captured calls before that time (a budget replaced
+    by one that starts there)."""
     since = parse_time(budget["set_at"]) or 0.0
     wt = worker_times(events, budget.get("worker_session"), budget["since_seq"])
     st = spool_times(spool_entries, since)
+    if before_seq is not None:
+        wt = [x for x in wt if x[0] < before_seq]
+    if before is not None:
+        st = [x for x in st if x[1] < before]
     spent = active_hours([t for _, t in wt] + [t for _, t in st], budget["thresholds"]["idle_gap_minutes"])
     return {"spent": spent, "earned": earned_hours(budget), "worker_times": wt, "spool_times": st}
 
 
 def spool_entries(home: Path, worker_session: Optional[str]) -> Optional[list]:
-    """The worker session's captured calls on this machine (None: no worker
-    session to look up), through the evidence module's listing only."""
+    """The worker session's captured calls on this machine, through the
+    evidence module's listings only (None: no worker session, or its spool
+    is not on this machine)."""
     if not worker_session:
         return None
-    return evidence.list_entries(evidence.default_root(home), worker_session)
+    root = evidence.default_root(home)
+    entries = evidence.list_entries(root, worker_session)
+    if entries or any(name == worker_session for name, _ in evidence.session_dirs(root)):
+        return entries
+    return None
 
 
 # -- rendering -----------------------------------------------------------------
@@ -359,7 +448,7 @@ def check_report(inv: str, budget: dict, m: dict, decision: dict, spool: Optiona
             why.append(f"spent >= {budget['thresholds']['lag_start']:.0%} of P80 and earned {_h(earned)} < "
                        f"{budget['thresholds']['lag_ratio']} x spent")
         verdict = f"FIRE {' + '.join(decision['fire'])}: " + "; ".join(why)
-    elif decision["lagging"] and lag_spents:
+    elif decision["lagging"] and lag_spents and lag_open(budget):
         verdict = f"ok (lag persists; fired at {_h(lag_spents[-1])}, re-fires at {_h(decision['next_lag_h'])})"
     else:
         verdict = "ok"
@@ -387,8 +476,8 @@ def check_report(inv: str, budget: dict, m: dict, decision: dict, spool: Optiona
 
 def check_lines(r: dict) -> list:
     done, total = len(r["done"]), r["milestones"]
-    act = ("activity spool not on this machine" if r["captured_calls"] in (None, 0) and r["worker_session"]
-           else "no worker session: events only" if r["captured_calls"] is None
+    act = ("no worker session: events only" if not r["worker_session"]
+           else "activity spool not on this machine" if r["captured_calls"] is None
            else f"{r['captured_calls']} captured calls")
     ratio = "n/a" if r["earned_over_spent"] is None else f"{r['earned_over_spent']:.2f}"
     nb = r["next_backstop"]
@@ -453,9 +542,9 @@ def _measure_current(state: dict, conn: dict, inv: str, client: str, home: Path,
 
 def run(args, *, target: Callable, home: Path, client: str, out: Callable = print, now: Callable = time.time,
         reader: Callable = None) -> int:
-    """`investigation budget`: one of --set / --done / --check / --show /
-    --close on args.budget_file. target() -> (conn, client, inv) or None,
-    called only by the modes that read the worker's events."""
+    """`investigation budget`: one of --set [--amend] / --done / --check /
+    --show / --close on args.budget_file. target() -> (conn, client, inv) or
+    None, called only by the modes that read the worker's events."""
     path = Path(args.budget_file)
     reader = reader or ie.read_events
     as_json = bool(getattr(args, "json", False))
@@ -471,13 +560,17 @@ def run(args, *, target: Callable, home: Path, client: str, out: Callable = prin
             if not state.get("current"):
                 raise BudgetError("no open budget: --set one first")
             mark_done(state["current"], args.done, args.ref, 1.0 if args.fraction is None else args.fraction,
-                      now=now())
+                      now=now(), correct=bool(getattr(args, "correct", False)))
             save(path, state)
         e = earned_hours(state["current"])
         d = state["current"]["done"][args.done]
         out(json.dumps({"done": args.done, **d, "earned_h": e}) if as_json else
             f"marked {args.done} done ({d['fraction']:.0%}, {d['ref']}); earned now {_h(e)}")
         return 0
+    if args.set and getattr(args, "amend", False):
+        with _locked(path):
+            state = load(path, hint)
+            return _amend(args, state, path, out, as_json)
     got = target()
     if got is None:
         return 2
@@ -505,23 +598,61 @@ def run(args, *, target: Callable, home: Path, client: str, out: Callable = prin
             save(path, state)
             after = evaluate(b, m["spent"], m["earned"])   # the next trigger points, past this firing
             decision = {**decision, "next_lag_h": after["next_lag_h"], "next_backstop": after["next_backstop"]}
+        elif not decision["lagging"] and lag_open(b):
+            b["lag_open"] = False                           # the lag episode ended; the next lag fires at once
+            save(path, state)
+            decision = evaluate(b, m["spent"], m["earned"])
         r = check_report(inv, b, m, decision, spool)
         out(json.dumps(r, indent=2, ensure_ascii=False) if as_json else "\n".join(check_lines(r)))
         return 0
 
 
+SET_FIELDS = ("question", "milestone", "basis", "worker_session", "worker_estimate", "since_seq", "amend")
+
+
 def _only(args) -> None:
     mode = "set" if args.set else "done" if args.done else "check" if args.check else "show" if args.show else "close"
-    allowed = {"set": {"question", "milestone", "basis", "worker_session", "worker_estimate", "since_seq"},
-               "done": {"ref", "fraction"}, "close": {"outcome"}}.get(mode, set())
-    for name in ("question", "milestone", "basis", "worker_session", "worker_estimate", "since_seq", "ref",
-                 "fraction", "outcome"):
-        if getattr(args, name, None) not in (None, []) and name not in allowed:
+    allowed = {"set": set(SET_FIELDS), "done": {"ref", "fraction", "correct"}, "close": {"outcome"}}.get(mode, set())
+    for name in SET_FIELDS + ("ref", "fraction", "correct", "outcome"):
+        if getattr(args, name, None) not in (None, [], False) and name not in allowed:
             raise BudgetError(f"--{name.replace('_', '-')} does not go with --{mode}")
+    if mode == "set" and getattr(args, "amend", False):
+        for name in ("since_seq", "worker_session"):
+            if getattr(args, name, None) is not None:
+                raise BudgetError(f"--{name.replace('_', '-')} does not go with --amend (it keeps the direction's "
+                                  "start and worker; a new direction is --set without --amend)")
     if mode == "done" and not args.ref:
         raise BudgetError("--done needs --ref \"#<seq>\" or ev_<12 hex>: the event or captured call proving it")
     if mode == "close" and not args.outcome:
         raise BudgetError(f"--close needs --outcome {'|'.join(OUTCOMES)}")
+
+
+def _amend(args, state, path, out, as_json) -> int:
+    """Correct the open budget: replace the given fields; keep its start,
+    worker, thresholds, done marks (of milestones that remain) and firings;
+    no history entry."""
+    b = state.get("current")
+    if not b:
+        raise BudgetError("no open budget to amend: --set one first")
+    if not (args.milestone or args.question or args.basis or args.worker_estimate):
+        raise BudgetError("--amend needs at least one of --milestone, --question, --basis, --worker-estimate")
+    fresh = new_budget(question=args.question or b["question"], milestones=args.milestone or b["milestones"],
+                       basis=args.basis or b["basis"], set_at=parse_time(b["set_at"]), since_seq=b["since_seq"],
+                       worker_session=b.get("worker_session"),
+                       worker_estimate=args.worker_estimate or b.get("worker_estimate"))
+    ids = {m["id"] for m in fresh["milestones"]}
+    dropped = sorted(k for k in b["done"] if k not in ids)
+    b.update({k: fresh[k] for k in ("question", "basis", "worker_estimate", "milestones")})
+    b["done"] = {k: d for k, d in b["done"].items() if k in ids}
+    save(path, state)
+    p50, p80 = totals(b)
+    if as_json:
+        out(json.dumps({"budget": b, "dropped_done": dropped}, indent=2, ensure_ascii=False))
+        return 0
+    out(f"budget amended: P50 {_h(p50)} / P80 {_h(p80)} over {len(b['milestones'])} milestones; still counting from "
+        f"#{b['since_seq']}; done marks and firings kept"
+        + (f" (dropped the done marks of {', '.join(dropped)}: no such milestone now)" if dropped else ""))
+    return 0
 
 
 def _set(args, state, path, conn, inv, client, home, reader, out, t, as_json) -> int:
@@ -538,8 +669,12 @@ def _set(args, state, path, conn, inv, client, home, reader, out, t, as_json) ->
                    since_seq=since, worker_session=args.worker_session, worker_estimate=args.worker_estimate)
     replaced = None
     if state.get("current"):
-        m, _, _ = _measure_current(state, conn, inv, client, home, reader)
-        actuals = milestone_actuals(state["current"], m["worker_times"], m["spool_times"])
+        # The replaced budget ends where the new one starts: no time counted twice.
+        old = state["current"]
+        events, _ = read_worker_events(conn, inv, old["since_seq"], client=client, reader=reader)
+        spool = spool_entries(home, old.get("worker_session")) or []
+        m = measure(old, events, spool, before_seq=since, before=set_at)
+        actuals = milestone_actuals(old, m["worker_times"], m["spool_times"])
         replaced = close(state, "replaced", m["spent"], m["earned"], actuals, now=t)
     state["current"] = b
     save(path, state)
@@ -549,7 +684,8 @@ def _set(args, state, path, conn, inv, client, home, reader, out, t, as_json) ->
         return 0
     if replaced:
         out(f"closed the previous budget as replaced: spent {_h(replaced['spent_h'])} against P80 "
-            f"{_h(replaced['p80_total_h'])}, earned {_h(replaced['earned_h'])}")
+            f"{_h(replaced['p80_total_h'])}, earned {_h(replaced['earned_h'])} (a correction of this direction is "
+            "--set --amend)")
     out(f"budget set: P50 {_h(p50)} / P80 {_h(p80)} over {len(b['milestones'])} milestones, counting the "
         f"worker's active time from #{since}" + (f" (worker session {b['worker_session']})" if b["worker_session"]
                                                  else " (no --worker-session: the author's session events)"))
