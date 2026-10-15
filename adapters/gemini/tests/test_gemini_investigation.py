@@ -539,10 +539,12 @@ class OwnerRelayTests(GeminiInvestigationTests):
         out = self.prompt(raw)
         want = (f"Cardinal: sent your approved draft {entry['id']} to the worker (session 9a8b7c6d) as owner "
                 'decision #57: "Only the cache layer.".')
-        self.assertIn(want, out["systemMessage"])
+        self.assertIn(want + " " + owner_relay.SEES_IT, out["systemMessage"])
         self.assertIn(want, out["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn(owner_relay.SEES_IT, out["hookSpecificOutput"]["additionalContext"])   # the terse line
         again = self.prompt(raw)   # gemini-cli re-fires BeforeAgent for one prompt
         self.assertIn(want, again["systemMessage"])
+        self.assertNotIn(owner_relay.SEES_IT, again["hookSpecificOutput"]["additionalContext"])
         relays = [r for r in self.fake.requests if r["tool"] == "relay-owner-decision"]
         self.assertEqual(len(relays), 1)
         self.assertEqual(relays[0]["body"]["relay_key"], entry["id"])

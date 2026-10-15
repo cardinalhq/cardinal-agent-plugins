@@ -23,7 +23,7 @@ is specific to Gemini CLI.
 Block on the watch until there is something to review:
 
 ```
-<this-skill-directory>/../../scripts/cardinal-storyboard investigation events <inv> --credential-file <dir>/grant.json --cursor-file <dir>/cursor.json --follow --timeout 600 --max 1
+<this-skill-directory>/../../scripts/cardinal-storyboard investigation events <inv> --credential-file <dir>/grant.json --cursor-file <dir>/cursor.json --follow --timeout 600 --max 1 --session <your_sid>
 ```
 
 Starting from your cursor file, the watch signals only events you have not committed, so

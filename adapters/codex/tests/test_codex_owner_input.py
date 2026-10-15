@@ -253,8 +253,10 @@ class OwnerRelayTests(OwnerInputBase):
         out = self.out(res)
         want = (f"Cardinal: sent your approved draft {entry['id']} to the worker (session 9a8b7c6d) as owner "
                 'decision #57: "Only the cache layer.".')
-        self.assertIn(want, out["systemMessage"])
+        from cardinal_core import owner_relay
+        self.assertIn(want + " " + owner_relay.SEES_IT, out["systemMessage"])
         self.assertIn(want, self.context(res))
+        self.assertNotIn(owner_relay.SEES_IT, self.context(res))   # the model gets the terse line
         [req] = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
         self.assertEqual(req["body"]["relay"]["supervisor_session_id"], SESSION)
         self.assertEqual(req["headers"]["x-cardinalhq-api-key"], "ck_codex_test")

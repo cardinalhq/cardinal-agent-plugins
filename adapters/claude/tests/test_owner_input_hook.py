@@ -684,9 +684,9 @@ class OwnerRelay(Base):
         env = dict(self.env, CARDINAL_OWNER_INPUT="0")
         res, prompt_id = self.relay_hook(f"approve {pid}", env=env)
         out = json.loads(res.stdout)
-        self.assertEqual(out["systemMessage"], f"Cardinal: confirming you typed this in this terminal, then sending "
-                                               f"draft {pid} to the worker (session 9a8b7c6d).")
-        self.assertIn("confirming the owner typed this prompt", out["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(out["systemMessage"], f"Cardinal: checking this prompt was typed in this terminal before "
+                                               f"sending draft {pid} to the worker (session 9a8b7c6d)…")
+        self.assertIn("not a task", out["hookSpecificOutput"]["additionalContext"])
         self.written(prompt_id, f"approve {pid}")
         self.settled()
         msg = self.stop()
@@ -702,12 +702,13 @@ class OwnerRelay(Base):
         res, _ = self.relay_hook("thanks")                   # the model hears it with the next prompt
         out = json.loads(res.stdout)
         self.assertNotIn("systemMessage", out)
-        self.assertIn(f"sent your approved draft {pid}", out["hookSpecificOutput"]["additionalContext"])
+        self.assertIn(f'Earlier prompt ("approve {pid}"): Cardinal: sent your approved draft {pid}',
+                      out["hookSpecificOutput"]["additionalContext"])
 
     def test_a_scheduled_approve_is_never_sent(self):
         pid = self.propose()
         res, prompt_id = self.relay_hook("approve")          # e.g. a model-created CronCreate firing `approve`
-        self.assertIn("confirming you typed this", json.loads(res.stdout)["systemMessage"])
+        self.assertIn("checking this prompt was typed", json.loads(res.stdout)["systemMessage"])
         self.written(prompt_id, "approve", human=False)
         self.settled()
         self.assertEqual(self.stop(), "Cardinal: not sent: Cardinal could not confirm you typed this prompt in this "

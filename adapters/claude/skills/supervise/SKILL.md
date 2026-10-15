@@ -24,7 +24,7 @@ is specific to Claude Code.
 Run one watch per supervised Investigation with **Monitor**, timeout at the maximum:
 
 ```
-cardinal-storyboard investigation events <inv> --credential-file <dir>/grant.json --cursor-file <dir>/cursor.json --follow --timeout 600
+cardinal-storyboard investigation events <inv> --credential-file <dir>/grant.json --cursor-file <dir>/cursor.json --follow --timeout 600 --session <your_sid>
 ```
 
 Starting from your cursor file, the watch signals only events you have not committed, so

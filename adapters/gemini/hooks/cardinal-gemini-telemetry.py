@@ -566,7 +566,7 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
         owner_input_log(status)
 
 
-def relay_owner_decision(payload: dict[str, Any], session_id: str) -> str | None:
+def relay_owner_decision(payload: dict[str, Any], session_id: str) -> tuple[str | None, str | None]:
     """Relayed owner decisions (owner_relay.handle_prompt, runtime "gemini"):
     when what the owner typed (hook_context and @file sections removed;
     never a machine prompt or a subagent's) is exactly `decide: <text>`
@@ -575,14 +575,14 @@ def relay_owner_decision(payload: dict[str, Any], session_id: str) -> str | None
     decision to the worker with this machine's key, or drop it. The one synchronous network
     call of BeforeAgent, made only for such a prompt and bounded by START +
     owner_relay.BUDGET. A re-fired BeforeAgent for the same prompt repeats
-    the outcome without relaying again. Returns the outcome (shown to the
-    user and given to the model) or None. Runs whether or not owner input is
-    on. Never raises."""
+    the outcome without relaying again. Returns (the outcome shown to the
+    user, the terser one given to the model), or (None, None). Runs whether
+    or not owner input is on. Never raises."""
     try:
         from cardinal_core import investigation_events as ie
 
         if not ie.valid_session(session_id):
-            return None
+            return None, None
         from cardinal_core import owner_relay
 
         wiring = storyboard_wiring()
@@ -591,9 +591,9 @@ def relay_owner_decision(payload: dict[str, Any], session_id: str) -> str | None
                                         conn=wiring.connection(), client=wiring.client,
                                         agent_id=agent_id if isinstance(agent_id, str) else None,
                                         deadline=START + owner_relay.BUDGET)
-        return got.message
+        return got.message, got.model_text()
     except Exception:
-        return None
+        return None, None
 
 
 def mark_disclosure_shown(session_id: str) -> None:
@@ -652,9 +652,9 @@ def handle_before_agent(payload: dict[str, Any]) -> None:
         # the disclosure: nothing is captured or delivered for it. The
         # owner's approval of a proposed owner decision comes first and is
         # independent of owner-input capture.
-        relayed = relay_owner_decision(payload, session_id)
-        if relayed:
-            parts.append(relayed)
+        relayed, told = relay_owner_decision(payload, session_id)
+        if told:
+            parts.append(told)
         disclosure = capture_owner_input(payload, session_id, cwd)
         staged = staged_for_prompt(session_id)
         if staged:

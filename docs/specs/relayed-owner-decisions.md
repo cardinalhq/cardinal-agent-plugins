@@ -39,9 +39,11 @@ prompts, task notifications).
 
 - **Claude Code** fires UserPromptSubmit for prompts no person typed, with no
   origin in the payload (verified in 2.1.300: a model-created one-shot
-  scheduled task with prompt `approve` arrived exactly like a typed one; a
-  cross-session message arrived wrapped in `<cross-session-message …>`, which
-  never matches the forms). The session transcript records the origin on the
+  scheduled task with prompt `approve` arrived exactly like a typed one, and a
+  peer session's message arrived as BARE text, `decide: injected via the
+  messaging socket`; only its transcript entry carries the
+  `<cross-session-message>` wrapper and `origin.kind: "peer"`). The transcript
+  origin check is therefore the defence. The session transcript records the origin on the
   user entry whose `promptId` is the hook's `prompt_id`: `origin.kind:
   "human"` (with `promptSource: "typed"`, `turnOrigin: "human"`) for what the
   person typed; scheduled and peer prompts carry `isMeta`, `promptSource:
@@ -50,9 +52,10 @@ prompts, task notifications).
   defers: it records the prompt as pending and a detached verifier waits up to
   20 s for the entry and acts only when it is human-typed (below).
 - **Codex, Gemini CLI, Cursor**: their prompt payloads carry no origin field
-  (payload captures in this repo). Neither their documentation nor our captures
-  show a model-schedulable prompt, so they relay synchronously, trusting that
-  the prompt hook sees what the person typed. Known hook-made prompts: Gemini
+  (payload captures in this repo). A stated assumption: none has a known
+  peer-message or scheduled-prompt mechanism that fires its prompt hook
+  (neither their documentation nor our captures show one), so they relay
+  synchronously, trusting that the prompt hook sees what the person typed. Known hook-made prompts: Gemini
   re-fires BeforeAgent with an AfterAgent block's reason as the prompt, and
   Cursor submits a `stop` hook's `followup_message` as the next user prompt
   (this plugin uses neither; another extension could). Unknown: whether a
@@ -67,7 +70,12 @@ ruling and cannot be cited by `--conflicts-with` (server: 422
 `owner_relay_answers_ruling` / `conflict_ref_not_owner`): only a web decision
 does. A supervisor defers to a relayed decision only when its own session's
 hook sent it (the reader marks it `relayed: by_you`); any other is unverified
-and reported to the owner. The opt-in is the owner's explicit acceptance of
+and reported to the owner. `by_you` is a local-file mark (the `sent` list in
+`<sid>.proposals.json`): it protects only against relays sent from another
+machine. A process on the same machine could forge it by writing that file,
+which is no easier than calling the route itself. A read without `--session`
+marks every relay unverified, so the supervise skill's review and watch
+commands always pass `--session`. The opt-in is the owner's explicit acceptance of
 that level. Later hardening (out of scope): a local user-presence gesture
 (Touch ID) the agent cannot perform.
 
@@ -374,17 +382,15 @@ Where this section and the text above differ, this section wins.
   records `{pid: prompt_id, at, state}` under `pending` in the session's store
   (`<sid>.proposals.json`, 0600, flock), starts a detached verifier (own
   session, isolated Python, the job on a pipe, as owner-input's flush), and
-  tells the owner "Cardinal: confirming you typed this in this terminal, then
-  sending draft dp_… to <name>." (the model: the outcome comes with the
-  owner's next prompt).
+  tells the owner it is checking the prompt was typed here before sending it
+  (wording: the last revision below).
 - The verifier reads the transcript from the size it had at hook time (minus
   256 KiB of slack) for up to 20 s, for the user entry with that promptId that
   is not a tool result. It acts only when `origin.kind == "human"`, no machine
   marker is present (`isMeta`, `promptSource: "system"`, a `turnOrigin` other
-  than `"human"`) and the entry's text is the prompt the hook saw. Any
-  `promptSource` other than `"system"` is accepted with a human origin: we have
-  only observed `"typed"`, and a pasted prompt should count if Claude marks it
-  differently; `origin.kind` is the attribution. Not found in time,
+  than `"human"`) and the entry's text is the prompt the hook saw.
+  `promptSource` must be `"typed"`, `"queued"` (typed while a turn ran) or
+  absent; any other value fails closed. Not found in time,
   unreadable, another origin, an unknown shape: "Cardinal: not sent: Cardinal
   could not confirm you typed this prompt in this terminal." The prompt text
   is the owner's; no missing payload field (`prompt_id`, `transcript_path`) is
@@ -420,8 +426,11 @@ Where this section and the text above differ, this section wins.
 ### Text, targets, answers
 
 - `decide:` is refused (nothing sent) with a blank line ("send one decision at
-  a time"), any `?` ("a decision is not a question; to ask the worker
-  something, tell the supervisor"), and the server's invisible characters
+  a time"), a sentence ending in `?` (a `?` followed by whitespace or the end,
+  outside a URL: "a decision is not a question; to ask the worker
+  something, tell the supervisor"), the server's control characters
+  (`/[\u0000-\u0008\u000b-\u001f]/`: CR, ESC…; tab and newline are fine; a
+  pasted CRLF becomes a newline first), and the server's invisible characters
   (U+202A–202E, U+2066–2069, U+200E, U+200F, U+061C, U+E0000–E007F, U+200B,
   U+2060, U+FEFF; ZWJ/ZWNJ are fine), which propose-decision also refuses in
   `--text` and `--ref`.
@@ -463,4 +472,31 @@ never sees that prompt; the outcome is staged for its next tool call.
 - A supervisor's (grantee) event reads mark each `owner_relayed` decision
   `relayed: by_you` when its own session's hook recorded sending that event
   (the store's `sent`, at most 50), else `unverified`. A local check: a process
-  running as the same OS user could write that file too.
+  running as the same OS user could write that file too (see the trust model).
+
+## Revision 2026-10-15 (re-review, live test on Claude Code 2.1.300)
+
+Where this section and the text above differ, this section wins.
+
+- First prompt: Claude Code creates the transcript only after a session's first
+  prompt hook returns. A missing transcript is offset 0, and the verifier
+  waits for the file (as for the entry) until its 20 s deadline.
+- Wording: the pending line no longer asserts the owner typed it: "Cardinal:
+  checking this prompt was typed in this terminal before sending it to codex
+  (session 1a2b3c4d)…". The model is told: "This prompt is a Cardinal relay
+  command handled by a hook, not a task: acknowledge it briefly and do nothing
+  else."
+- An outcome given to the model with a later prompt is labelled with the
+  prompt it answers: `Earlier prompt ("<≤40-char excerpt>"): Cardinal: …`.
+- A prompt the limits gate blocks takes no outcomes: in 2.1.300 a block shows
+  neither the owner nor the model anything from another hook (observed: a
+  `decide:` refusal's systemMessage was not displayed when a parallel hook
+  blocked the prompt). They wait for the next prompt. A subagent's prompt
+  takes none either.
+- `decide <name>:` is refused when that name stopped naming its target (moved,
+  renamed away, removed) since the owner's previous human prompt, naming the
+  current target ("the worker named codex changed since your last message;
+  it is now codex (session …). Type it again to send it there."). A name's
+  first registration is not a change.
+- Codex and Gemini give the model the terse outcome (without the "worker sees
+  it…" sentence), as Claude does.

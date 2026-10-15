@@ -33,21 +33,24 @@ confirm a human typed in this terminal, and it refuses every prompt a model
 created (scheduled tasks, /loop, peer messages, subagent prompts, task
 notifications).
 
-  Claude Code fires its prompt hook for model-created prompts too (a
-  scheduled task's prompt arrives exactly like a typed one), and its
-  payload says nothing about origin. The session transcript does: the user
-  entry whose promptId is the hook's prompt_id carries origin.kind "human"
-  only for what the person typed. That entry is written after the hook
-  returns, so the Claude hook defers (handle_prompt_deferred): it records
-  the prompt as pending and starts a detached verifier (verify) that waits
-  up to VERIFY_WINDOW for the entry and acts only when it is human-typed;
-  anything else (another origin, not found in time, unreadable, unknown
-  shape) is "not sent". The outcome is shown at the turn's end (at_stop)
-  or with the next prompt, exactly once. Codex, Gemini CLI and Cursor give
-  no origin signal and, as far as their documentation and our payload
-  captures show, no model-schedulable prompts: they relay synchronously
-  (handle_prompt), trusting that their prompt hook sees what the person
-  typed (the spec's trust section lists what is unknown).
+  Claude Code fires its prompt hook for model-created prompts too, and its
+  payload says nothing about origin: in 2.1.300 a scheduled task's prompt
+  and a peer session's message both arrived as BARE text, exactly like a
+  typed one (only the transcript wraps a peer message). The session
+  transcript is the defence: the user entry whose promptId is the hook's
+  prompt_id carries origin.kind "human" only for what the person typed.
+  That entry (the file itself, for a session's first prompt) is written
+  after the hook returns, so the Claude hook defers
+  (handle_prompt_deferred): it records the prompt as pending and starts a
+  detached verifier (verify) that waits up to VERIFY_WINDOW for the entry
+  and acts only when it is human-typed; anything else (another origin, not
+  found in time, unreadable, unknown shape) is "not sent". The outcome is
+  shown at the turn's end (at_stop) or with the next prompt, exactly once.
+  Codex, Gemini CLI and Cursor give no origin signal and have no known
+  peer-message or scheduled-prompt mechanism that fires their prompt hook
+  (an assumption: their documentation and our payload captures show
+  none): they relay synchronously (handle_prompt), trusting that their
+  prompt hook sees what the person typed.
 
 The worker's event is authority `owner_relayed` (attested by the owner's
 machine), weaker than `owner_decision` (web session).
@@ -59,12 +62,13 @@ Local state, one file per supervisor session, next to its binding:
                   created_at, expires_at, uncertain?}],
    "targets":   [{name?, investigation_id, to_session_id, created_at}],
    "targets_changed_at": when an existing target set last changed,
+   "names_changed": {name: when that name last stopped naming its target},
    "verbatim":  [{key, investigation_id, to_session_id, sha256, at}],
    "recent":    [{id, outcome, message, prompt_sha256, at}],
    "prompt":    {at, sha, prev}                        (synchronous runtimes)
    "prompts":   [{id, at, off, human?}]                (Claude: prompts seen, origin once known)
-   "pending":   [{pid, at, state}]                     (Claude: prompts being confirmed)
-   "outcomes":  [{pid, message, context, at, owner, model}]}  (Claude: to show once)
+   "pending":   [{pid, at, state, ex}]                 (Claude: prompts being confirmed; ex: a 40-char excerpt)
+   "outcomes":  [{pid, message, context, at, ex, owner, model}]}  (Claude: to show once)
 
 A proposal expires after PROPOSAL_TTL (30 min); at most MAX_PROPOSALS
 pending (the oldest goes). `uncertain` marks a draft whose send got no
@@ -81,16 +85,16 @@ REFIRE_WINDOW repeats a final outcome instead of acting twice.
 
 Freshness: a bare `approve` / `reject` applies only to a draft made after
 the owner's previous prompt (and before this one); a bare `decide:` is
-refused when the target set changed since then. On Claude only a prompt
-confirmed human counts as the owner's previous prompt, so a scheduled
-prompt cannot make a draft drafted in its own turn look fresh.
+refused when the target set changed since then, and `decide <name>:` when
+that name's target did. On Claude only a prompt confirmed human counts as
+the owner's previous prompt, so a scheduled prompt cannot make a draft
+drafted in its own turn look fresh.
 
 The prompt hook runs before, and independently of, owner-input capture:
 owner input may be off. It refuses a subagent's prompt (a non-empty
 agent_id) and a machine prompt (owner_input.normalize_prompt must reduce it
 to typed text), and acts only on a whole stripped prompt matching
-APPROVAL_RE or DECIDE_RE (case-insensitive; a peer message arrives wrapped
-in <cross-session-message …>, so it never matches). Anything else is left
+APPROVAL_RE or DECIDE_RE (case-insensitive). Anything else is left
 untouched.
 
 Standard library only. handle_prompt / handle_prompt_deferred never raise.
@@ -124,6 +128,7 @@ SOURCE_VERBATIM = "verbatim"          # relay.source: the owner's own words (`de
 PROPOSAL_TTL = 30 * 60.0
 MAX_PROPOSALS = 5
 MAX_TARGETS = 5
+MAX_NAMES = 10
 RECENT_TTL = 30 * 60.0
 MAX_RECENT = 10
 MAX_VERBATIM = 5
@@ -148,7 +153,10 @@ APPROVAL_RE = re.compile(r"(approve|reject)(?:\s+(dp_[0-9a-f]{16}))?[.!]?", re.I
 DECIDE_RE = re.compile(r"decide(?:[ \t]+([a-z0-9-]{1,32}))?[ \t]*:(.*)", re.IGNORECASE | re.DOTALL)  # fullmatch
 MAYBE_RE = re.compile(r"\s*(?:approve|reject|decide)\b", re.IGNORECASE)            # match: a cheap pre-check
 ORIGIN_RE = re.compile(r"https?://[A-Za-z0-9.:-]{1,253}")                            # fullmatch
+HUMAN_SOURCES = ("typed", "queued")   # transcript promptSource of a prompt the person typed (queued: while busy)
 FINAL_OUTCOMES = ("relayed", "duplicate", "refused", "rejected")
+URL_RE = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)                    # a "?" inside one is fine
+QUESTION_RE = re.compile(r"\?[\"')\]\u2019\u201d]*(?:\s|$)")                        # a sentence ending in "?"
 
 PROPOSE_HELP = ("Draft an owner decision for the worker session you supervise. Nothing is sent: the owner approves "
                 "it by typing `approve <id>` (or `reject <id>`) as a prompt in THIS session, and only then does this "
@@ -170,11 +178,13 @@ CREDENTIAL = ("Cardinal: your decision looks like it contains a credential, so n
               "the decision again; give the worker secrets through its environment, not a decision.")
 QUESTION = "Cardinal: not sent: a decision is not a question; to ask the worker something, tell the supervisor."
 ONE_AT_A_TIME = "Cardinal: not sent: send one decision at a time, as one paragraph (no blank line)."
-UNSTORABLE = ("Cardinal: not sent: the decision contains a character Cardinal does not accept (a NUL, or an "
-              "invisible direction or zero-width character). Type it again without it.")
+UNSTORABLE_WHAT = ("a control character (such as a carriage return or escape; tab and newline are fine), an unpaired "
+                   "surrogate, or an invisible direction or zero-width character")
+UNSTORABLE = (f"Cardinal: not sent: the decision contains a character Cardinal does not accept: {UNSTORABLE_WHAT}. "
+              "Type it again without it.")
 NOT_CONFIRMED = "Cardinal: not sent: Cardinal could not confirm you typed this prompt in this terminal."
-PENDING_CONTEXT = ("Cardinal is confirming the owner typed this prompt and then acts on it itself; the outcome comes "
-                   "with the owner's next prompt.")
+PENDING_CONTEXT = ("This prompt is a Cardinal relay command handled by a hook, not a task: acknowledge it briefly and "
+                   "do nothing else.")
 MAYBE_SENT = "may not have been sent: Cardinal did not answer in time or could not be reached"
 NO_DRAFT = "Cardinal: no draft is waiting for your approval (drafts expire after 30 minutes); nothing was sent."
 NO_WORKER = ("Cardinal: no worker is registered here yet; ask the supervisor to register the one it watches. Nothing "
@@ -287,11 +297,14 @@ def _read(home: Path, sid: str, now: float) -> dict:
     expired = kept("expired", lambda x: isinstance(x, dict) and isinstance(x.get("id"), str)
                    and bool(ID_RE.fullmatch(x["id"])) and _num(x.get("at")), MAX_RECENT)
     expired = [x for x in expired + gone if 0 <= now - x["at"] < RECENT_TTL][-MAX_RECENT:]
-    changed = data.get("targets_changed_at")
+    changed, names = data.get("targets_changed_at"), data.get("names_changed")
     return {"proposals": kept("proposals", lambda e: _entry_ok(e, now), MAX_PROPOSALS),
             "expired": expired,
             "targets": kept("targets", _target_ok, MAX_TARGETS),
             "targets_changed_at": changed if _num(changed) else 0,
+            "names_changed": dict(sorted(((k, v) for k, v in names.items() if isinstance(k, str)
+                                          and NAME_RE.fullmatch(k) and _num(v)), key=lambda kv: kv[1])[-MAX_NAMES:])
+            if isinstance(names, dict) else {},
             "verbatim": kept("verbatim", lambda v: _verbatim_ok(v, now), MAX_VERBATIM),
             "recent": kept("recent", lambda r: _recent_ok(r, now), MAX_RECENT),
             "prompt": prompt,
@@ -329,14 +342,14 @@ def _prompt_ok(p: Any) -> bool:
 
 def _pending_ok(p: Any) -> bool:
     return (isinstance(p, dict) and isinstance(p.get("pid"), str) and 0 < len(p["pid"]) <= 128 and _num(p.get("at"))
-            and p.get("state") in ("verifying", "sending"))
+            and p.get("state") in ("verifying", "sending") and isinstance(p.get("ex", ""), str))
 
 
 def _outcome_ok(o: Any, now: float) -> bool:
     return (isinstance(o, dict) and isinstance(o.get("message"), str) and isinstance(o.get("context"), str)
             and _num(o.get("at")) and 0 <= now - o["at"] < RECENT_TTL
             and isinstance(o.get("owner"), bool) and isinstance(o.get("model"), bool)
-            and not (o["owner"] and o["model"]))
+            and not (o["owner"] and o["model"]) and isinstance(o.get("ex", ""), str))
 
 
 def _write(home: Path, sid: str, store: dict) -> None:
@@ -400,8 +413,7 @@ def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any 
     if len(text) > MAX_TEXT:
         raise ValueError(f"--text is at most {MAX_TEXT} characters")
     if not storable(text):
-        raise ValueError("--text contains a NUL, an unpaired surrogate, or an invisible direction or zero-width "
-                         "character")
+        raise ValueError(f"--text contains {UNSTORABLE_WHAT}")
     if has_credential(text):
         raise ValueError("not proposed: the decision looks like it contains a credential. Remove it; the worker gets "
                          "secrets through its environment, never through an owner decision")
@@ -412,17 +424,26 @@ def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any 
         raise ValueError(f"at most {MAX_REFS} --ref")
     for r in refs:
         if not isinstance(r, str) or not r.strip() or len(r) > MAX_REF or not storable(r):
-            raise ValueError(f"each --ref is 1 to {MAX_REF} characters, none of them invisible")
+            raise ValueError(f"each --ref is 1 to {MAX_REF} characters, without {UNSTORABLE_WHAT}")
 
 
 def storable(text: str) -> bool:
-    """Whether the server accepts `text` in a relay: no NUL or unpaired
-    surrogate (wire_safe), and none of the invisible characters its
-    invalid_owner_relay rule refuses (INVISIBLE: direction controls, tag
-    characters, zero-width space / word joiner / BOM; ZWJ and ZWNJ are
-    fine)."""
+    """Whether the server accepts `text` in a relay: no unpaired surrogate
+    (wire_safe), no control character but tab and newline (its
+    /[\u0000-\u0008\u000b-\u001f]/ rule: NUL, CR, ESC…), and none of the
+    invisible characters its invalid_owner_relay rule refuses (INVISIBLE:
+    direction controls, tag characters, zero-width space / word joiner /
+    BOM; ZWJ and ZWNJ are fine). Normalize CRLF first (crlf)."""
     from .owner_input import wire_safe
-    return wire_safe(text) == text and not any(_invisible(c) for c in text)
+    return wire_safe(text) == text and not CONTROL_RE.search(text) and not any(_invisible(c) for c in text)
+
+
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f]")
+
+
+def crlf(text: str) -> str:
+    """A pasted CRLF (or CR) line break as a newline."""
+    return text.replace("\r\n", "\n")
 
 
 INVISIBLE = frozenset((0x200B, 0x200E, 0x200F, 0x061C, 0x2060, 0xFEFF))
@@ -454,10 +475,18 @@ def _targets_sig(ts: list) -> list:
 
 
 def _targets_changed(store: dict, before: list, now: float) -> None:
-    """Note when a non-empty target set changed (a bare `decide:` typed
-    before then is refused: the owner may not know where it goes now)."""
-    if before and before != _targets_sig(store["targets"]):
+    """Note when a non-empty target set changed, and when a name stopped
+    naming its target (moved, renamed away, removed): a bare `decide:` /
+    `decide <name>:` typed before then is refused, as the owner may not know
+    where it goes now."""
+    after = _targets_sig(store["targets"])
+    if before and before != after:
         store["targets_changed_at"] = now
+    now_named = {n: (i, s) for i, s, n in after if n}
+    for i, s, n in before:
+        if n and now_named.get(n) != (i, s):
+            store["names_changed"] = dict(list({k: v for k, v in store["names_changed"].items() if k != n}.items())
+                                          [-(MAX_NAMES - 1):] + [(n, now)])
 
 
 def _upsert_target(store: dict, investigation_id: str, to_session_id: str, name: Optional[str],
@@ -522,7 +551,9 @@ def propose(home: Path, sid: str, investigation_id: str, to_session_id: str, tex
             answers: Optional[int] = None, refs: Optional[list] = None, now: Optional[float] = None) -> dict:
     """Store a proposal of supervisor session `sid` (and register its
     target) and return it. Sends nothing. Raises ValueError (invalid input)
-    or OSError (the store is locked or cannot be written)."""
+    or OSError (the store is locked or cannot be written). A CRLF in `text`
+    is stored as a newline."""
+    text = crlf(text) if isinstance(text, str) else text
     validate(investigation_id, to_session_id, text, answers, refs)
     now = time.time() if now is None else now
     with _updating(home, sid, now, wait=2.0) as store:
@@ -651,8 +682,7 @@ def refusal(err: "sync.ServerError") -> tuple:
     if code == "event_limit_reached" and isinstance(err.body.get("scope"), str):
         said = LIMIT_SCOPES.get(err.body["scope"], said)
     if code == "invalid_owner_relay":
-        said = ("Cardinal could not read the request (a decision cannot contain invisible direction or zero-width "
-                "characters)")
+        said = f"Cardinal could not read the request (a decision cannot contain {UNSTORABLE_WHAT})"
     return said or "the reason is one this plugin version does not know", safe
 
 
@@ -770,13 +800,14 @@ def match(prompt: Any) -> Optional[tuple]:
 def match_decide(prompt: Any) -> Optional[tuple]:
     """(name or None, text) when the whole stripped prompt is `decide:
     <text>` / `decide <name>: <text>`; text is what follows the colon,
-    without surrounding whitespace (possibly empty), else verbatim."""
+    without surrounding whitespace (possibly empty; a CRLF is a newline),
+    else verbatim."""
     if not isinstance(prompt, str):
         return None
     m = DECIDE_RE.fullmatch(prompt.strip())
     if not m:
         return None
-    return (m.group(1).lower() if m.group(1) else None), m.group(2).strip()
+    return (m.group(1).lower() if m.group(1) else None), crlf(m.group(2)).strip()
 
 
 def _short(sid: str) -> str:
@@ -864,7 +895,7 @@ def _text_refusal(text: str) -> Optional[RelayResult]:
         return RelayResult("bad_text", UNSTORABLE)
     if re.search(r"\n\s*\n", text):
         return RelayResult("several", ONE_AT_A_TIME)
-    if "?" in text:
+    if QUESTION_RE.search(URL_RE.sub("", text)):
         return RelayResult("question", QUESTION)
     if has_credential(text):
         return RelayResult("credential", CREDENTIAL)
@@ -940,7 +971,8 @@ def _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline, now, o
                       and (pid is None or r["id"] == pid)), None)
         if again is not None and not any(e["id"] == again["id"] or e["created_at"] > again["at"]
                                          for e in store["proposals"]):
-            return RelayResult("repeat", again["message"], [again["id"]])
+            return RelayResult("repeat", again["message"], [again["id"]],
+                               context=again["message"].replace(" " + SEES_IT, ""))
     return _act(home, sid, approval, decision, store, previous, now, typed_sha, conn, client, deadline, now, opener)
 
 
@@ -978,6 +1010,10 @@ def _decide(home, sid, decision, store, previous, prompt_at, typed_sha, conn, cl
     if store["targets_changed_at"] > prompt_at:
         return RelayResult("target_changed", "Cardinal: not sent: the workers registered here changed after you "
                                              f"typed this; now: {_targets_line(ts)}. Type it again to send it.")
+    if name is not None and store["names_changed"].get(name, 0) > previous:
+        return RelayResult("target_changed", f"Cardinal: not sent: the worker named {name} changed since your last "
+                                             f"message; it is now {_target_label(target)}. Type it again to send "
+                                             "it there.")
     if name is None and store["targets_changed_at"] > previous:
         again = f"as `decide {target['name']}: …`" if target.get("name") else "to send it there"
         return RelayResult("target_changed", "Cardinal: not sent: the worker registered here changed since your "
@@ -1155,12 +1191,15 @@ def handle_prompt_deferred(home: Path, sid: str, prompt: Any, *, prompt_id: Any,
     Text refusals and "nothing to act on" answer at once (nothing is sent).
     Outcomes of earlier prompts not shown yet are shown now: message (the
     owner's systemMessage) and context (the model's) each carry them once.
-    `blocked`: another hook blocked this prompt (nothing is acted on).
+    `blocked`: another hook blocked this prompt: nothing is acted on and
+    no outcome is taken (2.1.300 shows neither the owner nor the model
+    anything from this hook then); a subagent's prompt takes none either.
     Never raises."""
     now = time.time() if now is None else now
     shown, told = [], []
-    with contextlib.suppress(Exception):
-        shown, told = take_outcomes(home, sid, now)
+    if not (blocked or agent_id):
+        with contextlib.suppress(Exception):
+            shown, told = take_outcomes(home, sid, now)
     try:
         got = RelayResult("blocked") if blocked else _defer(home, sid, prompt, prompt_id, transcript_path, conn,
                                                             client, agent_id, now, spawn or spawn_verifier)
@@ -1172,8 +1211,14 @@ def handle_prompt_deferred(home: Path, sid: str, prompt: Any, *, prompt_id: Any,
 
 
 def _transcript_size(path: Any) -> Optional[int]:
+    """The transcript's size now; 0 when it does not exist yet (Claude Code
+    creates it only after a session's first prompt hook returns)."""
+    if not isinstance(path, str) or not path:
+        return None
     try:
-        return os.stat(path).st_size if isinstance(path, str) and path else None
+        return os.stat(path).st_size
+    except FileNotFoundError:
+        return 0
     except (OSError, ValueError):
         return None
 
@@ -1213,7 +1258,8 @@ def _defer(home, sid, prompt, prompt_id, path, conn, client, agent_id, now, spaw
             return RelayResult(status, f"Cardinal: not sent: {_WHY[status]}.")
     what = _pending_what(store, approval, decision)
     with _updating(home, sid, now) as st:
-        st["pending"] = (st["pending"] + [{"pid": pid, "at": now, "state": "verifying"}])[-MAX_OUTCOMES:]
+        st["pending"] = (st["pending"] + [{"pid": pid, "at": now, "state": "verifying",
+                                           "ex": excerpt(typed, 40)}])[-MAX_OUTCOMES:]
     job = {"home": str(home), "sid": sid, "prompt_id": pid, "transcript_path": path, "offset": off,
            "prompt": prompt, "typed": typed, "typed_sha": typed_sha, "at": now, "conn": conn, "client": client}
     if not spawn(job):
@@ -1221,7 +1267,7 @@ def _defer(home, sid, prompt, prompt_id, path, conn, client, agent_id, now, spaw
             with _updating(home, sid, now) as st:
                 st["pending"] = [p for p in st["pending"] if p["pid"] != pid]
         return RelayResult("unconfirmed", NOT_CONFIRMED)
-    return RelayResult("verifying", f"Cardinal: confirming you typed this in this terminal, then {what}.",
+    return RelayResult("verifying", f"Cardinal: checking this prompt was typed in this terminal before {what}…",
                        context=PENDING_CONTEXT)
 
 
@@ -1230,8 +1276,7 @@ def _pending_what(store: dict, approval: Optional[tuple], decision: Optional[tup
     if decision is not None:
         ts, name = store["targets"], decision[0]
         t = next((t for t in ts if t.get("name") == name), None) if name else (ts[0] if len(ts) == 1 else None)
-        return f"sending your decision to {_who(store, t['investigation_id'], t['to_session_id'])}" if t \
-            else "sending your decision"
+        return f"sending it to {_who(store, t['investigation_id'], t['to_session_id'])}" if t else "sending it"
     verb, pid = approval
     e = next((e for e in store["proposals"] if e["id"] == pid), None) if pid else None
     if verb == "reject":
@@ -1285,9 +1330,10 @@ def _content_text(message: Any) -> Optional[str]:
 def entry_origin(obj: Any, prompt_id: str, typed: Optional[str] = None) -> Optional[str]:
     """For one transcript line: None when it is not the user entry of prompt
     `prompt_id` (another entry, a tool result); else "human" when the
-    person typed it in this terminal (origin.kind "human", and no machine
-    marker: isMeta, promptSource "system", a turnOrigin other than
-    "human"; with `typed`, its text must be that prompt) or "other"."""
+    person typed it in this terminal (origin.kind "human", promptSource
+    "typed" or "queued" or none, not isMeta, turnOrigin "human" or none;
+    with `typed`, its text must be that prompt) or "other" (fails closed on
+    anything else)."""
     if not isinstance(obj, dict) or obj.get("type") != "user" or obj.get("promptId") != prompt_id \
             or "toolUseResult" in obj:
         return None
@@ -1296,7 +1342,7 @@ def entry_origin(obj: Any, prompt_id: str, typed: Optional[str] = None) -> Optio
         return None
     origin = obj.get("origin")
     human = (isinstance(origin, dict) and origin.get("kind") == "human" and obj.get("isMeta") is not True
-             and obj.get("promptSource") != "system" and obj.get("turnOrigin", "human") == "human")
+             and obj.get("promptSource", "typed") in HUMAN_SOURCES and obj.get("turnOrigin", "human") == "human")
     if human and typed is not None:
         said = _content_text(obj.get("message"))
         human = isinstance(said, str) and said.strip() == typed.strip()
@@ -1320,14 +1366,17 @@ def find_origin(path: str, offset: int, prompt_id: str, prompt: str, *, window: 
                 poll: float = VERIFY_POLL, sleep: Callable[[float], None] = time.sleep) -> Optional[str]:
     """Wait up to `window` seconds for prompt `prompt_id`'s user entry in
     the transcript at `path` (appended after `offset`, the size when the
-    hook ran; TRANSCRIPT_SLACK before it is read too): "human" / "other"
-    (entry_origin), or None (not found in time, unreadable)."""
+    hook ran; TRANSCRIPT_SLACK before it is read too; a file not created
+    yet is waited for): "human" / "other" (entry_origin), or None (not
+    found in time, unreadable)."""
     deadline = time.monotonic() + window
     pos = max(0, offset - TRANSCRIPT_SLACK)
     needle = prompt_id.encode()
     while True:
         try:
             lines, pos = _lines_from(path, pos)
+        except FileNotFoundError:
+            lines = []
         except OSError:
             return None
         for raw in lines:
@@ -1416,12 +1465,14 @@ def _finish(home: Path, sid: str, prompt_id: str, res: RelayResult, now: float) 
     (nothing when it is no longer pending: already reported)."""
     with contextlib.suppress(Exception):
         with _updating(home, sid, now, wait=5.0) as st:
-            if any(p["pid"] == prompt_id for p in st["pending"]):
-                st["pending"] = [p for p in st["pending"] if p["pid"] != prompt_id]
+            p = next((p for p in st["pending"] if p["pid"] == prompt_id), None)
+            if p is not None:
+                st["pending"].remove(p)
                 if res.message:
                     st["outcomes"] = (st["outcomes"] + [{"pid": prompt_id, "message": res.message,
                                                          "context": res.model_text() or res.message, "at": now,
-                                                         "owner": False, "model": False}])[-MAX_OUTCOMES:]
+                                                         "ex": p.get("ex", ""), "owner": False,
+                                                         "model": False}])[-MAX_OUTCOMES:]
 
 
 STOPPED = ("Cardinal: your last decision may not have been sent (Cardinal stopped before it got an answer). Check the "
@@ -1467,19 +1518,23 @@ def _expire_pending(store: dict, now: float) -> None:
         store["pending"].remove(p)
         message = STOPPED if p["state"] == "sending" else NOT_CONFIRMED
         store["outcomes"] = (store["outcomes"] + [{"pid": p["pid"], "message": message, "context": message,
-                                                   "at": now, "owner": False, "model": False}])[-MAX_OUTCOMES:]
+                                                   "at": now, "ex": p.get("ex", ""), "owner": False,
+                                                   "model": False}])[-MAX_OUTCOMES:]
 
 
 def take_outcomes(home: Path, sid: str, now: float, *, model: bool = True) -> tuple:
     """(owner lines, model lines) not shown yet, now marked shown (each
-    outcome reaches each once). model=False (the Stop hook: no model
-    channel) leaves the model's. Raises OSError when locked."""
+    outcome reaches each once). A model line names the earlier prompt it
+    answers, so it is not taken for the current one. model=False (the Stop
+    hook: no model channel) leaves the model's. Raises OSError when
+    locked."""
     if not has_store(home, sid):
         return [], []
     with _updating(home, sid, now) as st:
         _expire_pending(st, now)
         owner = [o["message"] for o in st["outcomes"] if not o["owner"]]
-        told = [o["context"] for o in st["outcomes"] if model and not o["model"]]
+        told = [f'Earlier prompt ({o["ex"]}): {o["context"]}' if o.get("ex") else o["context"]
+                for o in st["outcomes"] if model and not o["model"]]
         for o in st["outcomes"]:
             o["owner"] = True
             o["model"] = o["model"] or model

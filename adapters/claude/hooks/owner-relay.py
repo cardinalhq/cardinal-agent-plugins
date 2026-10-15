@@ -18,8 +18,13 @@ is sent: a matching prompt is recorded as pending and a detached verifier
 before acting. The owner is told it is being confirmed; the outcome is
 shown when the turn ends (`owner-relay.py stop`, waiting at most ~3 s for
 it) or with the next prompt, exactly once (systemMessage), and given to the
-model with the next prompt (additionalContext). A prompt the limits gate
-blocks is not acted on.
+model with the next prompt (additionalContext), labelled with the prompt
+it answers. A prompt the limits gate blocks is not acted on and takes no
+outcome (Claude Code shows nothing from this hook on a blocked prompt).
+
+The first prompt of a session runs before Claude Code creates the
+transcript: the verifier waits for the file too. A peer session's message
+reaches this hook as bare text; only its transcript entry says peer.
 
 Independent of owner-input capture: it runs whether or not owner input is
 on. Refused: a subagent's prompt (agent_id) and a task notification.
