@@ -1001,6 +1001,19 @@ class VerdictsAndClose(CLIBase):
         st["history"][0]["missed"] = []
         self.assertEqual(bud.calibrate_lines(self.home, st)[1], "keep T 2.0, Z 0.5")
 
+    def test_calibrate_counts_only_misses_under_current_thresholds(self):
+        st = bud.load(self.file, INV)
+        useful = {"scope": "milestone", "snapshot": {"delivered": 0.5}, "verdict": {"verdict": "worker_choice"},
+                  "outcome": {"outcome": "accepted"}}
+        old = {**bud.DEFAULT_THRESHOLDS, "T": 2.25}
+        st["history"] = [{"outcome": "done", "per_milestone": [], "firings": [useful] * 5, "missed": ["x"],
+                          "thresholds": old}]
+        self.assertEqual(bud.calibrate_lines(self.home, st)[1], "keep T 2.0, Z 0.5")
+        st["history"].append({"outcome": "done", "per_milestone": [], "firings": [], "missed": ["y"],
+                              "thresholds": dict(bud.DEFAULT_THRESHOLDS)})
+        self.assertIn("1 missed milestone(s)", bud.calibrate_lines(self.home, st)[0])
+        self.assertIn("suggest T 2.0 -> 1.75", bud.calibrate_lines(self.home, st)[1])
+
 
 class Cache(CLIBase):
     def test_lock_link_and_shape(self):

@@ -1088,15 +1088,18 @@ def calibrate_lines(home: Path, state: dict) -> list:
     states = _local_states(home)
     if not any(s is state or s.get("investigation_id") == state.get("investigation_id") for s in states):
         states.append(state)
-    firings, misses, th = [], 0, None
+    firings, missed, th = [], [], None
     for st in states:
         for h in (st.get("history") or []):
             firings += [f for f in h.get("firings", []) if f.get("scope") != "opening"]
-            misses += len(h.get("missed") or [])
+            missed.append((h.get("thresholds") or DEFAULT_THRESHOLDS, len(h.get("missed") or [])))
         if st.get("current"):
             firings += [f for f in st["current"]["firings"] if f.get("scope") != "opening"]
             th = st["current"]["thresholds"]
     th = th or DEFAULT_THRESHOLDS
+    # Only misses under the thresholds in force count: a miss an earlier T or Z already answered must not
+    # keep pulling T down.
+    misses = sum(n for h_th, n in missed if (h_th.get("T"), h_th.get("Z")) == (th["T"], th["Z"]))
     labeled = [f for f in firings if label(f)]
     if len(labeled) < 5:
         return [f"{len(labeled)} labeled firing(s) of {len(firings)}; a suggestion needs 5 (T {th['T']}, Z {th['Z']})"]

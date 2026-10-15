@@ -554,7 +554,9 @@ Each firing is labeled from its verdict v and outcome o:
     useful  ⇔  v ≠ on_track  ∧  o ∈ {accepted, changed_constraint}
     other   ⇔  any other recorded outcome
 
-With L = the last 5 labeled firings, and misses = milestones listed in `direction.closed.missed`:
+With L = the last 5 labeled firings, and misses = milestones listed in `direction.closed.missed` of
+directions that ran under the T and Z now in force (a miss that an earlier change already answered
+stops counting):
 
     T ← min(3,   T + 0.25)   if noise(L) ≥ 4
     T ← max(1.5, T − 0.25)   if misses > 0 ∧ noise(L) ≤ 1
