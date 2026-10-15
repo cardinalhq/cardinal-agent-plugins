@@ -1469,12 +1469,12 @@
     }
   },
   "supervise_stepback": {
-    "title": "Supervise step backs on a work budget (budget, lag/backstop triggers, fresh-context step back)",
+    "title": "Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back)",
     "group": "investigation",
     "adapters": {
       "claude": "present",
       "codex": "present",
-      "cursor": "limit:cursor-agent was not available to verify a read-only headless pass, so the supervise skill keeps the budget and its triggers and tells the owner the step back needs a Claude, Codex or Gemini supervisor (adapters/cursor/skills/supervise/SKILL.md#fresh-context-passes-step-backs; docs/specs/supervise-stepback.md#runtimes).",
+      "cursor": "limit:cursor-agent was not available to verify a read-only headless pass, so the supervise skill keeps the plan and its trigger and tells the owner the step back needs a Claude, Codex or Gemini supervisor (adapters/cursor/skills/supervise/SKILL.md#fresh-context-passes-step-backs; docs/specs/supervise-stepback.md#runtimes; docs/specs/supervise-stepback-trigger.md).",
       "gemini": "present"
     },
     "probes": {
@@ -1482,7 +1482,7 @@
         {
           "kind": "grep",
           "path": "skills/supervise/CORE.md",
-          "pattern": "budget --check"
+          "pattern": "budget --set --plan"
         },
         {
           "kind": "grep",
@@ -1503,7 +1503,7 @@
         {
           "kind": "grep",
           "path": "skills/supervise/CORE.md",
-          "pattern": "budget --check"
+          "pattern": "budget --set --plan"
         },
         {
           "kind": "grep",
@@ -1515,7 +1515,7 @@
         {
           "kind": "grep",
           "path": "skills/supervise/CORE.md",
-          "pattern": "budget --check"
+          "pattern": "budget --set --plan"
         },
         {
           "kind": "grep",

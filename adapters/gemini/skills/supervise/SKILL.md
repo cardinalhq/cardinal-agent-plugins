@@ -42,16 +42,17 @@ send or approve it. No Cardinal line means nothing was sent; say so.
 
 ## Fresh-context passes (step backs)
 
-Run each pass (CORE.md, Step backs) as a separate headless Gemini, the brief on stdin with the
-pass's question at its end:
+Run each pass (CORE.md, Step backs) as a separate headless Gemini, the copy `budget pass` wrote
+on stdin:
 
 ```
-gemini -e none --policy <this-skill-directory>/stepback-policy.toml --include-directories <code checkout> --skip-trust --approval-mode default -p "Answer the question at the end of the brief above." < <dir>/brief-<n>-<pass>.md
+gemini -e none --policy <this-skill-directory>/stepback-policy.toml --include-directories <code checkout> --skip-trust --approval-mode default -p "Answer the question at the end of the brief above." < <the copy>
 ```
 
 Keep every flag: the policy leaves it only file reads and searches (headless Gemini can
-otherwise leave plan mode into YOLO and write), and `-e none` drops Cardinal's tools and hooks. If it fails,
-tell the owner the step back needs a Claude supervisor, and keep the budget and its checks.
+otherwise leave plan mode into YOLO and write), and `-e none` drops Cardinal's tools and hooks.
+If it fails, tell the owner the step back needs a Claude supervisor, and keep the plan and its
+review.
 
 ## Doing your own checks
 
