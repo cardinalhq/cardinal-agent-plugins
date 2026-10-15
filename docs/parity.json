@@ -1468,6 +1468,72 @@
       "claude": "Claude Code fires UserPromptSubmit for scheduled-task, /loop and peer prompts too, with no origin in the payload: a detached verifier confirms from the transcript that a person typed it before anything is sent; the outcome is shown at Stop or with the next prompt."
     }
   },
+  "supervise_stepback": {
+    "title": "Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back)",
+    "group": "investigation",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "limit:cursor-agent was not available to verify a read-only headless pass, so the supervise skill keeps the plan and its trigger and tells the owner the step back needs a Claude, Codex or Gemini supervisor (adapters/cursor/skills/supervise/SKILL.md#fresh-context-passes-step-backs; docs/specs/supervise-stepback.md#runtimes; docs/specs/supervise-stepback-trigger.md).",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "budget --set --plan"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/SKILL.md",
+          "pattern": "`cardinal:stepback` subagent"
+        },
+        {
+          "kind": "agent",
+          "path": "agents/stepback.md"
+        },
+        {
+          "kind": "grep",
+          "path": "hooks/storyboard-discovery.py",
+          "pattern": "FRESH_AGENTS = \\(\"stepback\",\\)"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "budget --set --plan"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/SKILL.md",
+          "pattern": "codex exec --ignore-user-config .*--disable hooks .*--sandbox read-only"
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "budget --set --plan"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/SKILL.md",
+          "pattern": "gemini -e none --policy <this-skill-directory>/stepback-policy.toml"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/stepback-policy.toml",
+          "pattern": "toolName = \\[\"enter_plan_mode\", \"exit_plan_mode\"\\]"
+        }
+      ]
+    },
+    "notes": {
+      "codex": "The step back runs as `codex exec --ignore-user-config --ignore-rules --disable hooks --disable apps --disable plugins --sandbox read-only --ephemeral` (the sandbox covers only shell commands; the flags drop the user's MCP servers, apps and hooks). Verified from a shell on 2026-10-15, codex-cli 0.162.1: no MCP tools, apply_patch and a shell write refused; not yet from inside a Codex session.",
+      "gemini": "The step back runs as `gemini -e none --policy skills/supervise/stepback-policy.toml ... --approval-mode default -p`: headless, enter_plan_mode/exit_plan_mode are allowed and leaving plan mode switches to YOLO, so the policy denies them and every tool but file reads and searches (denied tools are not offered). Verified from a shell on 2026-10-15, gemini-cli 0.64.0: without the policy a shell write succeeded via plan mode; with it only read_file/grep_search/glob/list_directory exist; not yet from inside a Gemini session."
+    }
+  },
   "connection_skills": {
     "title": "connect / disconnect / status skills",
     "group": "skills",

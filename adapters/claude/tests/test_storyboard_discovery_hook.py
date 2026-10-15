@@ -130,7 +130,8 @@ class _HookCase(unittest.TestCase):
         (self.home / ".claude" / "settings.json").write_text(json.dumps({"env": env}))
         (self.home / ".claude" / "cardinal.json").write_text("{}")
 
-    def run_hook(self, event: str = "SessionStart", cwd: Path | None = None, env: dict | None = None):
+    def run_hook(self, event: str = "SessionStart", cwd: Path | None = None, env: dict | None = None,
+                 agent_type: str = "general-purpose"):
         payload = {"session_id": SESSION, "cwd": str(cwd or self.repo), "hook_event_name": event}
         if event == "SessionStart":
             payload["source"] = "startup"
@@ -138,7 +139,7 @@ class _HookCase(unittest.TestCase):
             # Claude Code's SubagentStart input (hooks reference; 2.1.286):
             # the common fields plus agent_id and agent_type. session_id is
             # the parent session's.
-            payload.update({"agent_id": "a1b2c3", "agent_type": "general-purpose",
+            payload.update({"agent_id": "a1b2c3", "agent_type": agent_type,
                             "transcript_path": str(self.base / "t.jsonl")})
         else:
             payload["prompt"] = "review this PR"
@@ -260,6 +261,14 @@ class SubagentStartTests(_HookCase):
             "hookEventName": "SubagentStart", "additionalContext": block}})
         self.assertEqual(len(self.fake.requests), n, "no HTTP request")
         self.assertFalse(self.gh_log.exists())
+
+    def test_the_supervise_step_back_subagent_gets_no_block(self):
+        # agents/stepback.md: a fresh-context pass sees only its brief and the code.
+        self.connect()
+        block = self.context_of(self.run_hook("SessionStart"), "SessionStart")
+        self.silent(self.run_hook("SubagentStart", agent_type="cardinal:stepback"))
+        self.assertEqual(self.context_of(self.run_hook("SubagentStart", agent_type="Explore"), "SubagentStart"), block)
+        self.assertTrue((PLUGIN_ROOT / "agents" / "stepback.md").is_file())
 
     def test_subagent_start_with_no_state_is_silent(self):
         self.connect()
