@@ -198,16 +198,16 @@ the owner's approval, and never type or simulate the owner's prompt.
 
 ## Step backs on a work budget
 
-Per-claim review cannot see that every claim is right while the approach is bigger than the
-question needs. A budget per direction of the work triggers step backs that can. The worker
-never sees the budget. Below, `budget …` is `cardinal-storyboard investigation budget <inv>
---credential-file <dir>/grant.json --budget-file <dir>/budget.json …`.
+Per-claim review cannot see an approach bigger than the question needs; step backs,
+triggered by a work budget per direction, can. The worker never sees the budget. Below,
+`budget …` is `cardinal-storyboard investigation budget <inv> --credential-file
+<dir>/grant.json --budget-file <dir>/budget.json …`.
 
 **Each new direction**: at set-up, and whenever the owner gives the worker a new direction (a
 new question, a decision that changes scope, a pivot the worker records on the owner's
 instruction), write a facts brief (below) to `<dir>/brief-<n>.md` and run two fresh-context
-passes on it in parallel (SKILL.md says how in this agent; never in your own context, which
-has read the stream): the opening step back (below), and the estimator. Append to the
+passes on it (SKILL.md says how; never in your own context): the opening step back (below)
+and the estimator. Append to the
 estimator's copy the closed budgets on this machine (`cardinal-storyboard investigation budget
 --show --budget-file <f>` for each `~/.cardinal/supervise/*/budget.json`) and ask:
 
@@ -229,8 +229,7 @@ them. If they correct the budget, `--set` again with their numbers.
 
 **Progress**: when the record proves a milestone done, `budget --done <id> --ref "#<seq>"` (or
 `--ref ev_…`); `--fraction 0.5` only when the record shows a measurable part (2 of 4 corpora).
-`budget --check` prints the worker's active hours spent, the P50 hours earned, the next
-trigger, and `FIRE <reason>` or `ok`. Each `FIRE` is one step back; it never fires twice.
+`budget --check` ends with `FIRE <reason>` or `ok`; each `FIRE` is one step back.
 
 **The brief**: facts, never your suggestions:
 

@@ -53,11 +53,9 @@ the end of a copy of the brief, then, from the code's checkout:
 codex exec --sandbox read-only --ephemeral -C <code checkout> - < <dir>/brief-<n>-<pass>.md
 ```
 
-Its final message is the answer. It reads and searches the code; the sandbox refuses writes.
-It needs network: ask for it once, with the Cardinal commands. Run the two passes one after
-the other. (Verified 2026-10-15, codex-cli 0.162.1, from a shell; not yet from inside a Codex
-session: if it fails there, tell the owner the step back needs a Claude supervisor and keep
-the budget and its checks.)
+Its final message is the answer. It needs network: ask for it once, with the Cardinal
+commands. Run the two passes one after the other. If it fails, tell the owner the step back
+needs a Claude supervisor, and keep the budget and its checks.
 
 ## Doing your own checks
 

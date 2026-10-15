@@ -49,11 +49,8 @@ brief on stdin with the pass's question at its end:
 gemini --skip-trust --approval-mode default -p "Answer the question at the end of the brief above. Change nothing." < <dir>/brief-<n>-<pass>.md
 ```
 
-In `default` mode a headless run reads and searches files but its edits and shell commands are
-refused. Never `--approval-mode plan`: headless, it leaves plan mode and edits files.
-`--skip-trust` is needed when the checkout is not a trusted folder. (Verified 2026-10-15,
-gemini-cli 0.64.0, from a shell; not yet from inside a Gemini session: if it fails there,
-tell the owner the step back needs a Claude supervisor and keep the budget and its checks.)
+Never `--approval-mode plan`: headless, it leaves plan mode and edits files. If it fails,
+tell the owner the step back needs a Claude supervisor, and keep the budget and its checks.
 
 ## Doing your own checks
 
