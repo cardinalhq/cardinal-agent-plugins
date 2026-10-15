@@ -73,11 +73,18 @@ set. A follow invocation prints successive JSON page objects; empty pages are
 printed too, so an empty stream remains distinct from a failed read.
 
 The interval defaults to five seconds, with a two-second minimum. Follow uses
-an in-memory cursor unless a grant-backed `--cursor-file` is supplied. The
-latter requires `--auto-review`: print and flush each pending page, then commit
-its whole batch hash. Class/type/self filters only affect the display in this
-mode. A crash can replay a printed page. If `--max` stops partway through a
-pending page, the page remains uncommitted and is replayed on the next run.
+an in-memory cursor unless a grant-backed `--cursor-file` is supplied. With
+`--auto-review` it prints and flushes each pending page, then commits its whole
+batch hash; class/type/self filters only affect the display, and if `--max`
+stops partway through a pending page, the page remains uncommitted and is
+replayed on the next run. A crash can replay a printed page. Without
+`--auto-review` it is a watch: it starts after the committed review position
+(so re-arming it does not replay reviewed history), then reads like an
+in-memory follow (a single `--class` and the `--type` values are sent to the
+server) and never reads or writes the pending page or creates the cursor file.
+A watch is a wake signal, so `--max` never cuts a page: it returns after the
+page that reaches it (`--max 1`: the first non-empty page). The supervise
+skill's wake signal uses this form.
 There is no second durable cursor format.
 
 Self exclusion uses the server's `viewer.principal`. Grantee self is principal
@@ -92,17 +99,21 @@ In-memory reads send single-class and type filters to the server.
 A supervisor watches with one command, never a hand-written polling loop:
 
 ```sh
-cardinal-storyboard investigation events <inv> --follow --json --fields compact
+cardinal-storyboard investigation events <inv> --cursor-file <dir>/cursor.json --follow
 ```
 
 The same guidance appears in four places, from one source
 (`cardinal_core.investigation_text.WATCH_GUIDANCE` / `watch_command`): the
 `investigation events --help` epilog; one line on stderr from `investigation
-grant` naming the exact command for the grantee (with `--credential-file` when
-`--out` wrote one; stdout stays the single export line or the JSON); the
-"Supervising another session" section of the shared storyboard skill core
-(`common/storyboard/CORE.md`); and this spec. It says:
+grant` naming the exact command for the grantee (with `--credential-file` and a
+`cursor.json` beside it when `--out` wrote one; stdout stays the single export
+line or the JSON); the "Supervising another session" section of the shared
+storyboard skill core (`common/storyboard/CORE.md`, which also covers a member
+watcher, so it keeps the cursor-less form and defers to the grant's line); and
+this spec. It says:
 
+- With a grant's `--cursor-file` and no `--auto-review`, the follow is a watch
+  from the committed review position: re-running it replays nothing.
 - `--follow` replaces hand-written loops; run one `--follow` per watched
   investigation.
 - `--exclude-self` is the default under `--follow` with a session (`--session`,
