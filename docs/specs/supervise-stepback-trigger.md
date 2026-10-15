@@ -37,8 +37,7 @@ document. Backtest artifacts:
   and less than 100% delivered.
 - **Fire** when ratio_m ≥ T. T starts at 2.
 - **Zero progress**: when delivered_m = 0, fire when spent_m ≥ Z × estimate_m. Z starts at 0.5.
-- **Floor**: no firing while spent_m < min_spent_h. It starts at 0 (the rule as accepted); §2a
-  shows the case for 0.5, which awaits the owner.
+- **Floor**: no firing while spent_m < min_spent_h. It starts at 0.5 h (owner, 2026-10-15; §2a).
 - **Re-fire**: once per milestone per crossing. After a firing at ratio r_f, m re-arms only when:
   - ratio_m ≥ 1.5 × r_f (at 0% delivered: spent ≥ 1.5 × the spent at that firing; a reopen that
     drops m to 0% counts as an infinite ratio); or
@@ -158,8 +157,7 @@ worker-active hours, no revised or retracted events, and steady red→green prog
   gives the worker's measured pace: hours per deliverable from the record so far, and from
   `direction.closed` across the owner's investigations. With neither, the direction is marked
   `uncalibrated` in `direction.set`, and the CLI says so on its status line.
-- `min_spent_h` is pinned in `direction.set`. Recommendation: 0.5. Until the owner adopts it, the
-  default is 0.
+- `min_spent_h` is pinned in `direction.set`, default 0.5 (owner, 2026-10-15).
 
 ## 3. Milestones and supervisor duties
 
