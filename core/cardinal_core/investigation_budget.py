@@ -1,30 +1,39 @@
-"""Supervise step backs on a work budget (docs/specs/supervise-stepback.md).
+"""Supervise step backs: a per-milestone rate trigger (docs/specs/supervise-stepback-trigger.md).
 
-The supervisor records a budget per direction of the worker's work
-(milestones with P50 / P80 active hours) in a private budget file, marks
-milestones done with a ref, and asks `--check` whether a step back is due:
+A direction of the worker's work has an estimator's plan: milestones with
+P50 / P80 agent-active hours and 2-6 deliverables each. Every review pass
+(`investigation reviewed`) tags each worker event with the milestone(s) it
+advances (or none) and marks deliverables done / reopened / redone with a
+ref. The time leading up to a worker event (the gap since the previous
+worker event, over the union of event and captured-call timestamps; a gap
+over idle_min is idle) is charged to its milestones, split evenly. Then,
+at each tagged worker event, for each of its milestones m below 100%
+delivered:
 
-- spent: the worker's active hours since the budget was set: the union of
-  the timestamps of the worker session's events and, when its activity
-  spool is on this machine, its captured tool calls; a gap over the idle
-  gap between consecutive timestamps is not counted;
-- earned: the P50 hours of the milestones marked done (times a fraction);
-- lag: spent >= lag_start x P80 total and earned < lag_ratio x spent;
-  while one lag episode persists it re-fires only once spent has grown by
-  refire_growth since its last firing (a check without lag ends the
-  episode); backstop: spent first crosses a multiple of the P80 total.
+- ratio_m = (spent_m / P50_m) / delivered_m; FIRE when ratio_m >= T;
+- at 0% delivered, FIRE when spent_m >= Z x P50_m;
+- no firing while spent_m < min_spent_h;
+- after a firing at ratio r_f, m re-arms only at ratio >= rearm x r_f (at
+  0% delivered after a 0% firing: spent >= rearm x the spent then; a drop
+  to 0% counts as an infinite ratio) or when m is re-planned;
+- one firing per milestone per review pass;
+- backstop: the direction's worker-active hours reach backstop x the P80
+  total: one direction-wide firing.
 
-`--set --amend` corrects the open budget in place (same direction: its
-start, done marks and firings stay; no history entry).
-
-The budget file (0600, flock'd) holds the current budget and a bounded
-history of closed ones. The worker never sees it. Read-only on the server;
+Plans, attribution, marks, firings, verdicts and outcomes are `supervision`
+events in the supervisor's OWN investigation (maestro record-supervision,
+wire contract v1, spec 4a). budget.json is their cache (0600, flock'd);
+from a server without the class it is the only copy (said once). The worker
+never sees any of it. Reads of the worker's investigation use the grant;
 the spool is read only through evidence.list_entries. Stdlib only.
 """
 from __future__ import annotations
 
 import contextlib
+import copy
+import hashlib
 import json
+import math
 import re
 import time
 from datetime import datetime, timezone
@@ -34,31 +43,63 @@ from typing import Callable, Iterable, Optional
 from . import evidence
 from . import investigation_consumer as consumer
 from . import investigation_events as ie
+from . import investigation_state_sync as sync
 
-VERSION = 1
+VERSION = 2
 HISTORY_MAX = 20
 MAX_MILESTONES = 20
 MAX_TEXT = 1000
 MAX_TITLE = 200
 MAX_PAGES = 200
-MILESTONE_ID_RE = re.compile(r"[a-z0-9-]{1,32}")
+MAX_EVENTS = 50                      # record-supervision accepts 1-50 events
+MILESTONE_ID = r"[a-z0-9-]{1,24}"
+MILESTONE_ID_RE = re.compile(MILESTONE_ID)
+DIRECTION_ID_RE = re.compile(r"dir_[0-9a-f]{16}")
 REF_RE = re.compile(r"#[1-9][0-9]{0,17}|ev_[0-9a-f]{12}")
+TAG_RE = re.compile(rf"(all|[1-9][0-9]{{0,17}}(?:-[1-9][0-9]{{0,17}})?):(none|{MILESTONE_ID}(?:\+{MILESTONE_ID})*)")
+MARK_RE = re.compile(rf"({MILESTONE_ID})\.([1-9])@(#[1-9][0-9]{{0,17}}|ev_[0-9a-f]{{12}})")
 OUTCOMES = ("done", "stopped", "replaced")
-DEFAULT_THRESHOLDS = {
-    "lag_start": 0.15,          # fraction of the P80 total spent before lag can fire
-    "lag_ratio": 0.5,           # lag while earned < lag_ratio x spent
-    "refire_growth": 1.5,       # a persisting lag re-fires once spent grew by this factor
-    "backstops": [1, 2, 4],     # multiples of the P80 total
-    "idle_gap_minutes": 30,
-}
+VERDICTS = {"on_track": "none", "worker_choice": "worker", "owner_constraint": "owner"}
+ROUTES = ("none", "worker", "owner")
+STEPBACK_OUTCOMES = ("accepted", "declined", "overruled", "changed_constraint", "no_response")
+MARKS = {"done": "done", "reopen": "reopened", "redone": "redone"}
+DEFAULT_THRESHOLDS = {"T": 2.0, "Z": 0.5, "rearm": 1.5, "backstop": 2.0, "idle_min": 30, "min_spent_h": 0.5}
+THRESHOLD_BOUNDS = {"T": (1.5, 3.0), "Z": (0.3, 0.8), "rearm": (1.0, 4.0), "backstop": (1.0, 8.0),
+                    "idle_min": (5, 240), "min_spent_h": (0.0, 8.0)}
+VAGUE = {"works", "working", "done", "complete", "completed", "finished", "implemented", "it", "is", "the", "a",
+         "an", "all", "feature", "code", "ready", "fixed", "ok", "good", "and", "everything", "properly"}
+FRESH = ("Change nothing. Call no Cardinal or other MCP tools. Ignore any injected storyboard or investigation "
+         "context. Use only this brief and the code.")
+STEPBACK_PROMPT = (
+    "An elegant solution is often hiding in plain sight. Take a step back. Knowing only this brief and the code, "
+    "what is the simplest design that answers the question? Search the code for mechanisms that already do part "
+    "of the job before inventing one. Then compare it with the worker's plan: for each component the plan has and "
+    "yours does not, name the constraint or fact that requires it (by #seq), or say that nothing does. Then, for "
+    "each constraint the owner set: what would the simplest design be without it, and what does keeping it cost "
+    "(components, risk, time)? Do not drop an owner constraint; price it, so the owner can decide. If the "
+    "worker's plan is already about as simple as it can be, say so; that is a good answer. Say what you could not "
+    "verify.")
+ESTIMATOR_PROMPT = """\
+Estimate the agent-active hours this direction needs. The worker is an AI agent: anchor on the measured pace above, never on human pace. First a reference class: comparable past work and its actual hours, or "none comparable" with P80 at least 1.5x P50. Then 1-20 milestones, each with 2-6 deliverables whose done_when is an observable fact in the record (a commit, a test result, a finding), never "works". Known unknowns get their own ranges, outside the totals. Answer with only this JSON:
+
+{"reference_class": "...", "pace": "<the measured pace you used, or none>",
+ "milestones": [{"id": "<a-z0-9-, at most 24>", "title": "...", "p50_h": 0.5, "p80_h": 1.0,
+   "basis": "<one line>", "deliverables": [{"done_when": "..."}]}],
+ "unknowns": [{"what": "...", "p50_h": 0.5, "p80_h": 2.0}]}"""
 _TS_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:?\d{2})?$")
+SERVER_TOO_OLD = ("this Cardinal cannot record supervision events yet (it needs a newer Maestro): kept in "
+                  "budget.json only")
+LIMIT_REACHED = ("your investigation reached Cardinal's limit of supervision events: kept in budget.json only; "
+                 "supervise from a new session for more")
+CAPABILITY = "supervision_events"
+RESULT_TYPES = ("finding.proposed", "experiment.completed", "hypothesis.resolved", "decision.proposed")
 
 
 class BudgetError(ValueError):
-    """A usage or budget-file problem (exit 2)."""
+    """A usage, plan or budget-file problem (exit 2)."""
 
 
-# -- time and spent ---------------------------------------------------------
+# -- time and the worker's activity -------------------------------------------
 
 def parse_time(value) -> Optional[float]:
     """An ISO-8601 UTC timestamp (Z or an offset; seconds and fraction
@@ -83,11 +124,11 @@ def iso(t: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
-def active_hours(times: Iterable[float], idle_gap_minutes: float) -> float:
+def active_hours(times: Iterable[float], idle_min: float) -> float:
     """Sum of the gaps between consecutive timestamps (sorted, merged) that
     are at most the idle gap; a longer gap is idle and not counted."""
     ts = sorted(set(times))
-    gap = idle_gap_minutes * 60
+    gap = idle_min * 60
     return sum(b - a for a, b in zip(ts, ts[1:]) if b - a <= gap) / 3600
 
 
@@ -115,306 +156,17 @@ def worker_times(events: Iterable[dict], worker_session: Optional[str], since_se
         t = parse_time(e.get("created_at"))
         if t is not None:
             out.append((seq, t))
-    return out
+    return sorted(out)
 
 
 def spool_times(entries: Iterable[dict], since: float) -> list:
-    """[(evidence_id, epoch)] of captured calls at or after `since`."""
+    """Epochs of captured calls after `since`."""
     out = []
     for e in entries:
         t = parse_time(e.get("called_at")) if isinstance(e, dict) else None
-        if t is not None and t >= since:
-            out.append((e.get("evidence_id"), t))
-    return out
-
-
-# -- the budget -------------------------------------------------------------
-
-def _text(name: str, value, cap: int = MAX_TEXT, required: bool = True) -> Optional[str]:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        if required:
-            raise BudgetError(f"{name} is required (1 to {cap} characters)")
-        return None
-    if not isinstance(value, str) or len(value) > cap:
-        raise BudgetError(f"{name} is 1 to {cap} characters")
-    if any(ord(c) < 32 and c not in "\t" for c in value):
-        raise BudgetError(f"{name} may not contain control characters or newlines")
-    return value.strip()
-
-
-def _hours(raw: str, what: str) -> float:
-    try:
-        h = float(raw)
-    except ValueError:
-        raise BudgetError(f"{what} is a number of hours, not {raw!r}") from None
-    if not 0 < h <= 10000:
-        raise BudgetError(f"{what} is more than 0 hours")
-    return round(h, 3)
-
-
-def parse_milestone(spec: str) -> dict:
-    """"<id>:<P50h>:<P80h>:<title>" -> {id, p50, p80, title}."""
-    parts = spec.split(":", 3) if isinstance(spec, str) else []
-    if len(parts) != 4:
-        raise BudgetError(f"--milestone is \"<id>:<P50h>:<P80h>:<title>\", not {spec!r}")
-    mid, p50, p80, title = parts
-    if not MILESTONE_ID_RE.fullmatch(mid):
-        raise BudgetError(f"milestone id {mid!r}: 1-32 of a-z, 0-9 and -")
-    lo, hi = _hours(p50, f"{mid} P50"), _hours(p80, f"{mid} P80")
-    if hi < lo:
-        raise BudgetError(f"{mid}: P80 ({hi} h) is below P50 ({lo} h)")
-    return {"id": mid, "p50": lo, "p80": hi, "title": _text(f"{mid} title", title, MAX_TITLE)}
-
-
-def new_budget(*, question: str, milestones: list, basis: str, set_at: float, since_seq: int,
-               worker_session: Optional[str] = None, worker_estimate: Optional[str] = None) -> dict:
-    ms = [parse_milestone(m) if isinstance(m, str) else m for m in milestones]
-    if not 1 <= len(ms) <= MAX_MILESTONES:
-        raise BudgetError(f"a budget has 1 to {MAX_MILESTONES} milestones (--milestone, repeated)")
-    ids = [m["id"] for m in ms]
-    if len(set(ids)) != len(ids):
-        raise BudgetError("milestone ids must be distinct")
-    if worker_session is not None and not ie.valid_session(worker_session):
-        raise BudgetError(f"not a session id: {worker_session!r}")
-    if not isinstance(since_seq, int) or since_seq < 1:
-        raise BudgetError("--since-seq is a positive event seq")
-    return {
-        "question": _text("--question", question),
-        "basis": _text("--basis", basis),
-        "worker_estimate": _text("--worker-estimate", worker_estimate, required=False),
-        "worker_session": worker_session,
-        "milestones": ms,
-        "thresholds": json.loads(json.dumps(DEFAULT_THRESHOLDS)),
-        "set_at": iso(set_at),
-        "since_seq": since_seq,
-        "done": {},
-        "firings": [],
-    }
-
-
-def totals(budget: dict) -> tuple:
-    return (round(sum(m["p50"] for m in budget["milestones"]), 3),
-            round(sum(m["p80"] for m in budget["milestones"]), 3))
-
-
-def mark_done(budget: dict, mid: str, ref: str, fraction: float = 1.0, *, now: Optional[float] = None,
-              correct: bool = False) -> dict:
-    """`fraction` is cumulative: the part done so far, never an increment.
-    Lowering a recorded fraction needs `correct`."""
-    if mid not in {m["id"] for m in budget["milestones"]}:
-        raise BudgetError(f"no milestone {mid!r} in this budget ({', '.join(m['id'] for m in budget['milestones'])})")
-    if not isinstance(ref, str) or not REF_RE.fullmatch(ref):
-        raise BudgetError("--done needs --ref \"#<seq>\" or ev_<12 hex>: the event or captured call proving it")
-    if not 0 < fraction <= 1:
-        raise BudgetError("--fraction is more than 0 and at most 1")
-    before = budget["done"].get(mid)
-    if before and round(fraction, 3) < before["fraction"] and not correct:
-        raise BudgetError(f"{mid} is already {before['fraction']:.0%} done ({before['ref']}); --fraction is the total "
-                          "done so far, not an increment. To lower it, add --correct")
-    budget["done"][mid] = {"fraction": round(fraction, 3), "ref": ref, "at": iso(now if now is not None else time.time())}
-    return budget
-
-
-def earned_hours(budget: dict) -> float:
-    by_id = {m["id"]: m for m in budget["milestones"]}
-    return round(sum(by_id[k]["p50"] * d["fraction"] for k, d in budget["done"].items() if k in by_id), 4)
-
-
-def evaluate(budget: dict, spent: float, earned: float) -> dict:
-    """The trigger decision (no side effects): {fire: [reasons], lag, crossed:
-    [backstop multiples newly crossed], next_lag, next_backstop}."""
-    th = budget["thresholds"]
-    _, p80 = totals(budget)
-    fired_backstops = {m for f in budget["firings"] for m in f.get("backstops", [])}
-    crossed = [m for m in th["backstops"] if spent >= m * p80 and m not in fired_backstops]
-    lagging = spent >= th["lag_start"] * p80 and earned < th["lag_ratio"] * spent
-    lag_spents = [f["spent_h"] for f in budget["firings"] if "lag" in f.get("reasons", [])]
-    # Within one lag episode a re-fire needs refire_growth more spent; a check
-    # without lag ends the episode, so the next lag fires at once.
-    refire_at = th["refire_growth"] * lag_spents[-1] if lag_spents and lag_open(budget) else 0.0
-    lag_fires = lagging and spent >= refire_at
-    reasons = []
-    if crossed:
-        reasons.append(f"backstop {max(crossed)}x")
-    if lag_fires:
-        reasons.append("lag")
-    unfired = [m for m in th["backstops"] if m not in fired_backstops and m not in crossed]
-    return {
-        "fire": reasons,
-        "lagging": lagging,
-        "crossed": crossed,
-        # Assuming nothing more is marked done: lag needs spent past earned / ratio.
-        "next_lag_h": round(max(th["lag_start"] * p80, earned / th["lag_ratio"], refire_at), 3),
-        "next_backstop": (min(unfired), round(min(unfired) * p80, 3)) if unfired else None,
-    }
-
-
-def lag_open(budget: dict) -> bool:
-    """A lag episode is open from a lag firing until a check finds no lag
-    (files from before the key: open when lag ever fired)."""
-    return budget.get("lag_open", any("lag" in f.get("reasons", []) for f in budget["firings"]))
-
-
-def record_firing(budget: dict, decision: dict, spent: float, earned: float, *, now: float,
-                  head_seq: Optional[int]) -> None:
-    if "lag" in decision["fire"]:
-        budget["lag_open"] = True
-    budget["firings"].append({
-        "reasons": ["lag" if r == "lag" else "backstop" for r in decision["fire"]],
-        "backstops": decision["crossed"],
-        "spent_h": round(spent, 4),
-        "earned_h": round(earned, 4),
-        "at": iso(now),
-        "head_seq": head_seq,
-    })
-
-
-def milestone_actuals(budget: dict, wtimes: list, stimes: list) -> list:
-    """Per milestone: its estimate, done mark, and the actual hours: the
-    worker's cumulative spent when its ref happened, minus the cumulative
-    spent at the previous done mark (in ref order)."""
-    gap = budget["thresholds"]["idle_gap_minutes"]
-    all_times = [t for _, t in wtimes] + [t for _, t in stimes]
-    seq_time = dict(wtimes)
-    ev_time = dict(stimes)
-
-    def when(ref: str) -> Optional[float]:
-        if ref.startswith("#"):
-            seq = int(ref[1:])
-            earlier = [t for s, t in wtimes if s <= seq]
-            return seq_time.get(seq) or (max(earlier) if earlier else None)
-        return ev_time.get(ref)
-
-    marks = sorted(((when(d["ref"]), k) for k, d in budget["done"].items()), key=lambda x: (x[0] is None, x[0] or 0))
-    actual, prev = {}, 0.0
-    for t, k in marks:
-        if t is None:
-            continue
-        cum = active_hours([x for x in all_times if x <= t], gap)
-        actual[k] = round(cum - prev, 3)
-        prev = cum
-    return [{**m, "done": budget["done"].get(m["id"]), "actual_h": actual.get(m["id"])} for m in budget["milestones"]]
-
-
-def close(state: dict, outcome: str, spent: float, earned: float, actuals: list, *, now: float) -> dict:
-    if outcome not in OUTCOMES:
-        raise BudgetError(f"--outcome is one of {', '.join(OUTCOMES)}")
-    b = state.get("current")
-    if not b:
-        raise BudgetError("no open budget to close")
-    p50, p80 = totals(b)
-    entry = {k: b.get(k) for k in ("question", "basis", "worker_estimate", "worker_session", "set_at", "since_seq",
-                                   "firings", "thresholds")}
-    entry.update({"outcome": outcome, "closed_at": iso(now), "p50_total_h": p50, "p80_total_h": p80,
-                  "spent_h": round(spent, 3), "earned_h": round(earned, 3), "milestones": actuals})
-    state["history"] = (state.get("history") or [])[-(HISTORY_MAX - 1):] + [entry]
-    state["current"] = None
-    return entry
-
-
-# -- the budget file ---------------------------------------------------------
-
-def _num(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-
-def _shape_errors(state: dict) -> list:
-    """What is missing or mistyped in a budget file (empty: usable)."""
-    errs = []
-
-    def need(cond, what):
-        if not cond:
-            errs.append(what)
-
-    need(isinstance(state.get("investigation_id"), (str, type(None))), "investigation_id")
-    need(isinstance(state.get("history", []), list), "history")
-    for i, h in enumerate(state.get("history") or [] if isinstance(state.get("history"), list) else []):
-        need(isinstance(h, dict) and all(isinstance(h.get(k), str) for k in ("outcome", "closed_at", "question"))
-             and all(_num(h.get(k)) for k in ("p50_total_h", "p80_total_h", "spent_h", "earned_h")), f"history[{i}]")
-    b = state.get("current")
-    if b is None:
-        return errs
-    if not isinstance(b, dict):
-        return errs + ["current"]
-    for k in ("question", "basis", "set_at"):
-        need(isinstance(b.get(k), str), f"current.{k}")
-    need(parse_time(b.get("set_at")) is not None, "current.set_at (a UTC time)")
-    need(isinstance(b.get("since_seq"), int) and not isinstance(b.get("since_seq"), bool) and b["since_seq"] >= 1,
-         "current.since_seq")
-    for k in ("worker_session", "worker_estimate"):
-        need(isinstance(b.get(k), (str, type(None))), f"current.{k}")
-    ms = b.get("milestones")
-    need(isinstance(ms, list) and ms and all(
-        isinstance(m, dict) and isinstance(m.get("id"), str) and isinstance(m.get("title"), str)
-        and _num(m.get("p50")) and _num(m.get("p80")) for m in ms), "current.milestones")
-    th = b.get("thresholds")
-    need(isinstance(th, dict) and all(_num(th.get(k)) for k in ("lag_start", "lag_ratio", "refire_growth",
-                                                                   "idle_gap_minutes"))
-         and isinstance(th.get("backstops"), list) and all(_num(x) for x in th["backstops"]), "current.thresholds")
-    done = b.get("done")
-    need(isinstance(done, dict) and all(isinstance(d, dict) and _num(d.get("fraction"))
-                                        and isinstance(d.get("ref"), str) and REF_RE.fullmatch(d["ref"])
-                                        for d in done.values()), "current.done")
-    fs = b.get("firings")
-    need(isinstance(fs, list) and all(isinstance(f, dict) and isinstance(f.get("reasons"), list)
-                                      and isinstance(f.get("backstops"), list) and _num(f.get("spent_h"))
-                                      for f in fs), "current.firings")
-    need(isinstance(b.get("lag_open", False), bool), "current.lag_open")
-    return errs
-
-
-def load(path: Path, investigation_id: Optional[str]) -> dict:
-    try:
-        state = consumer.private_read(path)
-    except FileNotFoundError:
-        return {"version": VERSION, "investigation_id": investigation_id, "current": None, "history": []}
-    except OSError as e:
-        raise BudgetError(f"{path}: cannot open the budget file ({e.strerror}); it must be a regular file "
-                          "you own, not a link") from None
-    if state.get("version") != VERSION:
-        raise BudgetError(f"{path} is not a version {VERSION} budget file")
-    errs = _shape_errors(state)
-    if errs:
-        raise BudgetError(f"{path} is not a valid budget file (bad or missing: {', '.join(errs[:5])})")
-    if investigation_id and state.get("investigation_id") not in (None, investigation_id):
-        raise BudgetError(f"{path} is the budget of {state.get('investigation_id')}, not {investigation_id}")
-    return state
-
-
-def save(path: Path, state: dict) -> None:
-    consumer.private_write(path, state)
-
-
-# -- reading the worker's activity ---------------------------------------------
-
-def read_worker_events(conn: dict, inv: str, since_seq: int, *, client: str, reader: Callable = None) -> tuple:
-    """(events at or after since_seq, head_seq), paging the grant's read."""
-    reader = reader or ie.read_events
-    events, after, head = [], max(0, since_seq - 1), None
-    for _ in range(MAX_PAGES):
-        page = reader(conn, inv, after=after, limit=ie.PAGE_LIMIT, client=client)
-        events.extend(page["events"])
-        head = page["head_seq"]
-        if page["page_size"] < ie.PAGE_LIMIT or page["last_seq"] >= head or page["last_seq"] <= after:
-            break
-        after = page["last_seq"]
-    return events, head
-
-
-def measure(budget: dict, events: list, spool_entries: list, *, before_seq: Optional[int] = None,
-            before: Optional[float] = None) -> dict:
-    """Spent and earned; with before_seq / before, only the worker's events
-    before that seq and captured calls before that time (a budget replaced
-    by one that starts there)."""
-    since = parse_time(budget["set_at"]) or 0.0
-    wt = worker_times(events, budget.get("worker_session"), budget["since_seq"])
-    st = spool_times(spool_entries, since)
-    if before_seq is not None:
-        wt = [x for x in wt if x[0] < before_seq]
-    if before is not None:
-        st = [x for x in st if x[1] < before]
-    spent = active_hours([t for _, t in wt] + [t for _, t in st], budget["thresholds"]["idle_gap_minutes"])
-    return {"spent": spent, "earned": earned_hours(budget), "worker_times": wt, "spool_times": st}
+        if t is not None and t > since:
+            out.append(t)
+    return sorted(out)
 
 
 def spool_entries(home: Path, worker_session: Optional[str]) -> Optional[list]:
@@ -430,95 +182,618 @@ def spool_entries(home: Path, worker_session: Optional[str]) -> Optional[list]:
     return None
 
 
-# -- rendering -----------------------------------------------------------------
+def read_worker_events(conn: dict, inv: str, after: int, *, client: str, reader: Callable = None) -> tuple:
+    """(events after `after`, head_seq), paging the grant's read."""
+    reader = reader or ie.read_events
+    events, head = [], None
+    for _ in range(MAX_PAGES):
+        page = reader(conn, inv, after=after, limit=ie.PAGE_LIMIT, client=client)
+        events.extend(page["events"])
+        head = page["head_seq"]
+        if page["page_size"] < ie.PAGE_LIMIT or page["last_seq"] >= head or page["last_seq"] <= after:
+            break
+        after = page["last_seq"]
+    return events, head
 
-def _h(x: float) -> str:
-    return f"{x:.2f} h"
+
+# -- the plan (the estimator's JSON) ---------------------------------------------
+
+def _text(name: str, value, cap: int = MAX_TEXT, required: bool = True) -> Optional[str]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if required:
+            raise BudgetError(f"{name} is required (1 to {cap} characters)")
+        return None
+    if not isinstance(value, str) or len(value) > cap:
+        raise BudgetError(f"{name} is text of 1 to {cap} characters")
+    if any(ord(c) < 32 and c != "\t" for c in value):
+        raise BudgetError(f"{name}: one line, no control characters")
+    return value.strip()
 
 
-def check_report(inv: str, budget: dict, m: dict, decision: dict, spool: Optional[list]) -> dict:
-    p50, p80 = totals(budget)
-    spent, earned = m["spent"], m["earned"]
-    lag_spents = [f["spent_h"] for f in budget["firings"] if "lag" in f["reasons"]]
-    if decision["fire"]:
-        why = []
-        if decision["crossed"]:
-            why.append(f"spent crossed {max(decision['crossed'])}x the P80 total ({_h(max(decision['crossed']) * p80)})")
-        if "lag" in decision["fire"]:
-            why.append(f"spent >= {budget['thresholds']['lag_start']:.0%} of P80 and earned {_h(earned)} < "
-                       f"{budget['thresholds']['lag_ratio']} x spent")
-        verdict = f"FIRE {' + '.join(decision['fire'])}: " + "; ".join(why)
-    elif decision["lagging"] and lag_spents and lag_open(budget):
-        verdict = f"ok (lag persists; fired at {_h(lag_spents[-1])}, re-fires at {_h(decision['next_lag_h'])})"
-    else:
-        verdict = "ok"
+def _hours(value, what: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 10000:
+        raise BudgetError(f"{what} is a number of hours above 0, not {json.dumps(value)}")
+    return round(float(value), 3)
+
+
+def _observable(done_when: str) -> bool:
+    words = re.findall(r"[a-z0-9#_./-]+", done_when.lower())
+    return len(words) >= 4 and any(w not in VAGUE for w in words)
+
+
+def _plan_errors(raw) -> tuple:
+    """(plan, errors): every problem with the estimator's JSON, each naming the fix."""
+    errs = []
+
+    def err(msg):
+        errs.append(msg)
+
+    if not isinstance(raw, dict):
+        return None, ["the plan is a JSON object {reference_class, pace, milestones, unknowns}: re-ask the estimator "
+                      "for only that JSON"]
+    plan = {"milestones": [], "unknowns": []}
+    for name, required in (("reference_class", True), ("pace", False)):
+        try:
+            plan[name] = _text(name, raw.get(name), required=required)
+        except BudgetError as e:
+            err(f"{e}" + (": comparable past work and its actual hours, or \"none comparable\""
+                          if name == "reference_class" else ""))
+    extra = sorted(set(raw) - {"reference_class", "pace", "milestones", "unknowns"})
+    if extra:
+        err(f"unknown key {extra[0]!r}: the plan has only reference_class, pace, milestones and unknowns")
+    ms = raw.get("milestones")
+    if not isinstance(ms, list) or not 1 <= len(ms) <= MAX_MILESTONES:
+        err(f"milestones is a list of 1 to {MAX_MILESTONES}")
+        ms = []
+    seen = set()
+    for i, m in enumerate(ms):
+        where = f"milestones[{i}]"
+        if not isinstance(m, dict):
+            err(f"{where} is an object {{id, title, p50_h, p80_h, basis, deliverables}}")
+            continue
+        mid = m.get("id")
+        if not isinstance(mid, str) or not MILESTONE_ID_RE.fullmatch(mid):
+            err(f"{where}.id {json.dumps(mid)}: 1-24 of a-z, 0-9 and -")
+            mid = f"m{i}"
+        elif mid in seen:
+            err(f"{where}.id {mid!r} repeats: milestone ids are distinct")
+        seen.add(mid)
+        where = f"milestone {mid}"
+        out = {"id": mid}
+        for name, cap in (("title", MAX_TITLE), ("basis", MAX_TEXT)):
+            try:
+                out[name] = _text(f"{where} {name}", m.get(name), cap)
+            except BudgetError as e:
+                err(str(e) + (" (one line: why these hours)" if name == "basis" else ""))
+        try:
+            out["p50_h"], out["p80_h"] = _hours(m.get("p50_h"), f"{where} p50_h"), _hours(m.get("p80_h"),
+                                                                                         f"{where} p80_h")
+            if out["p80_h"] < out["p50_h"]:
+                err(f"{where}: p80_h {out['p80_h']} is below p50_h {out['p50_h']}: P80 >= P50")
+        except BudgetError as e:
+            err(str(e))
+        extra = sorted(set(m) - {"id", "title", "p50_h", "p80_h", "basis", "deliverables"})
+        if extra:
+            err(f"{where}: unknown key {extra[0]!r} (a milestone has id, title, p50_h, p80_h, basis, deliverables)")
+        ds = m.get("deliverables")
+        if not isinstance(ds, list) or not 2 <= len(ds) <= 6:
+            err(f"{where} has 2-6 deliverables, not {len(ds) if isinstance(ds, list) else 'none'}: split or merge them")
+            ds = []
+        out["deliverables"] = []
+        for n, d in enumerate(ds, 1):
+            did = f"{mid}.{n}"
+            dw = d if isinstance(d, str) else d.get("done_when") if isinstance(d, dict) else None
+            if isinstance(d, dict) and (set(d) - {"id", "done_when"} or d.get("id", did) != did):
+                err(f"deliverable {did}: an object {{\"done_when\": ...}} (its id is {did}, by position)")
+            try:
+                dw = _text(f"deliverable {did} done_when", dw)
+            except BudgetError as e:
+                err(str(e))
+                continue
+            if not _observable(dw):
+                err(f"deliverable {did} done_when {json.dumps(dw)} is not observable: name the commit, test result "
+                    "or finding in the record that shows it")
+            out["deliverables"].append({"id": did, "done_when": dw})
+        plan["milestones"].append(out)
+    us = raw.get("unknowns", [])
+    if not isinstance(us, list) or len(us) > 20:
+        err("unknowns is a list of at most 20 {what, p50_h, p80_h}")
+        us = []
+    for i, u in enumerate(us):
+        try:
+            if not isinstance(u, dict):
+                raise BudgetError(f"unknowns[{i}] is {{what, p50_h, p80_h}}: its own range, out of the totals")
+            lo, hi = _hours(u.get("p50_h"), f"unknowns[{i}].p50_h"), _hours(u.get("p80_h"), f"unknowns[{i}].p80_h")
+            if hi < lo:
+                raise BudgetError(f"unknowns[{i}]: p80_h is below p50_h")
+            plan["unknowns"].append({"what": _text(f"unknowns[{i}].what", u.get("what")), "p50_h": lo, "p80_h": hi})
+        except BudgetError as e:
+            err(str(e))
+    if not errs and plan.get("reference_class", "").lower().startswith("none comparable"):
+        p50, p80 = totals(plan)
+        if p80 < 1.5 * p50:
+            err(f"reference_class is \"none comparable\": widen P80 to at least 1.5x P50 (now {p80 / p50:.2f}x)")
+    return plan, errs
+
+
+def load_plan(path: Path) -> dict:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise BudgetError(f"--plan {path}: no such file; save the estimator's JSON there") from None
+    except (OSError, ValueError) as e:
+        raise BudgetError(f"--plan {path} is not JSON ({ie._one_line(e, 120)}): save only the estimator's JSON") \
+            from None
+    plan, errs = _plan_errors(raw)
+    if errs:
+        more = f" (+{len(errs) - 2} more)" if len(errs) > 2 else ""
+        raise BudgetError("plan: " + errs[0] + ("\n" + errs[1] + more if len(errs) > 1 else ""))
+    return plan
+
+
+def totals(d: dict) -> tuple:
+    return (round(sum(m["p50_h"] for m in d["milestones"]), 3), round(sum(m["p80_h"] for m in d["milestones"]), 3))
+
+
+def thresholds(overrides: Iterable[str] = ()) -> dict:
+    th = dict(DEFAULT_THRESHOLDS)
+    for o in overrides or ():
+        k, _, v = o.partition("=")
+        if k not in th:
+            raise BudgetError(f"--threshold {o!r}: one of {', '.join(th)}=<number>")
+        try:
+            x = float(v)
+        except ValueError:
+            raise BudgetError(f"--threshold {o!r}: {k}=<number>") from None
+        lo, hi = THRESHOLD_BOUNDS[k]
+        if not lo <= x <= hi:
+            raise BudgetError(f"--threshold {k} is {lo} to {hi}")
+        th[k] = x
+    return th
+
+
+def direction_id(inv: str, since_seq: int, question: str, plan: dict) -> str:
+    """Deterministic, so a retried --set is the same direction (and the same
+    idempotency key)."""
+    canon = json.dumps([inv, since_seq, question, plan], sort_keys=True, separators=(",", ":"))
+    return "dir_" + hashlib.sha256(canon.encode()).hexdigest()[:16]
+
+
+def new_direction(*, inv: str, question: str, plan: dict, since_seq: int, set_at: float, worker_session: str,
+                  worker_estimate: Optional[str] = None, th: Optional[dict] = None) -> dict:
+    question = _text("--question", question)
+    if not ie.valid_session(worker_session):
+        raise BudgetError(f"--worker-session: not a session id: {worker_session!r}")
+    pace = plan.get("pace")
     return {
-        "investigation_id": inv,
-        "question": budget["question"],
-        "p50_total_h": p50, "p80_total_h": p80,
-        "since_seq": budget["since_seq"], "set_at": budget["set_at"],
-        "worker_session": budget.get("worker_session"),
-        "worker_events": len(m["worker_times"]),
-        "captured_calls": None if spool is None else len(m["spool_times"]),
-        "spent_h": round(spent, 3), "earned_h": round(earned, 3),
-        "earned_over_spent": round(earned / spent, 3) if spent else None,
-        "milestones": len(budget["milestones"]),
-        "done": sorted(budget["done"]),
-        "open": [x["id"] for x in budget["milestones"] if x["id"] not in budget["done"]
-                 or budget["done"][x["id"]]["fraction"] < 1],
-        "next_lag_h": decision["next_lag_h"],
-        "next_backstop": ({"multiple": decision["next_backstop"][0], "at_h": decision["next_backstop"][1]}
-                          if decision["next_backstop"] else None),
-        "fire": decision["fire"],
-        "verdict": verdict,
+        "direction_id": direction_id(inv, since_seq, question, plan),
+        "question": question,
+        "since_seq": since_seq,
+        "set_at": iso(set_at),
+        "worker_session": worker_session,
+        "worker_estimate": _text("--worker-estimate", worker_estimate, required=False),
+        "reference_class": plan["reference_class"],
+        "pace": pace,
+        "calibration": "calibrated" if pace and pace.strip().lower() not in ("none", "n/a") else "uncalibrated",
+        "thresholds": th or dict(DEFAULT_THRESHOLDS),
+        "milestones": plan["milestones"],
+        "unknowns": plan["unknowns"],
+        "marks": {},
+        "charged": {m["id"]: 0.0 for m in plan["milestones"]},
+        "none_h": 0.0,
+        "active_h": 0.0,
+        "last_t": None,
+        "through_seq": None,
+        "last_fire": {},
+        "backstop_fired": False,
+        "firings": [],
     }
 
 
-def check_lines(r: dict) -> list:
-    done, total = len(r["done"]), r["milestones"]
-    act = ("no worker session: events only" if not r["worker_session"]
-           else "activity spool not on this machine" if r["captured_calls"] is None
-           else f"{r['captured_calls']} captured calls")
-    ratio = "n/a" if r["earned_over_spent"] is None else f"{r['earned_over_spent']:.2f}"
-    nb = r["next_backstop"]
-    return [
-        f"budget {r['investigation_id']}: {ie.json_text(r['question'])}; P50 {_h(r['p50_total_h'])}, "
-        f"P80 {_h(r['p80_total_h'])}; {done} of {total} milestones done",
-        f"spent {_h(r['spent_h'])} active since #{r['since_seq']} ({r['worker_events']} worker events; {act})",
-        f"earned {_h(r['earned_h'])}" + (f" ({', '.join(r['done'])})" if r["done"] else "")
-        + f"; earned/spent {ratio}",
-        f"next: lag when spent > {_h(r['next_lag_h'])} with nothing more done"
-        + (f"; backstop {nb['multiple']}x at {_h(nb['at_h'])}" if nb else "; all backstops fired"),
-        r["verdict"],
-    ]
+# -- the engine ------------------------------------------------------------------
+
+def milestone(d: dict, mid: str) -> Optional[dict]:
+    return next((m for m in d["milestones"] if m["id"] == mid), None)
 
 
-def show_lines(state: dict) -> list:
-    out = []
-    b = state.get("current")
-    if b:
-        p50, p80 = totals(b)
-        out.append(f"budget {state.get('investigation_id')}: {ie.json_text(b['question'])}; P50 {_h(p50)}, "
-                   f"P80 {_h(p80)}; set {b['set_at']} from #{b['since_seq']}"
-                   + (f"; worker session {b['worker_session']}" if b.get("worker_session") else ""))
-        out.append(f"  basis: {ie.json_text(b['basis'])}")
-        if b.get("worker_estimate"):
-            out.append(f"  worker's own estimate: {ie.json_text(b['worker_estimate'])}")
-        for x in b["milestones"]:
-            d = b["done"].get(x["id"])
-            mark = (f"done {d['fraction']:.0%} ({d['ref']})" if d else "open")
-            out.append(f"  {x['id']}: P50 {x['p50']} h / P80 {x['p80']} h, {mark} — {ie.json_text(x['title'])}")
-        for f in b["firings"]:
-            out.append(f"  fired {'+'.join(f['reasons'])} at spent {_h(f['spent_h'])} ({f['at']})")
-    else:
-        out.append(f"no open budget for {state.get('investigation_id') or 'this budget file'}")
-    for h in state.get("history") or []:
-        out.append(f"closed {h['outcome']} {h['closed_at']}: {ie.json_text(h['question'])}; P50 {_h(h['p50_total_h'])}"
-                   f" / P80 {_h(h['p80_total_h'])}; spent {_h(h['spent_h'])}, earned {_h(h['earned_h'])}")
-    return out
+def mark_state(d: dict, did: str, seq: Optional[int] = None) -> Optional[dict]:
+    """The deliverable's latest mark (at or before seq)."""
+    hist = [x for x in d["marks"].get(did, []) if seq is None or x["seq"] <= seq]
+    return hist[-1] if hist else None
 
 
-# -- the CLI action (investigation budget) ------------------------------------------
+def delivered(d: dict, mid: str, seq: Optional[int] = None) -> tuple:
+    """(done, total) deliverables of mid at seq: done while the latest mark
+    is done or redone."""
+    m = milestone(d, mid)
+    ds = m["deliverables"] if m else []
+    n = sum(1 for x in ds if (mark_state(d, x["id"], seq) or {}).get("mark") in ("done", "redone"))
+    return n, len(ds)
+
+
+def _ratio(spent: float, est: float, p: float) -> float:
+    return math.inf if p == 0 else (spent / est) / p
+
+
+def _evaluate(d: dict, mid: str, seq: int, fired_now: set) -> Optional[dict]:
+    """A firing of mid at seq, or None (records it in last_fire)."""
+    m, th = milestone(d, mid), d["thresholds"]
+    if not m:
+        return None
+    n, total = delivered(d, mid, seq)
+    p = n / total
+    if p >= 1:
+        return None
+    e, s = m["p50_h"], d["charged"].get(mid, 0.0)
+    r = _ratio(s, e, p)
+    if s < th["min_spent_h"] or not ((p > 0 and r >= th["T"]) or (p == 0 and s >= th["Z"] * e)):
+        return None
+    crossed = th["T"] if p > 0 else th["Z"]
+    last = d["last_fire"].get(mid)
+    if last:
+        rf, sf, pf = (math.inf if last[0] is None else last[0]), last[1], last[2]
+        if p == 0 and pf == 0:
+            if s < th["rearm"] * sf:
+                return None
+            crossed = th["rearm"] * sf / e
+        elif r < th["rearm"] * rf:
+            return None
+        elif p > 0:
+            crossed = th["rearm"] * rf
+    if mid in fired_now:
+        return None
+    d["last_fire"][mid] = [None if r == math.inf else round(r, 6), round(s, 6), round(p, 6)]
+    fired_now.add(mid)
+    return {"scope": "milestone", "milestone_id": mid, "at_seq": seq,
+            "snapshot": {"spent_h": round(s, 4), "estimate_h": e, "delivered": round(p, 4),
+                         "ratio": None if r == math.inf else round(r, 4), "threshold": round(crossed, 4)},
+            "worker_active_h": round(d["active_h"], 4), "fired_seq": None, "verdict": None, "outcome": None}
+
+
+def direction_delivered(d: dict, seq: Optional[int] = None) -> float:
+    done = total = 0
+    for m in d["milestones"]:
+        n, t = delivered(d, m["id"], seq)
+        done, total = done + n, total + t
+    return done / total if total else 0.0
+
+
+def apply_batch(d: dict, wt: list, spool: list, tags: dict, marks: list) -> tuple:
+    """One review pass over the worker events `wt` [(seq, epoch)], with the
+    captured-call epochs `spool`, `tags` {seq: [milestone, ...] | "none"} and
+    validated `marks` [{deliverable_id, mark, seq, ref}]. Returns (the
+    direction after it, {charged: {m: h}, none_h, firings, active}); `d`
+    itself is not changed."""
+    d = copy.deepcopy(d)
+    th = d["thresholds"]
+    for mk in marks:
+        d["marks"].setdefault(mk["deliverable_id"], []).append({"mark": mk["mark"], "seq": mk["seq"], "ref": mk["ref"]})
+    charged, none_h, firings, fired_now = {}, 0.0, [], set()
+    prev = d["last_t"]
+    spool = sorted(spool)
+    _, p80 = totals(d)
+    for seq, t in sorted(wt):
+        gap = 0.0
+        if prev is not None and t > prev:
+            gap = active_hours([prev, t] + [x for x in spool if prev < x < t], th["idle_min"])
+        prev = t if prev is None else max(prev, t)
+        tg = tags.get(seq, "none")
+        if gap:
+            d["active_h"] += gap
+            if isinstance(tg, list) and tg:
+                for mid in tg:
+                    share = gap / len(tg)
+                    d["charged"][mid] = d["charged"].get(mid, 0.0) + share
+                    charged[mid] = charged.get(mid, 0.0) + share
+            else:
+                d["none_h"] += gap
+                none_h += gap
+        for mid in (tg if isinstance(tg, list) else []):
+            f = _evaluate(d, mid, seq, fired_now)
+            if f:
+                firings.append(f)
+        if not d["backstop_fired"] and p80 and d["active_h"] >= th["backstop"] * p80:
+            d["backstop_fired"] = True
+            p = direction_delivered(d, seq)
+            firings.append({"scope": "backstop", "milestone_id": None, "at_seq": seq,
+                            "snapshot": {"spent_h": round(d["active_h"], 4), "estimate_h": p80, "delivered": round(p, 4),
+                                         "ratio": None if p == 0 else round((d["active_h"] / p80) / p, 4),
+                                         "threshold": th["backstop"]},
+                            "worker_active_h": round(d["active_h"], 4), "fired_seq": None, "verdict": None,
+                            "outcome": None})
+    d["last_t"] = prev
+    if wt:
+        d["through_seq"] = max(s for s, _ in wt)
+    end = max([s for s, _ in wt] + [mk["seq"] for mk in marks] + [0])
+    active = [m["id"] for m in d["milestones"]
+              if (charged.get(m["id"], 0) > 0 and delivered(d, m["id"], end)[0] < len(m["deliverables"]))
+              or any(f["milestone_id"] == m["id"] for f in firings)]
+    d["firings"].extend(firings)
+    return d, {"charged": charged, "none_h": none_h, "firings": firings, "active": active}
+
+
+# -- tags and marks (reviewed) ------------------------------------------------------
+
+def _ranges(seqs: list, ordered: list) -> list:
+    """Runs of consecutive worker events (in `ordered`) among seqs, as "a-b" / "a"."""
+    pos = {s: i for i, s in enumerate(ordered)}
+    out, run = [], []
+    for s in sorted(seqs):
+        if run and pos[s] != pos[run[-1]] + 1:
+            out.append(run)
+            run = []
+        run.append(s)
+    if run:
+        out.append(run)
+    return [f"{r[0]}-{r[-1]}" if len(r) > 1 else f"{r[0]}" for r in out]
+
+
+def open_milestones(d: dict) -> list:
+    return [m["id"] for m in d["milestones"] if delivered(d, m["id"])[0] < len(m["deliverables"])]
+
+
+def parse_tags(specs: list, wseqs: list, d: dict) -> dict:
+    ids = {m["id"] for m in d["milestones"]}
+    opened = ", ".join(open_milestones(d)) or "none"
+    tags, everything = {}, None
+    for spec in specs or []:
+        m = TAG_RE.fullmatch(spec) if isinstance(spec, str) else None
+        if not m:
+            raise BudgetError(f"--tag {spec!r}: <seq>[-<seq>]:<milestone>[+<milestone>] or :none, or all:<milestone>")
+        rng, what = m.groups()
+        val = "none" if what == "none" else list(dict.fromkeys(what.split("+")))
+        bad = [x for x in val if x not in ids] if val != "none" else []
+        if bad:
+            raise BudgetError(f"--tag {spec}: no milestone {bad[0]!r}; open: {opened}")
+        if rng == "all":
+            if everything is not None:
+                raise BudgetError("one --tag all:<milestone> per pass; tag the other events by seq")
+            everything = val
+            continue
+        lo, _, hi = rng.partition("-")
+        lo, hi = int(lo), int(hi or lo)
+        hit = [s for s in wseqs if lo <= s <= hi]
+        if hi < lo or not hit:
+            raise BudgetError(f"--tag {spec}: no worker event of this page there (worker events: "
+                              f"{', '.join(_ranges(wseqs, wseqs)) or 'none'})")
+        for s in hit:
+            if s in tags:
+                raise BudgetError(f"#{s} is tagged twice (--tag {spec}): one --tag per worker event")
+            tags[s] = val
+    rest = [s for s in wseqs if s not in tags]
+    if everything is not None:
+        tags.update({s: everything for s in rest})
+        rest = []
+    if rest:
+        rs = _ranges(rest, wseqs)
+        listed = ", ".join(f"#{s}" for s in rest[:8]) + (", …" if len(rest) > 8 else "")
+        adds = " ".join(f"--tag {r}:<milestone|none>" for r in rs[:3]) + (" …" if len(rs) > 3 else "")
+        raise BudgetError(f"{listed} untagged: add `{adds}`; open: {opened}")
+    return tags
+
+
+def parse_marks(args, d: dict, wseqs: list, page_lo: int, through: int, worker_inv: str) -> list:
+    """The pass's --done / --reopen / --redone, validated and in effect
+    order: [{deliverable_id, milestone_id, mark, seq, ref, refs}]."""
+    raw = []
+    for flag, kind in MARKS.items():
+        for spec in getattr(args, flag, None) or []:
+            m = MARK_RE.fullmatch(spec) if isinstance(spec, str) else None
+            if not m:
+                raise BudgetError(f"--{flag} {spec!r}: <milestone>.<n>@#<seq> (a worker event) or @ev_<12 hex>")
+            mid, n, ref = m.groups()
+            ms = milestone(d, mid)
+            if not ms or int(n) > len(ms["deliverables"]):
+                have = f"{mid} has {mid}.1-{mid}.{len(ms['deliverables'])}" if ms else \
+                    f"open: {', '.join(open_milestones(d)) or 'none'}"
+                raise BudgetError(f"--{flag} {spec}: no deliverable {mid}.{n} ({have})")
+            if ref.startswith("#"):
+                seq = int(ref[1:])
+                if seq > through:
+                    raise BudgetError(f"--{flag} {spec}: #{seq} is past this page (through #{through})")
+                if seq < d["since_seq"]:
+                    raise BudgetError(f"--{flag} {spec}: #{seq} is before this direction (from #{d['since_seq']})")
+                if seq >= page_lo and seq not in wseqs:
+                    raise BudgetError(f"--{flag} {spec}: #{seq} is not a worker event; cite the worker's own event "
+                                      "or its ev_ call")
+                refs = [{"investigation_id": worker_inv, "seq": seq}]
+            else:
+                seq, refs = through, [{"evidence_id": ref}]
+            raw.append({"deliverable_id": f"{mid}.{n}", "milestone_id": mid, "mark": kind, "seq": seq, "ref": ref,
+                        "refs": refs, "flag": f"--{flag} {spec}"})
+    raw.sort(key=lambda x: x["seq"])
+    latest = {}
+    for mk in raw:
+        did = mk["deliverable_id"]
+        cur = latest.get(did, mark_state(d, did))
+        state = cur["mark"] if cur else None
+        if cur and mk["seq"] < cur["seq"]:
+            raise BudgetError(f"{mk['flag']}: {did}'s latest mark is at #{cur['seq']}, after #{mk['seq']}")
+        ok = {"done": state is None, "reopened": state in ("done", "redone"), "redone": state == "reopened"}
+        if not ok[mk["mark"]]:
+            now = {None: "open", "reopened": "reopened"}.get(state, "done")
+            fix = {"done": "--redone it" if state == "reopened" else "drop this mark",
+                   "reopened": "--done it first, or drop this mark",
+                   "redone": "--done it" if state is None else "--reopen it first, or drop this mark"}[mk["mark"]]
+            raise BudgetError(f"{mk['flag']}: {did} is {now}: {fix}")
+        latest[did] = mk
+    return raw
+
+
+# -- supervision events (wire contract v1) ----------------------------------------------
+
+def ev_direction_set(d: dict, inv: str) -> dict:
+    p = {"direction_id": d["direction_id"], "question": d["question"],
+         "subject": {"investigation_id": inv, "since_seq": d["since_seq"]}, "worker_session_id": d["worker_session"],
+         "reference_class": d["reference_class"], "calibration": d["calibration"],
+         "thresholds": dict(d["thresholds"])}
+    if d.get("worker_estimate"):
+        p["worker_estimate"] = d["worker_estimate"]
+    return {"type": "direction.set", "payload": p}
+
+
+def ev_milestone_planned(d: dict, m: dict, replaces: Optional[str] = None) -> dict:
+    p = {"direction_id": d["direction_id"], "milestone_id": m["id"], "title": m["title"], "p50_h": m["p50_h"],
+         "p80_h": m["p80_h"], "basis": m["basis"], "deliverables": [dict(x) for x in m["deliverables"]]}
+    if replaces:
+        p["replaces"] = replaces
+    return {"type": "milestone.planned", "payload": p}
+
+
+def ev_fired(d: dict, f: dict) -> dict:
+    p = {"direction_id": d["direction_id"], "scope": f["scope"], "snapshot": f["snapshot"],
+         "worker_active_h": f["worker_active_h"]}
+    if f.get("milestone_id"):
+        p["milestone_id"] = f["milestone_id"]
+    return {"type": "stepback.fired", "payload": p}
+
+
+def ev_closed(d: dict, outcome: str, missed: list) -> dict:
+    return {"type": "direction.closed", "payload": {
+        "direction_id": d["direction_id"], "outcome": outcome, "missed": missed,
+        "per_milestone": [{"id": m["id"], "estimate_h": m["p50_h"], "spent_h": round(d["charged"].get(m["id"], 0), 4),
+                           "delivered": round(delivered(d, m["id"])[0] / len(m["deliverables"]), 4)}
+                          for m in d["milestones"]]}}
+
+
+def _route_missing(err: "sync.ServerError") -> bool:
+    code = err.body.get("error")
+    return (err.status == 403 and code == "insufficient_scope") or \
+        (err.status in (404, 405) and code != "investigation_not_found")
+
+
+_REFUSED = {
+    "not_author": "--session is not an author of its investigation: pass your own session id",
+    "unknown_event_type": "this Cardinal does not know that supervision event type (update the plugin or Maestro)",
+    "invalid_payload": "Cardinal refused a supervision record as invalid (a plugin bug; report it)",
+    "ref_not_readable": "a ref names an investigation this machine's key cannot read",
+    "ref_out_of_range": "a ref is past the worker investigation's head",
+    "idempotency_conflict": "this record was already sent with other content",
+}
+
+
+def record(own: dict, key: str, events: list) -> Optional[list]:
+    """record-supervision into the supervisor's own investigation: the
+    seqs of the stored events, or None when this Cardinal has no supervision
+    class or the investigation is at its limit (own["why"] says which; the
+    caller keeps its cache). subject_grant (the grant token that reads the
+    worker's investigation) lets refs into it pass; it is never stored."""
+    if not events:
+        return []
+    if own.get("capable") is False:
+        own["why"] = SERVER_TOO_OLD
+        return None
+    body = {"investigation_id": own["investigation_id"], "session_id": own["session_id"], "idempotency_key": key,
+            "client": own["client"], "events": events}
+    if own.get("subject_grant"):
+        body["subject_grant"] = own["subject_grant"]
+    try:
+        out = sync._post(own["conn"], "record-supervision", body, client=own["client"])
+    except sync.ServerError as e:
+        code = e.body.get("error")
+        if code == "supervision_unsupported" or _route_missing(e):
+            own["why"] = SERVER_TOO_OLD
+            return None
+        if code == "event_limit_reached":
+            own["why"] = LIMIT_REACHED
+            return None
+        said = _REFUSED.get(code) or sync.plain(e)
+        issues = sync._issues(e.body) or (e.body.get("path") if isinstance(e.body.get("path"), str) else "")
+        err = ist_fetch(f"not recorded: {said}{' (' + ie._one_line(issues, 200) + ')' if issues else ''}")
+        err.code = code
+        raise err from None
+    got = out.get("events")
+    if out.get("investigation_id") != own["investigation_id"] or not isinstance(got, list) or len(got) != len(events) \
+            or any(not isinstance(g, dict) or not isinstance(g.get("seq"), int) or g.get("type") != s["type"]
+                   for g, s in zip(got, events)):
+        raise ist_fetch("not recorded: record-supervision answered without these events")
+    return [g["seq"] for g in got]
+
+
+def ist_fetch(msg: str) -> Exception:
+    from . import investigation_state as ist
+    return ist.FetchError(msg)
+
+
+def key_for(prefix: str, material) -> str:
+    return f"sup:{prefix}:" + hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()[:48]
+
+
+# -- the cache (budget.json) -------------------------------------------------------------
+
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _shape_errors(state: dict) -> list:
+    errs = []
+
+    def need(cond, what):
+        if not cond:
+            errs.append(what)
+
+    need(isinstance(state.get("investigation_id"), (str, type(None))), "investigation_id")
+    need(isinstance(state.get("history", []), list), "history")
+    sup = state.get("supervisor")
+    need(sup is None or (isinstance(sup, dict) and ie.valid_investigation(sup.get("investigation_id"))
+                         and ie.valid_session(sup.get("session_id"))), "supervisor")
+    for i, h in enumerate(state.get("history") if isinstance(state.get("history"), list) else []):
+        need(isinstance(h, dict) and isinstance(h.get("outcome"), str) and isinstance(h.get("per_milestone"), list)
+             and isinstance(h.get("firings", []), list), f"history[{i}]")
+    d = state.get("current")
+    if d is None:
+        return errs
+    if not isinstance(d, dict):
+        return errs + ["current"]
+    for k in ("direction_id", "question", "set_at", "worker_session", "reference_class", "calibration"):
+        need(isinstance(d.get(k), str), f"current.{k}")
+    need(isinstance(d.get("since_seq"), int) and not isinstance(d.get("since_seq"), bool), "current.since_seq")
+    ms = d.get("milestones")
+    need(isinstance(ms, list) and ms and all(
+        isinstance(m, dict) and isinstance(m.get("id"), str) and _num(m.get("p50_h")) and _num(m.get("p80_h"))
+        and isinstance(m.get("deliverables"), list) and m["deliverables"]
+        and all(isinstance(x, dict) and isinstance(x.get("id"), str) for x in m["deliverables"]) for m in ms),
+        "current.milestones")
+    th = d.get("thresholds")
+    need(isinstance(th, dict) and all(_num(th.get(k)) for k in DEFAULT_THRESHOLDS), "current.thresholds")
+    mk = d.get("marks")
+    need(isinstance(mk, dict) and all(isinstance(v, list) and all(
+        isinstance(x, dict) and x.get("mark") in MARKS.values() and isinstance(x.get("seq"), int) for x in v)
+        for v in mk.values()), "current.marks")
+    need(isinstance(d.get("charged"), dict) and all(_num(v) for v in d["charged"].values()), "current.charged")
+    for k in ("none_h", "active_h"):
+        need(_num(d.get(k)), f"current.{k}")
+    need(d.get("last_t") is None or _num(d.get("last_t")), "current.last_t")
+    need(isinstance(d.get("last_fire"), dict), "current.last_fire")
+    need(isinstance(d.get("backstop_fired"), bool), "current.backstop_fired")
+    need(isinstance(d.get("firings"), list) and all(isinstance(f, dict) and f.get("scope") in
+                                                     ("opening", "milestone", "backstop") for f in d["firings"]),
+         "current.firings")
+    return errs
+
+
+def load(path: Path, investigation_id: Optional[str]) -> dict:
+    try:
+        state = consumer.private_read(path)
+    except FileNotFoundError:
+        return {"version": VERSION, "investigation_id": investigation_id, "supervisor": None, "current": None,
+                "history": []}
+    except OSError as e:
+        raise BudgetError(f"{path}: cannot open the budget file ({e.strerror}); it must be a regular file "
+                          "you own, not a link") from None
+    if state.get("version") != VERSION:
+        raise BudgetError(f"{path} is not a version {VERSION} budget file: use a new --budget-file")
+    errs = _shape_errors(state)
+    if errs:
+        raise BudgetError(f"{path} is not a valid budget file (bad or missing: {', '.join(errs[:5])})")
+    if investigation_id and state.get("investigation_id") not in (None, investigation_id):
+        raise BudgetError(f"{path} is the budget of {state.get('investigation_id')}, not {investigation_id}")
+    return state
+
+
+def save(path: Path, state: dict) -> None:
+    consumer.private_write(path, state)
+
 
 @contextlib.contextmanager
 def _locked(path: Path):
@@ -533,18 +808,255 @@ def _locked(path: Path):
         lock.__exit__(None, None, None)
 
 
-def _measure_current(state: dict, conn: dict, inv: str, client: str, home: Path, reader) -> tuple:
-    b = state["current"]
-    events, head = read_worker_events(conn, inv, b["since_seq"], client=client, reader=reader)
-    spool = spool_entries(home, b.get("worker_session"))
-    return measure(b, events, spool or []), spool, head
+def _recorded(state: dict, seqs: Optional[list], out: Callable, own: Optional[dict] = None) -> None:
+    """Say once per reason that records stay in the cache only."""
+    why = (own or {}).get("why") or SERVER_TOO_OLD
+    flag = "limit_noted" if why == LIMIT_REACHED else "unsupported_noted"
+    if seqs is None and not state.get(flag):
+        state[flag] = True
+        out(why)
 
 
-def run(args, *, target: Callable, home: Path, client: str, out: Callable = print, now: Callable = time.time,
-        reader: Callable = None) -> int:
-    """`investigation budget`: one of --set [--amend] / --done / --check /
-    --show / --close on args.budget_file. target() -> (conn, client, inv) or
-    None, called only by the modes that read the worker's events."""
+# -- rendering -------------------------------------------------------------------------
+
+def _n(x: float) -> str:
+    s = f"{x:.2f}".rstrip("0")
+    return s + "0" if s.endswith(".") else s
+
+
+def milestone_line(d: dict, mid: str, fired: bool) -> str:
+    m = milestone(d, mid)
+    n, total = delivered(d, mid)
+    s = d["charged"].get(mid, 0.0)
+    parts = [f"{mid} {s:.2f}/{_n(m['p50_h'])} h", f"{n}/{total} done"]
+    if n and n < total:
+        parts.append(f"{_ratio(s, m['p50_h'], n / total):.1f}×")
+    if fired:
+        parts.append("FIRE step back")
+    return " · ".join(parts)
+
+
+def backstop_line(d: dict) -> str:
+    _, p80 = totals(d)
+    done = sum(delivered(d, m["id"])[0] for m in d["milestones"])
+    total = sum(len(m["deliverables"]) for m in d["milestones"])
+    return f"all {d['active_h']:.2f}/{_n(p80)} h P80 · {done}/{total} done · FIRE step back"
+
+
+def pass_lines(d: dict, res: dict, through: int) -> list:
+    fired = {f["milestone_id"] for f in res["firings"] if f["scope"] == "milestone"}
+    lines = [milestone_line(d, mid, mid in fired) for mid in res["active"]]
+    if any(f["scope"] == "backstop" for f in res["firings"]):
+        lines.append(backstop_line(d))
+    tail = f"reviewed through #{through}"
+    if d["calibration"] == "uncalibrated":
+        tail += " · plan uncalibrated"
+    return lines + [tail]
+
+
+def show_lines(state: dict) -> list:
+    out = []
+    d = state.get("current")
+    if d:
+        p50, p80 = totals(d)
+        out.append(f"{d['direction_id']} {state.get('investigation_id')} from #{d['since_seq']}: "
+                   f"{ie.json_text(d['question'])}; P50 {_n(p50)} h / P80 {_n(p80)} h; {d['calibration']}; "
+                   f"{d['active_h']:.2f} h active ({d['none_h']:.2f} h none)")
+        out.append(f"  reference class: {ie.json_text(d['reference_class'])}")
+        if d.get("worker_estimate"):
+            out.append(f"  worker's own estimate: {ie.json_text(d['worker_estimate'])}")
+        for m in d["milestones"]:
+            out.append("  " + milestone_line(d, m["id"], False) + f" — {ie.json_text(m['title'])}")
+        for u in d.get("unknowns", []):
+            out.append(f"  unknown {u['p50_h']}-{u['p80_h']} h: {ie.json_text(u['what'])}")
+        for f in d["firings"]:
+            label = (f.get("verdict") or {}).get("verdict", "no verdict")
+            if f.get("outcome"):
+                label += f", {f['outcome']['outcome']}"
+            out.append(f"  fired {f.get('milestone_id') or f['scope']} at #{f['at_seq']} ({label})")
+    else:
+        out.append(f"no open direction for {state.get('investigation_id') or 'this budget file'}")
+    for h in state.get("history") or []:
+        out.append(f"closed {h['outcome']} {h.get('direction_id')}: {ie.json_text(h.get('question', ''))}; "
+                   f"P50 {_n(h.get('p50_total_h', 0))} h, spent {h.get('spent_h', 0):.2f} h")
+    return out
+
+
+# -- passes (fresh-context briefs) ---------------------------------------------------------
+
+def _local_states(home: Path) -> list:
+    out = []
+    for f in sorted((home / ".cardinal" / "supervise").glob("*/budget.json")):
+        try:
+            st = consumer.private_read(f)
+        except (OSError, ValueError):
+            continue
+        if st.get("version") == VERSION and not _shape_errors(st):
+            out.append(st)
+    return out
+
+
+def closed_pace(home: Path) -> Optional[str]:
+    """Hours per met deliverable across the closed directions on this machine."""
+    spent = met = est = 0.0
+    n = 0
+    for st in _local_states(home):
+        for h in st.get("history") or []:
+            n += 1
+            for pm in h.get("per_milestone", []):
+                k = pm.get("deliverables", 0) or 0
+                spent += pm.get("spent_h", 0) or 0
+                met += (pm.get("delivered", 0) or 0) * k
+                est += (pm.get("estimate_h", 0) or 0) * (pm.get("delivered", 0) or 0)
+    if not n or not met:
+        return None
+    return (f"{n} closed direction(s) on this machine: {met:.0f} deliverables met in {spent:.2f} agent-active h "
+            f"({spent / met:.2f} h each; actual ÷ P50 {spent / est:.2f})" if est else
+            f"{n} closed direction(s): {spent / met:.2f} h per deliverable")
+
+
+def record_pace(events: list, worker_session: str, idle_min: float) -> Optional[str]:
+    wt = worker_times(events, worker_session, 1)
+    if len(wt) < 2:
+        return None
+    h = active_hours([t for _, t in wt], idle_min)
+    results = sum(1 for e in events if isinstance(e, dict) and e.get("type") in RESULT_TYPES
+                  and worker_event(e, worker_session))
+    if not h:
+        return None
+    each = f"; {h / results:.2f} h per result" if results else ""
+    return (f"the worker's record so far: {h:.2f} agent-active h over {len(wt)} events, {results} results "
+            f"(findings, completed experiments, resolved hypotheses, decisions){each}")
+
+
+def write_estimator(brief: Path, paces: list) -> Path:
+    out = brief.with_name(brief.stem + "-estimator.md")
+    measured = "\n".join(f"- {p}" for p in paces) if paces else \
+        "- none: no record and no closed direction to measure. Answer \"pace\": \"none\"."
+    out.write_text(f"{FRESH}\n\n{brief.read_text(encoding='utf-8').strip()}\n\n## Measured pace\n\n{measured}\n\n"
+                   f"## Your task\n\n{ESTIMATOR_PROMPT}\n", encoding="utf-8")
+    return out
+
+
+def status_block(d: dict, mid: Optional[str]) -> str:
+    rows = []
+    for m in d["milestones"] if mid in (None, "all") else [milestone(d, mid)]:
+        n, total = delivered(d, m["id"])
+        rows.append(f"{m['id']} ({ie._one_line(m['title'], 80)}): {d['charged'].get(m['id'], 0):.2f} of "
+                    f"{_n(m['p50_h'])} h P50 spent, {n} of {total} deliverables done")
+        if mid != "all":
+            for x in m["deliverables"]:
+                st = mark_state(d, x["id"])
+                mark = f"{st['mark']} {st['ref']}" if st else "open"
+                rows.append(f"- {x['id']} {mark}: {ie._one_line(x['done_when'], 100)}")
+    return "\n".join(rows)
+
+
+def write_stepback(brief: Path, d: Optional[dict], mid: Optional[str]) -> Path:
+    body = brief.read_text(encoding="utf-8").strip()
+    if mid is None:
+        out = brief.with_name(brief.stem + "-stepback.md")
+        text = f"{FRESH}\n\n{body}\n\n## Your task\n\n{STEPBACK_PROMPT}\n\nAnswer in at most 800 words.\n"
+    else:
+        what = "this direction" if mid == "all" else mid
+        out = brief.with_name(brief.stem + f"-stepback-{mid}.md")
+        text = (f"{FRESH}\n\nFirst: is {what} an ordinary overrun, most of its deliverables done and the rest close? "
+                f"If so, answer \"on track\" and why, and stop.\n\n{body}\n\n## Status (the supervisor's record)\n\n"
+                f"{status_block(d, mid)}\n\n## Your task\n\n{STEPBACK_PROMPT}\n\nAnswer in at most 800 words.\n")
+    out.write_text(text, encoding="utf-8")
+    return out
+
+
+# -- calibrate ------------------------------------------------------------------------
+
+def label(f: dict) -> Optional[str]:
+    """useful / noise / other for a labeled firing; None while unlabeled.
+    A final `declined` means the supervisor agreed with the decline (one it
+    disagreed with went to the owner, whose answer is the outcome)."""
+    v = (f.get("verdict") or {}).get("verdict")
+    o = (f.get("outcome") or {}).get("outcome")
+    if v == "on_track" or o == "declined":
+        return "noise"
+    if o in ("accepted", "changed_constraint"):
+        return "useful" if v else None
+    return "other" if o else None
+
+
+def calibrate_lines(home: Path, state: dict) -> list:
+    states = _local_states(home)
+    if not any(s is state or s.get("investigation_id") == state.get("investigation_id") for s in states):
+        states.append(state)
+    firings, misses, th = [], 0, None
+    for st in states:
+        for h in (st.get("history") or []):
+            firings += [f for f in h.get("firings", []) if f.get("scope") != "opening"]
+            misses += len(h.get("missed") or [])
+        if st.get("current"):
+            firings += [f for f in st["current"]["firings"] if f.get("scope") != "opening"]
+            th = st["current"]["thresholds"]
+    th = th or DEFAULT_THRESHOLDS
+    labeled = [f for f in firings if label(f)]
+    if len(labeled) < 5:
+        return [f"{len(labeled)} labeled firing(s) of {len(firings)}; a suggestion needs 5 (T {th['T']}, Z {th['Z']})"]
+    last = labeled[-5:]
+    noise = sum(1 for f in last if label(f) == "noise")
+    useful = sum(1 for f in last if label(f) == "useful")
+    t = th["T"]
+    if noise >= 4:
+        t = min(3.0, t + 0.25)
+    elif misses and noise <= 1:
+        t = max(1.5, t - 0.25)
+    zs = [f for f in labeled if f["snapshot"].get("delivered") == 0][-5:]
+    z = th["Z"]
+    if len(zs) == 5:
+        zn = sum(1 for f in zs if label(f) == "noise")
+        z = min(0.8, z + 0.1) if zn >= 4 else max(0.3, z - 0.1) if misses and zn <= 1 else z
+    head = f"last 5 labeled firings: {useful} useful, {noise} noise; {misses} missed milestone(s) in closed directions"
+    if (t, round(z, 2)) == (th["T"], th["Z"]):
+        return [head, f"keep T {th['T']}, Z {th['Z']}"]
+    return [head, f"suggest T {th['T']} -> {t}, Z {th['Z']} -> {round(z, 2)}: ask the owner; if approved, the next "
+                  f"--set adds --threshold T={t} --threshold Z={round(z, 2)}"]
+
+
+# -- the CLI: investigation budget ----------------------------------------------------------
+
+def _own(state: dict, args, home: Path, own_conn: Callable, grant_token: Optional[Callable] = None) -> dict:
+    """The supervisor's own investigation: by --session (as `supervising`
+    finds it), else the cached one; with this machine's own key, and the
+    grant's token as subject_grant (never stored)."""
+    sid = getattr(args, "session", None)
+    sup = state.get("supervisor")
+    if sid and (not sup or sup["session_id"] != sid):
+        if not ie.valid_session(sid):
+            raise BudgetError(f"--session: not a session id: {sid!r}")
+        b = ie.read_binding(home, sid)
+        if not b:
+            raise BudgetError(f"session {sid} has no investigation yet: run `cardinal-storyboard investigation link "
+                              f"--session {sid}`; supervision records go to your own investigation")
+        if b.get("is_author") is not True:
+            raise BudgetError(f"session {sid} joined someone else's investigation; --session is your own session")
+        sup = {"investigation_id": b["investigation_id"], "session_id": sid}
+    if not sup:
+        raise BudgetError("needs --session <your_sid>: supervision records go to your own investigation")
+    if sup["investigation_id"] == state.get("investigation_id"):
+        raise BudgetError("--session is the worker's; pass your own session id")
+    conn, client = own_conn()
+    if not isinstance(conn, dict) or not conn.get("key") or conn.get("token"):
+        raise BudgetError("this machine is not connected to Cardinal with its own key (run cardinal-connect); "
+                          "supervision records are written with it")
+    state["supervisor"] = sup
+    own = {**sup, "conn": conn, "client": client, "subject_grant": grant_token() if grant_token else None}
+    b = ie.read_binding(home, sup["session_id"]) or {}
+    if isinstance(b.get("capabilities"), dict) and CAPABILITY in b["capabilities"] and not ie.capability(b, CAPABILITY):
+        own["capable"] = False          # this Cardinal said it has no supervision events
+    return own
+
+
+def run(args, *, target: Callable, own_conn: Callable, home: Path, client: str, out: Callable = print,
+        now: Callable = time.time, reader: Callable = None, grant_token: Optional[Callable] = None) -> int:
+    """`investigation budget`. target() -> (conn, client, inv) or None (the
+    grant, for reading the worker); own_conn() -> (conn, client) (this
+    machine's key, for writing to the supervisor's own investigation)."""
     path = Path(args.budget_file)
     reader = reader or ie.read_events
     as_json = bool(getattr(args, "json", False))
@@ -554,139 +1066,370 @@ def run(args, *, target: Callable, home: Path, client: str, out: Callable = prin
         state = load(path, hint)
         out(json.dumps(state, indent=2, ensure_ascii=False) if as_json else "\n".join(show_lines(state)))
         return 0
-    if args.done:
-        with _locked(path):
-            state = load(path, hint)
-            if not state.get("current"):
-                raise BudgetError("no open budget: --set one first")
-            mark_done(state["current"], args.done, args.ref, 1.0 if args.fraction is None else args.fraction,
-                      now=now(), correct=bool(getattr(args, "correct", False)))
-            save(path, state)
-        e = earned_hours(state["current"])
-        d = state["current"]["done"][args.done]
-        out(json.dumps({"done": args.done, **d, "earned_h": e}) if as_json else
-            f"marked {args.done} done ({d['fraction']:.0%}, {d['ref']}); earned now {_h(e)}")
+    if args.calibrate:
+        state = load(path, hint)
+        out("\n".join(calibrate_lines(home, state)))
         return 0
-    if args.set and getattr(args, "amend", False):
+    if args.pass_:
+        return _pass(args, path, hint, target, home, reader, out)
+    if args.set and not args.amend:
+        got = target()
+        if got is None:
+            return 2
+        conn, rclient, inv = got
         with _locked(path):
-            state = load(path, hint)
-            return _amend(args, state, path, out, as_json)
-    got = target()
-    if got is None:
-        return 2
-    conn, client, inv = got
+            state = load(path, inv)
+            state["investigation_id"] = inv
+            return _set(args, state, path, conn, inv, rclient, home, lambda: _own(state, args, home, own_conn,
+                                                                                lambda: conn.get("token")),
+                        reader, out, now(), as_json)
     with _locked(path):
-        state = load(path, inv)
-        state["investigation_id"] = inv
+        state = load(path, hint)
+        d = state.get("current")
+        if not d:
+            raise BudgetError("no open direction: `budget --set --plan <file>` first")
+        own = _own(state, args, home, own_conn, grant_token)
         if args.set:
-            return _set(args, state, path, conn, inv, client, home, reader, out, now(), as_json)
-        if not state.get("current"):
-            raise BudgetError("no open budget: --set one first")
-        m, spool, head = _measure_current(state, conn, inv, client, home, reader)
-        b = state["current"]
+            return _amend(args, state, path, own, out)
         if args.close:
-            actuals = milestone_actuals(b, m["worker_times"], m["spool_times"])
-            entry = close(state, args.outcome, m["spent"], m["earned"], actuals, now=now())
-            save(path, state)
-            out(json.dumps(entry, indent=2, ensure_ascii=False) if as_json else
-                f"closed ({args.outcome}): spent {_h(entry['spent_h'])} against P50 {_h(entry['p50_total_h'])} / "
-                f"P80 {_h(entry['p80_total_h'])}; earned {_h(entry['earned_h'])}; kept in the budget file's history")
-            return 0
-        decision = evaluate(b, m["spent"], m["earned"])
-        if decision["fire"]:
-            record_firing(b, decision, m["spent"], m["earned"], now=now(), head_seq=head)
-            save(path, state)
-            after = evaluate(b, m["spent"], m["earned"])   # the next trigger points, past this firing
-            decision = {**decision, "next_lag_h": after["next_lag_h"], "next_backstop": after["next_backstop"]}
-        elif not decision["lagging"] and lag_open(b):
-            b["lag_open"] = False                           # the lag episode ended; the next lag fires at once
-            save(path, state)
-            decision = evaluate(b, m["spent"], m["earned"])
-        r = check_report(inv, b, m, decision, spool)
-        out(json.dumps(r, indent=2, ensure_ascii=False) if as_json else "\n".join(check_lines(r)))
-        return 0
+            return _close(args, state, path, own, out, now())
+        if args.verdict:
+            return _verdict(args, state, path, own, out)
+        return _outcome(args, state, path, own, out)
 
 
-SET_FIELDS = ("question", "milestone", "basis", "worker_session", "worker_estimate", "since_seq", "amend")
+MODES = ("set", "show", "close", "pass_", "calibrate", "verdict", "stepback_outcome")
+SET_FIELDS = ("plan", "question", "worker_session", "worker_estimate", "since_seq", "threshold", "amend")
+ALLOWED = {"set": set(SET_FIELDS) | {"session"}, "close": {"outcome", "missed", "session"},
+           "pass_": {"brief", "milestone", "worker_session"}, "verdict": {"routed_to", "post_ref", "session"},
+           "stepback_outcome": {"ref", "session"}, "show": set(), "calibrate": set()}
 
 
 def _only(args) -> None:
-    mode = "set" if args.set else "done" if args.done else "check" if args.check else "show" if args.show else "close"
-    allowed = {"set": set(SET_FIELDS), "done": {"ref", "fraction", "correct"}, "close": {"outcome"}}.get(mode, set())
-    for name in SET_FIELDS + ("ref", "fraction", "correct", "outcome"):
-        if getattr(args, name, None) not in (None, [], False) and name not in allowed:
-            raise BudgetError(f"--{name.replace('_', '-')} does not go with --{mode}")
-    if mode == "set" and getattr(args, "amend", False):
-        for name in ("since_seq", "worker_session"):
-            if getattr(args, name, None) is not None:
-                raise BudgetError(f"--{name.replace('_', '-')} does not go with --amend (it keeps the direction's "
-                                  "start and worker; a new direction is --set without --amend)")
-    if mode == "done" and not args.ref:
-        raise BudgetError("--done needs --ref \"#<seq>\" or ev_<12 hex>: the event or captured call proving it")
+    mode = next(m for m in MODES if getattr(args, m, None))
+    for name in SET_FIELDS + ("outcome", "missed", "brief", "milestone", "routed_to", "post_ref", "ref"):
+        if getattr(args, name, None) not in (None, [], False) and name not in ALLOWED[mode]:
+            flag = {"pass_": "pass", "stepback_outcome": "outcome", "verdict": "verdict",
+                    "calibrate": "calibrate"}.get(mode, "--" + mode)
+            raise BudgetError(f"--{name.replace('_', '-')} does not go with {flag}")
+    if mode == "set":
+        if not args.plan:
+            raise BudgetError("--set needs --plan <file>: the estimator's JSON (`budget pass estimator` asks for it)")
+        if args.amend:
+            for name in ("question", "since_seq", "worker_session", "worker_estimate", "threshold"):
+                if getattr(args, name, None) not in (None, []):
+                    raise BudgetError(f"--{name.replace('_', '-')} does not go with --amend (it re-plans milestones "
+                                      "only; a new direction is --set without --amend)")
+        elif not args.question or not args.worker_session:
+            raise BudgetError("--set needs --question \"<the owner's question>\" and --worker-session <worker_sid>")
     if mode == "close" and not args.outcome:
         raise BudgetError(f"--close needs --outcome {'|'.join(OUTCOMES)}")
+    if mode == "pass_" and not args.brief:
+        raise BudgetError("pass needs --brief <the facts brief you wrote>")
 
 
-def _amend(args, state, path, out, as_json) -> int:
-    """Correct the open budget: replace the given fields; keep its start,
-    worker, thresholds, done marks (of milestones that remain) and firings;
-    no history entry."""
-    b = state.get("current")
-    if not b:
-        raise BudgetError("no open budget to amend: --set one first")
-    if not (args.milestone or args.question or args.basis or args.worker_estimate):
-        raise BudgetError("--amend needs at least one of --milestone, --question, --basis, --worker-estimate")
-    fresh = new_budget(question=args.question or b["question"], milestones=args.milestone or b["milestones"],
-                       basis=args.basis or b["basis"], set_at=parse_time(b["set_at"]), since_seq=b["since_seq"],
-                       worker_session=b.get("worker_session"),
-                       worker_estimate=args.worker_estimate or b.get("worker_estimate"))
-    ids = {m["id"] for m in fresh["milestones"]}
-    dropped = sorted(k for k in b["done"] if k not in ids)
-    b.update({k: fresh[k] for k in ("question", "basis", "worker_estimate", "milestones")})
-    b["done"] = {k: d for k, d in b["done"].items() if k in ids}
-    save(path, state)
-    p50, p80 = totals(b)
-    if as_json:
-        out(json.dumps({"budget": b, "dropped_done": dropped}, indent=2, ensure_ascii=False))
+def _pass(args, path, hint, target, home, reader, out) -> int:
+    brief = Path(args.brief)
+    if not brief.is_file():
+        raise BudgetError(f"--brief {brief}: no such file; write the facts brief first")
+    state = load(path, hint)
+    d = state.get("current")
+    if args.pass_ == "estimator":
+        if args.milestone:
+            raise BudgetError("--milestone goes with pass stepback")
+        paces = []
+        ws = args.worker_session or (d or {}).get("worker_session")
+        got = target() if ws else None
+        if got:
+            conn, rclient, inv = got
+            events, _ = read_worker_events(conn, inv, 0, client=rclient, reader=reader)
+            p = record_pace(events, ws, DEFAULT_THRESHOLDS["idle_min"])
+            if p:
+                paces.append(p)
+        p = closed_pace(home)
+        if p:
+            paces.append(p)
+        f = write_estimator(brief, paces)
+        out(f"wrote {f}: run the estimator pass on it; save its JSON for --set --plan"
+            + ("" if paces else " (no measured pace: the plan will be uncalibrated)"))
         return 0
-    out(f"budget amended: P50 {_h(p50)} / P80 {_h(p80)} over {len(b['milestones'])} milestones; still counting from "
-        f"#{b['since_seq']}; done marks and firings kept"
-        + (f" (dropped the done marks of {', '.join(dropped)}: no such milestone now)" if dropped else ""))
+    if args.worker_session:
+        raise BudgetError("--worker-session goes with pass estimator")
+    mid = args.milestone
+    if mid is not None:
+        if not d:
+            raise BudgetError("no open direction: the opening step back is pass stepback without --milestone")
+        if mid != "all" and not milestone(d, mid):
+            raise BudgetError(f"--milestone {mid!r}: one of {', '.join(m['id'] for m in d['milestones'])}, or all")
+    f = write_stepback(brief, d, mid)
+    out(f"wrote {f}: run the step-back pass on it")
     return 0
 
 
-def _set(args, state, path, conn, inv, client, home, reader, out, t, as_json) -> int:
+def _set(args, state, path, conn, inv, rclient, home, own_fn, reader, out, t, as_json) -> int:
+    plan = load_plan(args.plan)
+    th = thresholds(args.threshold)
     if args.since_seq is not None:
         if args.since_seq < 1:
             raise BudgetError("--since-seq is a positive event seq")
-        page = reader(conn, inv, after=args.since_seq - 1, limit=1, client=client)
+        page = reader(conn, inv, after=args.since_seq - 1, limit=1, client=rclient)
+        if args.since_seq > page["head_seq"]:
+            raise BudgetError(f"--since-seq {args.since_seq} is past the head (#{page['head_seq']})")
         first = page["events"][0] if page["events"] else None
         since, set_at = args.since_seq, (parse_time(first.get("created_at")) if first else None) or t
     else:
-        page = reader(conn, inv, after=0, limit=1, client=client)
-        since, set_at = page["head_seq"] + 1, t
-    b = new_budget(question=args.question, milestones=args.milestone or [], basis=args.basis, set_at=set_at,
-                   since_seq=since, worker_session=args.worker_session, worker_estimate=args.worker_estimate)
-    replaced = None
-    if state.get("current"):
-        # The replaced budget ends where the new one starts: no time counted twice.
-        old = state["current"]
-        events, _ = read_worker_events(conn, inv, old["since_seq"], client=client, reader=reader)
-        spool = spool_entries(home, old.get("worker_session")) or []
-        m = measure(old, events, spool, before_seq=since, before=set_at)
-        actuals = milestone_actuals(old, m["worker_times"], m["spool_times"])
-        replaced = close(state, "replaced", m["spent"], m["earned"], actuals, now=t)
-    state["current"] = b
+        page = reader(conn, inv, after=0, limit=1, client=rclient)
+        since, set_at = max(1, page["head_seq"]), t
+    d = new_direction(inv=inv, question=args.question, plan=plan, since_seq=since, set_at=set_at,
+                      worker_session=args.worker_session, worker_estimate=args.worker_estimate, th=th)
+    own = own_fn()
+    old = state.get("current")
+    if old and old["direction_id"] == d["direction_id"]:
+        raise BudgetError(f"{d['direction_id']} is already the open direction; a correction is --set --amend")
+    p50, p80 = totals(d)
+    opening = {"scope": "opening", "milestone_id": None, "at_seq": since,
+               "snapshot": {"spent_h": 0, "estimate_h": p50, "delivered": 0, "ratio": None, "threshold": 0},
+               "worker_active_h": 0, "fired_seq": None, "verdict": None, "outcome": None}
+    events = ([ev_closed(old, "replaced", [])] if old else []) + [ev_direction_set(d, inv)] + \
+        [ev_milestone_planned(d, m) for m in d["milestones"]] + [ev_fired(d, opening)]
+    seqs = record(own, key_for("set", events), events)
+    if seqs:
+        opening["fired_seq"] = seqs[-1]
+    d["firings"].append(opening)
+    lines = []
+    if old:
+        _to_history(state, old, "replaced", [], t)
+        lines.append(f"closed {old['direction_id']} as replaced ({old['active_h']:.2f} h active)")
+    state["current"] = d
+    state["applied_batch"] = None
+    _recorded(state, seqs, lines.append, own)
     save(path, state)
-    p50, p80 = totals(b)
     if as_json:
-        out(json.dumps({"budget": b, "replaced": replaced}, indent=2, ensure_ascii=False))
+        out(json.dumps({"direction": d, "recorded": seqs is not None}, indent=2, ensure_ascii=False))
         return 0
-    if replaced:
-        out(f"closed the previous budget as replaced: spent {_h(replaced['spent_h'])} against P80 "
-            f"{_h(replaced['p80_total_h'])}, earned {_h(replaced['earned_h'])} (a correction of this direction is "
-            "--set --amend)")
-    out(f"budget set: P50 {_h(p50)} / P80 {_h(p80)} over {len(b['milestones'])} milestones, counting the "
-        f"worker's active time from #{since}" + (f" (worker session {b['worker_session']})" if b["worker_session"]
-                                                 else " (no --worker-session: the author's session events)"))
+    lines.append(f"{d['direction_id']} set: {len(d['milestones'])} milestones, P50 {_n(p50)} h / P80 {_n(p80)} h, "
+                 f"counting from #{since}; {d['calibration']}"
+                 + ("" if d["calibration"] == "calibrated" else " (no measured pace)"))
+    out("\n".join(lines))
     return 0
+
+
+def _to_history(state: dict, d: dict, outcome: str, missed: list, t: float) -> dict:
+    p50, p80 = totals(d)
+    entry = {"direction_id": d["direction_id"], "question": d["question"], "outcome": outcome, "closed_at": iso(t),
+             "since_seq": d["since_seq"], "p50_total_h": p50, "p80_total_h": p80, "spent_h": round(d["active_h"], 4),
+             "none_h": round(d["none_h"], 4), "thresholds": d["thresholds"], "missed": missed,
+             "firings": d["firings"],
+             "per_milestone": [{**p, "deliverables": len(milestone(d, p["id"])["deliverables"])}
+                               for p in ev_closed(d, outcome, missed)["payload"]["per_milestone"]]}
+    state["history"] = (state.get("history") or [])[-(HISTORY_MAX - 1):] + [entry]
+    state["current"] = None
+    return entry
+
+
+def _amend(args, state, path, own, out) -> int:
+    """Re-plan within the same direction: new or changed milestones get a
+    milestone.planned (a changed one `replaces` itself, which re-arms it);
+    charges, marks of deliverables that remain, and firings stay."""
+    d = state["current"]
+    plan = load_plan(args.plan)
+    old = {m["id"]: m for m in d["milestones"]}
+    changed = [m for m in plan["milestones"] if old.get(m["id"]) != m]
+    if not changed and len(plan["milestones"]) == len(d["milestones"]):
+        raise BudgetError("--amend: the plan is the same as the open direction's")
+    events = [ev_milestone_planned(d, m, m["id"] if m["id"] in old else None) for m in changed]
+    seqs = record(own, key_for("amend", [d["direction_id"], events]), events) if events else []
+    keep = {x["id"] for m in plan["milestones"] for x in m["deliverables"]}
+    d["milestones"] = plan["milestones"]
+    d["unknowns"] = plan["unknowns"]
+    d["reference_class"] = plan["reference_class"]
+    d["marks"] = {k: v for k, v in d["marks"].items() if k in keep}
+    for m in plan["milestones"]:
+        d["charged"].setdefault(m["id"], 0.0)
+        if m["id"] in old and m in changed:
+            d["last_fire"].pop(m["id"], None)
+    _, p80 = totals(d)
+    if d["active_h"] < d["thresholds"]["backstop"] * p80:
+        d["backstop_fired"] = False
+    lines = []
+    _recorded(state, seqs if events else [], lines.append, own)
+    save(path, state)
+    p50, p80 = totals(d)
+    dropped = sorted(set(old) - {m["id"] for m in plan["milestones"]})
+    lines.append(f"{d['direction_id']} re-planned: {len(changed)} milestone(s) new or changed; P50 {_n(p50)} h / "
+                 f"P80 {_n(p80)} h" + (f"; dropped {', '.join(dropped)}" if dropped else ""))
+    out("\n".join(lines))
+    return 0
+
+
+def _close(args, state, path, own, out, t) -> int:
+    d = state["current"]
+    missed = [x for x in (args.missed or "").split(",") if x]
+    bad = [x for x in missed if not milestone(d, x)]
+    if bad:
+        raise BudgetError(f"--missed {bad[0]!r}: one of {', '.join(m['id'] for m in d['milestones'])}")
+    ev = ev_closed(d, args.outcome, missed)
+    seqs = record(own, key_for("close", ev), [ev])
+    lines = []
+    _recorded(state, seqs, lines.append, own)
+    entry = _to_history(state, d, args.outcome, missed, t)
+    save(path, state)
+    lines.append(f"closed {d['direction_id']} ({args.outcome}): {entry['spent_h']:.2f} h active against P50 "
+                 f"{_n(entry['p50_total_h'])} h / P80 {_n(entry['p80_total_h'])} h")
+    out("\n".join(lines))
+    return 0
+
+
+def _firing(d: dict, scope: str, want: str) -> dict:
+    """The latest firing of scope (a milestone id, opening or all) that
+    lacks `want` (verdict / outcome)."""
+    sc = {"opening": ("opening", None), "all": ("backstop", None)}.get(scope, ("milestone", scope))
+    cands = [f for f in d["firings"] if (f["scope"], f.get("milestone_id")) == sc]
+    if want == "outcome":
+        cands = [f for f in cands if f.get("verdict")]
+    open_ = [f for f in cands if not f.get(want)]
+    if not open_:
+        what = "with a verdict and no outcome" if want == "outcome" else "without a verdict"
+        raise BudgetError(f"no step back on {scope} {what}"
+                          + ("; record its verdict first" if want == "outcome" and not cands else ""))
+    return open_[-1]
+
+
+def _ref(r: str, inv: str) -> dict:
+    if not isinstance(r, str) or not REF_RE.fullmatch(r):
+        raise BudgetError(f"ref {r!r}: \"#<seq>\" (the worker's investigation) or ev_<12 hex>")
+    return {"investigation_id": inv, "seq": int(r[1:])} if r.startswith("#") else {"evidence_id": r}
+
+
+def _verdict(args, state, path, own, out) -> int:
+    d = state["current"]
+    scope, verdict = args.verdict
+    if verdict not in VERDICTS:
+        raise BudgetError(f"verdict {verdict!r}: one of {', '.join(VERDICTS)}")
+    routed = args.routed_to or VERDICTS[verdict]
+    if routed not in ROUTES:
+        raise BudgetError(f"--routed-to: one of {', '.join(ROUTES)}")
+    f = _firing(d, scope, "verdict")
+    p = {"fired_seq": f["fired_seq"], "verdict": verdict, "routed_to": routed}
+    if args.post_ref:
+        p["post_ref"] = _ref(args.post_ref, state["investigation_id"])
+    seqs = None
+    if f["fired_seq"] is not None:
+        seqs = record(own, key_for("verdict", p), [{"type": "stepback.verdict", "payload": p}])
+    f["verdict"] = {**p, "verdict_seq": seqs[0] if seqs else None}
+    lines = []
+    _recorded(state, seqs, lines.append, own)
+    save(path, state)
+    lines.append(f"verdict on the {scope} step back (#{f['at_seq']}): {verdict}, routed to {routed}")
+    out("\n".join(lines))
+    return 0
+
+
+def _outcome(args, state, path, own, out) -> int:
+    d = state["current"]
+    scope, outcome = args.stepback_outcome
+    if outcome not in STEPBACK_OUTCOMES:
+        raise BudgetError(f"outcome {outcome!r}: one of {', '.join(STEPBACK_OUTCOMES)}")
+    f = _firing(d, scope, "outcome")
+    p = {"verdict_seq": f["verdict"].get("verdict_seq"), "outcome": outcome,
+         "refs": [_ref(r, state["investigation_id"]) for r in args.ref or []]}
+    seqs = None
+    if p["verdict_seq"] is not None:
+        seqs = record(own, key_for("outcome", p), [{"type": "stepback.outcome", "payload": p}])
+    f["outcome"] = p
+    lines = []
+    _recorded(state, seqs, lines.append, own)
+    save(path, state)
+    lines.append(f"outcome of the {scope} step back (#{f['at_seq']}): {outcome}")
+    out("\n".join(lines))
+    return 0
+
+
+# -- the CLI: investigation reviewed (the review pass) ----------------------------------------
+
+def reviewed(args, *, grant: dict, own_conn: Callable, home: Path, out: Callable = print) -> int:
+    """Commit the outstanding page. With an open direction in the budget file
+    (--budget-file, default budget.json beside the cursor file): its worker
+    events must all be tagged; the tags, the marks and any firings are
+    recorded (idempotent on the batch hash) before the cursor moves."""
+    cursor = Path(args.cursor_file)
+    bfile = Path(args.budget_file) if getattr(args, "budget_file", None) else cursor.parent / "budget.json"
+    flags = [f"--{k} {v}" for k in ("tag", "done", "reopen", "redone") for v in (getattr(args, k, None) or [])]
+    inv = grant["investigation_id"]
+    if not bfile.exists() and not getattr(args, "budget_file", None):
+        if flags:
+            raise BudgetError("no open direction for --tag/--done: `budget --set --plan <file>` first, or drop them")
+        out(json.dumps(consumer.reviewed(grant, cursor, args.batch), indent=2))
+        return 0
+    with _locked(bfile):
+        state = load(bfile, inv)
+        d = state.get("current")
+        if not d:
+            if flags:
+                raise BudgetError("no open direction for --tag/--done: `budget --set --plan <file>` first, or drop "
+                                  "them")
+            out(json.dumps(consumer.reviewed(grant, cursor, args.batch), indent=2))
+            return 0
+        page = consumer.pending(grant, cursor)
+        if not page or page.get("batch") != args.batch:
+            raise BudgetError("batch is not the outstanding read; cursor unchanged")
+        through = page["next_after"]
+        if state.get("applied_batch") == args.batch:
+            lines = state.get("applied_lines") or [f"reviewed through #{through}"]
+        else:
+            lines = _apply(args, state, bfile, d, page, grant, flags, home, own_conn)
+    consumer.reviewed(grant, cursor, args.batch)
+    out("\n".join(lines))
+    return 0
+
+
+def _apply(args, state, bfile, d, page, grant, flags, home, own_conn) -> list:
+    inv = grant["investigation_id"]
+    through = page["next_after"]
+    wt = worker_times(page["events"], d["worker_session"], d["since_seq"])
+    wseqs = [s for s, _ in wt]
+    tags = parse_tags(getattr(args, "tag", None), wseqs, d)
+    marks = parse_marks(args, d, wseqs, page["after"] + 1, through, inv)
+    spool = []
+    if wt and d["last_t"] is not None:
+        entries = spool_entries(home, d["worker_session"]) or []
+        spool = [t for t in spool_times(entries, d["last_t"]) if t < wt[-1][1]]
+    new, res = apply_batch(d, wt, spool, tags, marks)
+    lines = pass_lines(new, res, through)
+    if wt or marks:
+        own = _own(state, args, home, own_conn, lambda: grant.get("token"))
+        sent = state.get("sent")
+        if sent and sent.get("batch") == args.batch and sent.get("flags") != flags:
+            raise BudgetError("this page was already sent with other flags (the commit failed after): repeat them: "
+                              + " ".join(sent["flags"]))
+        events = [{"type": "work.attributed", "payload": {
+            "direction_id": d["direction_id"], "batch": args.batch, "through_seq": through,
+            "tags": {str(s): tags[s] for s in wseqs},
+            "charged_h": {m: round(h, 4) for m, h in res["charged"].items()}}}]
+        events += [{"type": "deliverable.marked", "payload": {
+            "direction_id": d["direction_id"], "milestone_id": mk["milestone_id"], "deliverable_id": mk["deliverable_id"],
+            "mark": mk["mark"], "refs": mk["refs"]}} for mk in marks]
+        events += [ev_fired(new, f) for f in res["firings"]]
+        if len(events) > MAX_EVENTS:
+            raise BudgetError(f"at most {MAX_EVENTS - 1 - len(res['firings'])} marks in one pass")
+        state["sent"] = {"batch": args.batch, "flags": flags}
+        save(bfile, state)
+        try:
+            seqs = record(own, "sup:rv:" + args.batch[:64], events)
+        except Exception as e:
+            if getattr(e, "code", None) == "idempotency_conflict":
+                raise BudgetError("this page was already recorded with other tags or marks; repeat the ones sent "
+                                  "first") from None
+            raise
+        if seqs:
+            for f, s in zip(res["firings"], seqs[-len(res["firings"]):] if res["firings"] else []):
+                f["fired_seq"] = s
+        pre = []
+        _recorded(state, seqs, pre.append, own)
+        lines = pre + lines
+    state["current"] = new
+    state["applied_batch"] = args.batch
+    state["applied_lines"] = lines
+    state["sent"] = None
+    save(bfile, state)
+    return lines

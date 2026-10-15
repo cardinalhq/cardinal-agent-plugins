@@ -39,11 +39,16 @@ refs: earlier ids or "#<seq>". An id stays the same in its later events. Text <=
 
 
 BUDGET_HELP = """\
-The supervisor's work budget for the worker's current direction (supervise skill, "Step backs").
-The worker never sees it. Spent = the worker's active hours since --set (its events, plus its
-captured calls when its spool is on this machine; gaps over 30 min are idle). Earned = P50 hours
-of milestones marked done. --check prints spent, earned, the next trigger and FIRE <reason> or ok,
-and records a firing so it never fires twice."""
+The supervisor's plan for the worker's current direction and its step-back trigger (supervise
+skill, "Step backs"; docs/specs/supervise-stepback-trigger.md). The worker never sees it. Records
+go to your own investigation (--session) as supervision events; --budget-file is their cache.
+  --set --plan F --question Q --worker-session W --session S [--since-seq N]   a new direction
+  --set --amend --plan F                                                      re-plan its milestones
+  pass estimator|stepback --brief F [--milestone M|all]                       write a fresh pass's brief copy
+  verdict M|opening|all on_track|worker_choice|owner_constraint [--post-ref "#N"]
+  outcome M|opening|all accepted|declined|overruled|changed_constraint|no_response [--ref R]
+  --show, calibrate, --close --outcome done|stopped|replaced [--missed M,...]
+Each review pass tags and marks on `reviewed` (--tag, --done, --reopen, --redone)."""
 
 
 class CLI:
@@ -1101,7 +1106,8 @@ class CLI:
     def cmd_budget(self, args: argparse.Namespace) -> int:
         from . import investigation_budget as budget
 
-        return budget.run(args, target=lambda: self._target(args), home=self._home(), client=self.client())
+        return budget.run(args, target=lambda: self._target(args), own_conn=self.connection, home=self._home(),
+                          client=self.client(), grant_token=lambda: (self._grantee()[0] or {}).get("token"))
 
     def cmd_withdraw_proposal(self, args: argparse.Namespace) -> int:
         sid = self._session_arg(args)
@@ -1216,6 +1222,13 @@ def build_parser(wiring, session_env=()):
             p.add_argument("--cwd", action="append", default=[], help="checkout to attach; repeat for multiple repos; saved edits are replayed too")
         elif action == "reviewed":
             p.add_argument("--batch", required=True)
+            p.add_argument("--budget-file", type=Path, help="the step-back cache (default: budget.json beside the "
+                           "cursor file); with an open direction every worker event needs a --tag")
+            p.add_argument("--tag", action="append", default=[], metavar="SEQS:M",
+                           help="208-215:<m>, 255:<m>+<m2>, 220:none or all:<m> (repeat)")
+            for flag in ("done", "reopen", "redone"):
+                p.add_argument("--" + flag, action="append", default=[], metavar="M.N@REF",
+                               help=f"mark a deliverable {flag}: <m>.<n>@#<seq> or @ev_<12 hex> (repeat)")
         elif action == "question":
             p.add_argument("text", help="the question (1 to 1000 characters)")
         elif action == "checkpoint":
@@ -1309,30 +1322,34 @@ def build_parser(wiring, session_env=()):
             p.add_argument("proposal_id", help="dp_...")
         elif action == "budget":
             p.description = BUDGET_HELP
-            p.add_argument("--budget-file", type=Path, required=True, help="private 0600 budget state, e.g. "
+            p.add_argument("--budget-file", type=Path, required=True, help="private 0600 cache, e.g. "
                            "~/.cardinal/supervise/<inv>/budget.json")
             mode = p.add_mutually_exclusive_group(required=True)
-            mode.add_argument("--set", action="store_true", help="record a budget for a new direction (closes the "
+            mode.add_argument("--set", action="store_true", help="record a new direction from --plan (closes the "
                               "open one as replaced)")
-            mode.add_argument("--done", metavar="ID", help="mark a milestone done (needs --ref)")
-            mode.add_argument("--check", action="store_true", help="spent vs earned; FIRE <reason> or ok")
-            mode.add_argument("--show", action="store_true", help="the budget, its marks, firings and history")
-            mode.add_argument("--close", action="store_true", help="record actuals against the estimate")
-            p.add_argument("--amend", action="store_true", help="--set: correct the open budget in place (same "
-                           "direction: keeps its start, done marks and firings; no history entry)")
+            mode.add_argument("--show", action="store_true", help="the direction, its milestones, firings, history")
+            mode.add_argument("--close", action="store_true", help="end the direction (--outcome)")
+            mode.add_argument("--pass", dest="pass_", choices=("estimator", "stepback"), help=argparse.SUPPRESS)
+            mode.add_argument("--calibrate", action="store_true", help=argparse.SUPPRESS)
+            mode.add_argument("--verdict", nargs=2, metavar=("SCOPE", "VERDICT"), help=argparse.SUPPRESS)
+            mode.add_argument("--stepback-outcome", nargs=2, metavar=("SCOPE", "OUTCOME"), help=argparse.SUPPRESS)
+            p.add_argument("--amend", action="store_true", help="--set: re-plan the open direction's milestones")
+            p.add_argument("--plan", type=Path, help="--set: the estimator's JSON")
             p.add_argument("--question", help="--set: the owner's question for this direction, one line")
-            p.add_argument("--milestone", action="append", default=[], metavar="ID:P50H:P80H:TITLE",
-                           help="--set: one milestone (repeat, 1-20)")
-            p.add_argument("--basis", help="--set: the reference class and the known unknowns")
-            p.add_argument("--worker-session", help="--set: the worker's session id")
+            p.add_argument("--worker-session", help="--set, pass estimator: the worker's session id")
             p.add_argument("--worker-estimate", help="--set: what the worker itself estimated, if anything")
             p.add_argument("--since-seq", type=int, metavar="SEQ",
-                           help="--set: count from this event (the new direction's start); default: from now")
-            p.add_argument("--ref", help="--done: \"#<seq>\" or ev_<12 hex> proving it")
-            p.add_argument("--fraction", type=float, help="--done: the total part done so far (0-1], not an "
-                           "increment; default 1")
-            p.add_argument("--correct", action="store_true", help="--done: allow a lower --fraction than recorded")
+                           help="--set: count from this event (the new direction's start); default: the head")
+            p.add_argument("--threshold", action="append", default=[], metavar="K=V",
+                           help="--set: pin a threshold the owner approved (T, Z, rearm, backstop, idle_min, "
+                           "min_spent_h)")
+            p.add_argument("--brief", type=Path, help="pass: the facts brief")
+            p.add_argument("--milestone", help="pass stepback: the milestone that fired, or all")
+            p.add_argument("--routed-to", choices=("none", "worker", "owner"), help="verdict")
+            p.add_argument("--post-ref", help="verdict: your post's \"#<seq>\"")
+            p.add_argument("--ref", action="append", default=[], help="outcome: \"#<seq>\" or ev_ (repeat)")
             p.add_argument("--outcome", choices=("done", "stopped", "replaced"), help="--close")
+            p.add_argument("--missed", help="--close: milestones that needed rework or a pivot with no step back")
     return parser
 
 
@@ -1355,11 +1372,10 @@ def normalize_argv(argv):
         "--remove",
         "--replace",
         "--set",
-        "--check",
         "--show",
         "--close",
         "--amend",
-        "--correct",
+        "--calibrate",
         "--help",
         "-h",
     }
@@ -1372,6 +1388,13 @@ def normalize_argv(argv):
         else:
             positional.append(i)
             i += 1
+    if action == "budget":
+        # `budget [<inv>] … pass estimator`, `calibrate`, `verdict <scope> <v>`, `outcome <scope> <o>`.
+        verbs = {"pass": "--pass", "calibrate": "--calibrate", "verdict": "--verdict", "outcome": "--stepback-outcome"}
+        for idx in positional:
+            if argv[idx] in verbs:
+                argv[idx] = verbs[argv[idx]]
+                break
     if action in ("ack", "post") and positional and ie.valid_investigation(argv[positional[0]]):
         idx = positional.pop(0)
         inv = argv[idx]
@@ -1406,9 +1429,10 @@ def cli_main(argv, wiring, session_env=(), *, legacy=False):
         if args.action == "reviewed":
             if not cli.scoped or not args.cursor_file:
                 raise ValueError("reviewed requires a scoped credential and --cursor-file")
+            from . import investigation_budget as budget
+
             conn, _ = cli._grantee()
-            print(json.dumps(consumer.reviewed(conn, args.cursor_file, args.batch), indent=2))
-            return 0
+            return budget.reviewed(args, grant=conn, own_conn=cli.connection, home=cli._home())
         if args.action == "verify":
             from . import investigation_artifacts
 
@@ -1419,7 +1443,10 @@ def cli_main(argv, wiring, session_env=(), *, legacy=False):
             return investigation_artifacts.verify(conn, inv, args.target, root=args.root, client=client)
         return getattr(cli, "cmd_" + args.action.replace("-", "_"))(args)
     except (ValueError, ie.CheckpointInputError) as e:
-        print(ie._one_line(e, 1000), file=sys.stderr)
+        if type(e).__name__ == "BudgetError":   # at most 2 lines, each naming the fix
+            print("\n".join(ie._one_line(x, 1000) for x in str(e).splitlines()[:2]), file=sys.stderr)
+        else:
+            print(ie._one_line(e, 1000), file=sys.stderr)
         if (
             args.action == "grant"
             and not args.out

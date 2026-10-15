@@ -112,6 +112,12 @@ def read(conn: dict, path: Path, *, client: str) -> dict:
         return page
 
 
+def pending(conn: dict, path: Path):
+    """The outstanding page (None when there is none), read under the lock."""
+    with locked(path):
+        return load(path, conn).get("pending")
+
+
 def reviewed(conn: dict, path: Path, batch: str) -> dict:
     with locked(path):
         state = load(path, conn)
