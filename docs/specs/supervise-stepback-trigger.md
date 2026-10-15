@@ -150,7 +150,7 @@ worker-active hours, no revised or retracted events, and steady red→green prog
 |---|---|---|
 | 1.0–0.2 (46–9.2 h) | 0 | — |
 | 0.15 (6.9 h) | 2 | Both zero-progress firings: p0-7 at #69 (0.45 h, after the worker's own red test reopened its only done item) and p0-8 at #101 (0.27 h) |
-| 0.1 (4.6 h, about the actual) | 4 | #19, #69, #97, #99 |
+| 0.1 (4.6 h, about the actual) | 6 | #19, #69, #73, #97, #99, #102 (#73 and #102 come from re-arming at 1.5 × T after a zero-progress firing) |
 | 0.15 with `min_spent_h` 0.5 | 0 | — |
 | 0.1 with `min_spent_h` 0.5 | 3 | #77, #99, #115 |
 
