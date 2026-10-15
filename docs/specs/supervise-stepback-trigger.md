@@ -1,6 +1,6 @@
 # Supervise step backs: a per-milestone rate trigger, recorded on the server
 
-Status: proposal, 2026-10-15. It replaces the lag/backstop trigger in
+Status: accepted 2026-10-15 (owner accepted all five §9 recommendations; healthy-session backtest runs before the build). It replaces the lag/backstop trigger in
 docs/specs/supervise-stepback.md (branch `feat/supervise-stepback`) and the earlier version of this
 document. Backtest artifacts:
 `/private/tmp/claude-501/-Users-ruchirj-workspace-cardinal-agent-plugins/2650df3c-bf06-4edc-9d92-fddedf508937/scratchpad/backtest/`.
@@ -326,9 +326,9 @@ About 60 come back: one sentence on `reviewed` tagging and marking. Its errors t
 - the budget CLI shell: lock, 0600, `active_hours`, the worker-event filter, the spool union,
   `--since-seq`, `--set`/`--amend`/`--close`, history and the load shape check.
 
-## 9. Decisions for the owner
+## 9. Owner decisions (accepted 2026-10-15)
 
-| # | Decision | Recommendation |
+| # | Decision | Accepted |
 |---|---|---|
 | 1 | Starting T | **2×** (bounds 1.5–3×). 1.5× fired at #255, with less to judge from; 3× came after the rework began. |
 | 2 | Zero-progress share Z | **0.5** (bounds 0.3–0.8). |
