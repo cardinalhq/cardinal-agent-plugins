@@ -43,6 +43,13 @@ When the owner types `decide: …`, `approve <id>` or `reject <id>`, Cardinal's 
 confirms they typed it, acts, and shows them the outcome when your turn ends; you get it with
 their next prompt. Run nothing to send or approve it. No Cardinal line means nothing was sent.
 
+## Fresh-context passes (step backs)
+
+Run each pass (CORE.md, Step backs) as a subagent: a `Plan` subagent (read-only), or
+general-purpose told to change nothing. Its prompt is only the brief's path, the code's path
+and the pass's question from CORE.md: never the event stream or your own view. Start the
+estimator and the opening step back in one message so they run in parallel.
+
 ## Doing your own checks
 
 Reproduce claims with read-only tools: Read, Grep, `git log` / `git diff`, Cardinal query

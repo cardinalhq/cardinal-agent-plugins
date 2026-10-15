@@ -41,6 +41,14 @@ When the owner types `decide: …`, `approve <id>` or `reject <id>`, Cardinal's 
 acts on it and shows them the outcome instead of passing the prompt to you; you get the
 outcome at your next tool call. Run nothing to send or approve it.
 
+## Fresh-context passes (step backs)
+
+A read-only headless Cursor pass is not verified for this plugin, so the step backs (CORE.md)
+do not run here. Keep the budget and its checks: estimate it yourself from the brief alone,
+with CORE.md's estimator question, and start `--basis` with "estimated in the supervisor's
+context". At the opening and at each `FIRE`, tell the owner in one line that the step back
+needs a Claude supervisor (Codex and Gemini can run it too), and give them the brief's path.
+
 ## Doing your own checks
 
 Reproduce claims read-only: read files, `git log` / `git diff`, Cardinal query tools

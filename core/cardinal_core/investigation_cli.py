@@ -38,6 +38,14 @@ evidence: rcpt_ / ev_ ids (a cited ev_ is uploaded as an Investigation receipt f
 refs: earlier ids or "#<seq>". An id stays the same in its later events. Text <= 2000 chars. artifacts/gate: findings, results, resolutions and decisions (capability-gated)."""
 
 
+BUDGET_HELP = """\
+The supervisor's work budget for the worker's current direction (supervise skill, "Step backs").
+The worker never sees it. Spent = the worker's active hours since --set (its events, plus its
+captured calls when its spool is on this machine; gaps over 30 min are idle). Earned = P50 hours
+of milestones marked done. --check prints spent, earned, the next trigger and FIRE <reason> or ok,
+and records a firing so it never fires twice."""
+
+
 class CLI:
     def __init__(self, wiring, args, legacy=False):
         self.wiring, self.args, self.legacy = wiring, args, legacy
@@ -1090,6 +1098,11 @@ class CLI:
                   f"{ie._one_line(r['message'], 600)}")
         return 0
 
+    def cmd_budget(self, args: argparse.Namespace) -> int:
+        from . import investigation_budget as budget
+
+        return budget.run(args, target=lambda: self._target(args), home=self._home(), client=self.client())
+
     def cmd_withdraw_proposal(self, args: argparse.Namespace) -> int:
         sid = self._session_arg(args)
         if not sid:
@@ -1158,6 +1171,7 @@ def build_parser(wiring, session_env=()):
         "supervising",
         "proposals",
         "withdraw-proposal",
+        "budget",
     ):
         p = sub.add_parser(
             action,
@@ -1189,7 +1203,7 @@ def build_parser(wiring, session_env=()):
             ),
         )
         p.set_defaults(investigation_id=None)
-        if action in ("events", "show", "post", "bind", "attach", "propose-decision", "supervising"):
+        if action in ("events", "show", "post", "bind", "attach", "propose-decision", "supervising", "budget"):
             p.add_argument("investigation_id", nargs=None if action in ("bind", "attach") else "?")
         if action in ("events", "reviewed"):
             p.add_argument(
@@ -1293,6 +1307,27 @@ def build_parser(wiring, session_env=()):
                            help="move --name here from a target of another investigation")
         elif action == "withdraw-proposal":
             p.add_argument("proposal_id", help="dp_...")
+        elif action == "budget":
+            p.description = BUDGET_HELP
+            p.add_argument("--budget-file", type=Path, required=True, help="private 0600 budget state, e.g. "
+                           "~/.cardinal/supervise/<inv>/budget.json")
+            mode = p.add_mutually_exclusive_group(required=True)
+            mode.add_argument("--set", action="store_true", help="record a budget for the current direction")
+            mode.add_argument("--done", metavar="ID", help="mark a milestone done (needs --ref)")
+            mode.add_argument("--check", action="store_true", help="spent vs earned; FIRE <reason> or ok")
+            mode.add_argument("--show", action="store_true", help="the budget, its marks, firings and history")
+            mode.add_argument("--close", action="store_true", help="record actuals against the estimate")
+            p.add_argument("--question", help="--set: the owner's question for this direction, one line")
+            p.add_argument("--milestone", action="append", default=[], metavar="ID:P50H:P80H:TITLE",
+                           help="--set: one milestone (repeat, 1-20)")
+            p.add_argument("--basis", help="--set: the reference class and the known unknowns")
+            p.add_argument("--worker-session", help="--set: the worker's session id")
+            p.add_argument("--worker-estimate", help="--set: what the worker itself estimated, if anything")
+            p.add_argument("--since-seq", type=int, metavar="SEQ",
+                           help="--set: count from this event (the new direction's start); default: from now")
+            p.add_argument("--ref", help="--done: \"#<seq>\" or ev_<12 hex> proving it")
+            p.add_argument("--fraction", type=float, help="--done: the measurable part done (0-1]")
+            p.add_argument("--outcome", choices=("done", "stopped", "replaced"), help="--close")
     return parser
 
 
@@ -1314,6 +1349,10 @@ def normalize_argv(argv):
         "--owner-input",
         "--remove",
         "--replace",
+        "--set",
+        "--check",
+        "--show",
+        "--close",
         "--help",
         "-h",
     }
@@ -1353,7 +1392,7 @@ def cli_main(argv, wiring, session_env=(), *, legacy=False):
                   f"{args.action} without --credential-file and without CARDINAL_INVESTIGATION_TOKEN", file=sys.stderr)
             return EXIT_USAGE
         if cli.scoped and args.action not in ("events", "post", "show", "reviewed", "verify", "rule", "proposals",
-                                              "withdraw-proposal"):
+                                              "withdraw-proposal", "budget"):
             return EXIT_USAGE if not cli._author_only("not recorded") else 0
         if args.action == "post" and (args.type is None or args.text is None):
             raise ValueError("post requires type and text (positional or --type/--text)")

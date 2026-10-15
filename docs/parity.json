@@ -1468,6 +1468,58 @@
       "claude": "Claude Code fires UserPromptSubmit for scheduled-task, /loop and peer prompts too, with no origin in the payload: a detached verifier confirms from the transcript that a person typed it before anything is sent; the outcome is shown at Stop or with the next prompt."
     }
   },
+  "supervise_stepback": {
+    "title": "Supervise step backs on a work budget (budget, lag/backstop triggers, fresh-context step back)",
+    "group": "investigation",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "limit:cursor-agent was not available to verify a read-only headless pass, so the supervise skill keeps the budget and its triggers and tells the owner the step back needs a Claude, Codex or Gemini supervisor (adapters/cursor/skills/supervise/SKILL.md#fresh-context-passes-step-backs; docs/specs/supervise-stepback.md#runtimes).",
+      "gemini": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "budget --check"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/SKILL.md",
+          "pattern": "`Plan` subagent"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "budget --check"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/SKILL.md",
+          "pattern": "codex exec --sandbox read-only"
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "grep",
+          "path": "skills/supervise/CORE.md",
+          "pattern": "budget --check"
+        },
+        {
+          "kind": "grep",
+          "path": "skills/supervise/SKILL.md",
+          "pattern": "gemini --skip-trust --approval-mode default"
+        }
+      ]
+    },
+    "notes": {
+      "codex": "The step back runs as `codex exec --sandbox read-only` (verified from a shell on 2026-10-15, codex-cli 0.162.1; not yet from inside a Codex session).",
+      "gemini": "The step back runs as `gemini --approval-mode default -p` (verified from a shell on 2026-10-15, gemini-cli 0.64.0; `plan` mode is not read-only headless; not yet from inside a Gemini session)."
+    }
+  },
   "connection_skills": {
     "title": "connect / disconnect / status skills",
     "group": "skills",

@@ -44,6 +44,21 @@ When the owner types `decide: …`, `approve <id>` or `reject <id>`, Cardinal's 
 shows them the outcome and gives you the same line. Confirm it in one line; run nothing to
 send or approve it. No Cardinal line means nothing was sent; say so.
 
+## Fresh-context passes (step backs)
+
+Run each pass (CORE.md, Step backs) as a separate read-only Codex: put the pass's question at
+the end of a copy of the brief, then, from the code's checkout:
+
+```
+codex exec --sandbox read-only --ephemeral -C <code checkout> - < <dir>/brief-<n>-<pass>.md
+```
+
+Its final message is the answer. It reads and searches the code; the sandbox refuses writes.
+It needs network: ask for it once, with the Cardinal commands. Run the two passes one after
+the other. (Verified 2026-10-15, codex-cli 0.162.1, from a shell; not yet from inside a Codex
+session: if it fails there, tell the owner the step back needs a Claude supervisor and keep
+the budget and its checks.)
+
 ## Doing your own checks
 
 Reproduce claims read-only: read files, `git log` / `git diff`, Cardinal query tools

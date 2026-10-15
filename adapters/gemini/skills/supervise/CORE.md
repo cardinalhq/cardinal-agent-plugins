@@ -69,6 +69,7 @@ happened.
    and skip the rest. Otherwise tell the owner once: "You can send the worker an owner
    decision from here: type `decide: <your decision>` and it goes to the worker in your own
    words; or I can draft one for you to `approve <id>`."
+6. **Set the work budget and run the opening step back** (Step backs, below).
 
 ## The review loop
 
@@ -88,7 +89,8 @@ Wake on new events (SKILL.md says how in this agent), then:
    `cardinal-evidence show <ev_…>` for any call you need in full.
 3. **Review**, by event type (below). Do your own checks with your own tools.
 4. **Post** what the review found (below).
-5. **Commit the page only now**:
+5. **Check the budget** (`budget --check`, Step backs below); mark milestones the page proves done.
+6. **Commit the page only now**:
 
    ```
    cardinal-storyboard investigation reviewed --investigation <inv> --credential-file <dir>/grant.json --cursor-file <dir>/cursor.json --batch <hash>
@@ -193,6 +195,82 @@ the owner's approval, and never type or simulate the owner's prompt.
 - `cardinal-storyboard investigation proposals --session <your_sid>` lists the targets,
   pending drafts and latest outcomes; `withdraw-proposal <id> --session <your_sid>` drops a
   draft; `supervising --remove --name <name> --session <your_sid>` drops a target.
+
+## Step backs on a work budget
+
+Per-claim review cannot see that every claim is right while the approach is bigger than the
+question needs. A budget per direction of the work triggers step backs that can. The worker
+never sees the budget. Below, `budget …` is `cardinal-storyboard investigation budget <inv>
+--credential-file <dir>/grant.json --budget-file <dir>/budget.json …`.
+
+**Each new direction**: at set-up, and whenever the owner gives the worker a new direction (a
+new question, a decision that changes scope, a pivot the worker records on the owner's
+instruction), write a facts brief (below) to `<dir>/brief-<n>.md` and run two fresh-context
+passes on it in parallel (SKILL.md says how in this agent; never in your own context, which
+has read the stream): the opening step back (below), and the estimator. Append to the
+estimator's copy the closed budgets on this machine (`cardinal-storyboard investigation budget
+--show --budget-file <f>` for each `~/.cardinal/supervise/*/budget.json`) and ask:
+
+> From this brief and the code, estimate the active hours of work this direction needs. First
+> a reference class: comparable past work and how long it actually took (the repo's history,
+> the closed budgets above), or "none comparable" and a wider range. Then milestones, each
+> with an id, P50 and P80 active hours and a one-line basis. List the known unknowns
+> separately, each with its own range, out of the totals.
+
+Never give the estimator the worker's own estimate. Record the result:
+
+```
+budget --set --question "<the owner's question, one line>" --milestone "<id>:<P50h>:<P80h>:<title>" ... --basis "<reference class; unknowns>" --worker-session <worker_sid> [--since-seq <the direction's first event>] [--worker-estimate "<what the worker said>"]
+```
+
+`--set` closes the open budget as replaced. Tell the owner in at most two lines: the range and
+its basis (the worker's own estimate beside it, if it gave one) and any step-back question for
+them. If they correct the budget, `--set` again with their numbers.
+
+**Progress**: when the record proves a milestone done, `budget --done <id> --ref "#<seq>"` (or
+`--ref ev_…`); `--fraction 0.5` only when the record shows a measurable part (2 of 4 corpora).
+`budget --check` prints the worker's active hours spent, the P50 hours earned, the next
+trigger, and `FIRE <reason>` or `ok`. Each `FIRE` is one step back; it never fires twice.
+
+**The brief**: facts, never your suggestions:
+
+- the owner's current question, plainly;
+- the established facts that matter for the design, each with its `#seq`;
+- the constraints, each tagged with who set it (owner / worker's own choice / policy) and its
+  `#seq`;
+- the worker's current plan: its components and mechanisms;
+- where the code is, and the commit;
+- at a `FIRE`: the milestones done and open (`budget --show`).
+
+**The step back** asks, verbatim (at a `FIRE`, first: "Is this an ordinary overrun, with most
+milestones done? If so, answer 'on track' and why."):
+
+> An elegant solution is often hiding in plain sight. Take a step back. Knowing only this
+> brief and the code, what is the simplest design that answers the question? Search the code
+> for mechanisms that already do part of the job before inventing one. Then compare it with
+> the worker's plan: for each component the plan has and yours does not, name the constraint
+> or fact that requires it (by #seq), or say that nothing does. Then, for each constraint the
+> owner set: what would the simplest design be without it, and what does keeping it cost
+> (components, risk, time)? Do not drop an owner constraint; price it, so the owner can
+> decide. If the worker's plan is already about as simple as it can be, say so; that is a
+> good answer. Say what you could not verify.
+
+**Route what it found** by who owns the cost:
+
+- A component that exists only because of an **owner** constraint, or an owner constraint
+  with a material price: ask the owner in this terminal, naming the cost. If they change it,
+  it goes by `decide:` or a draft they approve (Owner decisions, above).
+- A component the **worker** chose, or an existing mechanism it missed: `--type question` to
+  the worker: `Step back (<opening|lag|backstop Nx>): <the simpler design; existing code at
+  file:line; what it would remove; what could not be verified>`.
+- Nothing to remove, or "on track": post nothing; one line in your summary.
+
+Never repeat a point the worker declined or the owner overruled unless new evidence arrived.
+If the worker declines a point you still believe, take it to the owner once, with the
+worker's argument attached, instead of withdrawing it.
+
+**When the direction ends** (done, stopped, or replaced by a new one): `budget --close
+--outcome done|stopped|replaced` records the actuals against the estimate.
 
 ## When the work is done: review the artifacts
 
