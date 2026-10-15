@@ -1,260 +1,337 @@
-# A measured step-back trigger for supervise
+# Supervise step backs: a per-milestone rate trigger, recorded on the server
 
-Status: proposal, 2026-10-15. Follows docs/specs/supervise-stepback.md (the budget trigger on
-the held branch `feat/supervise-stepback`). Numbers below were read on 2026-10-15 from
-Cardinal (read-only); scratch work is in
-`/private/tmp/claude-501/-Users-ruchirj-workspace-cardinal-agent-plugins/2650df3c-bf06-4edc-9d92-fddedf508937/scratchpad/trigger-proposal/`.
+Status: proposal, 2026-10-15. It replaces the lag/backstop trigger in
+docs/specs/supervise-stepback.md (branch `feat/supervise-stepback`) and the earlier version of this
+document. Backtest artifacts:
+`/private/tmp/claude-501/-Users-ruchirj-workspace-cardinal-agent-plugins/2650df3c-bf06-4edc-9d92-fddedf508937/scratchpad/backtest/`.
 
 ## Summary
 
-- The current lag trigger is a reasonable first guess. It is not a measured one: its
-  thresholds were picked by hand and checked on one in-sample replay.
-- There is not yet enough data to measure it. On this account, 5 investigations have 100 or
-  more events, 10 have 50 or more, all are from one author over 8 days, and 1 had a
-  supervisor. A properly powered, pre-registered study must wait for more data.
-- So: ship the branch with its thresholds marked provisional. Log every candidate signal in
-  shadow at each `--check`. Move the budget into typed events in the supervisor's own
-  investigation (needs a new server event class). Run the labeling protocol now as a pilot.
-  Fit thresholds only once the held-out set has enough rework episodes.
-- On the evidence, churn is worth testing, but not in the form first proposed. Revisions of
-  the same claim id miss most of wingbeat's rework, because the worker minted new ids for it.
-  Raw churn counts also do not carry across investigations. Signals based on hypotheses and on
-  "time since a claim was settled" have almost no data or no contrast, so they should be
-  dropped now rather than studied.
+- **Trigger**: on each active milestone, compare the hours burned per unit delivered with the plan.
+  At 2× the planned rate, run one step back scoped to that milestone.
+- **Records**: plans, attribution, deliverable marks, firings, verdicts and outcomes are `supervision`
+  events in the supervisor's own investigation, and the timeline draws them. budget.json becomes a
+  cache.
+- **Evidence (n=1)**: on wingbeat phase F, 2× fires at #270, after 3.1 worker-active hours. That is
+  ahead of the old trigger (#288, 4.1 h), the REWORK (#330, 6.0 h) and the owner's pivot (#336,
+  6.1 h). The #270 step back found the simpler design.
+- **Calibration**: a live pilot. Each firing is labeled by its verdict and the owner's outcome, and T
+  moves within 1.5–3×.
+- **Tokens**: the step-back section must shrink. Formulas and prompts move into the CLI, and tagging
+  and marking ride on the existing `reviewed` commit.
 
-## 1. What is weak about the current trigger
+## 1. The trigger
 
-| Weakness | Why it matters | Evidence |
+### Definitions (milestone m)
+
+| Quantity | Definition |
+|---|---|
+| estimate_m | the estimator's P50 hours for m |
+| delivered_m | deliverables done ÷ total. A deliverable counts while its latest mark is done or redone, with a ref. |
+| spent_m | worker-active hours charged to m |
+| planned rate | estimate_m ÷ 100% |
+| actual rate | spent_m ÷ delivered_m |
+| ratio_m | actual ÷ planned = (spent_m ÷ estimate_m) ÷ delivered_m |
+
+- **Scope**: the rules run only on *active* milestones: those with time charged in this review batch
+  and less than 100% delivered.
+- **Fire** when ratio_m ≥ T. T starts at 2.
+- **Zero progress**: when delivered_m = 0, fire when spent_m ≥ Z × estimate_m. Z starts at 0.5.
+- **Re-fire**: once per milestone per crossing. After a firing at ratio r_f, m re-arms only when:
+  - ratio_m ≥ 1.5 × r_f (at 0% delivered: spent ≥ 1.5 × the spent at that firing; a reopen that
+    drops m to 0% counts as an infinite ratio); or
+  - m is re-planned (a `milestone.planned` that replaces it).
+
+### Attribution
+
+- In its review pass, the supervisor tags each worker event with the milestone(s) it advances, or
+  `none`.
+- The active time leading up to an event is charged to its milestones. That time is the gap since
+  the previous worker event, measured over the existing union of event and spool timestamps.
+- Gaps over 30 minutes are idle and not charged.
+- An event with two milestones is split evenly between them.
+
+### At a firing
+
+The step back runs as the existing fresh-context, read-only pass, with the existing agent, routing
+and runtimes. Its brief is scoped to the milestone:
+
+- the deliverables, with `done_when` and their status and refs (the CLI writes this block);
+- the facts, by `#seq`;
+- the constraints, each tagged owner, worker or policy;
+- the worker's current approach for this milestone;
+- the code.
+
+The prompt is unchanged: it begins "An elegant solution is often hiding in plain sight…", prices
+owner constraints, and first asks whether this is an ordinary overrun. The worker never sees
+budgets, rates or triggers, and a post to it never names the trigger.
+
+### What happens to the branch's trigger
+
+| Branch mechanism | Fate | Why |
 |---|---|---|
-| Thresholds hand-picked (0.15 × P80, earned < ½ spent, +50% re-fire, 1/2/4× backstops, 30-min idle gap) | We cannot say how often it fires on healthy work, or how early it fires on real rework | `DEFAULT_THRESHOLDS` in core/cardinal_core/investigation_budget.py |
-| Checked once, in-sample | The replay used the milestones from the backtest that the trigger was designed after. It fires at #288 because it was built to. | core/tests/testdata/wingbeat-phase-f-worker-times.json; spec "As built" (Replay) |
-| Progress moves in steps, and the step size depends on how finely the work is cut into milestones | With 6 milestones of ~2 h each, earned jumps in 2 h steps. The same work cut into 3 milestones lags twice as long before anything is earned. | spec §2 |
-| Estimator bias goes straight into earned | Earned is the *P50 hours* of done milestones. An estimator that pads P50 makes every done mark worth more and hides a lag. | spec §2 |
-| "Done" is the supervisor's call | A done mark needs a ref, but nothing checks that the ref proves the milestone. Nothing un-marks it when the cited claim is later revised or retracted. | `mark_done` |
-| Blind to churn, wingbeat's strongest signal | In phase F (#199–#336), 20 of the worker's 68 semantic events were revisions, retractions, or new claims named as rework, amendments or repairs (29%). In #1–#198 the share was 12%. Earned against spent cannot see any of this. | §3, S2 |
+| Direction-level lag (earned < ½ spent after 15% of P80) | Dropped | Earned moves in milestone-sized steps, so a burning milestone hides behind done ones. On wingbeat it fired 1 h after the rate trigger. |
+| Earned weighted by P50; `--fraction` | Dropped | A padded P50 inflates earned. Checklists replace fractions. |
+| Backstops at 1×, 2× and 4× of total P80 | **One kept: 2× total P80**, which fires a direction-wide step back | It is one comparison with no skill prose. It is the only check that sees time tagged `none` or spent outside the plan, which per-milestone rates cannot see. On wingbeat it would not fire (47 h): it is a safety net, and a firing means the plan missed the work. |
+| Opening step back, 30-minute idle rule, `--set`/`--amend`/`--close` | Kept | — |
 
-## 2. Milestones as typed events in the supervisor's own investigation
+## 2. Backtest: wingbeat phase F (inv_cab0d4ba690509cd646915c2, #199–#336)
 
-### Why not use the existing semantic types
+**Method**:
 
-The supervisor session already has its own investigation (every connected session gets one
-at SessionStart). It could record milestones there with today's `finding.proposed` and
-`decision.proposed`, with no server change. That does not work, for three reasons:
+1. A blind planner, given only the #199 facts brief and the code at 8b51c326, wrote 7 milestones:
+   P50 11.5 h in total, each with 2–4 checklist items with `done_when` (milestones-199.json).
+2. A marker dated each deliverable done or reopened, with refs (marks-199.json).
+3. A tagger attributed all 103 worker events: 6 `none` and 4 split between two milestones
+   (event-tags-199.json).
+4. rate_trigger.py replays the worker's event times through the rules.
 
-1. **Refs cannot cross investigations.** A semantic ref is "#<seq> of an earlier event of this
-   investigation" (conductor `packages/maestro/src/routes/investigation-events.ts`, `refs`), so
-   `#288` would point at the supervisor's own #288.
-2. **They leak to the worker.** Org members can read semantic events (`reader.ts`
-   `visibleClasses`: member → control, semantic, owner, wake). Semantic text is also indexed for
-   storyboard search (`storyboard/search-doc.ts`), and the worker's storyboard discovery hooks
-   surface storyboards written from the same repo. A budget recorded as findings would reach
-   the worker's context through ordinary discovery.
-3. **They are claims about the work, not supervision records.** They would show up on the
-   supervisor's Storyboard as findings.
+| Trigger | Fires at | Worker-active h since #199 | Detail |
+|---|---|---|---|
+| Rate 1.5× | #255 | 2.3 | chunked-lane-implementation: 0.80 h of 2 h, 25% done |
+| **Rate 2×** | **#270** | **3.1** | **chunked-lane-implementation: 1.16 h of 2 h, 25% done, ratio 2.33** |
+| Rate 3× | #306, #330 | 4.9, 6.0 | late |
+| Old earned-vs-spent lag | #288 | 4.1 | direction-wide |
+| REWORK | #330 | 6.0 | — |
+| Owner pivot to Postgres worklanes | #336 | 6.1 | — |
 
-### Proposed server change: a new class, `supervision`
+**What the #270 step back found** (stepback-270.md, from brief-270.md and the code at fb1c8422):
 
-Event types are registered in one place: `packages/shared/src/investigation/events.ts`. That
-file exports `events.json`, and a vitest drift test regenerates and checks it. The Go contract
-test and the Postgres CHECK contract test both read it. Each new type also needs a migration that
-widens `maestro_investigation_events_type_check` and `_authority_class`, as
-`20261021090000_maestro_investigation_session_wake.up.sql` did for `session.wake`.
+- **Reuse existing lane code.** The legacy `tickNode` is already a chunk executor parameterized by
+  `h`: it frees scratch, resumes from the chain head and commits through the conditional put.
+  Executed tests already cover same-hour increasing-H and crash-resume, though the record did not
+  credit them.
+- **Unneeded machinery.** About 1,650 non-test lines of in-native scratch accounting (scratchbudget,
+  entry frontiers, group rewind) were reworked four times (#211, #228, #237, #261), and no owner
+  constraint requires them.
+- **Owner constraint priced.** It priced the owner's §4.5 "stop on any observed breach" waiver as
+  what makes that machinery attractive, and asked whether a prospective refusal counts as a breach.
+- **Simpler design.** 4 mechanisms against the worker's 9.
+
+**Why attribution matters**: the first naive run had no tags. It split time across every "started",
+unfinished milestone, and stale starts spread it six ways. 2× then fired first on the docs milestone
+(#232), and on chunked-lane-implementation only at #332. Per-event tags put the firing on the
+milestone that was actually burning.
+
+**Limits**:
+
+- **One case.** n=1, and the marks and tags are LLM-made.
+- **It missed the "no lease database" rabbit hole.** phase2-shard-proposal reached 0.38 h of 1.0 h
+  with 0 of 2 done, and never fired. Other milestones fired late or not at all. The opening step
+  back, which prices owner constraints up front, stays the backstop for constraint-driven overbuild.
+- **No "redone" mark.** The marks format could not say "redone after reopen". When it is modeled
+  (aws .1 re-met at #280, ci .1 at #295), 2× still fires at #270, and the re-arm rule adds #306,
+  #323 and #330: 4 step backs over about 3 active hours. Only #270 was run.
+- **Next.** Before shipping, backtest one healthy session to measure false alarms (§6).
+
+## 3. Milestones and supervisor duties
+
+**Estimator rules.** `budget --set --plan <file>` validates the estimator's JSON. Each error names
+the fix.
+
+- Give a reference class (comparable work and its actual hours) or "none comparable" with a wider
+  P80.
+- Each milestone has an id (`[a-z0-9-]{1,24}`), a title, P50 and P80 hours (P80 ≥ P50 > 0) and a
+  one-line basis.
+- Each milestone has 2–6 deliverables, each with a `done_when` that is an observable fact in the
+  record (a commit, a test result, a finding), not "works".
+- Unknowns carry their own ranges and stay out of the totals.
+
+**Each review pass** uses one command, the existing commit:
+
+```
+reviewed --batch <hash> --tag 208-215:chunked-lane --tag 220:none --tag 255:chunked-lane+ci-image
+         --done chunked-lane.1@#255 --reopen aws-qual.1@#270 --redone aws-qual.1@#280
+```
+
+`--tag all:<m>` covers a batch that is all one milestone. `reviewed` reads the batch's worker
+events with the grant. It refuses to commit when:
+
+- a worker event is untagged, for example: "#272, #273 untagged: add `--tag 272-273:<milestone|none>`;
+  open: chunked-lane, aws-qual";
+- a mark has no worker-event or `ev_` ref;
+- a mark is an impossible transition.
+
+Otherwise it writes `work.attributed` and `deliverable.marked` (idempotent on the batch hash),
+evaluates the rules, and commits the cursor. If a write fails, the cursor stays and the page
+replays. It prints one line per active milestone:
+
+```
+chunked-lane 1.16/2.0 h · 1/4 done · 2.3× · FIRE step back
+aws-qual 0.90/3.0 h · 1/4 done · 1.2×
+reviewed through #270
+```
+
+## 4. Server: `supervision` events
+
+The existing semantic types do not fit, for the earlier proposal's reasons:
+
+- their refs cannot leave their own investigation;
+- org members can read them;
+- they are indexed for search and discovery, which is how they would reach the worker;
+- they would read as findings.
 
 | Type | Payload (server-validated) |
 |---|---|
-| `direction.set` | `{direction_id, question, subject:{investigation_id, since_seq}, worker_session_id, basis, worker_estimate?, thresholds{}}` |
-| `milestone.planned` | `{direction_id, milestone_id, title, p50_h, p80_h, basis, done_when}` (one per milestone; re-planning sends a new one with `replaces`) |
-| `milestone.done` | `{direction_id, milestone_id, fraction, refs:[{investigation_id, seq}]}` |
-| `plan.snapshot` | `{direction_id, components:[{name, set_by: owner\|worker\|policy, refs}]}` (taken from each brief) |
-| `stepback.fired` | `{direction_id, trigger: opening\|lag\|backstop\|<signal>, signals:{…all values at this check…}, shadow: bool}` |
+| `direction.set` | `{direction_id, question, subject:{investigation_id, since_seq}, worker_session_id, reference_class, worker_estimate?, thresholds:{T, Z, rearm, backstop, idle_min}}` |
+| `milestone.planned` | `{direction_id, milestone_id, title, p50_h, p80_h, basis, deliverables:[{id, done_when}], replaces?}` |
+| `work.attributed` | One per review batch: `{direction_id, batch, through_seq, tags:{"<seq>": [milestone…] or "none"}, charged_h:{milestone: h}}`. `charged_h` is derived and can be recomputed. |
+| `deliverable.marked` | `{direction_id, milestone_id, deliverable_id, mark: done\|reopened\|redone, refs:[{investigation_id, seq} or {evidence_id}]}` |
+| `stepback.fired` | `{direction_id, scope: opening\|milestone\|backstop, milestone_id?, snapshot:{spent_h, estimate_h, delivered, ratio, threshold}, worker_active_h}` |
 | `stepback.verdict` | `{fired_seq, verdict: on_track\|worker_choice\|owner_constraint, routed_to: none\|worker\|owner, post_ref?}` |
-| `stepback.outcome` | `{verdict_seq, outcome: accepted\|declined\|overruled\|changed_constraint\|no_response, refs}` (appended later; events never change) |
-| `direction.closed` | `{direction_id, outcome: done\|stopped\|replaced, spent_h, earned_h, per_milestone_actuals}` |
+| `stepback.outcome` | Appended later: `{verdict_seq, outcome: accepted\|declined\|overruled\|changed_constraint\|no_response, refs}` |
+| `direction.closed` | `{direction_id, outcome: done\|stopped\|replaced, per_milestone:[{id, estimate_h, spent_h, delivered}], missed:[milestone_id]}` |
 
-- **Class and authority.** The new class is `supervision`, with a new authority
-  `supervisor_record`. Only the investigation's author can write these events, through a new
-  route `record-supervision` (or `checkpoint-investigation` with a class check). Grantees
-  never write them. They are not material, are left out of `search-doc`, the storyboard
-  projection and discovery, and are never deliverable. Older plugins already skip an unknown
-  class and only move their cursor past it, which is how `wake` was introduced.
-- **Refs across investigations.** A `{investigation_id, seq}` ref is accepted only if the writer
-  can read that investigation (as its author, or through a grant with `read`/`supervise`) and
-  `seq ≤ head_seq`. This is the one genuinely new rule for the server.
-- **Who can read them.** The author always can. A grantee can only with a new scope,
-  `supervision:read`, so the owner can share calibration data deliberately. Ordinary org members
-  cannot, unlike `semantic`.
-- **Remaining risk.** The worker usually runs as the same person as the supervisor, so it is an
-  *author* of the supervisor's investigation, and no principal-based rule can hide the events
-  from it. It is protected only by never being given the supervisor's investigation id and
-  never having the events delivered or surfaced by search or discovery. A worker that went
-  looking could read them. I recommend documenting this, not building session-level access
-  control.
+- **Class and authority**: class `supervision`, authority `supervisor_record`.
+  - Only the author writes these events, through a new `record-supervision` route.
+  - They are not material and never deliverable.
+  - They are excluded from `search-doc`, the storyboard projection and discovery.
+  - Older plugins skip the unknown class, as with `wake`.
+- **Cross-investigation refs**: `{investigation_id, seq}` is accepted only when the writer can read
+  that investigation (as author, or through a `read`/`supervise` grant) and `seq ≤ head_seq`. This
+  is the one new server rule.
+- **Visibility**:
+  - the author can read them;
+  - a grantee can read them only with a new `supervision:read` scope;
+  - org members cannot.
+- **Caveat**: a worker running as the same person is an author of the supervisor's investigation.
+  It is shielded only because it is never given that id, and the events are never delivered or
+  surfaced to it.
+- **Plugin side**:
+  - the CLI finds its own investigation by `--session <your_sid>`, as `supervising` does;
+  - budget.json caches the events (0600, flock);
+  - the estimator's reference class reads `direction.closed` across the owner's investigations.
+- **Effort (conductor, about 3–4 days, then a maestro deploy)**:
+  - registry entries in `packages/shared/src/investigation/events.ts`, plus the `events.json` drift,
+    Go and Postgres CHECK contract tests;
+  - a migration widening `maestro_investigation_events_type_check` and `_authority_class`, like
+    `…_session_wake.up.sql`;
+  - the route and its validation;
+  - the `reader.ts` scope;
+  - the search and projection exclusions.
 
-Rough effort (conductor): registry and types, migration, route and validation, reader scope,
-search and projection exclusion, contract tests. About 3–4 days, plus a maestro deploy before the
-plugin starts writing.
+## 5. Timeline visualization (v1, author-only)
 
-### Making "done" checkable
+This is a Supervision panel on the supervisor's investigation page, next to the existing
+`investigation-timeline/Supervision.tsx` header.
 
-- Each `milestone.planned` carries a `done_when` that the estimator writes before any work
-  starts, for example "a finding showing all four corpora byte-identical".
-- A `milestone.done` counts as **verified** when every ref is a worker `finding.*`,
-  `decision.*` or `experiment.completed`, the supervisor posted `Review: upheld` citing it,
-  and there is no later `*.revised` or `finding.retracted` of the same `semantic_id`. A later
-  revision or retraction **re-opens the milestone automatically**, so earned goes back down.
-  `--check` computes all of this from the record, so the supervisor's judgment is limited to
-  "this claim meets `done_when`", which an auditor can re-check.
+- **Direction header**: the question, the P50/P80 totals, worker-active hours, the share tagged
+  `none`, and the thresholds in force.
+- **Burn chart per milestone**:
+  - x is hours charged and y is % delivered;
+  - the planned line runs from (0, 0) to (estimate, 100%), and the threshold line from (0, 0) to
+    (T × estimate, 100%);
+  - the actual line is a step line, and it fires when it crosses right of the threshold line;
+  - a tick marks Z × estimate.
+- **Checklist**: each deliverable with its mark history. Refs link to the worker's investigation at
+  that seq.
+- **Firing markers** on the chart and the timeline, each with its verdict, its outcome once
+  recorded, and links to the brief and the answer.
+- **Later**: a link from the worker's page header, which needs `direction.set` indexed by subject.
 
-### Moving off budget.json
+Effort: about 2–3 days.
 
-1. `budget --export` posts the open budget and its history as events (idempotency key:
-   direction id + seq).
-2. Events become the source of truth. budget.json becomes a cache of them (it keeps 0600 and
-   flock) so `--show` keeps working offline.
-3. The estimator's reference class reads `direction.closed` from every investigation the owner
-   can read, not just `~/.cardinal/supervise/*` on one machine.
+## 6. Pilot and calibration
 
-## 3. Candidate signals, computable at every worker event
+**Labels.** Each firing is labeled by:
 
-"Worker events" means events with `producer.session_id` = the worker session (as in
-`worker_event`). "Window" means the trailing 2 worker-active hours, using the 30-min idle rule.
-Every value is logged as shadow data in `stepback.fired.signals`, whether or not anything fires.
+- the fresh pass's verdict;
+- the owner's outcome.
 
-| # | Signal | Exact definition (fields) | Wingbeat / corpus evidence | Pre-study call |
-|---|---|---|---|---|
-| S1 | Earned/spent (current) | earned = Σ p50_h × fraction over **verified** `milestone.done`; spent = worker active hours since `direction.set.since_seq` (event `created_at` plus spool timestamps) | First fires at #288 (4.10 h, earned 2 h). In-sample. | Keep as the baseline |
-| S2 | Churn, structural | Count in the window of worker `finding.revised`, `decision.revised`, `experiment.revised`, `finding.retracted` | Phase F: 8 (#211 #223 #228 #229 #236 #248 #312 #332) | Test |
-| S2b | Churn, broad | S2 plus first appearances of a `semantic_id` matching `rework\|amend\|repair\|supersed\|retract` | Phase F: 20 of 68 (29%), against 12% in #1–#198. Window count peaks at 10–11 from #237 to #263 (1.6–2.6 active h), well before S1's #288. But three unlabeled investigations reach 15, 16 and 20, so **raw counts do not carry over** | Test as a *share* of the window's semantic events and as a ratio to the worker's own first 2 h |
-| S3 | Claim-family depth | Most revisions of one `semantic_id` family (strip a trailing `_vN`) within the direction | Peaks at 3 (#133/#139/#141, before phase F). Phase F rework used new ids, not revisions | Test, low expectations |
-| S4 | Open hypotheses / questions | `hypothesis.proposed` minus `hypothesis.resolved`; `question.opened` minus `question.resolved` | 0–2 hypotheses and 0–8 questions per investigation across the 10 largest | **Drop**: workers do not use these types |
-| S5 | Time since a claim was settled | Worker-active minutes since the latest worker claim that has a `Review: upheld` cue citing its `#seq` and no later revision | Phase F maximum is 32 min: claims kept being upheld while the approach was wrong. This needs a supervisor (1 of the 10 largest had one) | **Drop**: it measures local progress, which is the thing that misled us |
-| S6 | Plan growth | Number of components in the latest `plan.snapshot`, minus the first one for the direction | Not recorded today. Only changes at briefs, so it is coarse | Start recording; study later |
-| S7 | Verdict mix | Supervisor challenges ÷ (challenges + upheld) in the window, and the interaction "all upheld while S2b is high" | Phase F: 0 challenges against 30 `Review: upheld` cues. #1–#198 had 4 challenges (#8 #12 #67 #181) | Test the interaction |
-| S8 | Declined approach concerns | Worker `acknowledged` with `disposition: declined` on a supervisor question or challenge that a step back or approach-level review raised, per direction | #205 declined #204; the supervisor withdrew at #206 | Test (rare; mostly useful in routing) |
-| S9 | File re-edits | Edits in the activity spool (`cardinal-evidence list`) to a path already edited ≥3 times in the window | Only when the worker's spool is on the supervisor's machine. Not measured in this corpus | Record when available; study later |
+A firing is **useful** when the verdict is not `on_track` and the outcome is `accepted` or
+`changed_constraint`. It is **noise** when the verdict is `on_track`, or when the outcome is
+`declined` and the supervisor agrees. A **miss** is a milestone listed in `direction.closed.missed`
+(later rework or a pivot, with no firing).
 
-There is a real problem with S2b. Its lexical rule depends on how the worker names things, and a
-worker could rename to avoid it. It only stays safe because the worker never sees signals. A
-structural alternative is an optional `corrects: <semantic_id>` field on `finding.proposed`.
-That changes the worker's own checkpoint schema, though only its own record, never the budget.
-See decision 5.
+**Adjustment.** After every 5 labeled firings, `budget calibrate` prints a suggestion and its counts.
+It moves T by 0.25×, within 1.5–3×:
 
-## 4. Study design (pre-registered)
+- up when 4 of the last 5 were noise;
+- down when there was a miss and at most 1 of the last 5 was noise.
 
-### Corpus: what exists today (feasibility count, run 2026-10-15)
+Z moves within 0.3–0.8. The owner approves each change, and new directions pin the thresholds in
+`direction.set`, so any firing replays under its own rule.
 
-| | Count |
-|---|---|
-| Investigations bound on this machine (org c4375e34…, excluding local-dev) | 646 (1 unreadable) |
-| … with ≥1 / ≥20 / ≥50 / ≥100 / ≥300 events | 147 / 35 / 10 / **5** / 1 |
-| Sizes of the ≥100 group | 451 (wingbeat, now), 140, 140, 134, 127 |
-| First-event dates | 2026-10-07 to 2026-10-15 |
-| With any grant / with a `supervise` grant | 2 / **1** (wingbeat) |
-| Worker-active hours across the 10 with ≥50 events | 3.2–16.6 h each, ~69 h total |
-| `owner.decided` / `owner_input.recorded` in those 10 | 0 / 0 (owner_input capture is off in prod) |
-| Distinct authors found | 1. Four `storyboard__find` searches returned 22 investigations, all by the owner and all already in the local set |
+**Before shipping.** Run the wingbeat method on one healthy session: a ≥100-event investigation
+with no rework or pivot. It passes when 2× fires at most once per 3 worker-active hours, and each
+fresh pass answers `on_track` or finds something real.
 
-There is no route that lists investigations org-wide, so this is a lower bound for the owner's
-own work and says nothing about other members. Someone with database access can get the org
-figure with: `SELECT count(*) FROM (SELECT investigation_id FROM maestro_investigation_events WHERE org_id = '<org>' GROUP BY 1 HAVING max(seq) >= 100) x;`.
+**Regression tests.** The wingbeat fixture (worker times #197–#336, plan, marks with redone, tags)
+becomes a core test:
 
-What this means: n = 5 (or 10) investigations cannot support a train/held-out split with any
-power. **The unit of analysis has to be the labeled episode, not the investigation**, and the
-corpus has to grow. Sources, in order:
+- at 2×, the first firing is chunked-lane-implementation at #270 (ratio 2.33);
+- at 1.5×, the first firing is at #255;
+- the re-arm sequence is #270, #306, #323, #330.
 
-1. Investigations accrued from now on, with shadow logging (§5).
-2. The ≥20-event tail (35).
-3. Local Claude/Codex transcripts, so that labelers can see owner pivots that the record does not
-   (decision 4).
+The healthy fixture joins it, and expects no firing at 2×.
 
-### Labeling: blind to the signals
+## 7. Token bloat
 
-- **Labeler**: a fresh agent given the full worker record (events plus artifacts), the repo's git
-  history over the window (reverts, deleted files, superseded design docs), and transcripts if
-  allowed. It **never sees signal values, budgets or firings**.
-- **Task**: mark *episodes*. For each one, give:
-  - **onset**: the earliest seq by which the facts the eventual fix relied on were all on record,
-    the way the #199 backtest found the accounting simplification from #199-era facts;
-  - **resolution**: the seq where the plan actually changed (a REWORK decision, an owner pivot,
-    an abandoned design, or the third revision of a claim family);
-  - the evidence seqs and a confidence (high/med/low).
+**Surfaces.** Sizes are cl100k tokens (tiktoken). The worker sees nothing new, and no hook text
+changes (the SubagentStart skip for `cardinal:stepback` already exists).
 
-  Wingbeat phase F is the worked example: resolution at #330/#336.
-- **Agreement**: a second labeler from a different model family labels 30% of investigations.
-  Score Cohen's κ on 30-minute active windows (inside an episode or not), and onset agreement
-  within ±1 active hour. **κ < 0.6 means the rubric gets fixed before anyone looks at signals.**
-  The owner settles a sample of disagreements.
-- **Negatives**: every active window outside an episode.
-
-### Split, metric and decisions
-
-- **Split**: by date, frozen in advance. Investigations started before the cut are *train*;
-  later ones are *held-out*. Thresholds are chosen on train only, using leave-one-investigation-out.
-  Held-out is evaluated once.
-- **Primary metric**: episode recall at a fixed false-alarm rate. A fire counts as a hit when it
-  lands between onset and resolution; lead time = resolution minus fire time, in worker-active
-  hours. A false alarm is a fire outside any episode, counted per active hour.
-- **The false-alarm budget**: a false alarm costs one read-only fresh-context pass and posts
-  nothing when the answer is "on track". The supervisor's summary gets one line. A miss can cost
-  hours: phase F was ~6 h before the REWORK. So the budget can be generous. **Proposed: at most
-  1 false alarm per 3 worker-active hours** (decision 3).
-- **Models**: S1 alone (the baseline); each signal alone; S1 OR (one other signal); and at most
-  a three-signal OR. Thresholds are monotone and come from a grid. There is no learned model
-  until there are ≥50 episodes.
-- **Decisions per signal**, measured on held-out at the operating point:
-  - **keep** if it adds ≥ 2 episodes of recall over S1 alone, or ≥ 1 active hour of median lead,
-    without breaking the false-alarm budget;
-  - **change** (re-normalize, e.g. absolute count → share) if it helps on train but not held-out;
-  - **drop** if it adds nothing on either.
-
-  S1 itself is dropped as a firing rule, and kept only as the backstop, if S1 OR S2b beats it
-  and S1 adds nothing on top.
-- **Power**: the confirmatory run waits until held-out has **≥ 20 high/med-confidence
-  episodes**. With fewer, report it as a pilot and leave the thresholds alone.
-
-## 5. Calibration after shipping
-
-- **Shadow logging from day one**: every `--check` computes S1–S3, S6–S9 and writes them in
-  `stepback.fired` with `shadow: true` when only a shadow signal crossed its provisional line.
-  Shadow fires run **no** step back.
-- **Labels from use**: a live fire is *useful* when its verdict is not `on_track` and its outcome
-  is `accepted` or `changed_constraint`. *Noise* is `on_track`, or `declined` with the supervisor
-  agreeing. A *miss* is a labeled episode with no live fire before its resolution, found by
-  running the labeler over closed directions every week.
-- **Updating thresholds**: re-fit on all labels after every 20 new labeled fires or misses, but
-  only inside pre-set bounds (each threshold can move at most ±25% per update). Every update is
-  written as an event, so the history can be replayed. A bad update can be rolled back by
-  pinning `thresholds` on `direction.set`.
-- **Guarding against Goodhart**:
-  - The worker never sees budgets, signals or triggers (unchanged, and the post text never
-    names the trigger).
-  - Signals are computed by the CLI from the record. The supervisor contributes only milestones,
-    done marks and plan snapshots.
-  - Done marks must verify (§2) and re-open when the cited claim is revised.
-  - The "on track" verdict comes from the fresh-context pass, not from the supervisor. Usefulness
-    is scored on *outcomes*, not on verdicts.
-  - The owner audits a monthly sample of 5 `on_track` verdicts.
-
-## 6. Phases
-
-| Phase | What | Effort | From `feat/supervise-stepback` |
+| Surface (who reads it) | origin/main | Branch now | Budget |
 |---|---|---|---|
-| 0. Ship provisional | Merge the branch as is. Mark thresholds "provisional" in the skill and the spec. Add shadow computation of S2/S2b/S3/S7/S8 to `--check` (stored in budget.json `firings[].signals`) | ~1 day | Everything: budget CLI, opening step back (threshold-free, and what the backtest actually validated), lag/backstop, routing, stepback agent and Gemini policy, replay test. Version re-bumped above the investigation-mode PR |
-| 1. Pilot labeling | Labeling rubric and agent; label the 10 investigations with ≥50 events (double-label 3); a replay harness that computes signals offline from the event streams; a pilot report. No threshold changes | ~2–3 days | The replay fixture becomes one row of the harness's test data |
-| 2. Typed records | Conductor: `supervision` class, 8 types, `record-supervision`, cross-investigation refs, `supervision:read`, exclusions. Plugin: write events, budget.json as cache, `--export`, done verification and re-open | ~3–4 days server, ~2 days plugin | `investigation_budget.py` keeps its maths; storage moves to events |
-| 3. Online calibration | Weekly miss-labeling, re-fits within bounds, owner audit | ~1 day, then running cost | — |
-| 4. Confirmatory study | When held-out reaches ≥20 episodes: one pre-registered run; keep/change/drop per signal | ~2 days | — |
+| CORE.md step-back section (supervisor) | 0 | 1,197 | **≤ 850**. Never above 1,197. |
+| CORE.md budget lines in set-up and the loop | 0 | 43 | ≤ 43. The `--check` step folds into `reviewed`. |
+| CORE.md whole | 3,375 | 4,594 | ≤ 4,250 after the rebase on #222 |
+| SKILL.md fresh-context sections (Claude, Codex, Cursor, Gemini) | 0 | 119, 184, 100, 170 (573) | ≤ 573 in total |
+| SKILL.md whole (same order) | 728, 664, 614, 586 | 794, 797, 685, 705 | Only the line above changes |
+| agents/stepback.md | 0 | 151 | Unchanged |
+| Per review pass: `budget --check` plus the `reviewed` ack | 31 | 151 + 31 = 182 | One `reviewed` output, ≤ 1 line per active milestone plus 1: about 60–90 for 2 milestones |
+| CLI errors | — | — | ≤ 2 lines, naming the fix |
+| Estimator and step-back prompts (fresh passes only) | 0 | In CORE.md: 99 + 184, plus about 70 for the brief's first line and the FIRE preface | Written by `budget pass` into the pass's brief copy. Estimator ≤ 250. The step back adds only an answer cap of 800 words. |
+| Step-back answer, read by the supervisor | 0 | 3,640 (stepback-270.md) | ≤ 1,200, through the cap |
+| Firing brief | 0 | 2,625 (brief-270.md) | The status block is CLI-written, ≤ 30 per deliverable |
 
-## Open questions for the owner
+**Where the cut comes from.** About 350 tokens leave the skill:
 
-1. Ship phase 0 now with provisional thresholds and shadow logging, or hold the branch until the
-   pilot is done? (Recommendation: ship. The opening step back alone justifies it.)
-2. Approve a new server class `supervision` (author-only writes, `supervision:read` grant,
-   members excluded, not indexed), accepting that a same-principal worker could read it if it
-   went looking?
-3. Set the operating point: at most 1 false alarm per 3 worker-active hours?
-4. Corpus: may labelers read local Claude/Codex transcripts (owner pivots are invisible in the
-   record while owner_input capture is off)? And should other members' investigations be included
-   if they agree?
-5. Churn: rely on the lexical rule (rework/amend/repair names) for now, or add an optional
-   `corrects:` field to the worker's `finding.proposed` schema?
+- the two prompts, the brief's first line and the FIRE preface move into the CLI. `budget pass
+  estimator|stepback --brief F [--milestone m]` writes them into the pass's brief copy;
+- the `--done`/`--fraction` paragraph (95 tokens) goes.
+
+About 60 come back: one sentence on `reviewed` tagging and marking. Its errors teach the syntax.
+
+**Process**:
+
+1. A measure script checks these budgets each build round, and a round over budget is not done.
+2. The last gate before push is one independent token-bloat review, under the owner's standing
+   rule.
+   - The reviewer has no context, and gets per-surface before/after counts against origin/main.
+   - Every cut must keep behavior, shown by targeted tests (`core/tests/test_investigation_budget.py`,
+     the replay fixtures, the adapter skill tests) and by rendered transcripts of a set-up, a
+     tagged review pass and a FIRE.
+3. Never run `make check` locally; CI is the gate.
+
+## 8. Phases
+
+| Phase | Work | Effort |
+|---|---|---|
+| A. Server | Class, 8 types, route, cross-investigation refs, `supervision:read`, exclusions, tests, deploy | 3–4 d |
+| B. Plugin | Rate engine replacing `evaluate`/`earned_hours`; `--set --plan`; `reviewed` tags and marks; event writer with budget.json as cache; `budget pass`, `budget calibrate`; 2× backstop; skill rewrite to budget; rebase on main (#220–#222) and bump above claude 0.56.3 | 3–4 d |
+| C. Fixtures | Wingbeat regression and healthy-session backtest | 1.5 d |
+| D. UI | Supervision panel | 2–3 d |
+| E. Bloat review | Independent review, cuts, re-test | 0.5 d |
+| F. Pilot | A few weeks; about 15 min of labeling per firing | Calendar |
+
+**Reused from `feat/supervise-stepback`**:
+
+- the threshold-free opening step back;
+- routing (owner constraint → owner, worker choice → `--type question`, on track → nothing) and the
+  never-repeat rule;
+- the read-only `cardinal:stepback` agent and its hook skip;
+- the Gemini policy and `-e none`;
+- the Codex isolation flags;
+- the Cursor limit in docs/parity.json;
+- the budget CLI shell: lock, 0600, `active_hours`, the worker-event filter, the spool union,
+  `--since-seq`, `--set`/`--amend`/`--close`, history and the load shape check.
+
+## 9. Decisions for the owner
+
+| # | Decision | Recommendation |
+|---|---|---|
+| 1 | Starting T | **2×** (bounds 1.5–3×). 1.5× fired at #255, with less to judge from; 3× came after the rework began. |
+| 2 | Zero-progress share Z | **0.5** (bounds 0.3–0.8). |
+| 3 | Re-fire rule | **As specified.** It gives 4 firings in wingbeat's 6.1 h. Add a 1-active-hour cooldown per direction only if the pilot shows clustering. |
+| 4 | Same-person visibility caveat | **Accept and document.** No session-level access control. |
+| 5 | Tagging cost in the review loop | **Required on every commit**, with ranges and `all:<m>`. 99 of 103 wingbeat events took a single tag (6 of them `none`). Without tags, rates blur (§2). |
