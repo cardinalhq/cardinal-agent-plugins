@@ -1,6 +1,9 @@
 # Supervise: step backs on a work budget
 
-Status: approved design, 2026-10-15. Plugin only (shared core + supervise skill, all four
+Status: the trigger, records and budget CLI here are superseded by
+docs/specs/supervise-stepback-trigger.md (accepted 2026-10-15): a per-milestone rate trigger, with records
+kept as server `supervision` events. The opening step back, the fresh read-only pass, routing and the runtimes
+below still hold. Originally: approved design, 2026-10-15. Plugin only (shared core + supervise skill, all four
 runtimes); no server change. Builds on relayed owner decisions
 (docs/specs/relayed-owner-decisions.md): a step back that questions an owner constraint ends,
 if the owner changes it, in a `decide:` or an approved draft.
