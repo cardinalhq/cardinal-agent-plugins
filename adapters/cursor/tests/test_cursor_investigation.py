@@ -315,10 +315,16 @@ class CursorInvestigationTests(unittest.TestCase):
         self.assertIn(want, "\n".join(investigation_turn.consume_staged(self.home, CONV)))
         self.assertIn(want, owner_relay.recent(self.home, CONV)[-1]["message"])
         self.assertEqual(self.owner_records(), [])
+        # decide: the owner's own words to the registered target (the proposal registered it).
+        res = self.run_hook({**PROMPT, "prompt": "decide: Stop after the cache fix."})
+        self.assertEqual(res.stdout, "")
+        reqs = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
+        self.assertEqual((len(reqs), reqs[-1]["body"]["relay"]["source"]), (2, "verbatim"))
+        self.assertIn("relayed your decision verbatim", "\n".join(investigation_turn.consume_staged(self.home, CONV)))
         # Not the owner's: a subagent payload relays nothing.
         entry = owner_relay.propose(self.home, CONV, "inv_" + "e" * 24, "9a8b7c6d-worker", "Second.")
         self.run_hook({**PROMPT, "prompt": "approve", "agent_id": "sub-1"})
-        self.assertEqual(len([r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]), 1)
+        self.assertEqual(len([r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]), 2)
 
     # --- owner input ----------------------------------------------------------
 

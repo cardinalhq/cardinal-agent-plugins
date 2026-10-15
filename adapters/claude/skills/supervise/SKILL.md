@@ -37,12 +37,12 @@ the watch's own lines are only the signal). When the watch exits on its timeout,
 worker's new activity anyway (a worker can act for a long time without checkpointing),
 then re-arm it. Never write sleep-and-reread loops.
 
-## Owner approvals
+## Owner decisions
 
-When the owner replies `approve <id>` or `reject <id>` (CORE.md, "Owner decisions for the
-worker"), Cardinal's prompt hook shows them the outcome as a Cardinal message and gives
+When the owner types `decide: …`, `approve <id>` or `reject <id>` (CORE.md, "Owner
+decisions for the worker"), Cardinal's prompt hook shows them the outcome as a Cardinal message and gives
 you the same line as context. Confirm it to the owner in one line; do not run anything to
-approve it.
+send or approve it.
 
 ## Doing your own checks
 

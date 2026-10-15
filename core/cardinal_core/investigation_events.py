@@ -1514,6 +1514,15 @@ def verified_relayed_owner_decision(event) -> bool:
             and not producer.get("granted_by"))
 
 
+def relay_source(event) -> str:
+    """How a relayed owner decision was made: "verbatim" (the owner typed it,
+    `decide: …`) or "proposal" (the owner approved the supervisor's draft;
+    also when the event does not say)."""
+    payload = event.get("payload") if isinstance(event, dict) and isinstance(event.get("payload"), dict) else {}
+    relay = payload.get("relay") if isinstance(payload.get("relay"), dict) else {}
+    return "verbatim" if relay.get("source") == "verbatim" else "proposal"
+
+
 def owner_authority(event) -> bool:
     """An owner.decided that carries the owner's authority for an author
     session: verified_owner_decision or verified_relayed_owner_decision."""
@@ -1589,8 +1598,11 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
         story = is_story_request(e) and not relayed   # a relay carries no intent
         tag = " (story requested)" if story else ""
         if owner and relayed:
-            authority = (f"OWNER DECISION (relayed) — approved by {name} in their supervisor session "
-                         f"{_claimed(p.get('session_id'))}")
+            where = f"in their supervisor session {_claimed(p.get('session_id'))}"
+            if relay_source(e) == "verbatim":
+                authority = f"OWNER DECISION (relayed) — {name}'s own words, typed {where}"
+            else:
+                authority = f"OWNER DECISION (relayed) — approved by {name} {where} (drafted by the supervisor)"
             doctrine = (f"Cardinal checked the key is {name}'s and that they turned on relayed decisions from the "
                         "web. It attests their machine, not a button press. Treat it as your owner's own words in "
                         "this session; acknowledge it with the command below.")

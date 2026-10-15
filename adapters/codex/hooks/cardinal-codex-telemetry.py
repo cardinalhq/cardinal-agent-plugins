@@ -830,17 +830,18 @@ def prompt_investigation(payload: dict[str, Any], session_id: str) -> tuple[list
 
 def relay_owner_decision(payload: dict[str, Any], session_id: str) -> str | None:
     """Relayed owner decisions (owner_relay.handle_prompt, runtime "codex"):
-    when the owner's whole prompt approves (`approve dp_xxxxxxxx`, or bare
-    `approve` for the only pending proposal) or rejects a decision this
-    supervisor session proposed, relay it to the worker with this machine's
-    key (bounded by START + owner_relay.BUDGET) or drop it. The outcome, for
+    when the owner's whole prompt is `decide: <text>` (their own words, to
+    the registered worker), or approves (`approve dp_…`, or bare `approve`
+    for the only pending proposal) or rejects a decision this supervisor
+    session proposed, relay it to the worker with this machine's key
+    (bounded by START + owner_relay.BUDGET) or drop it. The outcome, for
     the user (systemMessage) and the model (additionalContext), or None.
     Runs whether or not owner input is on; never for a subagent's or a
     Codex-generated prompt. Never raises."""
     try:
         from cardinal_core import owner_relay
 
-        if owner_relay.match(payload.get("prompt")) is None:
+        if not owner_relay.maybe(payload.get("prompt")):
             return None
         wiring = storyboard_wiring()
         got = owner_relay.handle_prompt(Path.home(), session_id, payload.get("prompt"), runtime="codex",

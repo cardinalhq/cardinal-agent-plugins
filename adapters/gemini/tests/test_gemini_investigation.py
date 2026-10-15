@@ -548,6 +548,16 @@ class OwnerRelayTests(GeminiInvestigationTests):
         self.assertEqual(relays[0]["headers"]["x-cardinalhq-api-key"], "ck_gemini_test")
         self.assertEqual(self.fake.records(), [])
 
+    def test_decide_relays_the_owners_words(self):
+        from cardinal_core import owner_relay
+        self.start()
+        owner_relay.add_target(self.home, SID, "inv_" + "e" * 24, "9a8b7c6d-worker", name="codex")
+        out = self.prompt("decide codex: Stop after the cache fix.\n<hook_context>x</hook_context>")
+        self.assertIn("relayed your decision verbatim to session 9a8b7c6d (codex) as event #57", out["systemMessage"])
+        [req] = [r for r in self.fake.requests if r["tool"] == "relay-owner-decision"]
+        self.assertEqual(req["body"]["payload"]["text"], "Stop after the cache fix.")
+        self.assertEqual(req["body"]["relay"]["source"], "verbatim")
+
     def test_unrelated_prompts_relay_nothing(self):
         from cardinal_core import owner_relay
         self.start()

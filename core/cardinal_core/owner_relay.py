@@ -1,19 +1,24 @@
-"""Relayed owner decisions: the owner approves, in the supervisor session's
-own terminal, a decision the supervisor drafted for the worker
+"""Relayed owner decisions: the owner decides, in the supervisor session's
+own terminal, for the worker that session supervises
 (docs/specs/relayed-owner-decisions.md).
 
-Two halves, and nothing else calls the route:
+Two ways, and nothing but the prompt hook calls the route:
 
-  propose (supervisor side, the CLI: `cardinal-storyboard investigation
-      propose-decision`): stores a local PROPOSAL and prints its id. It never
-      sends anything: a proposal never approves itself.
-  approve (the prompt hook of every runtime, handle_prompt): the owner types
-      `approve dp_xxxxxxxx` (bare `approve` when it is the only pending
-      proposal) or `reject dp_xxxxxxxx` as a prompt in the supervisor
-      session. The hook relays the proposal to maestro's
-      relay-owner-decision with this machine's API key, removes it, and
-      reports the outcome to the user and to the model. No CLI subcommand
-      and no MCP tool calls relay().
+  verbatim: the owner types `decide: <text>` (or `decide <name>: <text>`)
+      as the whole prompt in the supervisor session. The prompt hook relays
+      <text>, the owner's own words, unchanged, to the registered worker
+      target (`cardinal-storyboard investigation supervising`): relay
+      source "verbatim", relay key dv_ + 16 hex. No draft, no approve step.
+  proposal: the supervisor drafts (`cardinal-storyboard investigation
+      propose-decision`, a local PROPOSAL dp_ + 16 hex; nothing is sent: a
+      proposal never approves itself) and the owner types `approve
+      dp_xxxxxxxxxxxxxxxx` (bare `approve` while it is the only pending
+      proposal) or `reject dp_xxxxxxxxxxxxxxxx`. The hook relays it (relay
+      source "proposal", relay key = the proposal id) or drops it.
+
+Either way the hook posts maestro's relay-owner-decision with this
+machine's API key (bounded, BUDGET) and reports the outcome to the user and
+to the model. No CLI subcommand and no MCP tool calls relay().
 
 Trust (say exactly this, never more): the server checks that the key
 belongs to a person who authors the worker's investigation, that this
@@ -21,30 +26,37 @@ person turned on "accept owner decisions approved in my supervisor
 sessions" from their signed-in web session, that the claimed supervisor
 session is an author-claimed session of an investigation the same person
 authors, and that the stored text is the text whose sha256 the relay
-carries. It cannot verify that a human typed `approve`: the agent holds the
-same key. The worker's event is authority `owner_relayed` (attested by the
-owner's machine), weaker than `owner_decision` (web session).
+carries. It cannot verify that a human typed the prompt: the agent holds
+the same key. The worker's event is authority `owner_relayed` (attested by
+the owner's machine), weaker than `owner_decision` (web session).
 
-Proposals, one file per supervisor session, next to its binding:
+Local state, one file per supervisor session, next to its binding:
 
   ~/.cardinal/investigations/sessions/<sid>.proposals.json   (0600, under the binding's flock)
   {"proposals": [{id, investigation_id, to_session_id, text, sha256, answers?, refs,
                   created_at, expires_at}],
-   "recent": [{id, outcome, message, prompt_sha256, at}]}
+   "targets":   [{name?, investigation_id, to_session_id, created_at}],
+   "verbatim":  [{key, investigation_id, to_session_id, sha256, at}],
+   "recent":    [{id, outcome, message, prompt_sha256, at}]}
 
-id = "dp_" + 8 random hex; a proposal expires after PROPOSAL_TTL (30 min);
-at most MAX_PROPOSALS pending (the oldest goes). `recent` keeps the last
-outcomes for RECENT_TTL: `investigation proposals` lists them (Cursor has no
-user-visible channel on its prompt hook), and the same approving prompt
-seen again within REFIRE_WINDOW (a runtime that re-fires its prompt hook)
-repeats its outcome instead of acting twice.
+A proposal expires after PROPOSAL_TTL (30 min); at most MAX_PROPOSALS
+pending (the oldest goes). Targets (at most MAX_TARGETS; the oldest goes)
+are the workers this session supervises: `supervising` registers one,
+propose-decision registers its own. `verbatim` remembers the relay key of a
+`decide` that was not relayed (transient, not enabled) for RECENT_TTL, so
+retyping the same decision for the same target reuses its key: the server
+answers a duplicate instead of storing it twice. `recent` keeps the last
+outcomes for RECENT_TTL: `investigation proposals` lists them (Cursor has
+no user-visible channel on its prompt hook), and on a runtime that re-fires
+its prompt hook (Gemini) the same prompt seen again within REFIRE_WINDOW
+repeats a final outcome instead of acting twice.
 
 The prompt hook (handle_prompt) runs before, and independently of,
 owner-input capture: owner input may be off. It refuses a subagent's prompt
 (a non-empty agent_id) and a machine prompt (owner_input.normalize_prompt
 must reduce it to typed text), and acts only on a whole stripped prompt
-matching APPROVAL_RE (case-insensitive). Anything else is left untouched
-and the prompt always reaches the model.
+matching APPROVAL_RE or DECIDE_RE (case-insensitive). Anything else is left
+untouched and the prompt always reaches the model.
 
 Standard library only. handle_prompt never raises.
 """
@@ -69,23 +81,37 @@ from . import investigation_state_sync as sync
 ROUTE = "relay-owner-decision"
 CAPABILITY = "owner_relay"            # capabilities.owner_relay.enabled
 AUTHORITY = "owner_relayed"           # the authority the server stamps on a relayed owner.decided
+SOURCE_PROPOSAL = "proposal"          # relay.source: a supervisor's draft the owner approved
+SOURCE_VERBATIM = "verbatim"          # relay.source: the owner's own words (`decide: …`)
 PROPOSAL_TTL = 30 * 60.0
 MAX_PROPOSALS = 5
+MAX_TARGETS = 5
 RECENT_TTL = 30 * 60.0
 MAX_RECENT = 10
+MAX_VERBATIM = 5
 REFIRE_WINDOW = 30.0
 BUDGET = 3.0                          # wall-clock of the relay request, from the hook's start
 MAX_TEXT = 4000
 MAX_REFS = 20
 MAX_REF = 300
-ID_RE = re.compile(r"dp_[0-9a-f]{8}")                                              # fullmatch
-APPROVAL_RE = re.compile(r"(approve|reject)(?:\s+(dp_[0-9a-f]{8}))?[.!]?", re.IGNORECASE)  # fullmatch, stripped
+ID_RE = re.compile(r"dp_[0-9a-f]{16}")                                              # fullmatch
+VERBATIM_KEY_RE = re.compile(r"dv_[0-9a-f]{16}")                                    # fullmatch
+NAME_RE = re.compile(r"[a-z0-9-]{1,32}")                                            # fullmatch
+APPROVAL_RE = re.compile(r"(approve|reject)(?:\s+(dp_[0-9a-f]{16}))?[.!]?", re.IGNORECASE)  # fullmatch, stripped
+DECIDE_RE = re.compile(r"decide(?:[ \t]+([a-z0-9-]{1,32}))?[ \t]*:(.*)", re.IGNORECASE | re.DOTALL)  # fullmatch
+MAYBE_RE = re.compile(r"\s*(?:approve|reject|decide)\b", re.IGNORECASE)            # match: a cheap pre-check
 SETTINGS_URL_RE = re.compile(r"https?://[^\s\"'<>\\]{1,300}")                       # fullmatch
+FINAL_OUTCOMES = ("relayed", "duplicate", "refused", "rejected")
 
 PROPOSE_HELP = ("Draft an owner decision for the worker session you supervise. Nothing is sent: the owner approves "
                 "it by typing `approve <id>` (or `reject <id>`) as a prompt in THIS session, and only then does this "
                 "session's prompt hook relay it to the worker (authority owner_relayed). It uses this machine's own "
-                "key, never an access grant: no --credential-file.")
+                "key, never an access grant: no --credential-file. It also registers the worker as a target "
+                "(see `supervising`).")
+SUPERVISING_HELP = ("Register the worker this session supervises (a target), so the owner can type `decide: <text>` "
+                    "(or `decide <name>: <text>`) as a prompt here to send the worker their own words as an owner "
+                    "decision. Local only; nothing is sent. Without arguments: list the targets. --remove drops one "
+                    "(by --name, or by investigation and --to-session).")
 INSTRUCTION = ("Show the owner this text verbatim and ask them to reply `approve {id}` or `reject {id}`. Never approve "
                "it yourself and never call the relay route: only the owner's own prompt approves.")
 NOT_CAPABLE = ("this Cardinal cannot relay owner decisions (it does not advertise owner_relay; it needs a newer "
@@ -112,14 +138,14 @@ REFUSALS = {
                                               "author claimed"),
     "owner_relay_text_mismatch": "the decision text did not match its hash",
     "owner_decision_answer_not_found": "the event it answers (--answers) is not in the worker's investigation",
-    "idempotency_conflict": "another decision was already relayed under this proposal id",
+    "idempotency_conflict": "another decision was already relayed under this relay key",
     "owner_decision_limit_reached": "the worker's investigation reached its limit of owner decisions",
     "event_limit_reached": "the worker's investigation reached its limit of events",
 }
 
 
 # ---------------------------------------------------------------------------
-# The proposal store
+# The local store
 # ---------------------------------------------------------------------------
 
 def proposals_path(home: Path, sid: str) -> Path:
@@ -132,22 +158,36 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def _entry_ok(e: Any, now: float) -> bool:
     return (isinstance(e, dict) and isinstance(e.get("id"), str) and bool(ID_RE.fullmatch(e["id"]))
             and ie.valid_investigation(e.get("investigation_id")) and ie.valid_session(e.get("to_session_id"))
             and isinstance(e.get("text"), str) and 0 < len(e["text"]) <= MAX_TEXT
             and e.get("sha256") == sha256_text(e["text"])
-            and all(isinstance(e.get(k), (int, float)) and not isinstance(e[k], bool)
-                    for k in ("created_at", "expires_at"))
-            and now < e["expires_at"]
+            and _num(e.get("created_at")) and _num(e.get("expires_at")) and now < e["expires_at"]
             and isinstance(e.get("refs", []), list)
             and (e.get("answers") is None or (isinstance(e["answers"], int) and not isinstance(e["answers"], bool))))
 
 
+def _target_ok(t: Any) -> bool:
+    return (isinstance(t, dict) and ie.valid_investigation(t.get("investigation_id"))
+            and ie.valid_session(t.get("to_session_id")) and _num(t.get("created_at"))
+            and (t.get("name") is None or (isinstance(t["name"], str) and bool(NAME_RE.fullmatch(t["name"])))))
+
+
+def _verbatim_ok(v: Any, now: float) -> bool:
+    return (isinstance(v, dict) and isinstance(v.get("key"), str) and bool(VERBATIM_KEY_RE.fullmatch(v["key"]))
+            and ie.valid_investigation(v.get("investigation_id")) and ie.valid_session(v.get("to_session_id"))
+            and isinstance(v.get("sha256"), str) and _num(v.get("at")) and 0 <= now - v["at"] < RECENT_TTL)
+
+
 def _recent_ok(r: Any, now: float) -> bool:
-    return (isinstance(r, dict) and isinstance(r.get("id"), str) and bool(ID_RE.fullmatch(r["id"]))
-            and isinstance(r.get("message"), str) and isinstance(r.get("at"), (int, float))
-            and 0 <= now - r["at"] < RECENT_TTL)
+    return (isinstance(r, dict) and isinstance(r.get("id"), str)
+            and bool(ID_RE.fullmatch(r["id"]) or VERBATIM_KEY_RE.fullmatch(r["id"]))
+            and isinstance(r.get("message"), str) and _num(r.get("at")) and 0 <= now - r["at"] < RECENT_TTL)
 
 
 def _read(home: Path, sid: str, now: float) -> dict:
@@ -159,21 +199,37 @@ def _read(home: Path, sid: str, now: float) -> dict:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    pending = [e for e in data.get("proposals") or [] if _entry_ok(e, now)] \
-        if isinstance(data.get("proposals"), list) else []
-    recent = [r for r in data.get("recent") or [] if _recent_ok(r, now)] \
-        if isinstance(data.get("recent"), list) else []
-    return {"proposals": pending[-MAX_PROPOSALS:], "recent": recent[-MAX_RECENT:]}
+
+    def kept(name: str, ok: Callable[[Any], bool], cap: int) -> list:
+        got = data.get(name)
+        return [x for x in got if ok(x)][-cap:] if isinstance(got, list) else []
+
+    return {"proposals": kept("proposals", lambda e: _entry_ok(e, now), MAX_PROPOSALS),
+            "targets": kept("targets", _target_ok, MAX_TARGETS),
+            "verbatim": kept("verbatim", lambda v: _verbatim_ok(v, now), MAX_VERBATIM),
+            "recent": kept("recent", lambda r: _recent_ok(r, now), MAX_RECENT)}
 
 
 def _write(home: Path, sid: str, store: dict) -> None:
     path = proposals_path(home, sid)
-    if not store["proposals"] and not store["recent"]:
+    if not any(store.values()):
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
         return
     ie._ensure_dirs(home)
     ie.write_json(path, store)
+
+
+@contextlib.contextmanager
+def _updating(home: Path, sid: str, now: float, wait: float = 1.0):
+    """The store under the session's flock, written back on a clean exit.
+    Raises OSError when the lock cannot be had."""
+    with ie.locked(home, sid, wait=wait) as got:
+        if not got:
+            raise OSError("the session's proposals are locked by another process")
+        store = _read(home, sid, now)
+        yield store
+        _write(home, sid, store)
 
 
 def pending(home: Path, sid: str, now: Optional[float] = None) -> list:
@@ -182,8 +238,13 @@ def pending(home: Path, sid: str, now: Optional[float] = None) -> list:
 
 
 def recent(home: Path, sid: str, now: Optional[float] = None) -> list:
-    """The latest outcomes (approve / reject) of session `sid`, oldest first."""
+    """The latest outcomes of session `sid`, oldest first."""
     return _read(home, sid, time.time() if now is None else now)["recent"]
+
+
+def targets(home: Path, sid: str, now: Optional[float] = None) -> list:
+    """The worker targets session `sid` registered, oldest first."""
+    return _read(home, sid, time.time() if now is None else now)["targets"]
 
 
 def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any = None,
@@ -191,10 +252,7 @@ def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any 
     """Raises ValueError (in words) when the proposal cannot be relayed as
     given."""
     from .owner_input import wire_safe
-    if not ie.valid_investigation(investigation_id):
-        raise ValueError(f"not an investigation id: {investigation_id!r} (inv_ followed by 24 hex characters)")
-    if not ie.valid_session(to_session_id):
-        raise ValueError("--to-session is the worker's session id (letters, digits, _ and -; at most 128)")
+    validate_target(investigation_id, to_session_id)
     if not isinstance(text, str) or not text.strip():
         raise ValueError("--text is the decision, 1 to 4000 characters")
     if len(text) > MAX_TEXT:
@@ -211,28 +269,82 @@ def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any 
             raise ValueError(f"each --ref is 1 to {MAX_REF} characters")
 
 
+def validate_target(investigation_id: Any, to_session_id: Any, name: Any = None) -> None:
+    if not ie.valid_investigation(investigation_id):
+        raise ValueError(f"not an investigation id: {investigation_id!r} (inv_ followed by 24 hex characters)")
+    if not ie.valid_session(to_session_id):
+        raise ValueError("--to-session is the worker's session id (letters, digits, _ and -; at most 128)")
+    if name is not None and not (isinstance(name, str) and NAME_RE.fullmatch(name)):
+        raise ValueError("--name is 1 to 32 characters: a-z, 0-9 and -")
+
+
+def _upsert_target(store: dict, investigation_id: str, to_session_id: str, name: Optional[str],
+                   now: float) -> dict:
+    """The target for (investigation, session), registered or renamed
+    (no name given: an existing name is kept). A name names one target
+    only: another target holding it is dropped. Keeps the newest
+    MAX_TARGETS."""
+    old = next((t for t in store["targets"] if t["investigation_id"] == investigation_id
+                and t["to_session_id"] == to_session_id), None)
+    entry = {"investigation_id": investigation_id, "to_session_id": to_session_id,
+             "created_at": old["created_at"] if old else now}
+    keep_name = name if name is not None else (old or {}).get("name")
+    if keep_name is not None:
+        entry["name"] = keep_name
+    store["targets"] = [t for t in store["targets"] if t is not old
+                        and not (keep_name is not None and t.get("name") == keep_name)] + [entry]
+    store["targets"] = store["targets"][-MAX_TARGETS:]
+    return entry
+
+
+def add_target(home: Path, sid: str, investigation_id: str, to_session_id: str, name: Optional[str] = None,
+               now: Optional[float] = None) -> dict:
+    """Register (or rename) the worker target (investigation, session) of
+    supervisor session `sid`. A name already on another target moves here
+    (that target is dropped). Sends nothing. Raises ValueError / OSError."""
+    validate_target(investigation_id, to_session_id, name)
+    now = time.time() if now is None else now
+    with _updating(home, sid, now, wait=2.0) as store:
+        return _upsert_target(store, investigation_id, to_session_id, name, now)
+
+
+def remove_target(home: Path, sid: str, *, name: Optional[str] = None, investigation_id: Optional[str] = None,
+                  to_session_id: Optional[str] = None, now: Optional[float] = None) -> list:
+    """Drop the targets named `name`, or matching (investigation_id,
+    to_session_id); the dropped ones. Raises OSError when locked."""
+    now = time.time() if now is None else now
+
+    def hit(t: dict) -> bool:
+        if name is not None:
+            return t.get("name") == name
+        return t["investigation_id"] == investigation_id and (to_session_id is None
+                                                              or t["to_session_id"] == to_session_id)
+
+    with _updating(home, sid, now) as store:
+        gone = [t for t in store["targets"] if hit(t)]
+        store["targets"] = [t for t in store["targets"] if not hit(t)]
+        return gone
+
+
 def propose(home: Path, sid: str, investigation_id: str, to_session_id: str, text: str, *,
             answers: Optional[int] = None, refs: Optional[list] = None, now: Optional[float] = None) -> dict:
-    """Store a proposal of supervisor session `sid` and return it. Sends
-    nothing. Raises ValueError (invalid input) or OSError (the store is
-    locked or cannot be written)."""
+    """Store a proposal of supervisor session `sid` (and register its
+    target) and return it. Sends nothing. Raises ValueError (invalid input)
+    or OSError (the store is locked or cannot be written)."""
     validate(investigation_id, to_session_id, text, answers, refs)
     now = time.time() if now is None else now
-    with ie.locked(home, sid, wait=2.0) as got:
-        if not got:
-            raise OSError("the session's proposals are locked by another process")
-        store = _read(home, sid, now)
+    with _updating(home, sid, now, wait=2.0) as store:
         taken = {e["id"] for e in store["proposals"]} | {r["id"] for r in store["recent"]}
-        pid = "dp_" + secrets.token_hex(4)
+        pid = "dp_" + secrets.token_hex(8)
         while pid in taken:
-            pid = "dp_" + secrets.token_hex(4)
+            pid = "dp_" + secrets.token_hex(8)
         entry: dict = {"id": pid, "investigation_id": investigation_id, "to_session_id": to_session_id,
                        "text": text, "sha256": sha256_text(text), "refs": list(refs or []),
                        "created_at": now, "expires_at": now + PROPOSAL_TTL}
         if answers is not None:
             entry["answers"] = answers
         store["proposals"] = (store["proposals"] + [entry])[-MAX_PROPOSALS:]
-        _write(home, sid, store)
+        _upsert_target(store, investigation_id, to_session_id, None, now)
         return entry
 
 
@@ -243,46 +355,45 @@ def withdraw(home: Path, sid: str, pid: str, now: Optional[float] = None) -> Opt
 
 
 def _take(home: Path, sid: str, pid: str, now: float, outcome: Optional[dict] = None) -> Optional[dict]:
-    with ie.locked(home, sid, wait=1.0) as got:
-        if not got:
-            raise OSError("the session's proposals are locked by another process")
-        store = _read(home, sid, now)
+    with _updating(home, sid, now) as store:
         entry = next((e for e in store["proposals"] if e["id"] == pid), None)
         store["proposals"] = [e for e in store["proposals"] if e["id"] != pid]
         if outcome is not None:
             store["recent"] = (store["recent"] + [outcome])[-MAX_RECENT:]
-        if entry is not None or outcome is not None:
-            _write(home, sid, store)
         return entry
 
 
-def _note(home: Path, sid: str, outcome: dict, now: float) -> None:
-    """Remember an outcome that left the proposal pending. Never raises."""
+def _note(home: Path, sid: str, outcome: dict, now: float, verbatim: Optional[dict] = None,
+          forget_key: Optional[str] = None) -> None:
+    """Remember an outcome, and the relay key of an unsent `decide`
+    (verbatim) or forget one (forget_key). Never raises."""
     with contextlib.suppress(Exception):
-        with ie.locked(home, sid, wait=1.0) as got:
-            if got:
-                store = _read(home, sid, now)
-                store["recent"] = (store["recent"] + [outcome])[-MAX_RECENT:]
-                _write(home, sid, store)
+        with _updating(home, sid, now) as store:
+            store["recent"] = (store["recent"] + [outcome])[-MAX_RECENT:]
+            if verbatim is not None or forget_key is not None:
+                key = verbatim["key"] if verbatim is not None else forget_key
+                store["verbatim"] = [v for v in store["verbatim"] if v["key"] != key]
+                if verbatim is not None:
+                    store["verbatim"] = (store["verbatim"] + [verbatim])[-MAX_VERBATIM:]
 
 
 # ---------------------------------------------------------------------------
 # The route (called only by handle_prompt, i.e. the prompt hook)
 # ---------------------------------------------------------------------------
 
-def relay_body(entry: dict, *, supervisor_session_id: str, supervisor_investigation_id: str,
-               prompt_sha256: str, approved_at: str, client: str) -> dict:
+def relay_body(entry: dict, *, relay_key: str, source: str, supervisor_session_id: str,
+               supervisor_investigation_id: str, prompt_sha256: str, approved_at: str, client: str) -> dict:
     payload: dict = {"text": entry["text"]}
     if entry.get("answers") is not None:
         payload["answers"] = entry["answers"]
     if entry.get("refs"):
         payload["refs"] = list(entry["refs"])
     return {"investigation_id": entry["investigation_id"], "to_session_id": entry["to_session_id"],
-            "relay_key": entry["id"], "payload": payload,
+            "relay_key": relay_key, "payload": payload,
             "relay": {"supervisor_session_id": supervisor_session_id,
                       "supervisor_investigation_id": supervisor_investigation_id,
                       "proposal_sha256": sha256_text(entry["text"]), "prompt_sha256": prompt_sha256,
-                      "approved_at": approved_at},
+                      "approved_at": approved_at, "source": source},
             "client": client}
 
 
@@ -351,6 +462,42 @@ def settings_url(err: "sync.ServerError") -> Optional[str]:
     return url if isinstance(url, str) and SETTINGS_URL_RE.fullmatch(url) else None
 
 
+def _send(conn: dict, body: dict, client: str, deadline: float, opener) -> tuple:
+    """("ok", answer) | ("transient", None) | ("not_enabled", settings
+    line) | ("refused", reason in words)."""
+    timeout = max(0.1, min(BUDGET, deadline - time.monotonic()))
+    state, value = _bounded(lambda: relay(conn, body, client=client, opener=opener, timeout=timeout), deadline)
+    if state == "done":
+        return "ok", value
+    err = value if state == "raised" else None
+    if err is None or transient(err) or not isinstance(err, sync.ServerError):
+        return "transient", None
+    code = err.body.get("error") if isinstance(err.body, dict) else None
+    if err.status == 403 and code == NOT_ENABLED:
+        url = settings_url(err)
+        where = f"at {ie._tok(url)}" if url else "in your Cardinal settings (Settings, Investigations)"
+        return "not_enabled", ("relayed owner decisions are off for your account. Turn on \"Accept owner decisions "
+                               "I approve in my supervisor sessions\" once, from your signed-in Cardinal web "
+                               f"session, {where}")
+    return "refused", refusal(err)
+
+
+def _precheck(home: Path, sid: str, worker_inv: str, conn: Any) -> Optional[tuple]:
+    """(status, why, None) when this session cannot relay to `worker_inv`
+    now, else (None, None, its binding)."""
+    b = ie.read_binding(home, sid)
+    if not b:
+        return "unbound", "this session has no Investigation yet", None
+    if b.get("is_author") is not True:
+        return "not_author", "this session does not author its Investigation, so it cannot relay from it", None
+    if b.get("investigation_id") == worker_inv:
+        return "own_investigation", "it is addressed to this session's own Investigation", None
+    if not (isinstance(conn, dict) and conn.get("origin") and conn.get("org") and conn.get("key")
+            and not conn.get("token")):
+        return "no_connection", "this machine is not connected to Cardinal with its own key", None
+    return None, None, b
+
+
 # ---------------------------------------------------------------------------
 # The prompt hook
 # ---------------------------------------------------------------------------
@@ -359,11 +506,16 @@ def settings_url(err: "sync.ServerError") -> Optional[str]:
 class RelayResult:
     """What handle_prompt did. status: a debug code. message: the outcome to
     show the user (systemMessage, or the runtime's equivalent) AND to give
-    the model (additional context), or None (the prompt is not an approval:
-    nothing to say)."""
+    the model (additional context), or None (the prompt is not an approval
+    or a decision: nothing to say)."""
     status: str
     message: Optional[str] = None
     ids: list = field(default_factory=list)
+
+
+def maybe(prompt: Any) -> bool:
+    """A cheap pre-check before anything is read: could `prompt` be one?"""
+    return isinstance(prompt, str) and bool(MAYBE_RE.match(prompt))
 
 
 def match(prompt: Any) -> Optional[tuple]:
@@ -377,6 +529,18 @@ def match(prompt: Any) -> Optional[tuple]:
     return m.group(1).lower(), (m.group(2).lower() if m.group(2) else None)
 
 
+def match_decide(prompt: Any) -> Optional[tuple]:
+    """(name or None, text) when the whole stripped prompt is `decide:
+    <text>` / `decide <name>: <text>`; text is what follows the colon,
+    without surrounding whitespace (possibly empty), else verbatim."""
+    if not isinstance(prompt, str):
+        return None
+    m = DECIDE_RE.fullmatch(prompt.strip())
+    if not m:
+        return None
+    return (m.group(1).lower() if m.group(1) else None), m.group(2).strip()
+
+
 def _short(sid: str) -> str:
     return sid[:8]
 
@@ -385,28 +549,43 @@ def _pending_line(entries: list) -> str:
     return ", ".join(e["id"] for e in entries)
 
 
+def _target_label(t: dict) -> str:
+    return f"session {_short(t['to_session_id'])}" + (f" ({t['name']})" if t.get("name") else "")
+
+
+def _targets_line(ts: list) -> str:
+    return "; ".join(f"`decide {t['name']}: …` for {_target_label(t)}" if t.get("name")
+                     else f"{_target_label(t)} (no name: register one with `investigation supervising --name`)"
+                     for t in ts)
+
+
 def handle_prompt(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[dict], client: str,
                   agent_id: Optional[str] = None, deadline: float, now: Optional[float] = None,
                   opener=None) -> RelayResult:
-    """The approval half of every runtime's prompt hook (see the module
-    doc). Statuses:
+    """The relay half of every runtime's prompt hook (see the module doc).
+    Statuses:
 
       invalid / subagent / not_typed / no_match / none
-                      nothing said: not an approval of anything here
-      repeat          DEDUPE_REPEATS runtimes (Gemini) only: the same
-                      approving prompt again within REFIRE_WINDOW, with no
-                      newer proposal: its outcome is repeated, nothing is
+                      nothing said: not an approval or a decision here
+      repeat          DEDUPE_REPEATS runtimes (Gemini) only: the same prompt
+                      again within REFIRE_WINDOW after a final outcome, with
+                      no newer proposal: the outcome is repeated, nothing is
                       sent again
-      ambiguous       bare form, several pending: says which ids are
-      unknown_id      the id is not pending (expired, withdrawn, handled)
+      ambiguous       approve: several proposals pending; decide: several
+                      targets and no name. Says which
+      unknown_id      approve: the id is not pending (expired, withdrawn, handled)
+      no_target / unknown_target
+                      decide: no target registered, or none by that name
+      bad_text        decide: empty, over 4000 characters, NUL or a lone surrogate
       rejected        removed; nothing sent
       relayed / duplicate
-                      relay-owner-decision answered 201 / 200; removed
-      transient       network, timeout, 5xx, 408, 429: kept
-      not_enabled     403 owner_relay_not_enabled: kept, with the settings link
-      refused         any other refusal: removed, with the reason
+                      relay-owner-decision answered 201 / 200; a proposal is removed
+      transient       network, timeout, 5xx, 408, 429: a proposal is kept; a
+                      decide's relay key is kept for its retry
+      not_enabled     403 owner_relay_not_enabled: as transient, with the settings link
+      refused         any other refusal: a proposal is removed; with the reason
       unbound / not_author / own_investigation / no_connection / busy
-                      not sent; kept
+                      not sent; a proposal is kept
     Never raises (error)."""
     try:
         return _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline,
@@ -424,21 +603,100 @@ def _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline, now, o
     typed = owner_input.normalize_prompt(runtime, prompt)
     if typed is None:
         return RelayResult("not_typed")
-    got = match(typed)
-    if got is None:
+    approval, decision = match(typed), match_decide(typed)
+    if approval is None and decision is None:
         return RelayResult("no_match")
-    verb, pid = got
     typed_sha = hashlib.sha256(owner_input.scrubbed_of(typed)[0].encode("utf-8", "replace")).hexdigest()
     store = _read(home, sid, now)
-    entries = store["proposals"]
     if runtime in owner_input.DEDUPE_REPEATS:
         # A runtime that re-fires its prompt hook for one prompt: the same
-        # approval seen again moments later repeats its outcome.
+        # prompt seen again moments later repeats its final outcome.
+        pid = approval[1] if approval else None
         again = next((r for r in reversed(store["recent"]) if r.get("prompt_sha256") == typed_sha
-                      and 0 <= now - r["at"] < REFIRE_WINDOW and (pid is None or r["id"] == pid)), None)
+                      and 0 <= now - r["at"] < REFIRE_WINDOW and r.get("outcome") in FINAL_OUTCOMES
+                      and (pid is None or r["id"] == pid)), None)
         if again is not None and not any(e["id"] == again["id"] or e["created_at"] > again["at"]
-                                         for e in entries):
+                                         for e in store["proposals"]):
             return RelayResult("repeat", again["message"], [again["id"]])
+    if decision is not None:
+        return _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, opener)
+    return _approve(home, sid, approval, store, typed_sha, conn, client, deadline, now, opener)
+
+
+def _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, opener) -> RelayResult:
+    """`decide: <text>` / `decide <name>: <text>`: the owner's own words,
+    relayed verbatim to the registered target."""
+    from .owner_input import wire_safe
+    name, text = decision
+    nothing = "nothing was relayed"
+    ts = store["targets"]
+    if name is not None:
+        target = next((t for t in ts if t.get("name") == name), None)
+        if target is None:
+            known = f" Targets: {_targets_line(ts)}." if ts else ""
+            return RelayResult("unknown_target", f"Cardinal: no worker named {name} is registered in this session; "
+                                                 f"{nothing}.{known}")
+    elif not ts:
+        return RelayResult("no_target", "Cardinal: no worker is registered in this session (the supervisor "
+                                        "registers one with `cardinal-storyboard investigation supervising`); "
+                                        f"{nothing}.")
+    elif len(ts) > 1:
+        return RelayResult("ambiguous", f"Cardinal: {len(ts)} workers are registered here; say which: "
+                                        f"{_targets_line(ts)}. {nothing.capitalize()}.")
+    else:
+        target = ts[0]
+    if not text:
+        return RelayResult("bad_text", f"Cardinal: `decide:` needs your decision after the colon; {nothing}.")
+    if len(text) > MAX_TEXT:
+        return RelayResult("bad_text", f"Cardinal: a decision is at most {MAX_TEXT} characters (this one has "
+                                       f"{len(text)}); {nothing}.")
+    if wire_safe(text) != text:
+        return RelayResult("bad_text", f"Cardinal: the decision contains a NUL or an unpaired surrogate; {nothing}.")
+    label = _target_label(target)
+    retry = "type the same `decide …` again to retry (it is stored once)"
+    status, why, b = _precheck(home, sid, target["investigation_id"], conn)
+    if status:
+        return RelayResult(status, f"Cardinal: your decision was NOT relayed: {why}.")
+    sha = sha256_text(text)
+    prior = next((v for v in store["verbatim"] if v["investigation_id"] == target["investigation_id"]
+                  and v["to_session_id"] == target["to_session_id"] and v["sha256"] == sha), None)
+    key = prior["key"] if prior else "dv_" + secrets.token_hex(8)
+    entry = {"investigation_id": target["investigation_id"], "to_session_id": target["to_session_id"], "text": text}
+    body = relay_body(entry, relay_key=key, source=SOURCE_VERBATIM, supervisor_session_id=sid,
+                      supervisor_investigation_id=b["investigation_id"], prompt_sha256=typed_sha,
+                      approved_at=ie._now_iso(now), client=client)
+    got, detail = _send(conn, body, client, deadline, opener)
+
+    def outcome(s: str, message: str) -> dict:
+        return {"id": key, "outcome": s, "message": message, "prompt_sha256": typed_sha, "at": now}
+
+    unsent = {"key": key, "investigation_id": target["investigation_id"],
+              "to_session_id": target["to_session_id"], "sha256": sha, "at": now}
+    if got == "ok":
+        ev, dup = detail["event"], detail.get("duplicate") is True
+        message = (f"Cardinal: {'already relayed' if dup else 'relayed'} your decision verbatim to {label} as event "
+                   f"#{ev['seq']} ({AUTHORITY}). The worker receives it at its next tool boundary.")
+        status = "duplicate" if dup else "relayed"
+        _note(home, sid, outcome(status, message), now, forget_key=key)
+        return RelayResult(status, message, [key])
+    if got == "transient":
+        message = (f"Cardinal: your decision was NOT relayed to {label} (Cardinal did not answer in time or could "
+                   f"not be reached); {retry}.")
+        _note(home, sid, outcome("transient", message), now, verbatim=unsent)
+        return RelayResult("transient", message, [key])
+    if got == "not_enabled":
+        message = f"Cardinal: your decision was NOT relayed: {detail}; then {retry}."
+        _note(home, sid, outcome("not_enabled", message), now, verbatim=unsent)
+        return RelayResult("not_enabled", message, [key])
+    message = f"Cardinal refused your decision for {label} ({detail}); it was not relayed."
+    _note(home, sid, outcome("refused", message), now, forget_key=key)
+    return RelayResult("refused", message, [key])
+
+
+def _approve(home, sid, approval, store, typed_sha, conn, client, deadline, now, opener) -> RelayResult:
+    """`approve [dp_…]` / `reject [dp_…]` of a supervisor's proposal."""
+    verb, pid = approval
+    entries = store["proposals"]
     if pid is None:
         if not entries:
             return RelayResult("none")
@@ -472,48 +730,31 @@ def _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline, now, o
         return RelayResult("rejected", message, [pid])
 
     retry = f"retry with `approve {pid}`"
-    b = ie.read_binding(home, sid)
-    if not b:
-        return RelayResult("unbound", f"Cardinal: owner decision {pid} was NOT relayed: this session has no "
-                                      f"Investigation yet; {retry} once it has one.", [pid])
-    if b.get("is_author") is not True:
-        return RelayResult("not_author", f"Cardinal: owner decision {pid} was NOT relayed: this session does not "
-                                         "author its Investigation, so it cannot relay from it.", [pid])
-    if b.get("investigation_id") == entry["investigation_id"]:
-        return RelayResult("own_investigation", f"Cardinal: owner decision {pid} was NOT relayed: it is addressed "
-                                                "to this session's own Investigation.", [pid])
-    if not (isinstance(conn, dict) and conn.get("origin") and conn.get("org") and conn.get("key")
-            and not conn.get("token")):
-        return RelayResult("no_connection", f"Cardinal: owner decision {pid} was NOT relayed: this machine is not "
-                                            f"connected to Cardinal with its own key; {retry} once it is.", [pid])
-    body = relay_body(entry, supervisor_session_id=sid, supervisor_investigation_id=b["investigation_id"],
-                      prompt_sha256=typed_sha, approved_at=ie._now_iso(now), client=client)
-    timeout = max(0.1, min(BUDGET, deadline - time.monotonic()))
-    state, value = _bounded(lambda: relay(conn, body, client=client, opener=opener, timeout=timeout), deadline)
-    if state == "done":
-        ev = value["event"]
-        dup = value.get("duplicate") is True
+    status, why, b = _precheck(home, sid, entry["investigation_id"], conn)
+    if status:
+        return RelayResult(status, f"Cardinal: owner decision {pid} was NOT relayed: {why}; it is still pending.",
+                           [pid])
+    body = relay_body(entry, relay_key=pid, source=SOURCE_PROPOSAL, supervisor_session_id=sid,
+                      supervisor_investigation_id=b["investigation_id"], prompt_sha256=typed_sha,
+                      approved_at=ie._now_iso(now), client=client)
+    got, detail = _send(conn, body, client, deadline, opener)
+    if got == "ok":
+        ev, dup = detail["event"], detail.get("duplicate") is True
         message = (f"Cardinal: {'already relayed' if dup else 'relayed'} owner decision {pid} to session {to} as "
                    f"event #{ev['seq']} ({AUTHORITY}). The worker receives it at its next tool boundary.")
         with contextlib.suppress(OSError):
             _take(home, sid, pid, now, outcome("duplicate" if dup else "relayed", message))
         return RelayResult("duplicate" if dup else "relayed", message, [pid])
-    err = value if state == "raised" else None
-    if err is None or transient(err) or not isinstance(err, sync.ServerError):
+    if got == "transient":
         message = (f"Cardinal: owner decision {pid} was NOT relayed (Cardinal did not answer in time or could not be "
                    f"reached); it is still pending: {retry}.")
         _note(home, sid, outcome("transient", message), now)
         return RelayResult("transient", message, [pid])
-    code = err.body.get("error") if isinstance(err.body, dict) else None
-    if err.status == 403 and code == NOT_ENABLED:
-        url = settings_url(err)
-        where = f"at {ie._tok(url)}" if url else "in your Cardinal settings (Settings, Investigations)"
-        message = (f"Cardinal: owner decision {pid} was NOT relayed: relayed owner decisions are off for your "
-                   "account. Turn on \"Accept owner decisions I approve in my supervisor sessions\" once, from your "
-                   f"signed-in Cardinal web session, {where}; then {retry}. It is still pending.")
+    if got == "not_enabled":
+        message = f"Cardinal: owner decision {pid} was NOT relayed: {detail}; then {retry}. It is still pending."
         _note(home, sid, outcome("not_enabled", message), now)
         return RelayResult("not_enabled", message, [pid])
-    message = f"Cardinal refused owner decision {pid} ({refusal(err)}); the proposal was dropped."
+    message = f"Cardinal refused owner decision {pid} ({detail}); the proposal was dropped."
     with contextlib.suppress(OSError):
         _take(home, sid, pid, now, outcome("refused", message))
     return RelayResult("refused", message, [pid])

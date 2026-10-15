@@ -259,6 +259,18 @@ class OwnerRelayTests(OwnerInputBase):
         self.assertEqual(req["headers"]["x-cardinalhq-api-key"], "ck_codex_test")
         self.assertEqual(self.records(), [])
 
+    def test_decide_relays_the_owners_words(self):
+        from cardinal_core import owner_relay
+        self.setup_live(owner_input=False)
+        self.start()
+        owner_relay.add_target(self.home, SESSION, "inv_" + "e" * 24, "9a8b7c6d-worker")
+        self.fake.routes["relay-owner-decision"] = (201, {"event": {
+            "investigation_id": "inv_" + "e" * 24, "seq": 58, "type": "owner.decided"}, "duplicate": False})
+        out = self.out(self.prompt("decide: Stop after the cache fix."))
+        self.assertIn("relayed your decision verbatim to session 9a8b7c6d as event #58", out["systemMessage"])
+        [req] = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
+        self.assertEqual(req["body"]["relay"]["source"], "verbatim")
+
     def test_a_subagent_or_unrelated_prompt_relays_nothing(self):
         self.setup_live(owner_input=False)
         self.start()

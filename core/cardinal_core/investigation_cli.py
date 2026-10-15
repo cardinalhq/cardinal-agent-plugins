@@ -914,29 +914,9 @@ class CLI:
             return EXIT_USAGE
         owner_relay.validate(worker, args.to_session, args.text, args.answers, args.ref)
         home = self._home()
-        b = ie.read_binding(home, sid)
-        if not b:
-            print(f"not proposed: session {sid} has no investigation yet; the relay names this supervisor session's "
-                  "own Investigation (run `cardinal-storyboard investigation link`)", file=sys.stderr)
-            return 1
-        if b.get("is_author") is not True:
-            print(f"not proposed: session {sid} joined someone else's investigation; only a session that authors "
-                  "its own Investigation can relay an owner decision", file=sys.stderr)
-            return 1
-        if b["investigation_id"] == worker:
-            print(f"not proposed: {worker} is this session's own investigation; a relayed decision goes to the "
-                  "worker you supervise", file=sys.stderr)
-            return EXIT_USAGE
-        conn, client = self.connection()
-        if not isinstance(conn, dict) or not conn.get("key") or conn.get("token"):
-            print("not proposed: this machine is not connected to Cardinal with its own key (run cardinal-connect); "
-                  "the owner's approval is relayed with it", file=sys.stderr)
-            return 1
-        if not ie.capability(b, owner_relay.CAPABILITY):
-            b = ie.refresh_binding_capabilities(home, sid, conn, client) or b
-        if not ie.capability(b, owner_relay.CAPABILITY):
-            print("not proposed: " + owner_relay.NOT_CAPABLE, file=sys.stderr)
-            return 1
+        code = self._can_relay(home, sid, worker, "not proposed")
+        if code is not None:
+            return code
         entry = owner_relay.propose(home, sid, worker, args.to_session, args.text, answers=args.answers,
                                     refs=args.ref or None)
         if args.json:
@@ -953,6 +933,82 @@ class CLI:
               + " A bare `approve` works only while it is the only pending proposal.")
         return 0
 
+    def _can_relay(self, home: Path, sid: str, worker: str, what: str):
+        """None when supervisor session `sid` can relay owner decisions to
+        `worker`, else the exit code (the reason printed)."""
+        b = ie.read_binding(home, sid)
+        if not b:
+            print(f"{what}: session {sid} has no investigation yet; the relay names this supervisor session's "
+                  "own Investigation (run `cardinal-storyboard investigation link`)", file=sys.stderr)
+            return 1
+        if b.get("is_author") is not True:
+            print(f"{what}: session {sid} joined someone else's investigation; only a session that authors "
+                  "its own Investigation can relay an owner decision", file=sys.stderr)
+            return 1
+        if b["investigation_id"] == worker:
+            print(f"{what}: {worker} is this session's own investigation; a relayed decision goes to the "
+                  "worker you supervise", file=sys.stderr)
+            return EXIT_USAGE
+        conn, client = self.connection()
+        if not isinstance(conn, dict) or not conn.get("key") or conn.get("token"):
+            print(f"{what}: this machine is not connected to Cardinal with its own key (run cardinal-connect); "
+                  "the owner's decisions are relayed with it", file=sys.stderr)
+            return 1
+        if not ie.capability(b, owner_relay.CAPABILITY):
+            b = ie.refresh_binding_capabilities(home, sid, conn, client) or b
+        if not ie.capability(b, owner_relay.CAPABILITY):
+            print(f"{what}: " + owner_relay.NOT_CAPABLE, file=sys.stderr)
+            return 1
+        return None
+
+    def cmd_supervising(self, args: argparse.Namespace) -> int:
+        sid = self._session_arg(args)
+        if not sid:
+            return EXIT_USAGE
+        home = self._home()
+        worker = args.investigation_id or args.investigation
+        if args.remove:
+            if args.name is None and worker is None:
+                raise ValueError("--remove takes --name, or the worker's investigation (and --to-session)")
+            gone = owner_relay.remove_target(home, sid, name=args.name, investigation_id=worker,
+                                             to_session_id=args.to_session)
+            if not gone:
+                print("no such target in this session", file=sys.stderr)
+                return 1
+            print("removed " + ", ".join(owner_relay._target_label(t) for t in gone))
+            return 0
+        if worker is None:
+            ts = owner_relay.targets(home, sid)
+            if args.json:
+                print(json.dumps({"targets": ts}, indent=2))
+                return 0
+            if not ts:
+                print(f"no worker target in session {sid}")
+            for t in ts:
+                print(f"{t.get('name') or '(no name)'} -> session {t['to_session_id']} of {t['investigation_id']}")
+            return 0
+        if args.to_session is None:
+            raise ValueError("supervising <worker_inv> needs --to-session <worker_sid>")
+        owner_relay.validate_target(worker, args.to_session, args.name)
+        code = self._can_relay(home, sid, worker, "not registered")
+        if code is not None:
+            return code
+        t = owner_relay.add_target(home, sid, worker, args.to_session, args.name)
+        if args.json:
+            print(json.dumps(t, indent=2))
+            return 0
+        n = len(owner_relay.targets(home, sid))
+        form = f"decide {t['name']}: <text>" if t.get("name") else "decide: <text>"
+        print(f"registered {owner_relay._target_label(t)} of {worker} as a worker target ({n} in this session; "
+              "nothing was sent).")
+        print(f"The owner can now type `{form}` as a prompt in this session to send that worker their own words, "
+              "verbatim, as an owner decision" + (" (bare `decide:` works while it is the only target)."
+                                                  if t.get("name") else
+                                                  " (while it is the only target; add --name to tell several "
+                                                  "apart).")
+              + " Tell the owner this once. Never type it for them.")
+        return 0
+
     def cmd_proposals(self, args: argparse.Namespace) -> int:
         sid = self._session_arg(args)
         if not sid:
@@ -960,9 +1016,12 @@ class CLI:
         home = self._home()
         entries = owner_relay.pending(home, sid)
         done = owner_relay.recent(home, sid)
+        ts = owner_relay.targets(home, sid)
         if args.json:
-            print(json.dumps({"proposals": entries, "recent": done}, indent=2, ensure_ascii=False))
+            print(json.dumps({"proposals": entries, "targets": ts, "recent": done}, indent=2, ensure_ascii=False))
             return 0
+        for t in ts:
+            print(f"target {t.get('name') or '(no name)'} -> session {t['to_session_id']} of {t['investigation_id']}")
         if not entries:
             print(f"no pending owner-decision proposal in session {sid}")
         for e in entries:
@@ -983,7 +1042,7 @@ class CLI:
             return EXIT_USAGE
         pid = args.proposal_id
         if not isinstance(pid, str) or not owner_relay.ID_RE.fullmatch(pid):
-            print(f"not a proposal id: {pid!r} (dp_ followed by 8 hex characters)", file=sys.stderr)
+            print(f"not a proposal id: {pid!r} (dp_ followed by 16 hex characters)", file=sys.stderr)
             return EXIT_USAGE
         entry = owner_relay.withdraw(self._home(), sid, pid)
         if entry is None:
@@ -1038,6 +1097,7 @@ def build_parser(wiring, session_env=()):
         "show",
         "verify",
         "propose-decision",
+        "supervising",
         "proposals",
         "withdraw-proposal",
     ):
@@ -1071,7 +1131,7 @@ def build_parser(wiring, session_env=()):
             ),
         )
         p.set_defaults(investigation_id=None)
-        if action in ("events", "show", "post", "bind", "attach", "propose-decision"):
+        if action in ("events", "show", "post", "bind", "attach", "propose-decision", "supervising"):
             p.add_argument("investigation_id", nargs=None if action in ("bind", "attach") else "?")
         if action in ("events", "reviewed"):
             p.add_argument(
@@ -1166,6 +1226,11 @@ def build_parser(wiring, session_env=()):
             p.add_argument("--text", required=True, help="the decision, verbatim (1-4000 characters)")
             p.add_argument("--answers", type=int, metavar="SEQ", help="the worker event it answers")
             p.add_argument("--ref", action="append", default=[], help="a reference (repeatable, at most 20)")
+        elif action == "supervising":
+            p.description = owner_relay.SUPERVISING_HELP
+            p.add_argument("--to-session", help="the worker's session id")
+            p.add_argument("--name", help="a short name for `decide <name>: …` (a-z, 0-9, -; at most 32)")
+            p.add_argument("--remove", action="store_true", help="drop the target (by --name, or by id and session)")
         elif action == "withdraw-proposal":
             p.add_argument("proposal_id", help="dp_...")
     return parser
@@ -1187,6 +1252,7 @@ def normalize_argv(argv):
         "--exclude-self",
         "--include-self",
         "--owner-input",
+        "--remove",
         "--help",
         "-h",
     }
@@ -1220,10 +1286,10 @@ def cli_main(argv, wiring, session_env=(), *, legacy=False):
     args = build_parser(wiring, session_env).parse_args(normalize_argv(argv))
     cli = CLI(wiring, args, legacy)
     try:
-        if cli.scoped and args.action == "propose-decision":
-            print("not proposed: a proposal is relayed with this machine's own key when the owner approves it, "
-                  "never with an access grant; run propose-decision without --credential-file and without "
-                  "CARDINAL_INVESTIGATION_TOKEN", file=sys.stderr)
+        if cli.scoped and args.action in ("propose-decision", "supervising"):
+            print(f"not {'proposed' if args.action == 'propose-decision' else 'registered'}: an owner decision is "
+                  "relayed with this machine's own key, never with an access grant; run "
+                  f"{args.action} without --credential-file and without CARDINAL_INVESTIGATION_TOKEN", file=sys.stderr)
             return EXIT_USAGE
         if cli.scoped and args.action not in ("events", "post", "show", "reviewed", "verify", "rule", "proposals",
                                               "withdraw-proposal"):

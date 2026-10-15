@@ -39,8 +39,8 @@ specific:
     (`cardinal-connect --owner-input on`): Cursor has no user-visible,
     non-blocking channel for a per-session disclosure. Never blocks;
   * relayed owner decisions on beforeSubmitPrompt (cardinal_core.owner_relay):
-    the owner's `approve|reject dp_…` relays or drops a proposed owner
-    decision (bounded, only for such a prompt); the outcome is staged for
+    the owner's `decide: <text>` or `approve|reject dp_…` relays (or drops)
+    an owner decision (bounded, only for such a prompt); the outcome is staged for
     the next postToolUse (no user-visible channel there). Never blocks;
   * storyboard authoring (cardinal_core.storyboard_authoring): the preview
     render and hero upload in a matcher-scoped postToolUse entry with a
@@ -1534,10 +1534,11 @@ def capture_owner_input(payload: dict[str, Any], conv_id: str, cwd: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Relayed owner decisions (beforeSubmitPrompt): cardinal_core.owner_relay.
-# When the owner's whole prompt is `approve dp_xxxxxxxx` (bare `approve` for
-# the only pending proposal) or `reject dp_xxxxxxxx`, the decision this
-# supervisor conversation proposed is relayed to the worker with this
-# machine's key (bounded, ~3 s; only for such a prompt) or dropped. Cursor
+# When the owner's whole prompt is `decide: <text>` (their own words, relayed
+# verbatim to the registered worker), `approve dp_…` (bare `approve` for the
+# only pending proposal) or `reject dp_…`, the decision is relayed to the
+# worker with this machine's key (bounded, ~3 s; only for such a prompt) or
+# dropped. Cursor
 # has no user-visible, non-blocking message on beforeSubmitPrompt (its
 # user_message shows only for a blocked prompt, and the prompt is never
 # blocked here), so the outcome is STAGED for the next context-capable
@@ -1551,7 +1552,7 @@ def relay_owner_decision(payload: dict[str, Any], conv_id: str) -> str:
     try:
         from cardinal_core import owner_relay
 
-        if owner_relay.match(payload.get("prompt")) is None:
+        if not owner_relay.maybe(payload.get("prompt")):
             return "no_match"
         wiring = storyboard_wiring()
         agent_id = next((payload.get(k) for k in SUBAGENT_KEYS if payload.get(k)), None)

@@ -30,8 +30,8 @@ Event dispatch (payload shapes: packages/core/src/hooks/types.ts):
                   for this prompt (additionalContext); owner input
                   (owner_input.capture, detached: no network here) with its
                   one-time disclosure as systemMessage; the owner's
-                  `approve|reject dp_…` of a proposed owner decision
-                  (owner_relay: the one synchronous request, bounded ~3 s,
+                  `decide: …` / `approve|reject dp_…` (relayed owner
+                  decisions, owner_relay: the one synchronous request, bounded ~3 s,
                   only for such a prompt; outcome as systemMessage and
                   context); background:
                   cardinal.git_state (+PR) + verdict refresh + the discovery
@@ -569,10 +569,10 @@ def capture_owner_input(payload: dict[str, Any], session_id: str, cwd: str) -> s
 def relay_owner_decision(payload: dict[str, Any], session_id: str) -> str | None:
     """Relayed owner decisions (owner_relay.handle_prompt, runtime "gemini"):
     when what the owner typed (hook_context and @file sections removed;
-    never a machine prompt or a subagent's) is exactly `approve
-    dp_xxxxxxxx` (bare `approve` for the only pending proposal) or `reject
-    dp_xxxxxxxx`, relay the decision this supervisor session proposed to the
-    worker with this machine's key, or drop it. The one synchronous network
+    never a machine prompt or a subagent's) is exactly `decide: <text>`
+    (their own words, to the registered worker), `approve dp_…` (bare
+    `approve` for the only pending proposal) or `reject dp_…`, relay the
+    decision to the worker with this machine's key, or drop it. The one synchronous network
     call of BeforeAgent, made only for such a prompt and bounded by START +
     owner_relay.BUDGET. A re-fired BeforeAgent for the same prompt repeats
     the outcome without relaying again. Returns the outcome (shown to the

@@ -680,6 +680,16 @@ class OwnerRelay(Base):
         out = json.loads(self.relay_hook("APPROVE.").stdout)
         self.assertIn(f"relayed owner decision {pid}", out["systemMessage"])
 
+    def test_decide_relays_the_owners_words_to_the_registered_worker(self):
+        res = self.cli("supervising", WORKER, "--to-session", WORKER_SID, "--name", "codex", "--session", SID)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("`decide codex: <text>`", res.stdout)
+        out = json.loads(self.relay_hook("decide: Keep the scope to the cache layer.").stdout)
+        self.assertIn("relayed your decision verbatim to session 9a8b7c6d (codex) as event #", out["systemMessage"])
+        [(tool, body, _, _)] = self.fake.requests
+        self.assertEqual((tool, body["payload"]["text"], body["relay"]["source"]),
+                         ("relay-owner-decision", "Keep the scope to the cache layer.", "verbatim"))
+
     def test_propose_refuses_a_grant_file_and_the_hook_is_registered(self):
         res = self.cli("propose-decision", WORKER, "--to-session", WORKER_SID, "--text", "x", "--session", SID,
                        "--credential-file", str(self.base / "grant.json"))

@@ -34,12 +34,12 @@ ten quiet minutes. Then run one pass of CORE.md's review loop through your curso
 sweeping the worker's new activity even when the watch timed out, and start the watch
 again. Never write sleep-and-reread loops.
 
-## Owner approvals
+## Owner decisions
 
-When the owner replies `approve <id>` or `reject <id>` (CORE.md, "Owner decisions for the
-worker"), Cardinal's prompt hook shows them the outcome as a Cardinal message and gives
+When the owner types `decide: …`, `approve <id>` or `reject <id>` (CORE.md, "Owner
+decisions for the worker"), Cardinal's prompt hook shows them the outcome as a Cardinal message and gives
 you the same line as context. Confirm it to the owner in one line; do not run anything to
-approve it.
+send or approve it.
 
 ## Doing your own checks
 
