@@ -20,7 +20,8 @@ runs whether or not owner input is on. Refused: a subagent's prompt
 Contract:
   - Input on stdin: Claude Code's UserPromptSubmit payload {session_id,
     prompt, agent_id?, ...}.
-  - Output: nothing unless the prompt is a decision, approval or rejection; then ONE
+  - Output: nothing unless the prompt is a decision, approval or rejection
+    (even on an unconnected machine: it says nothing was sent); then ONE
     JSON object: systemMessage (the outcome, shown to the user) and
     hookSpecificOutput.additionalContext (the same outcome, for the model).
     The prompt is never blocked: it still reaches the model.
@@ -43,7 +44,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _connection  # noqa: E402
 
 # A cheap pre-check before anything is imported: the core matches the
-# normalized prompt exactly (owner_relay.APPROVAL_RE).
+# normalized prompt exactly (owner_relay.APPROVAL_RE / DECIDE_RE). A session
+# with relay state (<sid>.proposals.json) passes every prompt to the core,
+# which notes it for the stale-approve rule.
 _MAYBE = re.compile(r"\s*(?:approve|reject|decide)\b", re.IGNORECASE)
 
 
@@ -55,17 +58,20 @@ def main() -> str:
     if not isinstance(payload, dict):
         return "bad_payload"
     prompt = payload.get("prompt")
-    if not isinstance(prompt, str) or not _MAYBE.match(prompt):
-        return "no_match"
     sid = payload.get("session_id")
-    home = Path(os.environ.get("HOME") or str(Path.home()))
-    if not isinstance(sid, str) or not sid or "/" in sid:
+    if not isinstance(prompt, str) or not isinstance(sid, str) or not sid or "/" in sid:
         return "invalid"
+    home = Path(os.environ.get("HOME") or str(Path.home()))
+    store = home / ".cardinal" / "investigations" / "sessions" / f"{sid}.proposals.json"
+    if not _MAYBE.match(prompt) and not store.exists():
+        return "no_match"   # nothing imported: not a decision, and this session supervises nothing
+    conn = None
     if not _connection.is_connected():
-        return "unconnected"
+        conn = {}           # no network; the owner is still told why nothing was sent
     import _storyboard_discovery
     from cardinal_core import owner_relay
-    got = owner_relay.handle_prompt(home, sid, prompt, runtime="claude", conn=_storyboard_discovery.connection(),
+    got = owner_relay.handle_prompt(home, sid, prompt, runtime="claude",
+                                    conn=_storyboard_discovery.connection() if conn is None else conn,
                                     client=_storyboard_discovery.client_header(), agent_id=payload.get("agent_id"),
                                     deadline=START + owner_relay.BUDGET)
     if got.message:
@@ -74,7 +80,7 @@ def main() -> str:
             "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": got.message},
         }))
         sys.stdout.flush()
-    return got.status
+    return f"{got.status}:{got.code}" if got.code else got.status
 
 
 if __name__ == "__main__":

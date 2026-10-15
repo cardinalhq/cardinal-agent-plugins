@@ -537,7 +537,8 @@ class OwnerRelayTests(GeminiInvestigationTests):
         entry = owner_relay.propose(self.home, SID, worker, "9a8b7c6d-worker", "Only the cache layer.")
         raw = f"approve {entry['id']}\n<hook_context>Cardinal session id for this session: x.</hook_context>"
         out = self.prompt(raw)
-        want = f"Cardinal: relayed owner decision {entry['id']} to session 9a8b7c6d as event #57 (owner_relayed)."
+        want = (f"Cardinal: sent your approved draft {entry['id']} to the worker (session 9a8b7c6d) as owner "
+                'decision #57: "Only the cache layer.".')
         self.assertIn(want, out["systemMessage"])
         self.assertIn(want, out["hookSpecificOutput"]["additionalContext"])
         again = self.prompt(raw)   # gemini-cli re-fires BeforeAgent for one prompt
@@ -553,7 +554,7 @@ class OwnerRelayTests(GeminiInvestigationTests):
         self.start()
         owner_relay.add_target(self.home, SID, "inv_" + "e" * 24, "9a8b7c6d-worker", name="codex")
         out = self.prompt("decide codex: Stop after the cache fix.\n<hook_context>x</hook_context>")
-        self.assertIn("relayed your decision verbatim to session 9a8b7c6d (codex) as event #57", out["systemMessage"])
+        self.assertIn("sent your decision to codex (session 9a8b7c6d) as owner decision #57", out["systemMessage"])
         [req] = [r for r in self.fake.requests if r["tool"] == "relay-owner-decision"]
         self.assertEqual(req["body"]["payload"]["text"], "Stop after the cache fix.")
         self.assertEqual(req["body"]["relay"]["source"], "verbatim")

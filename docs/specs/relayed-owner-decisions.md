@@ -50,10 +50,10 @@ verified.
    policy, stop rules...).
 2. Supervisor drafts it and runs
    `cardinal-storyboard investigation propose-decision <worker_inv> --to-session <worker_sid> --text "<decision>" [--answers <seq>] [--ref <r>]... --session <supervisor_sid>`.
-   The CLI stores a local proposal and prints its id (`dp_` + 8 hex) and the
+   The CLI stores a local proposal and prints its id (`dp_` + 16 hex) and the
    instruction to show the text verbatim and ask the owner to reply
-   `approve dp_xxxxxxxx` (bare `approve` works when it is the only pending
-   proposal) or `reject dp_xxxxxxxx`.
+   `approve dp_xxxxxxxxxxxxxxxx` (bare `approve` works when it is the only pending
+   proposal) or `reject dp_xxxxxxxxxxxxxxxx`.
 3. The owner types `approve`. The supervisor's prompt hook matches it, relays
    the proposal to `relay-owner-decision`, deletes the proposal, and tells the
    user and the model the outcome ("Relayed owner decision dp_… to session
@@ -93,7 +93,8 @@ Request (zod, strict):
   relay: { supervisor_session_id: sessionId, supervisor_investigation_id,
            proposal_sha256: hex64,                       // sha256(utf-8 payload.text)
            prompt_sha256: hex64,                         // sha256 of the scrubbed approving prompt
-           approved_at: ISO-8601 },
+           approved_at: ISO-8601,
+           source?: "proposal" | "verbatim" },            // default "proposal"
   client?: string }
 ```
 
@@ -187,7 +188,7 @@ route; the per-user setting is reported by the route's 403 and by
   (owner input may be off; prod has it off): refuse subagent prompts (non-empty
   agent_id) and machine prompts (`normalize_prompt` must reduce it to typed
   text). Match the whole stripped prompt, case-insensitive:
-  `^(approve|reject)(\s+dp_[0-9a-f]{8})?[.!]?$`. Bare form only when exactly
+  `^(approve|reject)(\s+dp_[0-9a-f]{16})?[.!]?$`. Bare form only when exactly
   one unexpired proposal is pending; otherwise tell the user which ids are
   pending.
 - approve: POST `relay-owner-decision` synchronously with a bounded wall clock
@@ -247,3 +248,84 @@ matching (bare vs id, ambiguity, case, punctuation, subagent, machine prompt,
 non-matching prompt untouched); relay success/duplicate/transient/not-enabled/
 refusal paths; worker rendering for author vs joined session; old-authority
 event unchanged; parity guard.
+
+## Revision 2026-10-15: the verbatim form, targets, and UX rules (plugin)
+
+Approved after the first implementation and an independent UX review. Where
+this section and the text above differ, this section wins.
+
+### `decide:` — the owner's own words, no draft
+
+- The owner types `decide: <text>` (or `decide <name>: <text>`) as the whole
+  prompt in the supervisor session (`^decide(\s+[a-z0-9-]{1,32})?\s*:(.*)$`,
+  case-insensitive, matched on the normalized prompt). The prompt hook sends
+  `<text>` unchanged (surrounding whitespace trimmed) with `relay.source:
+  "verbatim"` and `relay_key` = `dv_` + 16 hex. No draft, no approve step.
+  Same refusals (subagent, machine prompt), same bounded request and outcome
+  reporting as `approve`.
+- Not sent, with a line saying why: empty text; over 4000 characters; a NUL or
+  lone surrogate; text ending with `?` ("that reads as a question");
+  text the credential scrubber would change (see below).
+- A `decide:` that failed transiently or because the setting is off keeps its
+  relay key for 30 minutes: typing the same text to the same target again
+  reuses it, so the server answers a duplicate rather than storing it twice.
+- Approve sends `relay.source: "proposal"`. The worker renders verbatim as
+  "OWNER DECISION (relayed) — <name>'s own words, typed in their supervisor
+  session <sid>" and a proposal as "… approved by <name> in their supervisor
+  session <sid> (drafted by the supervisor)"; any other value renders as a
+  proposal. The trust line reads "It confirms their machine and key, not that
+  they typed it." A relayed decision with `answers` adds "It answers #N."
+
+### Targets
+
+- `cardinal-storyboard investigation supervising <worker_inv> --to-session
+  <worker_sid> [--name <[a-z0-9-]{1,32}>] [--remove] [--session <sid>]`
+  records a worker target in the supervisor session's store
+  (`<sid>.proposals.json`, 0600, flock), at most 5 (oldest dropped); a name
+  names one target. No arguments lists them. Local only; refuses a grant token
+  or `--credential-file`; same preconditions as `propose-decision`.
+  `propose-decision` also registers its target (keeping an existing name).
+- Bare `decide:` needs exactly one target; otherwise the outcome lists them
+  ("codex (session 1a2b3c4d)"; an unnamed one "(unnamed: ask the supervisor to
+  name it)"). `decide <word>:` naming no target, when no target has a name, is
+  an ordinary prompt (no Cardinal output).
+- Capabilities: the server may add `owner_relay.on_for_caller` (bool) and
+  `owner_relay.settings_url` (an http(s) URL or a site path, made absolute with
+  the connection's origin). The plugin keeps them; `supervising` and
+  `propose-decision` print "Relayed decisions are off for your account: turn
+  them on once at <url> (web only)." when `on_for_caller` is false. Missing:
+  unknown, nothing said.
+
+### Credentials
+
+- If `owner_input.scrubbed_of(text)[0] != text`, nothing is sent:
+  `decide:` answers "your decision looks like it contains a credential, so
+  nothing was sent…"; `propose-decision --text` exits 2 with the same reason.
+
+### Stale bare approve
+
+- The store notes every owner prompt the hook sees in a session that keeps
+  relay state (`prompt: {at, sha, prev}`; a Gemini re-fire of the same prompt
+  keeps the previous time). A bare `approve` / `reject` applies only to a
+  draft created after the owner's previous prompt (drafted in the turn just
+  answered); otherwise "no draft is waiting for your approval (drafts expire
+  after 30 minutes); nothing was sent." An explicit id is not limited.
+- A session with no relay state stays silent on a bare `approve` (it is the
+  owner talking to their agent); every `decide:` gets an outcome line.
+
+### Outcome copy
+
+- Owner-facing words: "draft", "sent", the worker's name, "owner decision #N".
+  Success echoes a one-line, escaped ~160-character excerpt of what was sent
+  and says "The worker sees it after its next tool call; if it is waiting for
+  you, when it next runs (any prompt in its terminal). To change it, send
+  another decide:; the worker sees both."
+- Every refusal ends with the next step; unknown codes say "a reason this
+  plugin version does not know" (the code goes to the debug log only).
+- An id that is not waiting says whether it expired, was rejected (at HH:MM),
+  was already sent (as #N) or was refused.
+- The web toggle is labelled "Accept owner decisions I send from my supervisor
+  sessions".
+- Cursor has no user-visible channel on its prompt hook: the outcome is staged
+  for the next tool call and listed by `investigation proposals`; the skill
+  tells the agent to quote it verbatim.

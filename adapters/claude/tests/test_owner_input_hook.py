@@ -653,7 +653,8 @@ class OwnerRelay(Base):
         out = json.loads(res.stdout)
         msg = out["systemMessage"]
         self.assertEqual(out["hookSpecificOutput"], {"hookEventName": "UserPromptSubmit", "additionalContext": msg})
-        self.assertIn(f"relayed owner decision {pid} to session 9a8b7c6d as event #", msg)
+        self.assertIn(f"sent your approved draft {pid} to the worker (session 9a8b7c6d) as owner decision #", msg)
+        self.assertIn(': "Only the cache layer.".', msg)
         [(tool, body, headers, _)] = self.fake.requests
         self.assertEqual(tool, "relay-owner-decision")
         self.assertEqual(headers["x-cardinalhq-api-key"], "ck")
@@ -675,17 +676,24 @@ class OwnerRelay(Base):
                                         "settings_url": "https://app.example.invalid/settings"})
         out = json.loads(self.relay_hook("approve").stdout)
         self.assertIn("https://app.example.invalid/settings", out["systemMessage"])
-        self.assertIn(f"retry with `approve {pid}`", out["systemMessage"])
+        self.assertIn(f"type `approve {pid}` to try again", out["systemMessage"])
         self.fake.relay_status = None
-        out = json.loads(self.relay_hook("APPROVE.").stdout)
-        self.assertIn(f"relayed owner decision {pid}", out["systemMessage"])
+        out = json.loads(self.relay_hook(f"APPROVE {pid.upper()}.").stdout)
+        self.assertIn(f"sent your approved draft {pid}", out["systemMessage"])
+
+    def test_never_silent_on_an_unconnected_machine(self):
+        self.propose()
+        (self.home / ".claude" / "settings.json").write_text("{}")
+        out = json.loads(self.relay_hook("decide: Stop now.").stdout)
+        self.assertIn("Cardinal: not sent: this machine is not connected to Cardinal.", out["systemMessage"])
+        self.assertEqual(self.fake.requests, [])
 
     def test_decide_relays_the_owners_words_to_the_registered_worker(self):
         res = self.cli("supervising", WORKER, "--to-session", WORKER_SID, "--name", "codex", "--session", SID)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("`decide codex: <text>`", res.stdout)
         out = json.loads(self.relay_hook("decide: Keep the scope to the cache layer.").stdout)
-        self.assertIn("relayed your decision verbatim to session 9a8b7c6d (codex) as event #", out["systemMessage"])
+        self.assertIn("sent your decision to codex (session 9a8b7c6d) as owner decision #", out["systemMessage"])
         [(tool, body, _, _)] = self.fake.requests
         self.assertEqual((tool, body["payload"]["text"], body["relay"]["source"]),
                          ("relay-owner-decision", "Keep the scope to the cache layer.", "verbatim"))

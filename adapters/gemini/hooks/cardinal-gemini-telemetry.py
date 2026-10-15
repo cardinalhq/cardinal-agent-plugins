@@ -581,7 +581,7 @@ def relay_owner_decision(payload: dict[str, Any], session_id: str) -> str | None
     try:
         from cardinal_core import investigation_events as ie
 
-        if not ie.valid_session(session_id) or not ie.binding_path(Path.home(), session_id).exists():
+        if not ie.valid_session(session_id):
             return None
         from cardinal_core import owner_relay
 

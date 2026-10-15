@@ -100,7 +100,7 @@ NAME_RE = re.compile(r"[a-z0-9-]{1,32}")                                        
 APPROVAL_RE = re.compile(r"(approve|reject)(?:\s+(dp_[0-9a-f]{16}))?[.!]?", re.IGNORECASE)  # fullmatch, stripped
 DECIDE_RE = re.compile(r"decide(?:[ \t]+([a-z0-9-]{1,32}))?[ \t]*:(.*)", re.IGNORECASE | re.DOTALL)  # fullmatch
 MAYBE_RE = re.compile(r"\s*(?:approve|reject|decide)\b", re.IGNORECASE)            # match: a cheap pre-check
-SETTINGS_URL_RE = re.compile(r"https?://[^\s\"'<>\\]{1,300}")                       # fullmatch
+ORIGIN_RE = re.compile(r"https?://[A-Za-z0-9.:-]{1,253}")                            # fullmatch
 FINAL_OUTCOMES = ("relayed", "duplicate", "refused", "rejected")
 
 PROPOSE_HELP = ("Draft an owner decision for the worker session you supervise. Nothing is sent: the owner approves "
@@ -114,33 +114,41 @@ SUPERVISING_HELP = ("Register the worker this session supervises (a target), so 
                     "(by --name, or by investigation and --to-session).")
 INSTRUCTION = ("Show the owner this text verbatim and ask them to reply `approve {id}` or `reject {id}`. Never approve "
                "it yourself and never call the relay route: only the owner's own prompt approves.")
-NOT_CAPABLE = ("this Cardinal cannot relay owner decisions (it does not advertise owner_relay; it needs a newer "
-               "Maestro): give the owner the decision to type into the worker's own terminal instead")
+NOT_CAPABLE = ("this Cardinal cannot send owner decisions from here yet (it needs a newer Maestro). Type your "
+               "decision in the worker's own terminal, or post it from the Investigation page on the web.")
 NOT_ENABLED = "owner_relay_not_enabled"
-UNSUPPORTED = ("this Cardinal cannot relay owner decisions (it needs a newer Maestro); tell the owner to type the "
-               "decision into the worker's own terminal instead")
+UNSUPPORTED = NOT_CAPABLE
+TOGGLE = "Accept owner decisions I send from my supervisor sessions"   # the web setting's label
+CREDENTIAL = ("Cardinal: your decision looks like it contains a credential, so nothing was sent. Remove it and type "
+              "the decision again; give the worker secrets through its environment, not a decision.")
+QUESTION = ("Cardinal: that reads as a question, so it was not sent to the worker. Rephrase it as a decision to send "
+            "it.")
+NO_DRAFT = "Cardinal: no draft is waiting for your approval (drafts expire after 30 minutes); nothing was sent."
+NO_WORKER = ("Cardinal: no worker is registered here yet; ask the supervisor to register the one it watches. Nothing "
+             "was sent.")
+SEES_IT = ("The worker sees it after its next tool call; if it is waiting for you, when it next runs (any prompt in "
+           "its terminal). To change it, send another decide:; the worker sees both.")
+EXCERPT = 160
 _ROUTE_404S = ("investigation_not_found", "owner_decision_answer_not_found")
 
-# The route's refusals, in words (never a raw status line or server text).
+# The route's refusals, in words for the owner (never a raw status line or
+# server text; the code goes to the debug log only).
 REFUSALS = {
-    "owner_relay_requires_api_key": ("a relayed decision needs this machine's Cardinal API key (not a web session or "
-                                     "an access grant)"),
-    "owner_relay_requires_user_key": ("this machine's Cardinal API key acts for no person; a relayed decision needs a "
-                                      "key that belongs to you (reconnect with cardinal-connect)"),
-    "invalid_owner_relay": "Cardinal refused the relay as malformed",
-    "investigation_not_found": "there is no such investigation in this org",
-    "owner_relay_requires_investigation_author": ("only the worker investigation's author can relay a decision to "
-                                                  "it, and this machine's key is not that person's"),
-    "owner_relay_self": "a supervisor session cannot relay a decision to its own investigation",
-    "owner_relay_supervisor_not_yours": ("Cardinal could not confirm this supervisor session belongs to an "
-                                         "investigation you author"),
-    "owner_relay_target_not_author_session": ("the target session is not a session the worker investigation's "
-                                              "author claimed"),
-    "owner_relay_text_mismatch": "the decision text did not match its hash",
-    "owner_decision_answer_not_found": "the event it answers (--answers) is not in the worker's investigation",
-    "idempotency_conflict": "another decision was already relayed under this relay key",
-    "owner_decision_limit_reached": "the worker's investigation reached its limit of owner decisions",
-    "event_limit_reached": "the worker's investigation reached its limit of events",
+    "owner_relay_requires_api_key": "it needs this machine's Cardinal API key, not a web session or an access grant",
+    "owner_relay_requires_user_key": ("this machine's Cardinal API key belongs to no person; reconnect it with a key "
+                                      "of your own"),
+    "invalid_owner_relay": "Cardinal could not read the request",
+    "investigation_not_found": "the worker's Investigation is not in this org",
+    "owner_relay_requires_investigation_author": ("only the person who owns the worker's Investigation can send it "
+                                                  "decisions, and this machine's key is not theirs"),
+    "owner_relay_self": "it was addressed to this session's own Investigation",
+    "owner_relay_supervisor_not_yours": "Cardinal could not confirm this supervisor session is yours",
+    "owner_relay_target_not_author_session": "the worker session is not one of that Investigation's own sessions",
+    "owner_relay_text_mismatch": "the text changed on the way",
+    "owner_decision_answer_not_found": "the worker event it answers is not in the worker's Investigation",
+    "idempotency_conflict": "this draft was already sent with different text",
+    "owner_decision_limit_reached": "the worker's Investigation reached its limit of owner decisions",
+    "event_limit_reached": "the worker's Investigation reached its limit of events",
 }
 
 
@@ -204,10 +212,24 @@ def _read(home: Path, sid: str, now: float) -> dict:
         got = data.get(name)
         return [x for x in got if ok(x)][-cap:] if isinstance(got, list) else []
 
+    prompt = data.get("prompt")
+    prompt = prompt if isinstance(prompt, dict) and _num(prompt.get("at")) and _num(prompt.get("prev")) \
+        and isinstance(prompt.get("sha"), str) else {}
+    # Drafts that expired: their ids, kept for RECENT_TTL so "approve <id>"
+    # can say it expired.
+    gone = [{"id": e["id"], "at": e["expires_at"]} for e in data.get("proposals") or []
+            if isinstance(e, dict) and isinstance(e.get("id"), str) and ID_RE.fullmatch(e["id"])
+            and _num(e.get("expires_at")) and now >= e["expires_at"]] \
+        if isinstance(data.get("proposals"), list) else []
+    expired = kept("expired", lambda x: isinstance(x, dict) and isinstance(x.get("id"), str)
+                   and bool(ID_RE.fullmatch(x["id"])) and _num(x.get("at")), MAX_RECENT)
+    expired = [x for x in expired + gone if 0 <= now - x["at"] < RECENT_TTL][-MAX_RECENT:]
     return {"proposals": kept("proposals", lambda e: _entry_ok(e, now), MAX_PROPOSALS),
+            "expired": expired,
             "targets": kept("targets", _target_ok, MAX_TARGETS),
             "verbatim": kept("verbatim", lambda v: _verbatim_ok(v, now), MAX_VERBATIM),
-            "recent": kept("recent", lambda r: _recent_ok(r, now), MAX_RECENT)}
+            "recent": kept("recent", lambda r: _recent_ok(r, now), MAX_RECENT),
+            "prompt": prompt}
 
 
 def _write(home: Path, sid: str, store: dict) -> None:
@@ -230,6 +252,20 @@ def _updating(home: Path, sid: str, now: float, wait: float = 1.0):
         store = _read(home, sid, now)
         yield store
         _write(home, sid, store)
+
+
+def has_store(home: Path, sid: str) -> bool:
+    """Whether session `sid` keeps owner-relay state (it supervises: a draft
+    or a target was made here). Never raises."""
+    try:
+        return proposals_path(home, sid).exists()
+    except (ValueError, OSError):
+        return False
+
+
+def _expired(store: dict, pid: str) -> bool:
+    """Whether draft `pid` expired lately."""
+    return any(x["id"] == pid for x in store["expired"])
 
 
 def pending(home: Path, sid: str, now: Optional[float] = None) -> list:
@@ -259,6 +295,9 @@ def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any 
         raise ValueError(f"--text is at most {MAX_TEXT} characters")
     if wire_safe(text) != text:
         raise ValueError("--text contains a NUL or an unpaired surrogate")
+    if has_credential(text):
+        raise ValueError("not proposed: the decision looks like it contains a credential. Remove it; the worker gets "
+                         "secrets through its environment, never through an owner decision")
     if answers is not None and (not isinstance(answers, int) or isinstance(answers, bool) or answers < 1):
         raise ValueError("--answers is an event number (a positive integer)")
     refs = refs or []
@@ -267,6 +306,13 @@ def validate(investigation_id: Any, to_session_id: Any, text: Any, answers: Any 
     for r in refs:
         if not isinstance(r, str) or not r.strip() or len(r) > MAX_REF or wire_safe(r) != r:
             raise ValueError(f"each --ref is 1 to {MAX_REF} characters")
+
+
+def has_credential(text: str) -> bool:
+    """Whether the credential scrubber would change `text` (owner input's
+    scrubbed_of): a decision never carries a secret."""
+    from .owner_input import scrubbed_of
+    return scrubbed_of(text)[0] != text
 
 
 def validate_target(investigation_id: Any, to_session_id: Any, name: Any = None) -> None:
@@ -446,25 +492,37 @@ def unsupported(err: "sync.ServerError") -> bool:
     return err.status in (404, 405) and code not in _ROUTE_404S
 
 
-def refusal(err: "sync.ServerError") -> str:
-    """A refusal in words: inert, one line, never the server's own text."""
-    if unsupported(err):
-        return UNSUPPORTED
+def refusal(err: "sync.ServerError") -> tuple:
+    """(the refusal in words for the owner, the code for the debug log):
+    inert, one line, never the server's own text."""
     code = err.body.get("error") if isinstance(err.body, dict) else None
+    safe = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", code) else f"http_{int(err.status)}"
+    if unsupported(err):
+        return "this Cardinal cannot send owner decisions from here yet (it needs a newer Maestro)", safe
     said = REFUSALS.get(code) if isinstance(code, str) else None
-    if said:
-        return said
-    return f"HTTP {int(err.status)}, {ie._tok(code) if code else 'no reason given'}"
+    return said or "the reason is one this plugin version does not know", safe
 
 
-def settings_url(err: "sync.ServerError") -> Optional[str]:
-    url = err.body.get("settings_url") if isinstance(err.body, dict) else None
-    return url if isinstance(url, str) and SETTINGS_URL_RE.fullmatch(url) else None
+def settings_link(url: Any, origin: Any = None) -> Optional[str]:
+    """A settings URL safe to show: a plain http(s) URL, or a site path made
+    absolute with this connection's origin; None otherwise."""
+    from .investigation_bootstrap import SETTINGS_URL_RE
+    if not isinstance(url, str) or not SETTINGS_URL_RE.fullmatch(url):
+        return None
+    if url.startswith("/"):
+        return origin.rstrip("/") + url if isinstance(origin, str) and ORIGIN_RE.fullmatch(origin.rstrip("/")) \
+            else None
+    return url
+
+
+def _off_line(link: Optional[str]) -> str:
+    where = f" at {link}" if link else " in your Cardinal settings on the web (Settings, Investigations)"
+    return f"decisions from your supervisor sessions are off for your account. Turn on \"{TOGGLE}\" once{where}"
 
 
 def _send(conn: dict, body: dict, client: str, deadline: float, opener) -> tuple:
-    """("ok", answer) | ("transient", None) | ("not_enabled", settings
-    line) | ("refused", reason in words)."""
+    """("ok", answer) | ("transient", None) | ("not_enabled", the line for
+    the owner) | ("refused", (reason in words, code))."""
     timeout = max(0.1, min(BUDGET, deadline - time.monotonic()))
     state, value = _bounded(lambda: relay(conn, body, client=client, opener=opener, timeout=timeout), deadline)
     if state == "done":
@@ -474,28 +532,33 @@ def _send(conn: dict, body: dict, client: str, deadline: float, opener) -> tuple
         return "transient", None
     code = err.body.get("error") if isinstance(err.body, dict) else None
     if err.status == 403 and code == NOT_ENABLED:
-        url = settings_url(err)
-        where = f"at {ie._tok(url)}" if url else "in your Cardinal settings (Settings, Investigations)"
-        return "not_enabled", ("relayed owner decisions are off for your account. Turn on \"Accept owner decisions "
-                               "I approve in my supervisor sessions\" once, from your signed-in Cardinal web "
-                               f"session, {where}")
+        body_url = err.body.get("settings_url") if isinstance(err.body, dict) else None
+        return "not_enabled", _off_line(settings_link(body_url, conn.get("origin")))
     return "refused", refusal(err)
 
 
-def _precheck(home: Path, sid: str, worker_inv: str, conn: Any) -> Optional[tuple]:
-    """(status, why, None) when this session cannot relay to `worker_inv`
-    now, else (None, None, its binding)."""
+_WHY = {
+    "unbound": "this session has no Cardinal Investigation yet",
+    "not_author": "this session joined someone else's Investigation, so it cannot send decisions",
+    "own_investigation": "it is addressed to this session's own Investigation",
+    "no_connection": "this machine is not connected to Cardinal",
+}
+
+
+def _precheck(home: Path, sid: str, worker_inv: str, conn: Any) -> tuple:
+    """(status, None) when this session cannot send to `worker_inv` now
+    (_WHY says why), else (None, its binding)."""
     b = ie.read_binding(home, sid)
     if not b:
-        return "unbound", "this session has no Investigation yet", None
+        return "unbound", None
     if b.get("is_author") is not True:
-        return "not_author", "this session does not author its Investigation, so it cannot relay from it", None
+        return "not_author", None
     if b.get("investigation_id") == worker_inv:
-        return "own_investigation", "it is addressed to this session's own Investigation", None
+        return "own_investigation", None
     if not (isinstance(conn, dict) and conn.get("origin") and conn.get("org") and conn.get("key")
             and not conn.get("token")):
-        return "no_connection", "this machine is not connected to Cardinal with its own key", None
-    return None, None, b
+        return "no_connection", None
+    return None, b
 
 
 # ---------------------------------------------------------------------------
@@ -504,18 +567,27 @@ def _precheck(home: Path, sid: str, worker_inv: str, conn: Any) -> Optional[tupl
 
 @dataclass
 class RelayResult:
-    """What handle_prompt did. status: a debug code. message: the outcome to
-    show the user (systemMessage, or the runtime's equivalent) AND to give
-    the model (additional context), or None (the prompt is not an approval
-    or a decision: nothing to say)."""
+    """What handle_prompt did. status: a debug code (code: the server's
+    refusal code, for the debug log only). message: the outcome to show the
+    user (systemMessage, or the runtime's equivalent) AND to give the model
+    (additional context), or None (the prompt is not an approval or a
+    decision: nothing to say)."""
     status: str
     message: Optional[str] = None
     ids: list = field(default_factory=list)
+    code: Optional[str] = None
 
 
 def maybe(prompt: Any) -> bool:
     """A cheap pre-check before anything is read: could `prompt` be one?"""
     return isinstance(prompt, str) and bool(MAYBE_RE.match(prompt))
+
+
+def wanted(home: Path, sid: str, prompt: Any) -> bool:
+    """Whether an adapter should call handle_prompt for this prompt: it may
+    be an approval or a decision, or this session keeps relay state (every
+    owner prompt is then noted, for the stale-approve rule)."""
+    return maybe(prompt) or has_store(home, sid)
 
 
 def match(prompt: Any) -> Optional[tuple]:
@@ -545,47 +617,91 @@ def _short(sid: str) -> str:
     return sid[:8]
 
 
-def _pending_line(entries: list) -> str:
-    return ", ".join(e["id"] for e in entries)
+def _hhmm(t: float) -> str:
+    return time.strftime("%H:%M", time.localtime(t))
+
+
+def excerpt(text: str, cap: int = EXCERPT) -> str:
+    """`text` on one line (whitespace runs become one space) as an escaped
+    JSON string of at most `cap` characters, … when cut."""
+    lit, cut = ie.clipped_json_text(" ".join(text.split()), cap)
+    return lit[:-1] + '…"' if cut else lit
+
+
+def _who(store: dict, inv: str, to_sid: str) -> str:
+    """How the owner knows the worker: its target name, and its session."""
+    t = next((t for t in store["targets"] if t["investigation_id"] == inv and t["to_session_id"] == to_sid), None)
+    name = t.get("name") if t else None
+    return f"{name} (session {_short(to_sid)})" if name else f"the worker (session {_short(to_sid)})"
 
 
 def _target_label(t: dict) -> str:
-    return f"session {_short(t['to_session_id'])}" + (f" ({t['name']})" if t.get("name") else "")
+    return f"{t['name']} (session {_short(t['to_session_id'])})" if t.get("name") \
+        else f"session {_short(t['to_session_id'])} (unnamed: ask the supervisor to name it)"
 
 
 def _targets_line(ts: list) -> str:
-    return "; ".join(f"`decide {t['name']}: …` for {_target_label(t)}" if t.get("name")
-                     else f"{_target_label(t)} (no name: register one with `investigation supervising --name`)"
-                     for t in ts)
+    return "; ".join(_target_label(t) for t in ts)
+
+
+def _drafts_line(entries: list) -> str:
+    return "; ".join(f"{e['id']} {excerpt(e['text'], 40)} (expires {_hhmm(e['expires_at'])} local)" for e in entries)
+
+
+def _seen_prompt(home: Path, sid: str, sha: str, runtime: str, now: float) -> float:
+    """Note an owner prompt (the store's `prompt`: {at, sha, prev}) and
+    return the time of the owner's PREVIOUS prompt (0: unknown). A re-fired
+    prompt hook (DEDUPE_REPEATS) for the same prompt keeps the previous one.
+    Only for a session that keeps relay state. Never raises."""
+    from .owner_input import DEDUPE_REPEATS
+    try:
+        if not has_store(home, sid):
+            return 0.0
+        with _updating(home, sid, now) as store:
+            last = store["prompt"]
+            if last and runtime in DEDUPE_REPEATS and last["sha"] == sha and 0 <= now - last["at"] < REFIRE_WINDOW:
+                return last["prev"]
+            prev = last["at"] if last else 0.0
+            store["prompt"] = {"at": now, "sha": sha, "prev": prev}
+            return prev
+    except Exception:
+        return 0.0
 
 
 def handle_prompt(home: Path, sid: str, prompt: Any, *, runtime: str, conn: Optional[dict], client: str,
                   agent_id: Optional[str] = None, deadline: float, now: Optional[float] = None,
                   opener=None) -> RelayResult:
     """The relay half of every runtime's prompt hook (see the module doc).
-    Statuses:
+    Every owner prompt of a session with relay state is noted (the
+    stale-approve rule: a bare `approve` / `reject` applies only to a draft
+    made after the owner's previous prompt). Statuses:
 
       invalid / subagent / not_typed / no_match / none
-                      nothing said: not an approval or a decision here
+                      nothing said: not an approval or a decision here (a
+                      bare approve in a session that never had a draft or a
+                      target; `decide <word>:` when no target has a name)
       repeat          DEDUPE_REPEATS runtimes (Gemini) only: the same prompt
                       again within REFIRE_WINDOW after a final outcome, with
-                      no newer proposal: the outcome is repeated, nothing is
+                      no newer draft: the outcome is repeated, nothing is
                       sent again
-      ambiguous       approve: several proposals pending; decide: several
-                      targets and no name. Says which
-      unknown_id      approve: the id is not pending (expired, withdrawn, handled)
+      no_draft        approve / reject matched no waiting draft
+      ambiguous       approve: several fresh drafts; decide: several targets
+                      and no name. Says which
+      unknown_id      approve: the id is not waiting (expired, rejected, sent)
       no_target / unknown_target
                       decide: no target registered, or none by that name
-      bad_text        decide: empty, over 4000 characters, NUL or a lone surrogate
+      bad_text / question / credential
+                      decide: empty, too long, NUL; ends with "?"; the
+                      scrubber would change it
       rejected        removed; nothing sent
       relayed / duplicate
-                      relay-owner-decision answered 201 / 200; a proposal is removed
-      transient       network, timeout, 5xx, 408, 429: a proposal is kept; a
+                      sent (201 / 200); a draft is removed
+      transient       network, timeout, 5xx, 408, 429: a draft is kept; a
                       decide's relay key is kept for its retry
       not_enabled     403 owner_relay_not_enabled: as transient, with the settings link
-      refused         any other refusal: a proposal is removed; with the reason
+      refused         any other refusal: a draft is removed
       unbound / not_author / own_investigation / no_connection / busy
-                      not sent; a proposal is kept
+                      not sent; a draft is kept
     Never raises (error)."""
     try:
         return _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline,
@@ -603,11 +719,14 @@ def _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline, now, o
     typed = owner_input.normalize_prompt(runtime, prompt)
     if typed is None:
         return RelayResult("not_typed")
+    typed_sha = hashlib.sha256(owner_input.scrubbed_of(typed)[0].encode("utf-8", "replace")).hexdigest()
+    previous = _seen_prompt(home, sid, typed_sha, runtime, now)
     approval, decision = match(typed), match_decide(typed)
     if approval is None and decision is None:
         return RelayResult("no_match")
-    typed_sha = hashlib.sha256(owner_input.scrubbed_of(typed)[0].encode("utf-8", "replace")).hexdigest()
     store = _read(home, sid, now)
+    if decision is not None and decision[0] is not None and not any(t.get("name") for t in store["targets"]):
+        return RelayResult("no_match")   # `decide later: …` with no named worker: an ordinary prompt
     if runtime in owner_input.DEDUPE_REPEATS:
         # A runtime that re-fires its prompt hook for one prompt: the same
         # prompt seen again moments later repeats its final outcome.
@@ -620,43 +739,44 @@ def _handle(home, sid, prompt, runtime, conn, client, agent_id, deadline, now, o
             return RelayResult("repeat", again["message"], [again["id"]])
     if decision is not None:
         return _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, opener)
-    return _approve(home, sid, approval, store, typed_sha, conn, client, deadline, now, opener)
+    return _approve(home, sid, approval, store, previous, typed_sha, conn, client, deadline, now, opener)
 
 
 def _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, opener) -> RelayResult:
     """`decide: <text>` / `decide <name>: <text>`: the owner's own words,
-    relayed verbatim to the registered target."""
+    sent verbatim to the registered target."""
     from .owner_input import wire_safe
     name, text = decision
-    nothing = "nothing was relayed"
     ts = store["targets"]
     if name is not None:
         target = next((t for t in ts if t.get("name") == name), None)
         if target is None:
-            known = f" Targets: {_targets_line(ts)}." if ts else ""
-            return RelayResult("unknown_target", f"Cardinal: no worker named {name} is registered in this session; "
-                                                 f"{nothing}.{known}")
+            return RelayResult("unknown_target", f"Cardinal: no worker named {name} is registered here "
+                                                 f"({_targets_line(ts)}); nothing was sent.")
     elif not ts:
-        return RelayResult("no_target", "Cardinal: no worker is registered in this session (the supervisor "
-                                        "registers one with `cardinal-storyboard investigation supervising`); "
-                                        f"{nothing}.")
+        return RelayResult("no_target", NO_WORKER)
     elif len(ts) > 1:
-        return RelayResult("ambiguous", f"Cardinal: {len(ts)} workers are registered here; say which: "
-                                        f"{_targets_line(ts)}. {nothing.capitalize()}.")
+        return RelayResult("ambiguous", f"Cardinal: {len(ts)} workers are registered here; say which with "
+                                        f"`decide <name>: …`: {_targets_line(ts)}. Nothing was sent.")
     else:
         target = ts[0]
     if not text:
-        return RelayResult("bad_text", f"Cardinal: `decide:` needs your decision after the colon; {nothing}.")
+        return RelayResult("bad_text", "Cardinal: not sent: `decide:` needs your decision after the colon.")
     if len(text) > MAX_TEXT:
-        return RelayResult("bad_text", f"Cardinal: a decision is at most {MAX_TEXT} characters (this one has "
-                                       f"{len(text)}); {nothing}.")
+        return RelayResult("bad_text", f"Cardinal: not sent: a decision is at most {MAX_TEXT} characters (this one "
+                                       f"has {len(text)}). Shorten it and type it again.")
     if wire_safe(text) != text:
-        return RelayResult("bad_text", f"Cardinal: the decision contains a NUL or an unpaired surrogate; {nothing}.")
-    label = _target_label(target)
-    retry = "type the same `decide …` again to retry (it is stored once)"
-    status, why, b = _precheck(home, sid, target["investigation_id"], conn)
+        return RelayResult("bad_text", "Cardinal: not sent: the decision contains a character Cardinal cannot "
+                                       "store. Type it again without it.")
+    if text.endswith("?"):
+        return RelayResult("question", QUESTION)
+    if has_credential(text):
+        return RelayResult("credential", CREDENTIAL)
+    who = _who(store, target["investigation_id"], target["to_session_id"])
+    retry = "Type the same decide: again to retry; it will not be sent twice."
+    status, b = _precheck(home, sid, target["investigation_id"], conn)
     if status:
-        return RelayResult(status, f"Cardinal: your decision was NOT relayed: {why}.")
+        return RelayResult(status, f"Cardinal: not sent: {_WHY[status]}.")
     sha = sha256_text(text)
     prior = next((v for v in store["verbatim"] if v["investigation_id"] == target["investigation_id"]
                   and v["to_session_id"] == target["to_session_id"] and v["sha256"] == sha), None)
@@ -667,94 +787,118 @@ def _decide(home, sid, decision, store, typed_sha, conn, client, deadline, now, 
                       approved_at=ie._now_iso(now), client=client)
     got, detail = _send(conn, body, client, deadline, opener)
 
-    def outcome(s: str, message: str) -> dict:
-        return {"id": key, "outcome": s, "message": message, "prompt_sha256": typed_sha, "at": now}
+    def outcome(s: str, message: str, seq: Optional[int] = None) -> dict:
+        out = {"id": key, "outcome": s, "message": message, "prompt_sha256": typed_sha, "at": now}
+        if seq is not None:
+            out["seq"] = seq
+        return out
 
     unsent = {"key": key, "investigation_id": target["investigation_id"],
               "to_session_id": target["to_session_id"], "sha256": sha, "at": now}
     if got == "ok":
         ev, dup = detail["event"], detail.get("duplicate") is True
-        message = (f"Cardinal: {'already relayed' if dup else 'relayed'} your decision verbatim to {label} as event "
-                   f"#{ev['seq']} ({AUTHORITY}). The worker receives it at its next tool boundary.")
+        message = (f"Cardinal: {'already sent' if dup else 'sent'} your decision to {who} as owner decision "
+                   f"#{ev['seq']}: {excerpt(text)}. {SEES_IT}")
         status = "duplicate" if dup else "relayed"
-        _note(home, sid, outcome(status, message), now, forget_key=key)
+        _note(home, sid, outcome(status, message, ev["seq"]), now, forget_key=key)
         return RelayResult(status, message, [key])
     if got == "transient":
-        message = (f"Cardinal: your decision was NOT relayed to {label} (Cardinal did not answer in time or could "
-                   f"not be reached); {retry}.")
+        message = f"Cardinal: not sent: Cardinal did not answer in time or could not be reached. {retry}"
         _note(home, sid, outcome("transient", message), now, verbatim=unsent)
         return RelayResult("transient", message, [key])
     if got == "not_enabled":
-        message = f"Cardinal: your decision was NOT relayed: {detail}; then {retry}."
+        message = f"Cardinal: not sent: {detail}; then {retry[0].lower()}{retry[1:]}"
         _note(home, sid, outcome("not_enabled", message), now, verbatim=unsent)
         return RelayResult("not_enabled", message, [key])
-    message = f"Cardinal refused your decision for {label} ({detail}); it was not relayed."
+    reason, code = detail
+    if code == "idempotency_conflict":
+        reason = "a decision with different text was already sent under the same key"
+    message = (f"Cardinal refused your decision for {who}: {reason}. Nothing was sent; type it in the worker's "
+               "terminal instead.")
     _note(home, sid, outcome("refused", message), now, forget_key=key)
-    return RelayResult("refused", message, [key])
+    return RelayResult("refused", message, [key], code)
 
 
-def _approve(home, sid, approval, store, typed_sha, conn, client, deadline, now, opener) -> RelayResult:
-    """`approve [dp_…]` / `reject [dp_…]` of a supervisor's proposal."""
+def _unknown_id(home, sid, pid, store, now) -> str:
+    """Why draft `pid` is not waiting, as far as this session knows."""
+    r = next((r for r in reversed(store["recent"]) if r["id"] == pid), None)
+    if r is not None and r.get("outcome") == "rejected":
+        return f"you rejected it at {_hhmm(r['at'])}"
+    if r is not None and r.get("outcome") in ("relayed", "duplicate") and isinstance(r.get("seq"), int):
+        return f"it was already sent as owner decision #{r['seq']}"
+    if r is not None and r.get("outcome") == "refused":
+        return f"Cardinal refused it at {_hhmm(r['at'])}"
+    if _expired(store, pid):
+        return "it expired (drafts expire after 30 minutes)"
+    return "it is not waiting here (it expired, was withdrawn, or was never made in this session)"
+
+
+def _approve(home, sid, approval, store, previous, typed_sha, conn, client, deadline, now, opener) -> RelayResult:
+    """`approve [dp_…]` / `reject [dp_…]` of a supervisor's draft. A bare one
+    applies only to a draft made after the owner's previous prompt."""
     verb, pid = approval
     entries = store["proposals"]
+    known = has_store(home, sid)
     if pid is None:
-        if not entries:
-            return RelayResult("none")
-        if len(entries) > 1:
+        fresh = [e for e in entries if e["created_at"] > previous]
+        if not fresh:
+            return RelayResult("no_draft", NO_DRAFT) if known else RelayResult("none")
+        if len(fresh) > 1:
             return RelayResult("ambiguous", (
-                f"Cardinal: {len(entries)} owner-decision proposals are pending ({_pending_line(entries)}); nothing "
-                f"was {'relayed' if verb == 'approve' else 'rejected'}. Reply `{verb} <id>` with one of them."),
-                [e["id"] for e in entries])
-        entry = entries[0]
+                f"Cardinal: {len(fresh)} drafts are waiting; nothing was {'sent' if verb == 'approve' else 'discarded'}. "
+                f"Reply `{verb} <id>` with one of: {_drafts_line(fresh)}."), [e["id"] for e in fresh])
+        entry = fresh[0]
     else:
         entry = next((e for e in entries if e["id"] == pid), None)
         if entry is None:
-            left = f" Pending: {_pending_line(entries)}." if entries else " None is pending."
-            return RelayResult("unknown_id", (
-                f"Cardinal: there is no pending owner-decision proposal {pid} in this session (it expired, was "
-                f"withdrawn or was already handled); nothing was sent.{left}"), [pid])
+            left = f" Waiting: {_drafts_line(entries)}." if entries else ""
+            return RelayResult("unknown_id", f"Cardinal: not sent: draft {pid}: {_unknown_id(home, sid, pid, store, now)}."
+                                             f"{left}", [pid])
     pid = entry["id"]
-    to = _short(entry["to_session_id"])
+    who = _who(store, entry["investigation_id"], entry["to_session_id"])
 
-    def outcome(status: str, message: str) -> dict:
-        return {"id": pid, "outcome": status, "message": message, "prompt_sha256": typed_sha, "at": now}
+    def outcome(status: str, message: str, seq: Optional[int] = None) -> dict:
+        out = {"id": pid, "outcome": status, "message": message, "prompt_sha256": typed_sha, "at": now}
+        if seq is not None:
+            out["seq"] = seq
+        return out
 
     if verb == "reject":
-        message = (f"Cardinal: rejected owner-decision proposal {pid} (for session {to}); nothing was sent to "
-                   "the worker.")
+        message = f"Cardinal: discarded your draft {pid} for {who}; nothing was sent."
         try:
             _take(home, sid, pid, now, outcome("rejected", message))
         except OSError:
-            return RelayResult("busy", f"Cardinal: proposal {pid} could not be rejected now (its file is busy); "
-                                       f"reply `reject {pid}` again.", [pid])
+            return RelayResult("busy", f"Cardinal: draft {pid} could not be discarded just now; type `reject {pid}` "
+                                       "again.", [pid])
         return RelayResult("rejected", message, [pid])
 
-    retry = f"retry with `approve {pid}`"
-    status, why, b = _precheck(home, sid, entry["investigation_id"], conn)
+    retry = f"type `approve {pid}` to try again"
+    status, b = _precheck(home, sid, entry["investigation_id"], conn)
     if status:
-        return RelayResult(status, f"Cardinal: owner decision {pid} was NOT relayed: {why}; it is still pending.",
-                           [pid])
+        return RelayResult(status, f"Cardinal: not sent: {_WHY[status]}. Your draft {pid} is still waiting.", [pid])
     body = relay_body(entry, relay_key=pid, source=SOURCE_PROPOSAL, supervisor_session_id=sid,
                       supervisor_investigation_id=b["investigation_id"], prompt_sha256=typed_sha,
                       approved_at=ie._now_iso(now), client=client)
     got, detail = _send(conn, body, client, deadline, opener)
     if got == "ok":
         ev, dup = detail["event"], detail.get("duplicate") is True
-        message = (f"Cardinal: {'already relayed' if dup else 'relayed'} owner decision {pid} to session {to} as "
-                   f"event #{ev['seq']} ({AUTHORITY}). The worker receives it at its next tool boundary.")
+        message = (f"Cardinal: {'already sent' if dup else 'sent'} your approved draft {pid} to {who} as owner "
+                   f"decision #{ev['seq']}: {excerpt(entry['text'])}. {SEES_IT}")
         with contextlib.suppress(OSError):
-            _take(home, sid, pid, now, outcome("duplicate" if dup else "relayed", message))
+            _take(home, sid, pid, now, outcome("duplicate" if dup else "relayed", message, ev["seq"]))
         return RelayResult("duplicate" if dup else "relayed", message, [pid])
     if got == "transient":
-        message = (f"Cardinal: owner decision {pid} was NOT relayed (Cardinal did not answer in time or could not be "
-                   f"reached); it is still pending: {retry}.")
+        message = (f"Cardinal: not sent: Cardinal did not answer in time or could not be reached. Your draft {pid} "
+                   f"is still waiting; {retry}.")
         _note(home, sid, outcome("transient", message), now)
         return RelayResult("transient", message, [pid])
     if got == "not_enabled":
-        message = f"Cardinal: owner decision {pid} was NOT relayed: {detail}; then {retry}. It is still pending."
+        message = f"Cardinal: not sent: {detail}; then {retry}. Your draft {pid} is still waiting."
         _note(home, sid, outcome("not_enabled", message), now)
         return RelayResult("not_enabled", message, [pid])
-    message = f"Cardinal refused owner decision {pid} ({detail}); the proposal was dropped."
+    reason, code = detail
+    message = (f"Cardinal refused your draft {pid} for {who}: {reason}. Nothing was sent; ask the supervisor to "
+               "draft it again, or type it in the worker's terminal.")
     with contextlib.suppress(OSError):
         _take(home, sid, pid, now, outcome("refused", message))
-    return RelayResult("refused", message, [pid])
+    return RelayResult("refused", message, [pid], code)

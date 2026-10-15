@@ -1552,7 +1552,7 @@ def relay_owner_decision(payload: dict[str, Any], conv_id: str) -> str:
     try:
         from cardinal_core import owner_relay
 
-        if not owner_relay.maybe(payload.get("prompt")):
+        if not owner_relay.wanted(Path.home(), conv_id, payload.get("prompt")):
             return "no_match"
         wiring = storyboard_wiring()
         agent_id = next((payload.get(k) for k in SUBAGENT_KEYS if payload.get(k)), None)

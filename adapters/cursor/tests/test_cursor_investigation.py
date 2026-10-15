@@ -311,7 +311,8 @@ class CursorInvestigationTests(unittest.TestCase):
         self.assertEqual(res.stdout, "")                       # never {continue: false}
         [req] = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
         self.assertEqual(req["body"]["relay"]["supervisor_session_id"], CONV)
-        want = f"Cardinal: relayed owner decision {entry['id']} to session 9a8b7c6d as event #57 (owner_relayed)."
+        want = (f"Cardinal: sent your approved draft {entry['id']} to the worker (session 9a8b7c6d) as owner "
+                'decision #57: "Only the cache layer.".')
         self.assertIn(want, "\n".join(investigation_turn.consume_staged(self.home, CONV)))
         self.assertIn(want, owner_relay.recent(self.home, CONV)[-1]["message"])
         self.assertEqual(self.owner_records(), [])
@@ -320,7 +321,7 @@ class CursorInvestigationTests(unittest.TestCase):
         self.assertEqual(res.stdout, "")
         reqs = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
         self.assertEqual((len(reqs), reqs[-1]["body"]["relay"]["source"]), (2, "verbatim"))
-        self.assertIn("relayed your decision verbatim", "\n".join(investigation_turn.consume_staged(self.home, CONV)))
+        self.assertIn("sent your decision to the worker", "\n".join(investigation_turn.consume_staged(self.home, CONV)))
         # Not the owner's: a subagent payload relays nothing.
         entry = owner_relay.propose(self.home, CONV, "inv_" + "e" * 24, "9a8b7c6d-worker", "Second.")
         self.run_hook({**PROMPT, "prompt": "approve", "agent_id": "sub-1"})

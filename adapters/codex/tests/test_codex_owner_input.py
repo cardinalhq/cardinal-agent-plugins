@@ -251,7 +251,8 @@ class OwnerRelayTests(OwnerInputBase):
             "investigation_id": "inv_" + "e" * 24, "seq": 57, "type": "owner.decided"}, "duplicate": False})
         res = self.prompt(f"approve {entry['id']}")
         out = self.out(res)
-        want = f"Cardinal: relayed owner decision {entry['id']} to session 9a8b7c6d as event #57 (owner_relayed)."
+        want = (f"Cardinal: sent your approved draft {entry['id']} to the worker (session 9a8b7c6d) as owner "
+                'decision #57: "Only the cache layer.".')
         self.assertIn(want, out["systemMessage"])
         self.assertIn(want, self.context(res))
         [req] = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
@@ -267,7 +268,7 @@ class OwnerRelayTests(OwnerInputBase):
         self.fake.routes["relay-owner-decision"] = (201, {"event": {
             "investigation_id": "inv_" + "e" * 24, "seq": 58, "type": "owner.decided"}, "duplicate": False})
         out = self.out(self.prompt("decide: Stop after the cache fix."))
-        self.assertIn("relayed your decision verbatim to session 9a8b7c6d as event #58", out["systemMessage"])
+        self.assertIn("sent your decision to the worker (session 9a8b7c6d) as owner decision #58", out["systemMessage"])
         [req] = [r for r in self.fake.requests if r["path"].endswith("/relay-owner-decision")]
         self.assertEqual(req["body"]["relay"]["source"], "verbatim")
 

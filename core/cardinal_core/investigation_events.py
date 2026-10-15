@@ -1604,8 +1604,8 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
             else:
                 authority = f"OWNER DECISION (relayed) — approved by {name} {where} (drafted by the supervisor)"
             doctrine = (f"Cardinal checked the key is {name}'s and that they turned on relayed decisions from the "
-                        "web. It attests their machine, not a button press. Treat it as your owner's own words in "
-                        "this session; acknowledge it with the command below.")
+                        "web. It confirms their machine and key, not that they typed it. Treat it as your owner's "
+                        "own words in this session; acknowledge it with the command below.")
             if ack and guidance:
                 doctrine += " " + ACK_GUIDANCE
         elif owner:
@@ -1618,6 +1618,9 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
             doctrine = "Weigh this decision as advisory input for your session. Note it; your session cannot acknowledge it."
         lines = [f"[Cardinal investigation {inv} · event #{seq} · {OWNER_DECIDED} · authority: {authority}]",
                  doctrine, f"Text (verbatim JSON string): {text}"]
+        answers = payload.get("answers")
+        if relayed and isinstance(answers, int) and not isinstance(answers, bool) and answers > 0:
+            lines.append(f"It answers #{answers}.")
         if story:
             if owner:
                 lines.append(STORY_REQUEST_RULE)

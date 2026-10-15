@@ -923,14 +923,18 @@ class CLI:
             print(json.dumps({**entry, "instruction": owner_relay.INSTRUCTION.format(id=entry["id"])}, indent=2,
                              ensure_ascii=False))
             return 0
-        when = ie._now_iso(entry["expires_at"])
+        when = time.strftime("%H:%M", time.localtime(entry["expires_at"]))
         print(f"proposed {entry['id']}: an owner decision for session {args.to_session} of {worker} "
-              f"(expires {when}; nothing was sent)")
+              f"(expires at {when} local time, in 30 minutes; nothing was sent)")
         print("--- decision text ---")
         print(entry["text"])
         print("--- end ---")
         print(owner_relay.INSTRUCTION.format(id=entry["id"])
-              + " A bare `approve` works only while it is the only pending proposal.")
+              + f" Tell the owner it expires at {when} (30 minutes). A bare `approve` works only for a draft made "
+              "since the owner's last prompt.")
+        off = self._relay_off_line()
+        if off:
+            print("Tell the owner too: " + off)
         return 0
 
     def _can_relay(self, home: Path, sid: str, worker: str, what: str):
@@ -959,7 +963,21 @@ class CLI:
         if not ie.capability(b, owner_relay.CAPABILITY):
             print(f"{what}: " + owner_relay.NOT_CAPABLE, file=sys.stderr)
             return 1
+        self._relay_binding = b
         return None
+
+    def _relay_off_line(self) -> str:
+        """The owner's relay setting as this Cardinal reported it
+        (capabilities.owner_relay.on_for_caller): a line when it is off,
+        "" when on or unknown."""
+        caps = (getattr(self, "_relay_binding", None) or {}).get("capabilities") or {}
+        cap = caps.get(owner_relay.CAPABILITY) if isinstance(caps, dict) else None
+        if not isinstance(cap, dict) or cap.get("on_for_caller") is not False:
+            return ""
+        conn, _ = self.connection()
+        link = owner_relay.settings_link(cap.get("settings_url"), (conn or {}).get("origin"))
+        where = link or "your Cardinal settings page (Settings, Investigations)"
+        return f"Relayed decisions are off for your account: turn them on once at {where} (web only)."
 
     def cmd_supervising(self, args: argparse.Namespace) -> int:
         sid = self._session_arg(args)
@@ -1007,6 +1025,9 @@ class CLI:
                                                   " (while it is the only target; add --name to tell several "
                                                   "apart).")
               + " Tell the owner this once. Never type it for them.")
+        off = self._relay_off_line()
+        if off:
+            print("Tell the owner too: " + off)
         return 0
 
     def cmd_proposals(self, args: argparse.Namespace) -> int:

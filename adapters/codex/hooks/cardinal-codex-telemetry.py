@@ -841,7 +841,7 @@ def relay_owner_decision(payload: dict[str, Any], session_id: str) -> str | None
     try:
         from cardinal_core import owner_relay
 
-        if not owner_relay.maybe(payload.get("prompt")):
+        if not owner_relay.wanted(Path.home(), session_id, payload.get("prompt")):
             return None
         wiring = storyboard_wiring()
         got = owner_relay.handle_prompt(Path.home(), session_id, payload.get("prompt"), runtime="codex",
