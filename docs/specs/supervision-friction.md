@@ -125,5 +125,5 @@ the final diff and resolve findings before delivery.
 - Repository contracts: 35 tests passed; shared-skill sync and diff checks passed.
 - Claude adapter full suite: 713 tests, OK (3 skipped).
 
-These are local checks. No plugin release, server deployment, account setting
-change, or live external-state integration was performed.
+At implementation validation, these were local checks; no plugin release, server
+deployment, account setting change, or live external-state integration had been performed.
