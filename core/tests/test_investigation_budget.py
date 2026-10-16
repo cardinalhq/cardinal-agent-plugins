@@ -847,7 +847,7 @@ class Review(CLIBase):
     def test_a_crash_after_the_write_replays_without_recharging(self):
         self.events += [wev(2, 10)]
         batch = self.page_read()["batch"]
-        with patch.object(consumer, "reviewed", side_effect=OSError("disk full")):
+        with patch.object(consumer, "reviewed_locked", side_effect=OSError("disk full")):
             self.assertEqual(self.reviewed("--tag", "all:a", batch=batch)[0], 1)
         n = len(self.server.events)
         code, out, _ = self.reviewed("--tag", "all:a", batch=batch)
