@@ -88,7 +88,18 @@ Wake on new events (SKILL.md says how in this agent), then:
    reviewed, and raise `--limit` if that one is not listed) and
    `cardinal-evidence show <ev_…>` for any call you need in full.
 3. **Review**, by event type (below). Do your own checks with your own tools.
-4. **Post** what the review found (below).
+4. **Declare required posts before invoking any posting command**, then post what the
+   review found. Create `<dir>/outbox/` if necessary. Write each message to a UTF-8 text
+   file with a file-writing tool; preserve spaces and punctuation. Declare all outboxes
+   for this batch first (repeat `--require-post` for each):
+
+   ```
+   cardinal-storyboard investigation review-plan --credential-file <dir>/grant.json --cursor-file <dir>/cursor.json --batch <hash> --require-post <dir>/outbox/<n>.json
+   ```
+
+   This declaration survives even a shell quoting error that prevents a post from starting.
+   Post each with the same cursor and batch. A failed or missing post blocks review; retry
+   its exact content with the same outbox. Do not bypass the guard with another cursor.
 5. **Commit the page only now** (with a direction set, tagged and marked: Step backs):
 
    ```
@@ -129,7 +140,7 @@ Every post is to the worker's session, with a private outbox file (required for 
 use a new file per post: `<dir>/outbox/<n>.json`):
 
 ```
-cardinal-storyboard investigation post <inv> --credential-file <dir>/grant.json --to-session <worker_sid> --outbox-file <dir>/outbox/<n>.json --type <cue|question|challenge> --text "<text>" --ref "#<seq>" --ref <finding_…> --ref <ev_…>
+cardinal-storyboard investigation post <inv> --credential-file <dir>/grant.json --to-session <worker_sid> --outbox-file <dir>/outbox/<n>.json --cursor-file <dir>/cursor.json --batch <hash> --type <cue|question|challenge> --text-file <dir>/outbox/<n>.txt --ref "#<seq>" --ref <finding_…> --ref <ev_…>
 ```
 
 Each finding gets one verdict, written so the owner can read it alone:
@@ -156,9 +167,9 @@ You hold delegated supervision on your own challenges. After the worker takes a 
 - it **accepted** and later checkpointed the correction (a result citing `#<seq>`): verify
   the correction, then post the verdict on the revised claim;
 - it **declined** with a reason that holds, or new evidence resolves it:
-  `cardinal-storyboard investigation rule <seq> --withdraw --text "<why>" --credential-file <dir>/grant.json`;
+  `cardinal-storyboard investigation rule <seq> --withdraw --text-file <dir>/withdrawal.txt --credential-file <dir>/grant.json`;
 - it **declined** and your own evidence still shows the problem:
-  `cardinal-storyboard investigation rule <seq> --uphold --text "<the directive: exactly what must change>" --ref <ev_…> --credential-file <dir>/grant.json`.
+  `cardinal-storyboard investigation rule <seq> --uphold --text-file <dir>/directive.txt --ref <ev_…> --credential-file <dir>/grant.json`.
   An upheld ruling is binding on the worker, so uphold only on evidence you produced or
   checked yourself, never on suspicion. One ruling per challenge.
 
@@ -178,12 +189,12 @@ the owner's approval, and never type or simulate the owner's prompt.
 - **A draft the owner approves.** When the owner asks you to write the decision up:
 
   ```
-  cardinal-storyboard investigation propose-decision <inv> --to-session <worker_sid> --session <your_sid> --text "<the decision, in the owner's terms>" [--answers <seq>] [--ref <r>]...
+  cardinal-storyboard investigation propose-decision <inv> --to-session <worker_sid> --session <your_sid> --text-file <dir>/decision.txt [--answers <seq>] [--ref <r>]...
   ```
 
   - No `--credential-file`: it uses this machine's own key, never your grant. `--session` is
     your own session id.
-  - `--text` is the decision itself, complete and unambiguous: the worker will treat it as
+  - The text file contains the decision itself, complete and unambiguous: the worker will treat it as
     its owner's own words. `--answers <seq>` when it answers the worker's question.
   - Nothing is sent. Show the owner the text **verbatim**, its expiry time and any
     `answers #N` line, and ask them to reply `approve <id>` or `reject <id>`. Never approve
@@ -249,6 +260,29 @@ the worker's argument.
 **When the direction ends**: `budget --close --outcome done|stopped|replaced [--missed <m>,…]`
 (reworked or pivoted with no step back). After every 5 recorded outcomes, show the owner
 `budget calibrate`.
+
+## Remote evidence
+
+When the worker ran elsewhere, request a portable evidence bundle instead of restating
+unverifiable measurements. On the worker's host, include only the selected claim's
+revisions, its cited receipts, and explicitly recorded artifacts:
+
+```
+cardinal-storyboard investigation bundle <semantic_id> --investigation <inv> --out <new-directory> --root <artifact-root>
+```
+
+Read-only grantees need `read,evidence:read`; without `--root` artifact bytes are explicitly
+missing. Transfer through an owner-authorized channel, then inspect offline:
+
+```
+cardinal-storyboard investigation verify --bundle <directory>
+```
+
+Hash matches establish file integrity, not independent verification of remote execution,
+source identity or measurement validity. Run context (`host`, full `source_commit`,
+`image_digest`, `command`, timestamps) remains participant-reported. Cite captured raw
+logs and independently reproduce deciding claims where possible. Never upgrade a verdict
+just because a hash matches.
 
 ## When the work is done: review the artifacts
 

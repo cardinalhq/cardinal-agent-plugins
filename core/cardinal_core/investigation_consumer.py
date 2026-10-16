@@ -121,17 +121,65 @@ def pending(conn: dict, path: Path):
 def reviewed(conn: dict, path: Path, batch: str) -> dict:
     with locked(path):
         state = load(path, conn)
-        pending = state.get("pending")
-        if not pending or pending.get("batch") != batch:
-            raise ValueError("--batch is not the outstanding read (cursor unchanged): pass the batch of the page you "
-                             "read last, or read it again with --cursor-file")
+        pending = _check_review(state, conn, path, batch)
         state["after"] = pending["next_after"]
         state["pending"] = None
+        state.pop("required_posts", None)
         private_write(path, state)
         return {"investigation_id": conn["investigation_id"], "after": state["after"]}
 
 
-def post(conn: dict, type_: str, text: str, target: str, refs: list, *, client: str, outbox: Path, session_id=None) -> dict:
+def require_posts(conn: dict, path: Path, batch: str, outboxes: list[Path]) -> None:
+    """Declare intent before invoking the shell: even a quoting error must block review."""
+    with locked(path):
+        state = load(path, conn)
+        if not state.get("pending") or state["pending"].get("batch") != batch:
+            raise ValueError("--batch is not the outstanding read; cursor unchanged")
+        required = state.setdefault("required_posts", [])
+        for outbox in outboxes:
+            name = str(outbox.absolute())
+            if name not in required:
+                required.append(name)
+        private_write(path, state)
+
+
+def _check_review(state: dict, conn: dict, path: Path, batch: str) -> dict:
+    page = state.get("pending")
+    if not page or page.get("batch") != batch:
+        raise ValueError("--batch is not the outstanding read (cursor unchanged): pass the batch of the page you "
+                         "read last, or read it again with --cursor-file")
+    for name in state.get("required_posts", []):
+        try:
+            saved = private_read(Path(name))
+            event = saved.get("result", {}).get("event", {})
+            confirmed = (
+                saved.get("intent", {}).get("identity") == identity(conn)
+                and saved.get("review") == {"cursor": str(path.absolute()), "batch": batch}
+                and isinstance(event.get("seq"), int) and not isinstance(event.get("seq"), bool)
+                and event["seq"] > 0
+                and event.get("investigation_id") == conn["investigation_id"]
+            )
+        except (OSError, ValueError, TypeError, AttributeError):
+            confirmed = False
+        if not confirmed:
+            raise ValueError(f"required post is not confirmed: {name}; retry it with --cursor-file and --batch "
+                             "before reviewing (cursor unchanged)")
+    return page
+
+
+def check_review(conn: dict, path: Path, batch: str) -> None:
+    """Preflight before budget attribution; reviewed checks again under its commit lock."""
+    with locked(path):
+        _check_review(load(path, conn), conn, path, batch)
+
+
+def post(conn: dict, type_: str, text: str, target: str, refs: list, *, client: str, outbox: Path,
+         session_id=None, cursor: Path | None = None, batch: str | None = None) -> dict:
+    if (cursor is None) != (batch is None):
+        raise ValueError("a review post requires both --cursor-file and --batch")
+    if cursor is not None:
+        require_posts(conn, cursor, batch, [outbox])
+    review = {"cursor": str(cursor.absolute()), "batch": batch} if cursor is not None else None
     payload = ie.text_payload(text, refs or None)
     # Content-addressed key survives a lost HTTP response and process restart.
     material = [identity(conn), type_, payload, target]
@@ -141,9 +189,9 @@ def post(conn: dict, type_: str, text: str, target: str, refs: list, *, client: 
         try:
             saved = private_read(outbox)
         except FileNotFoundError:
-            saved = {"intent": intent}
+            saved = {"intent": intent, "review": review}
             private_write(outbox, saved, create=True)
-        if saved.get("intent") != intent:
+        if saved.get("intent") != intent or saved.get("review") != review:
             raise ValueError("outbox contains another advisory; retry its exact content or use a new file")
         # Always retry through the server: it checks revocation/expiry and deduplicates.
         producer = {"session_id": session_id} if not conn.get("token") and session_id else {}

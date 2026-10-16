@@ -16,6 +16,30 @@ def encoded(value):
 
 
 class SupervisionTests(fixtures.CodexStoryboardTests):
+    def test_file_post_and_review_plan_survive_failure_until_confirmed_retry(self):
+        credential, _ = self.credential()
+        cursor = self.repo / 'review.json'; outbox = self.repo / 'required.json'; text = self.repo / 'review.txt'
+        content = "Don't run `at` or $(anything).\nSource CI and image digest must match."
+        text.write_text(content)
+        self.fake.routes['read-investigation-events'] = (200, {'investigation_id': INV, 'events': [{'seq': 1}], 'next_after': 1, 'head_seq': 1})
+        common = ['--credential-file', str(credential), '--cursor-file', str(cursor)]
+        read = self.scoped_cli('events', *common, '--json')
+        self.assertEqual(read.returncode, 0, read.stderr)
+        batch = json.loads(read.stdout)['batch']
+        plan = self.scoped_cli('review-plan', *common, '--batch', batch, '--require-post', str(outbox))
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        blocked = self.scoped_cli('reviewed', *common, '--batch', batch)
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn('not confirmed', blocked.stderr)
+        self.fake.routes['append-investigation-event'] = (200, {'event': {'investigation_id': INV, 'seq': 2}})
+        posted = self.scoped_cli('post', 'challenge', *common, '--batch', batch, '--to-session', SESSION,
+                                 '--outbox-file', str(outbox), '--text-file', str(text))
+        self.assertEqual(posted.returncode, 0, posted.stderr)
+        self.assertEqual(self.fake.requests[-1]['body']['payload']['text'], content)
+        reviewed = self.scoped_cli('reviewed', *common, '--batch', batch)
+        self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+        self.assertEqual(json.loads(reviewed.stdout)['after'], 1)
+
     def scoped_cli(self, *args, **env):
         return subprocess.run([sys.executable, str(CLI), 'investigation', *args], text=True,
                               capture_output=True, env=self.env(**env), cwd=self.repo, timeout=20)

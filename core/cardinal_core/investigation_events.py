@@ -847,6 +847,12 @@ def refresh_binding_capabilities(home, sid, conn, client, *, opener=None):
 
 
 def validate_structured(name: str, value: Any, where: str = "checkpoint") -> Any:
+    if name in ("lanes", "run"):
+        from . import checkpoint_details
+        try:
+            return checkpoint_details.validate(name, value)
+        except ValueError as error:
+            raise CheckpointInputError(f"{where}: {error}") from error
     if name == "artifacts":
         if not isinstance(value, list) or len(value) > 20:
             raise CheckpointInputError(f"{where}: artifacts is a list of at most 20 objects")
@@ -874,6 +880,9 @@ def validate_structured(name: str, value: Any, where: str = "checkpoint") -> Any
 
 
 def checkpoint_capabilities(events: list, binding: dict) -> list:
+    if any(any(k in e["payload"] for k in ("lanes", "run")) for e in events) and not capability(binding, "checkpoint_details"):
+        raise CheckpointInputError("this Cardinal server does not support checkpoint lanes/run yet; upgrade Maestro "
+                                   "before recording structured status (nothing stripped or sent)")
     if any(e["type"] == "experiment.revised" for e in events) and not capability(binding, "experiment_revised"):
         raise CheckpointInputError("this Cardinal server does not support experiment.revised yet")
     if not capability(binding, "checkpoint_artifacts"):
@@ -915,7 +924,7 @@ def _semantic_event(e: Any, i: int) -> dict:
     if not isinstance(sid, str) or not sid.startswith(prefix) or not SEMANTIC_ID_RE.fullmatch(sid):
         raise CheckpointInputError(f"{where}: \"id\" is {_id_shape((prefix,))}, the same id in its later events")
     required, texts, lists = SEMANTIC_FIELDS[t]
-    structured = {"artifacts", "gate"} if t in STRUCTURED_TYPES else set()
+    structured = {"artifacts", "gate", "lanes", "run"} if t in STRUCTURED_TYPES else set()
     unknown = sorted(str(k) for k in set(fields) - {required, *texts, *lists} - structured)
     if unknown:
         takes = ", ".join(("id", required) + texts + lists)
@@ -1633,11 +1642,11 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
         if owner and ack:
             lines.append(f"Acknowledge: cardinal-storyboard investigation ack {inv} {seq} --session {sid} "
                          '--disposition accepted|declined|noted --note "<what you will do>"')
-        return "\n".join(lines)
+        return "\n".join(lines) + event_link(binding, seq)
     if e.get("type") == RULING:
         ruling = render_ruling(e, sid, ack, who, text)
         if ruling is not None:
-            return ruling
+            return ruling + event_link(binding, seq)
     # A Cardinal with delegated supervision refuses `noted` on a challenge;
     # an older one keeps the old wording (its rules are unchanged).
     challenge = e.get("type") == CHALLENGE and capability(binding or {}, SUPERVISION_CAPABILITY)
@@ -1669,7 +1678,16 @@ def render_event(e: dict, sid: str, ack: bool = True, binding=None, *, guidance:
                      "--disposition accepted|declined|noted --note \"<what you will do>\"")
     else:
         lines.append(NOT_AUTHOR_ACK)
-    return "\n".join(lines)
+    return "\n".join(lines) + event_link(binding, seq)
+
+
+def event_link(binding, seq):
+    """A server-provided, validated timeline URL; never a URL from event prose."""
+    from .investigation_bootstrap import safe_url
+    if not isinstance(binding, dict) or not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+        return ""
+    url = safe_url(binding.get("investigation_url"), None)
+    return f"\nFull event: {json_text(url.split('#', 1)[0] + '#event-' + str(seq))}" if url else ""
 
 
 # The SessionStart guidance (author sessions), after the advisory line and
@@ -1752,7 +1770,16 @@ def render(events: list, sid: str, investigation_id: str, *, cap: int = MAX_REND
     events = [e for e in events if (event_class(e) == CONTROL and e.get("type") in DELIVERABLE)
               or (event_class(e) == OWNER and e.get("type") == OWNER_DECIDED)]
     blocks: list = []
-    size = 0
+    # A short first line survives notification previews. Full envelopes below
+    # still determine authority; the excerpt remains an inert JSON string.
+    digest = ""
+    if events and event_link(binding, events[-1]["seq"]):
+        latest = events[-1]
+        excerpt = _one_line((latest.get("payload") or {}).get("text", ""), 180)
+        if len(excerpt) == 180 and " " in excerpt[90:]:
+            excerpt = excerpt.rsplit(" ", 1)[0] + "…"
+        digest = f"Cardinal #{latest['seq']} {_tok(latest['type'])}: {json_text(excerpt)}" + event_link(binding, latest["seq"])
+    size = len(digest) + 2 if digest else 0
     for e in reversed(events):
         if len(blocks) >= cap:
             break
@@ -1771,7 +1798,7 @@ def render(events: list, sid: str, investigation_id: str, *, cap: int = MAX_REND
             f"[Cardinal investigation {investigation_id} · {hidden} earlier advisory event"
             f"{'s' if hidden != 1 else ''} not shown (#{first} to #{events[hidden - 1]['seq']}); read them with: "
             f"cardinal-storyboard investigation events {investigation_id} --after {first - 1}]"))
-    return "\n\n".join(blocks)
+    return "\n\n".join(([digest] if digest else []) + blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -2472,7 +2499,7 @@ def _status_words(info: dict) -> str:
             sv.DIRECTIVE_ACCEPTED: "a directive you accepted; not yet addressed"}.get(s, _tok(s))
 
 
-def render_reminder(e: dict, info: dict, sid: str, *, stop: bool = False) -> str:
+def render_reminder(e: dict, info: dict, sid: str, *, stop: bool = False, binding=None) -> str:
     """A re-surfaced event. Periodic (every RESURFACE_EVERY boundaries): a
     compact pointer — header, a short excerpt, how to close it, how to read it
     in full — since the full text was delivered once already and every repeat
@@ -2480,7 +2507,15 @@ def render_reminder(e: dict, info: dict, sid: str, *, stop: bool = False) -> str
     inv, seq = e.get("investigation_id"), e["seq"]
     payload = e.get("payload") if isinstance(e.get("payload"), dict) else {}
     read = f"cardinal-storyboard investigation events {_tok(inv)} --after {seq - 1}"
-    text, cut = clipped_json_text(str(payload.get("text", "")), REMINDER_TEXT if stop else REMINDER_EXCERPT)
+    original = str(payload.get("text", ""))
+    cap = REMINDER_TEXT if stop else REMINDER_EXCERPT
+    text, cut = clipped_json_text(original, cap)
+    if cut and not stop:
+        excerpt = json.loads(text)
+        boundary = excerpt.rfind(" ")
+        if boundary > len(excerpt) // 2:
+            excerpt = excerpt[:boundary]
+            text, cut = json_text(excerpt), len(original) - len(excerpt)
     if cut or payload.get("_cut") is True:
         text += f" …[truncated; read it with: {read}]"
     is_directive = directive(e)
@@ -2497,7 +2532,7 @@ def render_reminder(e: dict, info: dict, sid: str, *, stop: bool = False) -> str
         lines.append(f"Acknowledge: cardinal-storyboard investigation ack {_tok(inv)} {seq} --session {sid} "
                      "--disposition accepted|conflicts [--conflicts-with SEQ] --note \"<what you will do>\"")
     lines.append(f"Still open: when done, checkpoint with refs [\"#{seq}\"].")
-    return "\n".join(lines)
+    return "\n".join(lines) + event_link(binding, seq)
 
 
 def resurface(home: Path, sid: str, emit: Optional[Callable[[str], None]]) -> bool:
@@ -2523,7 +2558,7 @@ def resurface(home: Path, sid: str, emit: Optional[Callable[[str], None]]) -> bo
                     every = RESURFACE_EVERY if times < RESURFACE_BACKOFF_AFTER else RESURFACE_BACKOFF_EVERY
                     if st["boundaries"] - int(_num(entry[1])) < every:
                         continue
-                    emit(render_reminder(tracked_event(b, target), info, sid))
+                    emit(render_reminder(tracked_event(b, target), info, sid, binding=b))
                     st["shown"][str(target)] = [entry[0], st["boundaries"], times + 1]
                     emitted = True
                     break
@@ -2549,7 +2584,7 @@ def supervision_stop(home: Path, sid: str, emit: Callable[[str], None]) -> bool:
             for target, _, info in _settle(b):
                 if info["status"] not in sv.OPEN_DIRECTIVE or target in st["stop_blocked"]:
                     continue
-                emit(render_reminder(tracked_event(b, target), info, sid, stop=True))
+                emit(render_reminder(tracked_event(b, target), info, sid, stop=True, binding=b))
                 st["stop_blocked"].append(target)
                 st["stop_blocked"] = st["stop_blocked"][-MAX_SUPERVISION_EVENTS:]
                 write_binding(home, sid, b)

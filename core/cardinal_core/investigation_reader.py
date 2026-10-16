@@ -90,6 +90,7 @@ def compact_event(event, principals, mine=None):
         "refs": payload.get("refs", []),
         "artifacts": payload.get("artifacts", []),
         "gate": payload.get("gate"),
+        **{k: payload[k] for k in ("lanes", "run") if k in payload},
         **({"relayed": relay_mark(event, mine)} if relay_mark(event, mine) else {}),
     }
 

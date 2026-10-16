@@ -95,6 +95,39 @@ class ConsumerTests(unittest.TestCase):
                 c.read(CONN, self.path, client='test')
         self.assertFalse(self.path.exists())
 
+    def test_declared_post_blocks_commit_even_if_shell_never_started(self):
+        with patch.object(c.ie, 'read_events', return_value=self.page()):
+            page = c.read(CONN, self.path, client='test')
+        outbox = Path(self.tmp.name) / 'post.json'
+        c.require_posts(CONN, self.path, page['batch'], [outbox])
+        with self.assertRaisesRegex(ValueError, 'required post is not confirmed'):
+            c.reviewed(CONN, self.path, page['batch'])
+        self.assertEqual(c.committed(CONN, self.path), 0)
+        self.assertEqual(c.pending(CONN, self.path), page)
+
+    def test_failed_review_post_blocks_until_confirmed_idempotent_retry(self):
+        with patch.object(c.ie, 'read_events', return_value=self.page()):
+            page = c.read(CONN, self.path, client='test')
+        outbox = Path(self.tmp.name) / 'post.json'
+        args = (CONN, 'challenge.added', "Don't execute `anything` or $(anything).", 'worker', [])
+        kw = dict(client='test', outbox=outbox, cursor=self.path, batch=page['batch'])
+        with patch.object(c.ie, 'append_event', side_effect=TimeoutError):
+            with self.assertRaises(TimeoutError): c.post(*args, **kw)
+        with self.assertRaises(ValueError): c.check_review(CONN, self.path, page['batch'])
+        result = {'event': {'seq': 3, 'investigation_id': INV}, 'duplicate': True}
+        with patch.object(c.ie, 'append_event', return_value=result): c.post(*args, **kw)
+        c.check_review(CONN, self.path, page['batch'])
+        self.assertEqual(c.reviewed(CONN, self.path, page['batch'])['after'], 2)
+
+    def test_unrelated_successful_outbox_cannot_satisfy_review(self):
+        with patch.object(c.ie, 'read_events', return_value=self.page()):
+            page = c.read(CONN, self.path, client='test')
+        outbox = Path(self.tmp.name) / 'old.json'
+        with patch.object(c.ie, 'append_event', return_value={'event': {'seq': 3, 'investigation_id': INV}}):
+            c.post(CONN, 'cue.added', 'Old advice', 'worker', [], client='test', outbox=outbox)
+        c.require_posts(CONN, self.path, page['batch'], [outbox])
+        with self.assertRaises(ValueError): c.reviewed(CONN, self.path, page['batch'])
+
 
 if __name__ == '__main__':
     unittest.main()
