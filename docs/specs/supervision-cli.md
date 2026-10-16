@@ -33,12 +33,16 @@ cardinal-storyboard receipt rcpt_… --credential-file /private/grant.json --out
 
 `post cue TEXT` is also accepted; member posts can broadcast and use an
 explicit idempotency key or a durable outbox, but cannot combine them. Scoped
-posts require both a target session and an outbox. A narrow compatibility
+posts require a target session and an outbox. With an explicit credential file,
+the CLI generates a private content-addressed outbox beside it when omitted;
+timeout retries with identical content and the same grant reuse the file/key.
+An explicit idempotency key cannot override generated-outbox semantics. A narrow compatibility
 exception preserves Claude's pre-#190 environment-token post when no credential
 file or outbox is supplied: the unchanged `TokenMode` parity test requires that
 broadcast form. It still never sends the member key or claims an author session.
-Explicit credential files and all shared Codex/Cursor/Gemini scoped posts retain
-the required target/outbox rule. Member outbox identity has
+Scoped environment-token posts still require an explicit outbox outside that
+legacy exception. Grant renewal does not transfer uncertain posts or ruling
+authority; resolve an uncertain old outbox under its original grant. Member outbox identity has
 `grant_id: null`; retries retain the same advisory content and key.
 
 ## Acknowledgment and action
@@ -67,17 +71,18 @@ legacy servers and cues outside that workflow.
 
 Explicit investigation reads and Claude reads page through the visible stream
 without a target-session filter. Human output in the shared CLI is compact;
-Claude retains its existing inert, one-line event envelopes for parity. JSON
+Claude retains its existing inert, one-line event envelopes for cursor-less parity;
+cursor-backed review uses complete compact lines with refs and evidence IDs. JSON
 defaults to full events, with `--fields compact` selecting the bounded field
-set. A follow invocation prints successive JSON page objects; empty pages are
+set, including secondary semantic explanations, tests and based_on. A follow invocation prints successive JSON page objects; empty pages are
 printed too, so an empty stream remains distinct from a failed read.
 
 The interval defaults to five seconds, with a two-second minimum. Follow uses
 an in-memory cursor unless a grant-backed `--cursor-file` is supplied. With
 `--auto-review` it prints and flushes each pending page, then commits its whole
-batch hash; class/type/self filters only affect the display, and if `--max`
-stops partway through a pending page, the page remains uncommitted and is
-replayed on the next run. A crash can replay a printed page. Without
+batch hash. Cursor-backed auto-review rejects class/type/max filters so hidden
+events cannot be marked reviewed. Self exclusion can hide only known own events,
+never owner decisions. A crash can replay a printed page. Without
 `--auto-review` it is a watch: it starts after the committed review position
 (so re-arming it does not replay reviewed history), then reads like an
 in-memory follow (a single `--class` and the `--type` values are sent to the
@@ -86,6 +91,31 @@ A watch is a wake signal, so `--max` never cuts a page: it returns after the
 page that reaches it (`--max 1`: the first non-empty page). The supervise
 skill's wake signal uses this form.
 There is no second durable cursor format.
+
+Claude Monitor uses `--signal-only` on its cursor-backed watch: short range/count
+notifications, no event bodies and no cursor mutation. It rejects JSON, display
+filters, include-self and auto-review. Review uses a normal read or
+`events --save-page <directory>`: an unfiltered non-follow read writes a private,
+exclusive `<batch>.json` snapshot and prints its absolute path. Read its complete
+contents, then `reviewed --page-file <path>` commits it after verifying identity,
+content and batch against the pending page. `--batch` remains supported; exactly
+one commit selector is required. Budget and cursor locks are held in that order
+through validation, attribution writes and advancement. A stale or changed
+snapshot fails before budget writes. Saved/delivered is never reviewed.
+
+Cursor reads exclude own events by default. Only nonempty pages of known own
+events with contiguous coverage of every sequence after+1 through next_after
+advance automatically, at most ten pages per invocation. Owner decisions,
+unknown events/metadata, gaps, hidden rows and mixed pages require explicit
+review. Class/type/maximum filters disable this automatic advancement;
+include-self does too. Raw mixed pending pages remain unchanged.
+
+Use `renew-cursor --previous-credential-file <old> --credential-file <new>
+--cursor-file <cursor>` instead of editing JSON. It requires the same
+origin/org/investigation and identical scopes, remotely validates the new grant,
+then preserves the committed position and discards/refetches unreviewed pending
+content under the new identity. Failures leave state unchanged. The old grant
+may be expired; the new one cannot rule on old-grant challenges.
 
 Self exclusion uses the server's `viewer.principal`. Grantee self is principal
 only; member self requires both the principal and `--session` to match.

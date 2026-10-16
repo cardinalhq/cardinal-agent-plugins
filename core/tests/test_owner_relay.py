@@ -614,6 +614,23 @@ class UxRules(Base):
         self.assertNotIn("are off", self.run_cli("supervising", WORKER_INV, "--to-session", WORKER_SID,
                                                  "--session", SID)[1])
 
+    def test_registration_reports_ready_disabled_and_unknown_in_json_and_text(self):
+        for value, status in ((True, "ready"), (False, "disabled"), (None, "unknown")):
+            cap = {"enabled": True, "settings_url": "/settings/investigations"}
+            if value is not None:
+                cap["on_for_caller"] = value
+            self.bind(capabilities={"owner_relay": cap})
+            args = ("supervising", WORKER_INV, "--to-session", WORKER_SID, "--session", SID)
+            code, text, err = self.run_cli(*args)
+            self.assertEqual(code, 0, err)
+            self.assertIn("Relay status: " + status, text)
+            code, raw, err = self.run_cli(*args, "--json")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(raw)["relay_status"], status)
+            if value is False:
+                self.assertIn("cannot relay", text)
+                self.assertIn("direct owner prompts", text)
+
     def test_capabilities_keep_the_callers_setting(self):
         from cardinal_core import investigation_bootstrap as boot
         caps = boot.capabilities({"capabilities": {

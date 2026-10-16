@@ -554,7 +554,7 @@ class FollowReader(Base):
         self.assertTrue(reader.is_self(other, {"principal": "grantee:g"}, None))
         self.assertFalse(reader.is_self(own, {}, SID))
 
-    def test_cursor_filters_display_only_print_then_commit_whole_batch(self):
+    def test_cursor_filters_cannot_auto_commit_hidden_events(self):
         path = self.home / "cursor"
         page = {
             "investigation_id": INV,
@@ -569,12 +569,10 @@ class FollowReader(Base):
         )
         with patch.object(ie, "read_events", return_value=page) as read, contextlib.redirect_stdout(
             io.StringIO()
-        ) as out:
-            self.assertEqual(reader.run(args, GRANT, INV, client="test"), 0)
-        self.assertNotIn("class_", read.call_args.kwargs)
-        self.assertEqual(consumer.private_read(path)["after"], 2)
-        self.assertIn("#2", out.getvalue())
-        self.assertNotIn("#1 ", out.getvalue())
+        ), self.assertRaisesRegex(ValueError, "hidden events must not be reviewed"):
+            reader.run(args, GRANT, INV, client="test")
+        read.assert_not_called()
+        self.assertFalse(path.exists())
 
     def test_watch_starts_at_committed_review_and_never_writes(self):
         path = self.home / "cursor"
@@ -692,6 +690,12 @@ class FollowReader(Base):
             "head_seq": 2,
             "page_size": 2,
         }
+        with patch.object(ie, "read_events") as read, self.assertRaisesRegex(ValueError, "hidden events"):
+            reader.run(args, GRANT, INV, client="test")
+        read.assert_not_called()
+        self.assertFalse(args.cursor_file.exists())
+        # A manual partial read still pins the full page without committing it.
+        args.follow, args.auto_review = False, False
         with patch.object(ie, "read_events", return_value=page), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(reader.run(args, GRANT, INV, client="test"), 0)
         saved = consumer.private_read(args.cursor_file)
