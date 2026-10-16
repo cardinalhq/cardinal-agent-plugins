@@ -18,6 +18,37 @@ from . import owner_relay
 
 EXIT_USAGE = 2
 
+
+def add_text_input(parser, field="text", *, required=False, positional=False):
+    if positional:
+        parser.add_argument(field, nargs="?")
+    group = parser.add_mutually_exclusive_group(required=required)
+    if not positional:
+        group.add_argument("--" + field)
+    group.add_argument("--" + field + "-file", type=Path, help="UTF-8 file, read verbatim; avoids shell quoting")
+    group.add_argument("--stdin", action="store_true", help="read text verbatim from standard input")
+
+
+def read_text_input(args):
+    field = "note" if args.action == "ack" else "text"
+    file = getattr(args, field + "_file", None)
+    stdin = getattr(args, "stdin", False)
+    if file is None and not stdin:
+        return
+    if getattr(args, field, None) is not None:
+        raise ValueError("choose inline text, a file, or --stdin")
+    limit = 1000 if args.action == "question" else ie.MAX_NOTE if field == "note" else ie.MAX_TEXT
+    if stdin:
+        if sys.stdin.isatty():
+            raise ValueError("--stdin requires piped input")
+        value = sys.stdin.read(limit + 1)
+    else:
+        with file.open(encoding="utf-8", newline="") as stream:
+            value = stream.read(limit + 1)
+    if len(value) > limit:
+        raise ValueError(f"{field} exceeds {limit} characters; nothing sent")
+    setattr(args, field, value)
+
 CHECKPOINT_TIMING_ENV = "CARDINAL_CHECKPOINT_TIMING"
 CHECKPOINT_HELP = """\
 A JSON array of 1-20 events on stdin, appended to this session's Investigation atomically.
@@ -35,7 +66,7 @@ Each {"type", "id", ...fields} is your claim (not a fact), never reasoning. requ
   question.opened       question_*  statement; refs
   question.resolved     question_*  answer; evidence, refs
 evidence: rcpt_ / ev_ ids (a cited ev_ is uploaded as an Investigation receipt first).
-refs: earlier ids or "#<seq>". An id stays the same in its later events. Text <= 2000 chars. artifacts/gate: findings, results, resolutions and decisions (capability-gated)."""
+refs: earlier ids or "#<seq>". An id stays the same in its later events. Text <= 2000 chars. Optional lanes/run (checkpoint_details capability) record structured progress and client-attested provenance; artifacts/gate: findings, results, resolutions and decisions (capability-gated)."""
 
 
 BUDGET_HELP = """\
@@ -641,6 +672,10 @@ class CLI:
         if got is None:
             return EXIT_USAGE
         conn, client, inv = got
+        if (args.cursor_file is not None or args.batch is not None) and (
+            args.cursor_file is None or args.batch is None or args.outbox_file is None
+        ):
+            raise ValueError("review posts require --cursor-file, --batch and --outbox-file together")
         if args.idempotency_key and args.outbox_file:
             raise ValueError("--idempotency-key and --outbox-file cannot be combined")
         # The unchanged Claude parity gate includes its pre-#190 environment-token
@@ -670,6 +705,8 @@ class CLI:
                     client=client,
                     outbox=args.outbox_file,
                     session_id=own if ie.valid_session(own) else None,
+                    cursor=args.cursor_file,
+                    batch=args.batch,
                 )
                 key = consumer.private_read(args.outbox_file)["intent"]["key"]
             else:
@@ -1171,8 +1208,10 @@ def build_parser(wiring, session_env=()):
         "revoke",
         "rule",
         "reviewed",
+        "review-plan",
         "show",
         "verify",
+        "bundle",
         "propose-decision",
         "supervising",
         "proposals",
@@ -1211,7 +1250,7 @@ def build_parser(wiring, session_env=()):
         p.set_defaults(investigation_id=None)
         if action in ("events", "show", "post", "bind", "attach", "propose-decision", "supervising", "budget"):
             p.add_argument("investigation_id", nargs=None if action in ("bind", "attach") else "?")
-        if action in ("events", "reviewed"):
+        if action in ("events", "reviewed", "review-plan", "post"):
             p.add_argument(
                 "--cursor-file", type=Path,
                 help="#190 durable pending-page review state (requires grant)"
@@ -1220,8 +1259,12 @@ def build_parser(wiring, session_env=()):
             )
         if action == "repos":
             p.add_argument("--cwd", action="append", default=[], help="checkout to attach; repeat for multiple repos; saved edits are replayed too")
+        elif action == "review-plan":
+            p.add_argument("--batch", required=True)
+            p.add_argument("--require-post", type=Path, action="append", required=True)
         elif action == "reviewed":
             p.add_argument("--batch", required=True)
+            p.add_argument("--require-post", type=Path, action="append", default=[])
             p.add_argument("--budget-file", type=Path, help="the step-back cache (default: budget.json beside the "
                            "cursor file); with an open direction every worker event needs a --tag")
             p.add_argument("--tag", action="append", default=[], metavar="SEQS:M",
@@ -1230,7 +1273,7 @@ def build_parser(wiring, session_env=()):
                 p.add_argument("--" + flag, action="append", default=[], metavar="M.N@REF",
                                help=f"mark a deliverable {flag}: <m>.<n>@#<seq> or @ev_<12 hex> (repeat)")
         elif action == "question":
-            p.add_argument("text", help="the question (1 to 1000 characters)")
+            add_text_input(p, positional=True)
         elif action == "checkpoint":
             p.add_argument("--key")
         elif action == "create":
@@ -1254,7 +1297,8 @@ def build_parser(wiring, session_env=()):
             p.add_argument("grant_id")
         elif action == "post":
             p.add_argument("--type", choices=tuple(ie.POST_TYPES))
-            p.add_argument("--text")
+            add_text_input(p)
+            p.add_argument("--batch", help="bind this post to the pending review page")
             p.add_argument("--to-session")
             p.add_argument("--ref", action="append", default=[])
             p.add_argument("--outbox-file", type=Path, help="durable intent; required with a scoped grant")
@@ -1268,7 +1312,7 @@ def build_parser(wiring, session_env=()):
                 help="a challenge: accepted|declined with --note; a directive: accepted, or conflicts "
                 "--conflicts-with SEQ; cues and questions: accepted|declined|noted",
             )
-            p.add_argument("--note")
+            add_text_input(p, "note")
             p.add_argument(
                 "--conflicts-with",
                 type=int,
@@ -1282,7 +1326,7 @@ def build_parser(wiring, session_env=()):
             outcome.add_argument("--uphold", action="store_true",
                                  help="a binding directive (once the worker took a position)")
             outcome.add_argument("--withdraw", action="store_true", help="close the challenge")
-            p.add_argument("--text", required=True, help="the directive, or why it is withdrawn (1-4000 chars)")
+            add_text_input(p, required=True)
             p.add_argument("--ref", action="append", default=[])
         elif action == "events":
             p.add_argument("--after", type=int, default=0)
@@ -1303,12 +1347,17 @@ def build_parser(wiring, session_env=()):
             p.add_argument("--include-self", dest="exclude_self", action="store_false")
             p.add_argument("--fields", choices=("full", "compact"), default="full")
         elif action == "verify":
-            p.add_argument("target", help="event seq or semantic_id")
+            p.add_argument("target", nargs="?", help="event seq or semantic_id")
             p.add_argument("--root", type=Path)
+            p.add_argument("--bundle", type=Path, help="verify a portable bundle offline")
+        elif action == "bundle":
+            p.add_argument("target", help="semantic event seq or claim id (all revisions)")
+            p.add_argument("--out", type=Path, required=True)
+            p.add_argument("--root", type=Path, help="include cited artifact files from this root, after checking hashes")
         elif action == "propose-decision":
             p.description = owner_relay.PROPOSE_HELP
             p.add_argument("--to-session", required=True, help="the worker's session id")
-            p.add_argument("--text", required=True, help="the decision, verbatim (1-4000 characters)")
+            add_text_input(p, required=True)
             p.add_argument("--answers", type=int, metavar="SEQ", help="the worker event it answers")
             p.add_argument("--ref", action="append", default=[], help="a reference (repeatable, at most 20)")
         elif action == "supervising":
@@ -1362,6 +1411,7 @@ def normalize_argv(argv):
     # Options take one value except the explicitly boolean options.
     boolean = {
         "--json",
+        "--stdin",
         "--uphold",
         "--withdraw",
         "--follow",
@@ -1409,6 +1459,9 @@ def normalize_argv(argv):
         del argv[b]
         del argv[a]
         argv.extend(["--type", typ, "--text", text])
+    elif action == "post" and len(positional) == 1 and "--type" not in argv and argv[positional[0]] in ie.POST_TYPES:
+        idx = positional[0]
+        argv[idx:idx + 1] = ["--type", argv[idx]]
     return argv
 
 
@@ -1416,31 +1469,52 @@ def cli_main(argv, wiring, session_env=(), *, legacy=False):
     args = build_parser(wiring, session_env).parse_args(normalize_argv(argv))
     cli = CLI(wiring, args, legacy)
     try:
+        read_text_input(args)
+        if args.action == "question" and args.text is None:
+            raise ValueError("question requires text, --text-file, or --stdin")
         if cli.scoped and args.action in ("propose-decision", "supervising"):
             print(f"not {'proposed' if args.action == 'propose-decision' else 'registered'}: an owner decision is "
                   "relayed with this machine's own key, never with an access grant; run "
                   f"{args.action} without --credential-file and without CARDINAL_INVESTIGATION_TOKEN", file=sys.stderr)
             return EXIT_USAGE
         if cli.scoped and args.action not in ("events", "post", "show", "reviewed", "verify", "rule", "proposals",
-                                              "withdraw-proposal", "budget"):
+                                              "withdraw-proposal", "budget", "review-plan", "bundle"):
             return EXIT_USAGE if not cli._author_only("not recorded") else 0
         if args.action == "post" and (args.type is None or args.text is None):
             raise ValueError("post requires type and text (positional or --type/--text)")
-        if args.action == "reviewed":
+        if args.action in ("reviewed", "review-plan"):
             if not cli.scoped or not args.cursor_file:
-                raise ValueError("reviewed requires a scoped credential and --cursor-file")
+                raise ValueError(f"{args.action} requires a scoped credential and --cursor-file")
             from . import investigation_budget as budget
 
             conn, _ = cli._grantee()
+            if args.require_post:
+                consumer.require_posts(conn, args.cursor_file, args.batch, args.require_post)
+            if args.action == "review-plan":
+                print("Required posts registered; the cursor stays pending until they are confirmed.")
+                return 0
             return budget.reviewed(args, grant=conn, own_conn=cli.connection, home=cli._home())
         if args.action == "verify":
             from . import investigation_artifacts
+            if args.bundle:
+                if args.target or args.root:
+                    raise ValueError("--bundle cannot be combined with target or --root")
+                from . import investigation_bundle
+                return investigation_bundle.verify(args.bundle)
+            if not args.target:
+                raise ValueError("verify requires a target or --bundle")
 
             got = cli._target(args)
             if got is None:
                 return EXIT_USAGE
             conn, client, inv = got
             return investigation_artifacts.verify(conn, inv, args.target, root=args.root, client=client)
+        if args.action == "bundle":
+            from . import investigation_bundle
+            got = cli._target(args)
+            if got is None: return EXIT_USAGE
+            conn, client, inv = got
+            return investigation_bundle.export(conn, inv, args.target, args.out, root=args.root, client=client)
         return getattr(cli, "cmd_" + args.action.replace("-", "_"))(args)
     except (ValueError, ie.CheckpointInputError) as e:
         if type(e).__name__ == "BudgetError":   # at most 2 lines, each naming the fix

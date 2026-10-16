@@ -492,6 +492,9 @@ class OwnerInputContract(OwnerInputBase):
         self.assertFalse(self.outbox().exists())
 
     def test_the_connection_travels_on_the_pipe_never_in_argv_or_env(self):
+        # A realistic unique sentinel avoids matching a checkout named "feedback"
+        # against FakeMaestro's two-character key "ck".
+        conn = {**self.fake.conn, "key": "private-owner-input-credential-sentinel-9384"}
         class FakeStdin:
             data = b""
             def write(self, b):
@@ -504,13 +507,13 @@ class OwnerInputContract(OwnerInputBase):
             calls.append((argv, kw))
             return SimpleNamespace(stdin=FakeStdin())
         with patch.object(oi.subprocess, "Popen", side_effect=popen):
-            self.assertTrue(oi.spawn_flush(self.home, OI_SID, self.fake.conn, "t"))
+            self.assertTrue(oi.spawn_flush(self.home, OI_SID, conn, "t"))
         argv, kw = calls[0]
         self.assertEqual(argv[:2], [sys.executable, "-I"])
-        self.assertNotIn(self.fake.conn["key"], " ".join(argv))
+        self.assertNotIn(conn["key"], " ".join(argv))
         self.assertNotIn("env", kw)
         self.assertTrue(kw["start_new_session"])
-        self.assertEqual(json.loads(FakeStdin.data)["conn"], self.fake.conn)
+        self.assertEqual(json.loads(FakeStdin.data)["conn"], conn)
 
     def test_a_real_detached_process_posts_it(self):
         self.bind()

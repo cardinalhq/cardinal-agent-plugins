@@ -1642,6 +1642,7 @@ def reviewed(args, *, grant: dict, own_conn: Callable, home: Path, out: Callable
     recorded (idempotent on the batch hash) before the cursor moves. A lost
     budget.json is rebuilt from those records first."""
     cursor = Path(args.cursor_file)
+    _cursor(consumer.check_review, grant, cursor, args.batch)
     bfile = Path(args.budget_file) if getattr(args, "budget_file", None) else cursor.parent / "budget.json"
     flags = [f"--{k} {v}" for k in ("tag", "done", "reopen", "redone") for v in (getattr(args, k, None) or [])]
     inv = grant["investigation_id"]

@@ -249,6 +249,15 @@ class EventClass(unittest.TestCase):
 
 
 class Render(unittest.TestCase):
+    def test_notification_digest_keeps_words_and_links_to_full_event(self):
+        binding = {"investigation_url": "https://example.test/storyboards/sb_test/investigation?org=test"}
+        e = event(9, payload={"text": "Source CI 38809041938 and image digest match. " * 20})
+        out = ie.render([e], SID, INV, binding=binding)
+        self.assertTrue(out.startswith('Cardinal #9 challenge.added: "Source CI 38809041938 and image'))
+        self.assertIn('investigation?org=test#event-9', out)
+        self.assertIn('authority: ADVISORY', out)
+        self.assertNotIn('Full event:', ie.render([e], SID, INV, binding={"investigation_url": "javascript:evil"}))
+
     def test_adopted_work_is_accepted_even_when_sent_as_a_cue(self):
         # Includes legacy events with no class/capabilities: the reported cue
         # was marked noted while its requested metadata reads were underway.
