@@ -167,11 +167,23 @@ def revoke(conn: dict, grant_id: str, *, client: str, opener=None) -> dict:
     return sync._post(conn, "revoke-investigation-grant", {"grant_id": grant_id}, client=client, opener=opener)
 
 
+# zod's message for unknown top-level keys (v4, then v3) naming a supervisor field.
+_UNRECOGNIZED_SUPERVISOR_RE = re.compile(
+    r"""^Unrecognized key(?:s|\(s\) in object)?: .*["']supervisor_(?:investigation|session)_id["']""")
+
+
 def supervisor_unsupported(err: Any) -> bool:
-    """An older maestro's strict grant schema refusing the supervisor fields."""
+    """An older maestro's strict grant schema refusing the supervisor fields:
+    400 invalid_body with a top-level unrecognized-key issue naming them.
+    Any other 400 is a real refusal."""
     body = getattr(err, "body", None)
-    return (isinstance(err, sync.ServerError) and err.status == 400 and isinstance(body, dict)
-            and body.get("error") == "invalid_body")
+    if not (isinstance(err, sync.ServerError) and err.status == 400 and isinstance(body, dict)
+            and body.get("error") == "invalid_body"):
+        return False
+    issues = body.get("issues")
+    return any(isinstance(i, dict) and i.get("path") in ("", None, [])
+               and isinstance(i.get("message"), str) and _UNRECOGNIZED_SUPERVISOR_RE.match(i["message"])
+               for i in (issues if isinstance(issues, list) else []))
 
 
 def supervisor_invalid(err: Any) -> bool:

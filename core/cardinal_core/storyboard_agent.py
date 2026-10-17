@@ -41,7 +41,7 @@ from typing import Any, Callable, Iterable, List, Optional
 from . import storyboard_context, storyboard_discovery, storyboard_files
 from .paths import AgentPaths
 
-SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}\Z")
 COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$")
 CONTEXT_DISABLE_ENV = "CARDINAL_STORYBOARD_CONTEXT"
 # No storyboard text at session start at all (the session id line and the

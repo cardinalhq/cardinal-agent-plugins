@@ -10,20 +10,29 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from cardinal_core import investigation_agent as agent
+from cardinal_core import investigation_bootstrap as boot
 from cardinal_core import investigation_events as ie
 from cardinal_core import investigation_grants as grants
 from cardinal_core import investigation_state_sync as sync
+from cardinal_core import session_repos
 from cardinal_core import storyboard_agent
 from cardinal_core import storyboard_context as sc
+from cardinal_core import storyboard_discovery
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_investigation_lifecycle import LifecycleMaestro  # noqa: E402
 
 CLIENT = "claude-code/0.58.0"
 
@@ -56,9 +65,15 @@ class HostParsingTests(unittest.TestCase):
             None, "", "/srv/git/local.git", "file:///srv/x.git", "git@bad_host:o/r",
             "ssh://[::1]/o/r", "git@" + "a" * 64 + ".com:o/r", "git@" + ".".join(["abc"] * 64) + ":o/r",
             "https://host.example:8443/o/r",  # the port would be read as the owner: no repo to link
+            "git@-github.com:o/r", "git@github-.com:o/r", "git@a..b:o/r", "git@github.com\n:o/r",
         ):
             with self.subTest(url=url):
                 self.assertIsNone(sc.host_of_url(url))
+
+    def test_an_https_remote_with_a_port_has_no_repo(self):
+        # initiative.canonical_repo reads the port as the owner ("8443/o/r").
+        self.assertIsNone(sc.repo_of_url("https://git.example.com:8443/o/r.git"))
+        self.assertEqual(sc.repo_of_url("git@git.example.com:o/r.git"), "o/r")
 
     def test_gate(self):
         for caps, sends in ((None, False), (0, False), (1, False), (True, False), ("2", False), (2, True), (3, True)):
@@ -94,6 +109,12 @@ class CollectRepoHostTests(unittest.TestCase):
 
     def test_only_with_repo(self):
         _git(self.dir, "remote", "set-url", "origin", "/srv/git/local.git")
+        ctx = sc.collect(str(self.dir), client=CLIENT, associations_api=2)
+        self.assertNotIn("repo", ctx)
+        self.assertNotIn("repo_host", ctx)
+
+    def test_https_port_remote_sends_neither(self):
+        _git(self.dir, "remote", "set-url", "origin", "https://git.example.com:8443/o/r.git")
         ctx = sc.collect(str(self.dir), client=CLIENT, associations_api=2)
         self.assertNotIn("repo", ctx)
         self.assertNotIn("repo_host", ctx)
@@ -175,10 +196,23 @@ class GrantSupervisorTests(unittest.TestCase):
         self.assertEqual(body["investigation_id"], INV)
         self.assertIn("Supervised by", err)
 
-    def test_the_session_defaults_to_the_agent_session(self):
+    def test_only_an_explicit_session_is_linked(self):
+        # The defaulted agent session may be unrelated (an owner minting a
+        # supervise grant for someone else): never a "Supervised by" link.
         code, _, err = self.grant(environ={"CODEX_SESSION_ID": SID})
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.bodies[0]["supervisor_session_id"], SID)
+        self.assertNotIn("supervisor_investigation_id", self.bodies[0])
+        self.assertNotIn("not linking", err)
+        code, _, err = self.grant("--session", SID, environ={"CODEX_SESSION_ID": "other"})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.bodies[1]["supervisor_session_id"], SID)
+
+    def test_a_session_id_with_a_trailing_newline_is_refused(self):
+        code, _, err = self.grant("--session", SID + "\n")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("supervisor_session_id", self.bodies[0])
+        self.assertIn("not a session id", err)
+        self.assertFalse(storyboard_agent.valid_session(SID + "\n"))
 
     def test_never_for_a_grant_without_supervise(self):
         code, _, err = self.grant("--session", SID, scope="read,advise,evidence:read")
@@ -224,8 +258,25 @@ class GrantSupervisorTests(unittest.TestCase):
         self.assertTrue(out_file.exists())
         self.assertNotIn(TOKEN, out)
 
+    def test_zod_v4_message_is_an_older_cardinal_too(self):
+        self.answers = [sync.ServerError(400, {"error": "invalid_body", "issues": [{"path": "", "message": (
+            'Unrecognized keys: "supervisor_investigation_id", "supervisor_session_id"')}]}, "x")]
+        code, _, err = self.grant("--session", SID)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.bodies), 2)
+
+    def test_another_invalid_body_is_a_real_refusal(self):
+        self.answers = [sync.ServerError(400, {"error": "invalid_body", "issues": [
+            {"path": "label", "message": "String must contain at most 200 character(s)"}]}, "x")]
+        code, _, err = self.grant("--session", SID)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.bodies), 1, "not retried")
+        self.assertNotIn("does not link supervisors", err)
+        self.assertIn("at most 200", err)
+
     def test_the_retry_is_once(self):
-        bad = sync.ServerError(400, {"error": "invalid_body"}, "x")
+        bad = sync.ServerError(400, {"error": "invalid_body", "issues": [{"path": "", "message": (
+            "Unrecognized key(s) in object: 'supervisor_investigation_id'")}]}, "x")
         self.answers = [bad, bad]
         code, _, err = self.grant("--session", SID)
         self.assertEqual(code, 1)
@@ -257,6 +308,100 @@ class GrantSupervisorTests(unittest.TestCase):
             ):
                 with self.subTest(scopes=scopes, sup=sup), self.assertRaises(ValueError):
                     grants.grant(conn, INV, scopes, client="t", supervisor=sup)
+
+
+REPO_CTX = {"repo": "acme/widgets", "repo_host": "github.com", "branch": "fix/one", "client": "claude-code/0.1"}
+
+
+class OldMaestro(LifecycleMaestro):
+    """ensure-session-investigation of a maestro before associations_api 2:
+    400 on the unknown context key repo_host (context.ts
+    unknownContextKeyMessage), unless repo_host_ok."""
+
+    def __init__(self):
+        super().__init__()
+        self.repo_host_ok = False
+
+    def answer(self, tool, body):
+        if tool == "ensure-session-investigation" and not self.repo_host_ok \
+                and "repo_host" in (body.get("context") or {}):
+            return 400, {"error": "invalid_body", "issues": [{"path": "context", "message": (
+                'context: unknown key "repo_host"; accepted keys: repo, repo_path, branch, pr_number, '
+                'pr_url, head_sha, workdir_hash, client, actor_email, paths')}]}
+        return super().answer(tool, body)
+
+
+class SavedContextReplayTests(unittest.TestCase):
+    """The bootstrap snapshot and staged repo labels keep repo_host; it is
+    sent only while the origin is cached at associations_api >= 2, and an
+    older maestro's 400 on it is retried once without it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.fake = OldMaestro()
+        self.addCleanup(self.fake.close)
+        env_patch = patch.dict(os.environ, {"HOME": str(self.home)})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+    def caps(self, version, runtime="codex"):
+        path = self.home / f".{runtime}" / "cardinal" / "server-caps.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({self.fake.conn["origin"]: {"associations_api": version, "at": time.time()}}))
+
+    def ensures(self):
+        return [r[1] for r in self.fake.requests if r[0] == "ensure-session-investigation"]
+
+    def start_and_stage(self):
+        res = boot.ensure(self.home, SID, self.fake.conn, "claude-code/0.1", context=dict(REPO_CTX))
+        self.assertEqual(res["status"], "ok")
+        self.assertTrue(session_repos.stage(self.home, SID, {**REPO_CTX, "repo": "acme/other"}, runtime="claude",
+                                            env={}))
+        self.assertEqual(session_repos.pending(self.home, SID, "o1")[0]["repo_host"], "github.com")
+        self.assertEqual(boot.session_context(self.home, SID, self.fake.conn)["repo_host"], "github.com")
+        self.fake.requests.clear()
+
+    def test_unknown_caps_strips_repo_host_at_send_time(self):
+        self.start_and_stage()
+        self.assertEqual(boot.refresh_capabilities(self.home, SID, self.fake.conn, "claude-code/0.1"), "ok")
+        sent = self.ensures()
+        self.assertEqual([b["context"]["repo"] for b in sent], ["acme/widgets", "acme/other"])
+        self.assertTrue(all("repo_host" not in b["context"] for b in sent))
+        self.assertEqual(boot.session_context(self.home, SID, self.fake.conn)["repo_host"], "github.com",
+                         "the saved snapshot is unchanged")
+
+    def test_caps_2_sends_it(self):
+        self.fake.repo_host_ok = True
+        self.caps(2, runtime="claude")
+        self.start_and_stage()
+        boot.refresh_capabilities(self.home, SID, self.fake.conn, "claude-code/0.1")
+        self.assertTrue(all(b["context"]["repo_host"] == "github.com" for b in self.ensures()))
+
+    def test_the_freshest_runtime_cache_wins(self):
+        self.caps(2, runtime="claude")
+        time.sleep(0.01)
+        self.caps(1, runtime="codex")  # the server was rolled back since
+        self.assertEqual(storyboard_discovery.read_caps_any(self.home, self.fake.conn["origin"]), 1)
+        self.assertNotIn("repo_host", boot.sendable_context(self.home, self.fake.conn, dict(REPO_CTX)))
+
+    def test_a_stale_cache_is_retried_once_without_repo_host(self):
+        self.caps(2)  # cached before maestro was rolled back
+        res = boot.ensure(self.home, SID, self.fake.conn, "claude-code/0.1", context=dict(REPO_CTX))
+        self.assertEqual(res["status"], "ok")
+        sent = self.ensures()
+        self.assertEqual(len(sent), 2)
+        self.assertIn("repo_host", sent[0]["context"])
+        self.assertEqual(sent[1]["context"], {k: v for k, v in REPO_CTX.items() if k != "repo_host"})
+
+    def test_other_context_refusals_are_not_retried(self):
+        self.fake.repo_host_ok = True
+        self.fake.ensure_answer = (400, {"error": "invalid_body", "issues": [
+            {"path": "context", "message": 'context: unknown key "nope"; accepted keys: repo'}]})
+        with self.assertRaises(sync.ServerError):
+            sync.ensure_session_investigation(self.fake.conn, SID, context=dict(REPO_CTX), client="c")
+        self.assertEqual(len(self.ensures()), 1)
 
 
 if __name__ == "__main__":

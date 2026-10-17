@@ -56,7 +56,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 DISABLE_ENV = "CARDINAL_STORYBOARD_CONTEXT"
 OFF_VALUES = ("0", "false", "off", "no")
 TOOL_RE = re.compile(r"^mcp__(?:plugin_cardinal_)?cardinal__storyboard__(create|add_act|publish|find|link)$")
-SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}\Z")
 COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$")
 SESSION_TOOLS = ("create", "add_act", "find")
 CONTEXT_TOOLS = ("create", "add_act", "publish", "find")

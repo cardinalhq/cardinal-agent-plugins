@@ -363,6 +363,34 @@ def write_caps(caps_path: Optional[Path], origin: Optional[str], version: int,
         pass
 
 
+# The runtimes whose capability caches (<home>/.<runtime>/cardinal/server-caps.json)
+# all describe the same server per origin.
+CAPS_RUNTIMES = ("claude", "codex", "cursor", "gemini")
+
+
+def read_caps_any(home: Optional[Path], origin: Optional[str], now: Optional[float] = None) -> Optional[int]:
+    """origin's associations_api from the freshest entry (within CAPS_TTL_S)
+    of any runtime's cache under home, or None: for a caller that sends to a
+    connection without knowing which runtime cached it (the session
+    bootstrap). Never raises."""
+    if home is None or not origin:
+        return None
+    best, best_at = None, None
+    now = time.time() if now is None else now
+    for runtime in CAPS_RUNTIMES:
+        path = Path(home) / f".{runtime}" / "cardinal" / "server-caps.json"
+        version = read_caps(path, origin, now)
+        if version is None:
+            continue
+        try:
+            at = read_json(path)[origin]["at"]
+        except Exception:
+            continue
+        if best_at is None or at > best_at:
+            best, best_at = version, at
+    return best
+
+
 def caps_from_answer(found: Any) -> int:
     """A find answer's associations_api (0 from a server without it)."""
     v = found.get("associations_api") if isinstance(found, dict) else None

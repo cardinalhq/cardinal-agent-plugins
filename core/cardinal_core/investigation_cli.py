@@ -718,15 +718,17 @@ class CLI:
 
     def _grant_supervisor(self, args, inv: str, scopes: list, conn: dict):
         """{investigation_id, session_id} of the session minting a supervise
-        grant on an explicit --investigation (--session, else this agent's
-        session): its own investigation from the local session binding, so
-        the worker's storyboard links to it as "Supervised by". None for any
-        other grant: without --investigation, --session names the granted
-        investigation; a session bound to the granted investigation itself is
-        its owner minting for someone else (both silently); a session with no
-        usable binding (with a note)."""
+        grant on an explicit --investigation with an explicit --session (never
+        the defaulted agent session: an owner minting for someone else from
+        an unrelated session must not link it): its own investigation from
+        the local session binding, so the worker's storyboard links to it as
+        "Supervised by". None for any other grant: without --investigation,
+        --session names the granted investigation; a session bound to the
+        granted investigation itself is its owner minting for someone else
+        (both silently); a session with no usable binding (with a note)."""
         sid = getattr(args, "session", None)
-        if gr.SUPERVISE not in scopes or not sid or getattr(args, "investigation", None) is None:
+        if (gr.SUPERVISE not in scopes or not sid or not getattr(args, "session_explicit", False)
+                or getattr(args, "investigation", None) is None):
             return None
         why = None
         if not ie.valid_session(sid):
@@ -1229,6 +1231,15 @@ def not_recorded(err, *, outbox=None):
     return 3
 
 
+class _ExplicitSession(argparse.Action):
+    """--session that records it was given (grant: only an explicit session
+    is linked as the supervisor)."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.session_explicit = True
+
+
 def build_parser(wiring, session_env=()):
     parser = argparse.ArgumentParser(
         prog="cardinal-storyboard investigation",
@@ -1275,11 +1286,16 @@ def build_parser(wiring, session_env=()):
         )
         if action == "checkpoint":
             p.usage = "%(prog)s [--session SID] [--key K] [--json]"
-        p.add_argument(
-            "--session", default=default_sid,
-            help=("this session (default: the agent's own); with --scope supervise its own investigation is "
-                  "recorded as the supervisor, linking the two storyboards" if action == "grant" else None),
-        )
+        if action == "grant":
+            p.add_argument(
+                "--session", default=default_sid, action=_ExplicitSession,
+                help="this session (default: the agent's own); passed explicitly with --investigation and "
+                     "--scope supervise, its own investigation is recorded as the supervisor, linking the two "
+                     "storyboards",
+            )
+            p.set_defaults(session_explicit=False)
+        else:
+            p.add_argument("--session", default=default_sid)
         p.add_argument("--json", action="store_true")
         p.add_argument(
             "--credential-file",

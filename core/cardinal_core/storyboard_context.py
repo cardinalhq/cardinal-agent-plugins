@@ -60,7 +60,8 @@ WORKDIR_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 CLIENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}(/[A-Za-z0-9._+-]{1,64})?$")
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 BRANCH_BAD_RE = re.compile(r"[\s\x00-\x1f\x7f]")
-HOST_LABEL_RE = re.compile(r"^[a-z0-9-]{1,63}$")
+# A DNS label: letters, digits and '-', not at either end (maestro's rule).
+HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 HOST_MAX = 253
 PR_MAX = 2 ** 31 - 1
 # conductor storyboard/context.ts MAX_CONTEXT_PATHS.
@@ -76,6 +77,14 @@ def workdir_hash(realpath: str, hostname: Optional[str] = None) -> str:
     the same machine hashes the same, and the path never leaves the machine."""
     host = hostname if hostname is not None else socket.gethostname()
     return hashlib.sha256(f"{host}\0{realpath}".encode("utf-8", "surrogatepass")).hexdigest()[:32]
+
+
+def _https_port(remote_url: str) -> bool:
+    """http(s)://host:port/o/r: initiative.canonical_repo reads the port as
+    the owner ("8443/o/r"), so such a remote has no repo (nor a host to link
+    it with). canonical_repo itself is unchanged (spend attribution)."""
+    m = REMOTE_URL_RE.match(remote_url)
+    return bool(m) and not remote_url.startswith("git@") and remote_url[m.end(1):m.end(1) + 1] == ":"
 
 
 def _ssh_url(remote_url: str) -> Optional[urllib.parse.SplitResult]:
@@ -95,6 +104,8 @@ def repo_of_url(remote_url: Optional[str]) -> Optional[str]:
     if not isinstance(remote_url, str):
         return None
     url = remote_url.strip()
+    if _https_port(url):
+        return None
     repo = canonical_repo(url)
     if not repo:
         parts = _ssh_url(url)
@@ -123,17 +134,15 @@ def host_of_url(remote_url: Optional[str]) -> Optional[str]:
         except ValueError:
             return None
     else:
+        if _https_port(url):
+            return None
         m = REMOTE_URL_RE.match(url)
         host = m.group(1) if m else None
-        if host is not None and not url.startswith("git@") and url[m.end(1)] == ":":
-            # https://host:port/o/r: canonical_repo reads the port as the
-            # owner, so there is no repo this host could be linked with.
-            return None
         if host is not None:
             host = host.rsplit("@", 1)[-1]  # https://user@host/o/r
     if not host:
         return None
-    host = host.strip().lower().rstrip(".")
+    host = host.lower().rstrip(".")
     if not host or len(host) > HOST_MAX:
         return None
     return host if all(HOST_LABEL_RE.match(label) for label in host.split(".")) else None
