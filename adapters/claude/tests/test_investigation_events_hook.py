@@ -649,6 +649,20 @@ class SessionStartBootstrap(Base):
         self.start(cwd=checkout)
         self.assertEqual(self.ensures()[0]["context"]["repo"], "acme/widgets")
 
+    def test_repo_host_follows_the_cached_capability(self):
+        checkout = self.base / "checkout"
+        checkout.mkdir()
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", "git@github.com:acme/widgets.git"], check=True)
+        self.start(cwd=checkout)
+        self.assertNotIn("repo_host", self.ensures()[0]["context"], "unknown caps")
+        caps = self.home / ".claude" / "cardinal" / "server-caps.json"
+        caps.parent.mkdir(parents=True, exist_ok=True)
+        caps.write_text(json.dumps({f"http://127.0.0.1:{self.fake.port}": {"associations_api": 2, "at": time.time()}}))
+        self.start(sid="sess-two", cwd=checkout)
+        ctx = self.ensures()[-1]["context"]
+        self.assertEqual((ctx["repo"], ctx["repo_host"]), ("acme/widgets", "github.com"))
+
     def test_a_fresh_session_gets_an_investigation_storyboard_and_url(self):
         ctx = self.start()
         b = self.binding()

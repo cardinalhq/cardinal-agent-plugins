@@ -113,6 +113,19 @@ class ContextHookTests(unittest.TestCase):
         got = self.updated("create", {"question": "q", "context": {}})
         self.assertEqual(got["context"]["paths"], ["svc/x.txt"])
 
+    def test_create_and_add_act_send_repo_host_only_at_caps_2(self):
+        for tool, tool_input in (("create", {"question": "q"}), ("add_act", {"storyboard_id": "sb_x"})):
+            with self.subTest(tool=tool):
+                (self.home / ".claude" / "cardinal" / "server-caps.json").unlink(missing_ok=True)
+                ctx = self.updated(tool, dict(tool_input))["context"]
+                self.assertEqual(ctx["repo"], "acme/widgets")
+                self.assertNotIn("repo_host", ctx, "unknown caps")
+                self.caps(1)
+                self.assertNotIn("repo_host", self.updated(tool, dict(tool_input))["context"])
+                self.caps(2)
+                ctx = self.updated(tool, dict(tool_input))["context"]
+                self.assertEqual((ctx["repo"], ctx["repo_host"]), ("acme/widgets", "github.com"))
+
     def test_publish_is_stamped_only_at_caps_1(self):
         self.assertEqual(self.run_hook("publish", {"storyboard_id": "sb_x"}), "", "unknown caps")
         self.caps(0)
