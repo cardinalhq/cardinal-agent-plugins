@@ -90,5 +90,6 @@ def observe(call, home, *, env=None):
             directories.insert(0, os.path.dirname(os.path.join(call.cwd or os.getcwd(), value)))
     from . import storyboard_context
     for directory in dict.fromkeys(d for d in directories if isinstance(d, str) and d):
+        # No associations_api: additional repo labels never carry repo_host.
         context = storyboard_context.collect(directory, client=call.client or runtime)
         stage(home, call.session_id, context, runtime=runtime, env=env)

@@ -25,6 +25,13 @@ same fields again, server-side; this side only avoids sending junk):
     (storyboard_files), only when the caller knows the session
     (`edited_paths`). They are where the act was written from, never what it
     is about.
+  - `repo_host`: the forge hostname of `origin` (github.com,
+    gitlab.example.com), lowercased, no port, no userinfo. Sent only with
+    `repo`, and only when the caller passes the target origin's cached
+    `associations_api` >= REPO_HOST_API (storyboard_discovery.read_caps):
+    every strict write path of an older maestro (create, add_act, publish,
+    ensure-session-investigation) answers 400 to an unknown context key, so
+    the gate lives here, for every caller. None (unknown) counts as 0.
 """
 
 from __future__ import annotations
@@ -33,16 +40,19 @@ import hashlib
 import os
 import re
 import socket
+import urllib.parse
 from typing import Any, Callable, Optional
 
-from .initiative import PROTECTED_BRANCHES, canonical_repo, git
+from .initiative import PROTECTED_BRANCHES, REMOTE_URL_RE, canonical_repo, git
 
 # The context fields maestro stores (conductor storyboard/context.ts). There is
 # deliberately no cwd: an absolute path is PII and not needed for matching.
 CONTEXT_FIELDS = (
-    "repo", "repo_path", "branch", "pr_number", "pr_url", "head_sha",
+    "repo", "repo_host", "repo_path", "branch", "pr_number", "pr_url", "head_sha",
     "workdir_hash", "client", "actor_email",
 )
+# The associations_api version from which maestro accepts `repo_host`.
+REPO_HOST_API = 2
 
 REPO_RE = re.compile(r"^[a-z0-9_.-]+(/[a-z0-9_.-]+)+$")
 HEAD_SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
@@ -50,6 +60,8 @@ WORKDIR_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 CLIENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}(/[A-Za-z0-9._+-]{1,64})?$")
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 BRANCH_BAD_RE = re.compile(r"[\s\x00-\x1f\x7f]")
+HOST_LABEL_RE = re.compile(r"^[a-z0-9-]{1,63}$")
+HOST_MAX = 253
 PR_MAX = 2 ** 31 - 1
 # conductor storyboard/context.ts MAX_CONTEXT_PATHS.
 MAX_PATHS = 50
@@ -66,12 +78,80 @@ def workdir_hash(realpath: str, hostname: Optional[str] = None) -> str:
     return hashlib.sha256(f"{host}\0{realpath}".encode("utf-8", "surrogatepass")).hexdigest()[:32]
 
 
-def _repo(cwd: str) -> Optional[str]:
-    repo = canonical_repo(git(["remote", "get-url", "origin"], cwd))
+def _ssh_url(remote_url: str) -> Optional[urllib.parse.SplitResult]:
+    """ssh://[user@]host[:port]/owner/name parsed, or None for another form."""
+    if not remote_url.lower().startswith("ssh://"):
+        return None
+    try:
+        return urllib.parse.urlsplit(remote_url)
+    except ValueError:
+        return None
+
+
+def repo_of_url(remote_url: Optional[str]) -> Optional[str]:
+    """The canonical `owner/name` of a remote URL (initiative.canonical_repo,
+    plus ssh://[user@]host[:port]/owner/name), lowercased; None when it is
+    not a forge URL."""
+    if not isinstance(remote_url, str):
+        return None
+    url = remote_url.strip()
+    repo = canonical_repo(url)
+    if not repo:
+        parts = _ssh_url(url)
+        path = parts.path.strip("/") if parts is not None else ""
+        if path.endswith(".git"):
+            path = path[:-4]
+        repo = path if "/" in path else None
     if not repo:
         return None
     repo = repo.strip().lower()
     return repo if len(repo) <= 200 and REPO_RE.match(repo) else None
+
+
+def host_of_url(remote_url: Optional[str]) -> Optional[str]:
+    """The forge hostname of a remote URL: `git@host:o/r` and
+    `https://host/o/r` (REMOTE_URL_RE group 1), `ssh://[user@]host[:port]/o/r`
+    (urllib.parse). Lowercased, without port or userinfo; None unless it is a
+    hostname of [a-z0-9-] labels, at most HOST_MAX characters."""
+    if not isinstance(remote_url, str):
+        return None
+    url = remote_url.strip()
+    parts = _ssh_url(url)
+    if parts is not None:
+        try:
+            host = parts.hostname  # drops userinfo and port, lowercases
+        except ValueError:
+            return None
+    else:
+        m = REMOTE_URL_RE.match(url)
+        host = m.group(1) if m else None
+        if host is not None and not url.startswith("git@") and url[m.end(1)] == ":":
+            # https://host:port/o/r: canonical_repo reads the port as the
+            # owner, so there is no repo this host could be linked with.
+            return None
+        if host is not None:
+            host = host.rsplit("@", 1)[-1]  # https://user@host/o/r
+    if not host:
+        return None
+    host = host.strip().lower().rstrip(".")
+    if not host or len(host) > HOST_MAX:
+        return None
+    return host if all(HOST_LABEL_RE.match(label) for label in host.split(".")) else None
+
+
+def _repo(cwd: str) -> Optional[str]:
+    return repo_of_url(git(["remote", "get-url", "origin"], cwd))
+
+
+def _repo_host(cwd: str) -> Optional[str]:
+    return host_of_url(git(["remote", "get-url", "origin"], cwd))
+
+
+def sends_repo_host(associations_api: Any) -> bool:
+    """Whether the target maestro accepts `repo_host` (associations_api >=
+    REPO_HOST_API). None / unknown / malformed counts as 0."""
+    return (isinstance(associations_api, int) and not isinstance(associations_api, bool)
+            and associations_api >= REPO_HOST_API)
 
 
 def _repo_path(cwd: str) -> Optional[str]:
@@ -159,6 +239,7 @@ def collect(
     hostname: Optional[str] = None,
     pr_resolver: Optional[PrResolver] = None,
     edited_paths: Optional[EditedPaths] = None,
+    associations_api: Optional[int] = None,
 ) -> dict:
     """The context dict for cwd (see the module docstring). Never raises.
 
@@ -166,7 +247,10 @@ def collect(
     None skips the lookup. decisions.resolve_pr (gh, cached) is the usual one,
     see default_pr_resolver. edited_paths(repo) -> [repo-relative path]: the
     files this session edited (storyboard_files.for_repo); None (the session
-    is unknown) sends no `paths`."""
+    is unknown) sends no `paths`. associations_api: the cached server
+    capability of the origin this context is sent to
+    (storyboard_discovery.read_caps); `repo_host` only at >= REPO_HOST_API,
+    None (unknown) never."""
     ctx: dict = {}
     try:
         real = os.path.realpath(cwd)
@@ -185,6 +269,7 @@ def collect(
                 branch = None
             ctx.update({
                 "repo": repo,
+                "repo_host": _repo_host(cwd) if repo and sends_repo_host(associations_api) else None,
                 "repo_path": _repo_path(cwd),
                 "branch": branch,
                 "head_sha": _head_sha(cwd),

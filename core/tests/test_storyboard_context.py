@@ -156,8 +156,8 @@ class ContractTests(unittest.TestCase):
         # conductor packages/maestro/src/storyboard/context.ts CONTEXT_FIELDS.
         self.assertEqual(
             sc.CONTEXT_FIELDS,
-            ("repo", "repo_path", "branch", "pr_number", "pr_url", "head_sha", "workdir_hash", "client",
-             "actor_email"),
+            ("repo", "repo_host", "repo_path", "branch", "pr_number", "pr_url", "head_sha", "workdir_hash",
+             "client", "actor_email"),
         )
         self.assertNotIn("cwd", sc.CONTEXT_FIELDS)
 

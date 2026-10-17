@@ -172,9 +172,11 @@ class Wiring:
             return None
 
     def collect(self, cwd: str, session_id: Optional[str], *, gh: bool) -> dict:
+        # associations_api: repo_host only for a server that accepts it.
         return storyboard_context.collect(cwd, client=self.client, actor_email=self.actor_email(),
                                           pr_resolver=self.pr_resolver(gh),
-                                          edited_paths=self.edited_paths(session_id))
+                                          edited_paths=self.edited_paths(session_id),
+                                          associations_api=self.caps())
 
 
 def valid_session(session_id: Any) -> bool:

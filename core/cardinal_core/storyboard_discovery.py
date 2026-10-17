@@ -1014,6 +1014,7 @@ def _discover(cwd: str, conn: dict, pr_resolver, opener, deadline: float, *,
 
     def work() -> None:
         try:
+            # No associations_api: find's discovery context never carries repo_host.
             ctx = discovery_context(storyboard_context.collect(cwd, client=None, pr_resolver=pr_resolver))
             if not ctx:
                 box["no_context"] = True

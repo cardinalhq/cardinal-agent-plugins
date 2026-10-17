@@ -107,8 +107,14 @@ def valid_label(v: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 def grant(conn: dict, investigation_id: str, scopes: list, *, ttl_seconds: Optional[int] = None,
-          label: Optional[str] = None, client: str, opener=None) -> dict:
-    """grant-investigation-access: the grant, its token shown once."""
+          label: Optional[str] = None, client: str, opener=None,
+          supervisor: Optional[dict] = None) -> dict:
+    """grant-investigation-access: the grant, its token shown once.
+
+    supervisor: {investigation_id, session_id} of the minting session (the
+    supervisor's own investigation), sent as supervisor_investigation_id /
+    supervisor_session_id so the storyboards link "Supervising" / "Supervised
+    by". Only with the supervise scope; never the granted investigation."""
     if not ie.valid_investigation(investigation_id):
         raise ist.FetchError(f"not an investigation id: {investigation_id!r}")
     if not scopes or any(s not in SCOPES for s in scopes):
@@ -124,6 +130,16 @@ def grant(conn: dict, investigation_id: str, scopes: list, *, ttl_seconds: Optio
         if not valid_label(label):
             raise ist.FetchError(f"the label is 1 to {MAX_LABEL} printable characters")
         body["label"] = label
+    if supervisor is not None:
+        sup_inv, sup_sid = supervisor.get("investigation_id"), supervisor.get("session_id")
+        if SUPERVISE not in scopes:
+            raise ValueError("a supervisor link needs the supervise scope")
+        if not ie.valid_investigation(sup_inv) or not ie.valid_session(sup_sid):
+            raise ValueError("the supervisor link needs an investigation id and a session id")
+        if sup_inv == investigation_id:
+            raise ValueError("an investigation cannot supervise itself")
+        body["supervisor_investigation_id"] = sup_inv
+        body["supervisor_session_id"] = sup_sid
     out = sync._post(conn, "grant-investigation-access", body, client=client, opener=opener)
     tok = out.get("token")
     if out.get("investigation_id") != investigation_id or not valid_grant_id(out.get("grant_id")) \
@@ -149,6 +165,21 @@ def revoke(conn: dict, grant_id: str, *, client: str, opener=None) -> dict:
     if not valid_grant_id(grant_id):
         raise ist.FetchError(f"not a grant id: {grant_id!r} (grt_ followed by 24 hex characters)")
     return sync._post(conn, "revoke-investigation-grant", {"grant_id": grant_id}, client=client, opener=opener)
+
+
+def supervisor_unsupported(err: Any) -> bool:
+    """An older maestro's strict grant schema refusing the supervisor fields."""
+    body = getattr(err, "body", None)
+    return (isinstance(err, sync.ServerError) and err.status == 400 and isinstance(body, dict)
+            and body.get("error") == "invalid_body")
+
+
+def supervisor_invalid(err: Any) -> bool:
+    """maestro refusing the supervisor link (not this author's investigation
+    or session, or the granted investigation itself)."""
+    body = getattr(err, "body", None)
+    return (isinstance(err, sync.ServerError) and err.status == 422 and isinstance(body, dict)
+            and body.get("error") == "supervisor_invalid")
 
 
 def refusal(err: "sync.ServerError") -> Optional[str]:

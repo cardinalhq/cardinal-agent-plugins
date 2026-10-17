@@ -307,7 +307,7 @@ def investigations_unsupported(err: "ServerError") -> bool:
     issues = err.body.get("issues")
     return any(isinstance(i, dict) and i.get("path") in ("", None, [])
                and isinstance(i.get("message"), str) and _UNRECOGNIZED_RE.match(i["message"])
-               for i in issues if isinstance(issues, list))
+               for i in (issues if isinstance(issues, list) else []))
 
 
 def _issues(body: dict) -> str:
