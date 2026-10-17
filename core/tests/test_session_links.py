@@ -51,6 +51,8 @@ class HostParsingTests(unittest.TestCase):
             "https://GitHub.com/CardinalHQ/Conductor": ("github.com", "cardinalhq/conductor"),
             "https://gitlab.example.com/group/sub/repo.git": ("gitlab.example.com", "group/sub/repo"),
             "https://ci-bot@git.example.com/o/r.git": ("git.example.com", "o/r"),
+            "https://git.example.com:8443/Group/Repo.git": ("git.example.com", "group/repo"),
+            "http://ci-bot@git.example.com:8080/g/sub/r": ("git.example.com", "g/sub/r"),
             "ssh://git@git.corp.example:2222/team/repo.git": ("git.corp.example", "team/repo"),
             "ssh://GIT.Corp.Example/team/repo": ("git.corp.example", "team/repo"),
             "git@gitea:o/r": ("gitea", "o/r"),  # single-label hosts are hostnames too
@@ -64,16 +66,18 @@ class HostParsingTests(unittest.TestCase):
         for url in (
             None, "", "/srv/git/local.git", "file:///srv/x.git", "git@bad_host:o/r",
             "ssh://[::1]/o/r", "git@" + "a" * 64 + ".com:o/r", "git@" + ".".join(["abc"] * 64) + ":o/r",
-            "https://host.example:8443/o/r",  # the port would be read as the owner: no repo to link
+            "https://host.example:99999/o/r", "https://host.example:x/o/r",  # not a port
             "git@-github.com:o/r", "git@github-.com:o/r", "git@a..b:o/r", "git@github.com\n:o/r",
         ):
             with self.subTest(url=url):
                 self.assertIsNone(sc.host_of_url(url))
 
-    def test_an_https_remote_with_a_port_has_no_repo(self):
-        # initiative.canonical_repo reads the port as the owner ("8443/o/r").
-        self.assertIsNone(sc.repo_of_url("https://git.example.com:8443/o/r.git"))
-        self.assertEqual(sc.repo_of_url("git@git.example.com:o/r.git"), "o/r")
+    def test_an_https_remote_with_a_port_is_parsed_not_read_by_canonical_repo(self):
+        from cardinal_core.initiative import canonical_repo
+        url = "https://git.example.com:8443/o/r.git"
+        self.assertEqual(canonical_repo(url), "8443/o/r", "initiative.canonical_repo is unchanged")
+        self.assertEqual((sc.repo_of_url(url), sc.host_of_url(url)), ("o/r", "git.example.com"))
+        self.assertIsNone(sc.repo_of_url("https://git.example.com:99999/o/r"))
 
     def test_gate(self):
         for caps, sends in ((None, False), (0, False), (1, False), (True, False), ("2", False), (2, True), (3, True)):
@@ -113,11 +117,11 @@ class CollectRepoHostTests(unittest.TestCase):
         self.assertNotIn("repo", ctx)
         self.assertNotIn("repo_host", ctx)
 
-    def test_https_port_remote_sends_neither(self):
+    def test_https_port_remote(self):
         _git(self.dir, "remote", "set-url", "origin", "https://git.example.com:8443/o/r.git")
         ctx = sc.collect(str(self.dir), client=CLIENT, associations_api=2)
-        self.assertNotIn("repo", ctx)
-        self.assertNotIn("repo_host", ctx)
+        self.assertEqual((ctx["repo"], ctx["repo_host"]), ("o/r", "git.example.com"))
+        self.assertNotIn("repo_host", sc.collect(str(self.dir), client=CLIENT, associations_api=1))
 
     def test_outside_git_never(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -346,8 +350,8 @@ class SavedContextReplayTests(unittest.TestCase):
         env_patch.start()
         self.addCleanup(env_patch.stop)
 
-    def caps(self, version, runtime="codex"):
-        path = self.home / f".{runtime}" / "cardinal" / "server-caps.json"
+    def caps(self, version, runtime="codex", base=None):
+        path = (base or self.home / f".{runtime}") / "cardinal" / "server-caps.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({self.fake.conn["origin"]: {"associations_api": version, "at": time.time()}}))
 
@@ -385,6 +389,25 @@ class SavedContextReplayTests(unittest.TestCase):
         self.caps(1, runtime="codex")  # the server was rolled back since
         self.assertEqual(storyboard_discovery.read_caps_any(self.home, self.fake.conn["origin"]), 1)
         self.assertNotIn("repo_host", boot.sendable_context(self.home, self.fake.conn, dict(REPO_CTX)))
+
+    def test_custom_runtime_homes_are_read_too(self):
+        origin = self.fake.conn["origin"]
+        claude_home, codex_home = self.home / "claude-cfg", self.home / "codex-cfg"
+        self.caps(1, runtime="claude")
+        time.sleep(0.01)
+        self.caps(2, base=claude_home)
+        env = {"CLAUDE_CONFIG_DIR": str(claude_home)}
+        self.assertEqual(storyboard_discovery.read_caps_any(self.home, origin, environ=env), 2, "freshest wins")
+        self.assertEqual(storyboard_discovery.read_caps_any(self.home, origin, environ={}), 1, "unset: default only")
+        time.sleep(0.01)
+        self.caps(0, base=codex_home)
+        env["CODEX_HOME"] = str(codex_home)
+        self.assertEqual(storyboard_discovery.read_caps_any(self.home, origin, environ=env), 0)
+        self.assertEqual(storyboard_discovery.read_caps_any(None, origin, environ=env), 0, "no home: custom only")
+        self.assertEqual(storyboard_discovery.read_caps_any(self.home, origin,
+                                                            environ={"CLAUDE_CONFIG_DIR": "relative/dir"}), 1)
+        paths = storyboard_discovery.caps_paths(self.home, {"CODEX_HOME": str(self.home / ".codex")})
+        self.assertEqual(len(paths), len(set(paths)), "no duplicates")
 
     def test_a_stale_cache_is_retried_once_without_repo_host(self):
         self.caps(2)  # cached before maestro was rolled back

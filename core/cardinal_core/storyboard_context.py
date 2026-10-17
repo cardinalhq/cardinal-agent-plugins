@@ -80,39 +80,45 @@ def workdir_hash(realpath: str, hostname: Optional[str] = None) -> str:
 
 
 def _https_port(remote_url: str) -> bool:
-    """http(s)://host:port/o/r: initiative.canonical_repo reads the port as
-    the owner ("8443/o/r"), so such a remote has no repo (nor a host to link
-    it with). canonical_repo itself is unchanged (spend attribution)."""
+    """http(s)://[user@]host:port/o/r: initiative.canonical_repo reads the
+    port as the owner ("8443/o/r"), so this form is parsed with urllib.parse
+    instead. canonical_repo itself is unchanged (spend attribution)."""
     m = REMOTE_URL_RE.match(remote_url)
     return bool(m) and not remote_url.startswith("git@") and remote_url[m.end(1):m.end(1) + 1] == ":"
 
 
-def _ssh_url(remote_url: str) -> Optional[urllib.parse.SplitResult]:
-    """ssh://[user@]host[:port]/owner/name parsed, or None for another form."""
-    if not remote_url.lower().startswith("ssh://"):
-        return None
+def _parsed(remote_url: str) -> bool:
+    """Whether remote_url is parsed with urllib.parse rather than
+    REMOTE_URL_RE: ssh://[user@]host[:port]/o/r and http(s) with a port."""
+    return remote_url.lower().startswith("ssh://") or _https_port(remote_url)
+
+
+def _split(remote_url: str) -> Optional[urllib.parse.SplitResult]:
+    """remote_url split, or None when it does not parse (a bad port, an
+    unterminated IPv6 literal)."""
     try:
-        return urllib.parse.urlsplit(remote_url)
+        parts = urllib.parse.urlsplit(remote_url)
+        parts.port, parts.hostname  # noqa: B018 -- both raise ValueError on junk
+        return parts
     except ValueError:
         return None
 
 
 def repo_of_url(remote_url: Optional[str]) -> Optional[str]:
     """The canonical `owner/name` of a remote URL (initiative.canonical_repo,
-    plus ssh://[user@]host[:port]/owner/name), lowercased; None when it is
-    not a forge URL."""
+    plus ssh://[user@]host[:port]/owner/name and https://host:port/owner/name
+    via urllib.parse), lowercased; None when it is not a forge URL."""
     if not isinstance(remote_url, str):
         return None
     url = remote_url.strip()
-    if _https_port(url):
-        return None
-    repo = canonical_repo(url)
-    if not repo:
-        parts = _ssh_url(url)
+    if _parsed(url):
+        parts = _split(url)
         path = parts.path.strip("/") if parts is not None else ""
         if path.endswith(".git"):
             path = path[:-4]
         repo = path if "/" in path else None
+    else:
+        repo = canonical_repo(url)
     if not repo:
         return None
     repo = repo.strip().lower()
@@ -122,20 +128,16 @@ def repo_of_url(remote_url: Optional[str]) -> Optional[str]:
 def host_of_url(remote_url: Optional[str]) -> Optional[str]:
     """The forge hostname of a remote URL: `git@host:o/r` and
     `https://host/o/r` (REMOTE_URL_RE group 1), `ssh://[user@]host[:port]/o/r`
-    (urllib.parse). Lowercased, without port or userinfo; None unless it is a
-    hostname of [a-z0-9-] labels, at most HOST_MAX characters."""
+    and `https://host:port/o/r` (urllib.parse). Lowercased, without port or
+    userinfo; None unless it is a hostname of [a-z0-9-] labels, at most
+    HOST_MAX characters."""
     if not isinstance(remote_url, str):
         return None
     url = remote_url.strip()
-    parts = _ssh_url(url)
-    if parts is not None:
-        try:
-            host = parts.hostname  # drops userinfo and port, lowercases
-        except ValueError:
-            return None
+    if _parsed(url):
+        parts = _split(url)
+        host = parts.hostname if parts is not None else None  # no userinfo, no port, lowercased
     else:
-        if _https_port(url):
-            return None
         m = REMOTE_URL_RE.match(url)
         host = m.group(1) if m else None
         if host is not None:
