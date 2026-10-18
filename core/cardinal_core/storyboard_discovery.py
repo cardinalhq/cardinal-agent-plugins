@@ -84,7 +84,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from . import storyboard_context
-from .evidence_promote import no_redirect_opener
+from .mcp_connection import no_redirect_opener
 from .initiative import git
 from .paths import atomic_write_json_compact, read_json, safe_session
 
@@ -433,10 +433,13 @@ def names_refs(body: Any) -> bool:
     return "refs" in text and "find needs" not in text
 
 
-def head_state(cwd: str) -> tuple:
+def head_state(cwd: str, *, deadline: Optional[float] = None) -> tuple:
     """(branch, head_sha) of cwd, or (None, None) outside git / before the
     first commit. One git call: this runs on every prompt."""
-    out = git(["rev-parse", "HEAD", "--abbrev-ref", "HEAD"], cwd)
+    remaining = 1.0 if deadline is None else min(1.0, deadline - time.monotonic())
+    if remaining <= 0:
+        return None, None
+    out = git(["rev-parse", "HEAD", "--abbrev-ref", "HEAD"], cwd, timeout=remaining)
     lines = (out or "").splitlines()
     if len(lines) != 2:
         return None, None
@@ -984,6 +987,9 @@ def discover(
     deliver_by: Optional[float] = None,
     client: Optional[str] = None,
     caps_path: Optional[Path] = None,
+    schedule=None,
+    stage_only: bool = False,
+    after_write=None,
 ) -> Optional[str]:
     """The block for cwd, or None. The one entry point an adapter calls.
 
@@ -995,7 +1001,9 @@ def discover(
     must finish by (default: now + deadline_s). deliver_by: absolute
     time.monotonic() after which a rendered block is stored as pending (the
     next UserPromptSubmit emits it) instead of returned. client: the
-    X-Cardinal-Client value (e.g. claude-plugin/0.40.0). caps_path: the
+    X-Cardinal-Client value (e.g. claude-plugin/0.40.0). schedule: defer a
+    needed look after the local cache check. stage_only: a background look
+    must never consume context pending for the foreground hook. caps_path: the
     server capability cache (read_caps / write_caps). Never raises."""
     try:
         if not _usable(conn):
@@ -1005,19 +1013,31 @@ def discover(
             return _subagent_block(cwd, state_dir, session_id, cid)
         if deadline is None:
             deadline = time.monotonic() + deadline_s
-        branch, head_sha = head_state(cwd)
+        branch, head_sha = head_state(cwd, deadline=deadline)
         last = _read_state(state_dir, session_id, cid) or {}
         same_head = bool(last) and (last.get("branch"), last.get("head_sha")) == (branch, head_sha)
         last_failed = same_head and last.get("failed") is True
         last_attempts = last.get("attempts") if isinstance(last.get("attempts"), int) else 1
         if event == USER_PROMPT_SUBMIT and same_head and last.get("pending") is True and _storable(last.get("block")):
+            if stage_only:
+                return None  # only the foreground hook may consume pending context
             # The last look finished too late to be delivered: deliver it now
             # (keeping a failure's backoff, if the look after it failed).
-            record_run(state_dir, session_id, branch, head_sha, last.get("at") if last_failed else now,
-                       block=last["block"], failed=last_failed, attempts=last_attempts if last_failed else 0,
-                       conn_id=cid)
+            def delivered():
+                # Do not overwrite a newer refresh or a different connection.
+                if _read_state(state_dir, session_id, cid) == last:
+                    record_run(state_dir, session_id, branch, head_sha, last.get("at") if last_failed else now,
+                               block=last["block"], failed=last_failed,
+                               attempts=last_attempts if last_failed else 0, conn_id=cid)
+            if after_write is None:
+                delivered()
+            else:
+                after_write(delivered)
             return last["block"]
         if not should_run(state_dir, session_id, branch, head_sha, event, now, cid):
+            return None
+        if schedule is not None and time.monotonic() < deadline:
+            schedule()  # refresh outside the prompt; leave context pending for its next turn
             return None
         block, failed = None, True
         try:
@@ -1063,6 +1083,8 @@ def _discover(cwd: str, conn: dict, pr_resolver, opener, deadline: float, *,
     joined until `deadline`: git, DNS and slow reads all count against the
     same budget. failed: the deadline passed, or find timed out / errored.
     Nothing to look up (no repo) is not a failure."""
+    if time.monotonic() >= deadline:
+        return None, True  # cache the failure without starting any work
     box: dict = {}
 
     def work() -> None:

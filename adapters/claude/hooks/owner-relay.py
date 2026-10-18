@@ -53,6 +53,7 @@ START = time.monotonic()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _connection  # noqa: E402
+from cardinal_core.machine_prompts import is_claude_machine_prompt  # noqa: E402
 
 # A cheap pre-check before anything is imported: the core matches the
 # normalized prompt exactly (owner_relay.APPROVAL_RE / DECIDE_RE). A session
@@ -73,15 +74,17 @@ def _limits_blocked(sid: str) -> bool:
         return False
 
 
-def main(stop: bool) -> str:
+def main(stop: bool = False, payload=None, *, emit=None, after_write=None) -> str:
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
+        payload = json.loads(sys.stdin.read() or "{}") if payload is None else payload
     except ValueError:
         return "bad_payload"
     if not isinstance(payload, dict):
         return "bad_payload"
     sid = payload.get("session_id")
     prompt = payload.get("prompt")
+    if not stop and (payload.get("agent_id") or is_claude_machine_prompt(prompt)):
+        return "not_typed"
     if not isinstance(sid, str) or not sid or "/" in sid or (not stop and not isinstance(prompt, str)):
         return "invalid"
     home = Path(os.environ.get("HOME") or str(Path.home()))
@@ -104,15 +107,18 @@ def main(stop: bool) -> str:
     got = owner_relay.handle_prompt_deferred(home, sid, prompt, prompt_id=payload.get("prompt_id"),
                                              transcript_path=payload.get("transcript_path"), conn=conn,
                                              client=client, agent_id=payload.get("agent_id"),
-                                             blocked=connected and _limits_blocked(sid))
+                                             blocked=connected and _limits_blocked(sid), after_write=after_write)
     out: dict = {}
     if got.message:
         out["systemMessage"] = got.message
     if got.context:
         out["hookSpecificOutput"] = {"hookEventName": "UserPromptSubmit", "additionalContext": got.context}
     if out:
-        sys.stdout.write(json.dumps(out))
-        sys.stdout.flush()
+        if emit is None:
+            sys.stdout.write(json.dumps(out))
+            sys.stdout.flush()
+        else:
+            emit(out)
     return f"{got.status}:{got.code}" if got.code else got.status
 
 

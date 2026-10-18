@@ -64,6 +64,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .mcp_connection import MCP_URL_PATH_RE, _NoRedirect, connection_for, origin_of, no_redirect_opener
 from . import evidence
 from . import evidence_capture as capture
 from . import evidence_gate as gate
@@ -88,7 +89,6 @@ MAX_TOOL = 200
 MAX_CLIENT = 64
 
 DEFAULT_MCP_URL = "https://app.cardinalhq.io/mcp"
-MCP_URL_PATH_RE = re.compile(r"^/api/orgs/([^/?#]+)/mcp(?:/|$)")
 RECEIPT_ID_RE = evidence.RECEIPT_ID_RE
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -125,33 +125,6 @@ class PromoteAdapter:
 # Connection helpers
 # ---------------------------------------------------------------------------
 
-def origin_of(url: str) -> Optional[str]:
-    try:
-        parts = urllib.parse.urlsplit(url)
-        port = parts.port
-    except ValueError:
-        return None
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return None
-    default = 443 if parts.scheme == "https" else 80
-    host = parts.hostname.lower()
-    if ":" in host:
-        host = "[" + host + "]"
-    return f"{parts.scheme}://{host}" + (f":{port}" if port and port != default else "")
-
-
-def connection_for(url: Any, key: Any) -> dict:
-    """{origin, org, key} for an MCP URL and key; {} when the URL is not a
-    usable http(s) URL."""
-    if not (isinstance(url, str) and url):
-        return {}
-    origin = origin_of(url)
-    if origin is None:
-        return {}
-    m = MCP_URL_PATH_RE.match(urllib.parse.urlsplit(url).path)
-    return {"origin": origin, "org": urllib.parse.unquote(m.group(1)) if m else None,
-            "key": key if isinstance(key, str) and key else None}
-
 
 def agent_paths_connection(paths) -> Callable[[Path, dict], dict]:
     """A connection lookup over an adapter's managed files (AgentPaths:
@@ -166,17 +139,6 @@ def agent_paths_connection(paths) -> Callable[[Path, dict], dict]:
         return connection_for(url, key)
     return lookup
 
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """urllib re-sends custom headers on a redirect: a credential must never
-    follow one."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
-        return None
-
-
-def no_redirect_opener():
-    return urllib.request.build_opener(_NoRedirect())
 
 
 def _error_body(err: urllib.error.HTTPError) -> dict:

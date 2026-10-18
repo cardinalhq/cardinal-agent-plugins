@@ -1192,7 +1192,7 @@ def relook_if_moved(paths: AgentPaths, runtime: str, sid: Any, cwd: Any, *,
                     event: str = "UserPromptSubmit", connection: Optional[Callable[[], dict]] = None,
                     client: Client = None, environ: Optional[Mapping] = None,
                     deadline: Optional[float] = None, deliver_by: Optional[float] = None,
-                    opener=None) -> Optional[str]:
+                    opener=None, schedule=None, stage_only: bool = False, after_write=None) -> Optional[str]:
     """The storyboard discovery block for cwd (at most 3 storyboards and 2
     KB, framed as DATA), or None (storyboard_discovery.discover over this
     runtime's session cache, the gh-cache-only PR and server-caps.json).
@@ -1230,6 +1230,7 @@ def relook_if_moved(paths: AgentPaths, runtime: str, sid: Any, cwd: Any, *,
             deliver_by=deliver_by,
             client=_client(client, runtime),
             caps_path=caps_path(paths),
+            schedule=schedule, stage_only=stage_only, after_write=after_write,
         )
     except Exception:
         return None

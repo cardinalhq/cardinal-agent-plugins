@@ -1181,7 +1181,7 @@ def _approve(home, sid, approval, store, previous, prompt_at, typed_sha, conn, c
 def handle_prompt_deferred(home: Path, sid: str, prompt: Any, *, prompt_id: Any, transcript_path: Any,
                            conn: Optional[dict], client: str, agent_id: Optional[str] = None,
                            now: Optional[float] = None, spawn: Optional[Callable[[dict], bool]] = None,
-                           blocked: bool = False) -> RelayResult:
+                           blocked: bool = False, after_write=None) -> RelayResult:
     """Claude Code's prompt hook. Its prompt hook also fires for prompts no
     person typed (a scheduled task, /loop, a peer message), with no origin
     in the payload; the transcript records the origin, but only after the
@@ -1199,7 +1199,7 @@ def handle_prompt_deferred(home: Path, sid: str, prompt: Any, *, prompt_id: Any,
     shown, told = [], []
     if not (blocked or agent_id):
         with contextlib.suppress(Exception):
-            shown, told = take_outcomes(home, sid, now)
+            shown, told = take_outcomes(home, sid, now, after_write=after_write)
     try:
         got = RelayResult("blocked") if blocked else _defer(home, sid, prompt, prompt_id, transcript_path, conn,
                                                             client, agent_id, now, spawn or spawn_verifier)
@@ -1522,12 +1522,14 @@ def _expire_pending(store: dict, now: float) -> None:
                                                    "model": False}])[-MAX_OUTCOMES:]
 
 
-def take_outcomes(home: Path, sid: str, now: float, *, model: bool = True) -> tuple:
+def take_outcomes(home: Path, sid: str, now: float, *, model: bool = True, after_write=None) -> tuple:
     """(owner lines, model lines) not shown yet, now marked shown (each
     outcome reaches each once). A model line names the earlier prompt it
     answers, so it is not taken for the current one. model=False (the Stop
     hook: no model channel) leaves the model's. Raises OSError when
-    locked."""
+    locked. after_write: register the commit for successful stdout flush;
+    an abandoned or failed response leaves outcomes available for retry.
+    """
     if not has_store(home, sid):
         return [], []
     with _updating(home, sid, now) as st:
@@ -1535,11 +1537,23 @@ def take_outcomes(home: Path, sid: str, now: float, *, model: bool = True) -> tu
         owner = [o["message"] for o in st["outcomes"] if not o["owner"]]
         told = [f'Earlier prompt ({o["ex"]}): {o["context"]}' if o.get("ex") else o["context"]
                 for o in st["outcomes"] if model and not o["model"]]
-        for o in st["outcomes"]:
-            o["owner"] = True
-            o["model"] = o["model"] or model
-        st["outcomes"] = [o for o in st["outcomes"] if not (o["owner"] and o["model"])]
+        keys = {(o.get("pid"), o["at"], o["context"]) for o in st["outcomes"]}
+        if after_write is None:
+            _mark_outcomes(st, keys, model)
+    if after_write is not None and (owner or told):
+        def delivered():
+            with _updating(home, sid, time.time()) as latest:
+                _mark_outcomes(latest, keys, model)
+        after_write(delivered)
     return owner, told
+
+
+def _mark_outcomes(store, keys, model):
+    for outcome in store["outcomes"]:
+        if (outcome.get("pid"), outcome["at"], outcome["context"]) in keys:
+            outcome["owner"] = True
+            outcome["model"] = outcome["model"] or model
+    store["outcomes"] = [o for o in store["outcomes"] if not (o["owner"] and o["model"])]
 
 
 def at_stop(home: Path, sid: str, *, wait: float = STOP_WAIT, sleep: Callable[[float], None] = time.sleep) -> Optional[str]:

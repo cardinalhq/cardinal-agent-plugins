@@ -73,7 +73,7 @@ def is_disabled(home: Optional[Path] = None, environ: Optional[dict] = None) -> 
 
 def connection(home: Optional[Path] = None, environ: Optional[dict] = None) -> dict:
     """{origin, org, key} or {} (no usable URL)."""
-    from cardinal_core.evidence_promote import connection_for
+    from cardinal_core.mcp_connection import connection_for
 
     home = home or home_dir()
     environ = os.environ if environ is None else environ
