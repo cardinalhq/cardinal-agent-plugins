@@ -29,13 +29,17 @@ Contract:
     most 3 storyboards and 2 KB, framed as DATA written by org members, not
     instructions, and pointing at storyboard__get. Draft acts' statements are
     inlined marked "[draft, not yet checked]". Nothing when nothing matches.
+  - The unified prompt-submit.py calls this adapter in background mode:
+    changed HEADs schedule a detached refresh, whose pending block is
+    delivered on the next human prompt. SessionStart/SubagentStart remain
+    synchronous.
   - Silent no-op (exit 0, no output, no network) when not connected, when
     the connection has no MCP key (telemetry-only), outside a git repo with
     an origin, or with CARDINAL_STORYBOARD_DISCOVERY=0.
   - Bounded, from INTERPRETER START (imports and settings reads count: when
     several sessions start at once they alone can take most of a second): the
     network work ends by STARTED + BUDGET_S (at least MIN_NETWORK_S after the
-    imports, never past STARTED + HARD_CAP_S). hooks.json's timeout (6) is
+    imports, never past STARTED + HARD_CAP_S). hooks.json's timeout (15) is
     the backstop, well clear of HARD_CAP_S. A block ready after DELIVER_BY_S
     is not printed (Claude Code may have stopped listening): it is stored as
     pending and the next prompt emits it, so the session and its subagents
@@ -65,11 +69,11 @@ EVENTS = ("SessionStart", "UserPromptSubmit", "SubagentStart")
 # agent_type is "<plugin>:<name>").
 FRESH_AGENTS = ("stepback",)
 
-# Seconds from process start. hooks.json's timeout for this hook is 6.
+# Seconds from process start. hooks.json's timeout for this hook is 15.
 BUDGET_S = 2.1
 MIN_NETWORK_S = 1.0
 HARD_CAP_S = 4.0
-# Before hooks.json's 6 with room for what the clock cannot see: the
+# Before hooks.json's 15 with room for what the clock cannot see: the
 # interpreter's own startup before STARTED, and record_run + print after the
 # late check.
 DELIVER_BY_S = 4.5
@@ -83,14 +87,14 @@ def deadlines(now: float, started: float = STARTED) -> tuple:
     return deadline, started + DELIVER_BY_S
 
 
-def main() -> None:
+def main(payload=None, *, emit=None, background=False, deadline=None, after_write=None) -> None:
     # Env and local-file checks first: no subprocess, no network.
     if _storyboard_discovery.is_disabled():
         return
     if not _connection.is_connected():
         return
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
+        payload = json.loads(sys.stdin.read() or "{}") if payload is None else payload
     except ValueError:
         return
     if not isinstance(payload, dict):
@@ -101,18 +105,29 @@ def main() -> None:
     agent_type = payload.get("agent_type")
     if event == "SubagentStart" and isinstance(agent_type, str) and agent_type.rsplit(":", 1)[-1] in FRESH_AGENTS:
         return
+    if event == "UserPromptSubmit":
+        from cardinal_core.machine_prompts import is_claude_machine_prompt
+        if payload.get("agent_id") or is_claude_machine_prompt(payload.get("prompt")):
+            return
     cwd = payload.get("cwd")
     if not (isinstance(cwd, str) and cwd and os.path.isdir(cwd)):
         cwd = os.getcwd()
     sid = payload.get("session_id")
     sid = sid if isinstance(sid, str) and sid else None
 
-    deadline, deliver_by = deadlines(time.monotonic())
+    local_deadline, deliver_by = deadlines(time.monotonic())
+    # Background mode does no HTTP here; keep the remaining local-work budget.
+    if not background or deadline is None:
+        deadline = local_deadline if deadline is None else min(local_deadline, deadline)
+    schedule = None
+    if background and event == "UserPromptSubmit" and sid:
+        from _discovery_refresh import spawn
+        schedule = lambda: spawn(sid, cwd)
     from cardinal_core import storyboard_authoring as sa
     block = sa.relook_if_moved(sa.agent_paths("claude"), "claude", sid, cwd, event=event,
                                connection=_storyboard_discovery.connection,
                                client=_storyboard_discovery.client_header, deadline=deadline,
-                               deliver_by=deliver_by)
+                               deliver_by=deliver_by, schedule=schedule, after_write=after_write)
     try:
         import _hook_debug
         _hook_debug.log("storyboard-discovery", STARTED, event=event, block=bool(block))
@@ -120,23 +135,27 @@ def main() -> None:
         pass
     if not block:
         return
-    sys.stdout.write(json.dumps({
+    out = {
         "hookSpecificOutput": {
             "hookEventName": event,
             "additionalContext": block,
         }
-    }))
+    }
+    if emit is None:
+        sys.stdout.write(json.dumps(out))
+    else:
+        emit(out)
 
 
 if __name__ == "__main__":
+    # Bound the whole adapter, including imports/settings/Git/cache writes.
+    from _prompt_support import bounded
+    outputs = []
     try:
-        main()
+        bounded(lambda: main(emit=outputs.append), STARTED + DELIVER_BY_S)
+        if outputs:
+            sys.stdout.write(json.dumps(outputs[0]))
+            sys.stdout.flush()
     except Exception:
         pass
-    try:
-        sys.stdout.flush()
-    except Exception:
-        pass
-    # An abandoned request thread (the deadline passed) must not hold the
-    # process open.
     os._exit(0)

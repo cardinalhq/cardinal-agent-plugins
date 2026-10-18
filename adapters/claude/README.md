@@ -370,3 +370,27 @@ change). Older servers continue to accept the existing context request, and
 the CLI reports when full multi-repo support is unavailable. Every adapter's
 next patch release includes this same shared implementation; the parity matrix
 and packaged-artifact tests guard against adapter drift.
+
+### Prompt hook latency
+
+`UserPromptSubmit` uses one synchronous `prompt-submit.py` process for
+optional decision context, owner-input disclosure/capture, owner relay,
+and storyboard discovery. The limits gate remains separate. The dispatcher
+returns one JSON response with both user messages and model context; it
+marks disclosures, relay outcomes, and staged discovery as delivered only
+after stdout has flushed successfully.
+
+Owner input is scrubbed and queued in the existing private outbox before a
+detached sender posts it. Failed sends remain retryable at the next prompt
+or Stop. Discovery checks the local branch/HEAD cache, schedules a detached
+refresh when needed, and delivers its staged context on the next human
+prompt. Pending context is checked against the current connection and
+branch/HEAD; subagents receive it only after the parent has received it.
+Task notifications and monitor events do not capture owner input or trigger
+these optional features.
+
+The dispatcher bounds its work (including imports, Git and lock waits) to
+four seconds after its first clock read, plus one second to deliver output
+and commit delivery state. The 15-second host timeout provides startup
+headroom. `CARDINAL_HOOK_DEBUG=1` records dispatcher timing and the number
+of completed components in `~/.claude/cardinal/hook-debug.log`.

@@ -28,7 +28,7 @@ VENDORED = HOOKS / "cardinal_core" / "storyboard_discovery.py"
 
 SB1 = "sb_0123456789abcdef01234567"
 # hooks.json's timeout for the hook: the backstop, well clear of its own cap.
-HOOK_TIMEOUT = 6
+HOOK_TIMEOUT = 15
 SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
 
 
@@ -329,12 +329,13 @@ class RegistrationTests(unittest.TestCase):
     def test_registered_on_every_event_sync(self):
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
         for event in ("SessionStart", "UserPromptSubmit", "SubagentStart"):
-            entries = [h for g in hooks[event] for h in g["hooks"] if h["command"].endswith("/storyboard-discovery.py")]
+            script = "prompt-submit.py" if event == "UserPromptSubmit" else "storyboard-discovery.py"
+            entries = [h for g in hooks[event] for h in g["hooks"] if h["command"].endswith("/" + script)]
             self.assertEqual(len(entries), 1, event)
             self.assertEqual(entries[0]["timeout"], HOOK_TIMEOUT, event)
             self.assertFalse(entries[0].get("async", False), f"{event}: the context must land before the model runs")
         text = (HOOKS / "hooks.json").read_text()
-        self.assertEqual(text.count("storyboard-discovery"), 3)
+        self.assertEqual(text.count("storyboard-discovery"), 2)
         self.assertTrue(os.access(HOOK, os.X_OK))
 
 

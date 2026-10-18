@@ -757,7 +757,7 @@ class OwnerRelay(Base):
                        "--credential-file", str(self.base / "grant.json"))
         self.assertEqual(res.returncode, 2)
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
-        self.assertIn("${CLAUDE_PLUGIN_ROOT}/hooks/owner-relay.py",
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}/hooks/prompt-submit.py",
                       [h["command"] for g in hooks["UserPromptSubmit"] for h in g["hooks"]])
         self.assertIn("${CLAUDE_PLUGIN_ROOT}/hooks/owner-relay.py stop",
                       [h["command"] for g in hooks["Stop"] for h in g["hooks"]])

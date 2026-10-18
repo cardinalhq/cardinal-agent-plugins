@@ -131,7 +131,7 @@
         {
           "kind": "hook",
           "event": "UserPromptSubmit",
-          "command": "/hooks/owner-input\\.py$"
+          "command": "/hooks/prompt-submit\\.py$"
         },
         {
           "kind": "grep",
@@ -1089,7 +1089,7 @@
         {
           "kind": "hook",
           "event": "UserPromptSubmit",
-          "command": "/hooks/storyboard-discovery\\.py$"
+          "command": "/hooks/prompt-submit\\.py$"
         },
         {
           "kind": "grep",
@@ -1393,7 +1393,7 @@
         {
           "kind": "hook",
           "event": "UserPromptSubmit",
-          "command": "/hooks/owner-relay\\.py$"
+          "command": "/hooks/prompt-submit\\.py$"
         },
         {
           "kind": "hook",
@@ -2460,7 +2460,7 @@
         {
           "kind": "hook",
           "event": "UserPromptSubmit",
-          "command": "/hooks/decision-prompt\\.py$"
+          "command": "/hooks/prompt-submit\\.py$"
         }
       ],
       "codex": [

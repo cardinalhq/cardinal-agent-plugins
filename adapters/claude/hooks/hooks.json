@@ -15,23 +15,8 @@
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/owner-input.py",
-            "timeout": 3
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/owner-relay.py",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/decision-prompt.py",
-            "timeout": 3
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-discovery.py",
-            "timeout": 6
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/prompt-submit.py",
+            "timeout": 15
           }
         ]
       }
@@ -177,7 +162,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-discovery.py",
-            "timeout": 6
+            "timeout": 15
           },
           {
             "type": "command",
@@ -194,7 +179,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/storyboard-discovery.py",
-            "timeout": 6
+            "timeout": 15
           }
         ]
       }

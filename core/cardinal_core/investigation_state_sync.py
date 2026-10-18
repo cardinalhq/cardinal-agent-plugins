@@ -197,7 +197,7 @@ def _post(conn: dict, tool: str, payload: dict, *, client: str, opener=None, tim
         raise ist.FetchError("not connected to Cardinal (run /cardinal:connect)")
     tracked_grant = opener is None and tool == "grant-investigation-access"
     if opener is None:
-        from .evidence_promote import _NoRedirect, no_redirect_opener
+        from .mcp_connection import _NoRedirect, no_redirect_opener
         opener = (urllib.request.build_opener(_NoRedirect(), _GrantHTTPHandler(), _GrantHTTPSHandler())
                   if tracked_grant else no_redirect_opener())
     url = conn["origin"] + "/api/orgs/" + urllib.parse.quote(conn["org"], safe="") + "/storyboards/mcp-tools/" + tool

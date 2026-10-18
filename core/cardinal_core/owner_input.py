@@ -103,6 +103,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from .machine_prompts import CLAUDE
 from . import investigation_events as ie
 from . import investigation_state as ist
 from . import investigation_state_sync as sync
@@ -810,7 +811,7 @@ REPEAT_WINDOW = 30.0
 MACHINE_PROMPTS = {
     # Claude Code re-enters UserPromptSubmit with a synthetic body when a
     # background task finishes ("<task-notification>…" / "task-notification …").
-    "claude": (re.compile(r"^\s*<?task-notification[\s>]", re.IGNORECASE),),
+    "claude": (CLAUDE,),
     # gemini-cli's loop recovery sends this as the request (_recoverFromLoop),
     # and /init submits its GEMINI.md template (performInit, gemini-cli
     # 0.63.0 packages/core/src/commands/init.ts). An MCP server's prompt

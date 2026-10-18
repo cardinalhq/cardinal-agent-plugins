@@ -35,7 +35,10 @@ Contract:
     object {"systemMessage": ...} (shown to the user; not model context, not
     a block). Never plain text (plain stdout of UserPromptSubmit becomes
     context).
-  - Otherwise cardinal_core.owner_input.submit: the prompt scrubbed of
+  - The unified prompt-submit.py uses capture(detached=True): queue locally
+    before spawning a sender; no prompt waits on HTTP. The standalone
+    adapter also supports synchronous submit for existing callers/tests.
+  - With synchronous submit: the prompt scrubbed of
     credentials, NUL stripped, cut to 32 KiB, with prompt_sha256 the sha256
     of the scrubbed text (never of the original); posted to
     record-owner-input within a hard ~1.5 s wall-clock bound (the session's
@@ -69,15 +72,18 @@ START = time.monotonic()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _connection  # noqa: E402
 import _owner_input  # noqa: E402
+from cardinal_core.machine_prompts import is_claude_machine_prompt  # noqa: E402
 
 
-def main() -> str:
+def main(payload=None, *, emit=None, after_write=None, detached=False) -> str:
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
+        payload = json.loads(sys.stdin.read() or "{}") if payload is None else payload
     except ValueError:
         return "bad_payload"
     if not isinstance(payload, dict):
         return "bad_payload"
+    if payload.get("agent_id") or is_claude_machine_prompt(payload.get("prompt")):
+        return "not_typed"
     sid = payload.get("session_id")
     home = Path(os.environ.get("HOME") or str(Path.home()))
     sessions = home / ".cardinal" / "investigations" / "sessions"
@@ -95,14 +101,20 @@ def main() -> str:
     got = owner_input.capture(home, sid, payload.get("prompt"), runtime="claude",
                               conn=_storyboard_discovery.connection(), client=_storyboard_discovery.client_header(),
                               environ=os.environ, agent_id=payload.get("agent_id"),
-                              deadline=START + owner_input.BUDGET, cwd=payload.get("cwd"), mark_disclosure=False)
+                              deadline=START + owner_input.BUDGET, cwd=payload.get("cwd"), mark_disclosure=False,
+                              detached=detached)
     if got.disclosure:
         # Tell the user before anything is captured; this prompt is not. It
         # counts as told only once the message was flushed (a failed write
         # raises here and leaves it unrecorded).
-        sys.stdout.write(json.dumps({"systemMessage": got.disclosure}))
-        sys.stdout.flush()
-        owner_input.mark_disclosed(home, sid)
+        if emit is None:
+            sys.stdout.write(json.dumps({"systemMessage": got.disclosure}))
+            sys.stdout.flush()
+            owner_input.mark_disclosed(home, sid)
+        else:
+            emit({"systemMessage": got.disclosure})
+            # The dispatcher marks disclosure only after its merged JSON was flushed.
+            after_write(lambda: owner_input.mark_disclosed(home, sid))
     return got.status
 
 

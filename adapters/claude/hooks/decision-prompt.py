@@ -9,7 +9,7 @@ refines / supersedes). Silent when capture is off.
 Contract: stdin is Claude Code's UserPromptSubmit JSON ({session_id,
 prompt, ...}); stdout is hookSpecificOutput.additionalContext when
 capture is on, else nothing. Sync (its output must reach this turn's
-context) and cheap: two small JSON reads. NEVER blocks — every failure
+context). Disabled sessions skip telemetry and decision imports. Every failure
 exits 0 silently.
 
 Not connected (hooks/_connection.py: /cardinal:connect never ran, the
@@ -21,26 +21,17 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _connection  # noqa: E402
-import _otel_settings  # noqa: E402
-from cardinal_core import decisions  # noqa: E402
-from cardinal_core.paths import AgentPaths  # noqa: E402
-
-PATHS = AgentPaths(home=Path.home() / ".claude")
+from cardinal_core.machine_prompts import is_claude_machine_prompt  # noqa: E402
 CLI = Path(__file__).resolve().parent.parent / "bin" / "cardinal-decision"
-
-# Claude Code re-enters UserPromptSubmit with a synthetic
-# "task-notification …" body when a background task finishes; that is
-# not a turn the human took.
-TASK_NOTIFICATION_RE = re.compile(r"^\s*task-notification\s", re.IGNORECASE)
 
 
 def build_context(cli: str, session_id: str, entries: list[dict]) -> str:
+    from cardinal_core.decisions import render_ledger
     return (
         "Cardinal decision capture is on for this session. When you make a choice that "
         "constrains later work (picking between approaches, settling an open question, or "
@@ -53,38 +44,48 @@ def build_context(cli: str, session_id: str, entries: list[dict]) -> str:
         "made the call. Anchor the files or symbols the decision governs. Link a decision to "
         "an earlier one when it builds on, narrows, or replaces it.\n"
         "Decisions so far this session:\n"
-        f"{decisions.render_ledger(entries)}"
+        f"{render_ledger(entries)}"
     )
 
 
-def main() -> None:
+def main(payload=None, *, emit=None) -> None:
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
+        payload = json.loads(sys.stdin.read() or "{}") if payload is None else payload
     except ValueError:
         return
     if not isinstance(payload, dict):
+        return
+    prompt = payload.get("prompt")
+    if payload.get("agent_id") or is_claude_machine_prompt(prompt):
         return
     if not _connection.is_connected():
         return
     session_id = str(payload.get("session_id") or "").strip()
     if not session_id:
         return
-    prompt = payload.get("prompt")
-    if isinstance(prompt, str) and TASK_NOTIFICATION_RE.match(prompt):
+    # Check the switch before importing the decision and telemetry modules.
+    settings_env = _connection._settings_env(Path.home() / ".claude")
+    override = settings_env.get("CARDINAL_DECISIONS") or os.environ.get("CARDINAL_DECISIONS")
+    runtime_dir = Path.home() / ".claude" / "cardinal"
+    if isinstance(override, str) and override.strip().lower() in ("1", "true", "on", "yes", "0", "false", "off", "no"):
+        enabled = override.strip().lower() in ("1", "true", "on", "yes")
+    else:
+        try:
+            enabled = json.loads((runtime_dir / "decisions" / "config.json").read_text()).get("enabled") is True
+        except (OSError, ValueError, AttributeError):
+            enabled = False
+    if not enabled:
         return
 
-    settings_env = _otel_settings.load_otel_settings()
-    override = settings_env.get(decisions.ENABLE_ENV) or os.environ.get(decisions.ENABLE_ENV)
-    if not decisions.is_enabled(PATHS.runtime_dir, override):
-        return
-
-    entries = decisions.read_ledger(PATHS.runtime_dir, session_id)
-    print(json.dumps({
+    from cardinal_core import decisions
+    entries = decisions.read_ledger(runtime_dir, session_id)
+    out = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": build_context(str(CLI), session_id, entries),
         }
-    }))
+    }
+    (emit or (lambda value: print(json.dumps(value))))(out)
 
 
 if __name__ == "__main__":

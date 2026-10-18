@@ -43,7 +43,7 @@ SESSION = "3f2a9c1e-7b4d-4e0a-9c8b-1a2b3c4d5e6f"
 GATED_HOOKS = (
     "initiative-convention.py", "plan-state.py", "git-state.py", "limits-gate.py", "decision-prompt.py",
     "turn-usage.py", "plan-usage.py", "subagent-usage.py", "storyboard-discovery.py", "storyboard-edit-lookup.py",
-    "owner-input.py", "owner-relay.py",
+    "owner-input.py", "owner-relay.py", "prompt-submit.py",
 )
 # Run in both modes: storyboards work before connect. storyboard-context.py
 # only rewrites a storyboard tool call's input locally (no network).
@@ -299,13 +299,16 @@ class HookRegistrationTests(unittest.TestCase):
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
         commands = {h["command"].rsplit("/", 1)[-1].split()[0] for groups in hooks.values() for g in groups
                     for h in g["hooks"]}
-        self.assertEqual(commands, set(GATED_HOOKS) | set(STORYBOARD_HOOKS) | set(LOCAL_ONLY_HOOKS) | set(FAST_PATH_HOOKS),
+        delegated = {"decision-prompt.py", "owner-input.py"}
+        self.assertEqual(commands, (set(GATED_HOOKS) - delegated) | set(STORYBOARD_HOOKS) | set(LOCAL_ONLY_HOOKS) | set(FAST_PATH_HOOKS),
                          "a new hook must be gated on _connection or listed as working unconnected")
         for sh in FAST_PATH_HOOKS:
             text = (HOOKS / sh).read_text()
             for tool in ("python", "curl", "wget", "nc "):
                 self.assertNotIn(tool, text.split("\n", 1)[1].replace("investigation-events.py", ""), sh)
         for name in list(GATED_HOOKS) + list(FAST_PATH_HOOKS.values()) + list(BACKGROUND_HOOKS):
+            if name == "prompt-submit.py":
+                continue  # it delegates to each component's connection gate (relay also explains disconnects)
             text = (HOOKS / name).read_text()
             self.assertIn("import _connection", text, name)
             self.assertIn("if not _connection.is_connected():", text, name)
