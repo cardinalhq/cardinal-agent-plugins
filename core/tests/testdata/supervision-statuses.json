@@ -1,6 +1,6 @@
 {
-  "description": "Delegated supervision: event streams -> challengeStatuses (packages/shared/src/investigation/supervision.ts). The Cardinal plugin's Python mirror runs the same cases. expected: every challenge.added of the stream, by seq, -> {status, ruling_seq, owner_seq}. Events carry the wire fields the derivation reads (seq, type, class, payload, producer.is_investigation_author, and authority on owner.decided: only owner_decision overrules).",
-  "version": 2,
+  "description": "Delegated supervision: event streams -> challengeStatuses (packages/shared/src/investigation/supervision.ts). The Cardinal plugin's Python mirror runs the same cases. expected: every challenge.added of the stream, by seq, -> {status, ruling_seq, owner_seq, correction_seq, verification_seq}; correction_seq is correctionOf(challenge) (the worker's current correction) for addressed / directive_addressed and the verdict statuses, else null, so the fixture pins correctionOf too. The derivation's display-only `verdicts` list is not part of this contract. Events carry the wire fields the derivation reads (seq, type, class, payload, producer.is_investigation_author, authority on owner.decided: only owner_decision overrules, and on verdicts producer.lineage_root_id when present, else producer.principal.id, as their grant lineage: grt_…002 with lineage_root_id grt_…001 is grt_…001's successor; grt_…003 is another lineage). Version 3 (cardinal-agent-plugins docs/specs/supervision-verdicts.md, revision 5): verification.recorded verdicts, correctionOf, and supersedes_verdict (only active verdicts combine; a superseded one still judged k, and #<v> answers only a verdict on the current correction, before its revision). Cases may carry expected_next: by challenge seq, {actor: worker | supervisor | owner | nobody, action_kind: take_position | comply | submit_correction | verify_correction | rule | decide_conflict | reverify | decide_unverifiable | none} — nextAction(status, the deciding verdict's staleness) (§3, Next action); compared only where present.",
+  "version": 3,
   "cases": [
     {
       "name": "no challenges: nothing to report",
@@ -15,7 +15,7 @@
       "events": [
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "This commit changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
       ],
-      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "open: a legacy noted ack is not a position",
@@ -23,7 +23,7 @@
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "noted" }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "open: a non-author ack is not a position",
@@ -31,7 +31,7 @@
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Will revert." }, "producer": { "principal": { "kind": "user", "id": "someone-else" }, "session_id": "sess-x", "is_investigation_author": false } }
       ],
-      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "accepted: the worker accepted with a plan",
@@ -39,7 +39,7 @@
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting the restore change; keeping only the approved fix." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "accepted", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "accepted", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "addressed: an author checkpoint after the position cites #<challenge seq>",
@@ -48,7 +48,7 @@
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": null } }
     },
     {
       "name": "accepted: a checkpoint citing the challenge BEFORE the position does not address it",
@@ -57,7 +57,7 @@
         { "seq": 2, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_a", "statement": "Seen it.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 3, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "accepted", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "accepted", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "accepted: refs match whole strings (#10 is not #1), and a supervisor's cue citing it does not address it",
@@ -67,7 +67,7 @@
         { "seq": 3, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_b", "statement": "Unrelated.", "refs": ["#10", "#1 "] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 4, "type": "cue.added", "class": "control", "payload": { "text": "Still waiting on this.", "refs": ["#1"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
       ],
-      "expected": { "1": { "status": "accepted", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "accepted", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "declined: awaiting a ruling",
@@ -75,7 +75,7 @@
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "The owner asked for this refactor in turn 3." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "declined", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "declined", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "declined: a checkpoint citing a declined challenge does not address it",
@@ -84,7 +84,7 @@
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "In scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_keep", "statement": "Keeping it.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "declined", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "declined", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "withdrawn: the supervisor withdrew after a decline",
@@ -93,7 +93,7 @@
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "In scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 3, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "withdrawn", "text": "Agreed, the owner asked for it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
       ],
-      "expected": { "1": { "status": "withdrawn", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "withdrawn", "ruling_seq": 3, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "withdrawn: allowed with no position at all",
@@ -101,7 +101,7 @@
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "withdrawn", "text": "My mistake." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
       ],
-      "expected": { "1": { "status": "withdrawn", "ruling_seq": 2, "owner_seq": null } }
+      "expected": { "1": { "status": "withdrawn", "ruling_seq": 2, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "withdrawn: only the first ruling on a challenge counts",
@@ -111,7 +111,7 @@
         { "seq": 3, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "withdrawn", "text": "Fine." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 4, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
       ],
-      "expected": { "1": { "status": "withdrawn", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "withdrawn", "ruling_seq": 3, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "directive: upheld, not yet acknowledged",
@@ -120,7 +120,7 @@
         { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "In scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 3, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Revert the restore change; the approval covered the fix only." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
       ],
-      "expected": { "1": { "status": "directive", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "directive", "ruling_seq": 3, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "directive: noted and declined acks of a directive are not positions",
@@ -131,7 +131,7 @@
         { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "noted" }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 5, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "declined", "note": "No." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-b", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "directive", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "directive", "ruling_seq": 3, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "directive: an accepted challenge can be upheld too (accept-and-cite is not a way out)",
@@ -141,7 +141,7 @@
         { "seq": 3, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_x", "statement": "Looked at it.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 4, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Actually revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000002" }, "session_id": null, "is_investigation_author": false } }
       ],
-      "expected": { "1": { "status": "directive", "ruling_seq": 4, "owner_seq": null } }
+      "expected": { "1": { "status": "directive", "ruling_seq": 4, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "directive_accepted: the worker complies",
@@ -151,7 +151,7 @@
         { "seq": 3, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting now." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "directive_accepted", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "directive_accepted", "ruling_seq": 3, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "directive_addressed: a later author checkpoint cites #<ruling seq>",
@@ -162,7 +162,7 @@
         { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting now." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 5, "type": "experiment.completed", "class": "semantic", "payload": { "semantic_id": "exp_revert", "outcome": "Reverted; tests green.", "refs": ["#3"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "directive_addressed", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "directive_addressed", "ruling_seq": 3, "owner_seq": null, "correction_seq": 5, "verification_seq": null } }
     },
     {
       "name": "directive_addressed: citing #<challenge seq> works too",
@@ -173,7 +173,7 @@
         { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting now." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 5, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "directive_addressed", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "directive_addressed", "ruling_seq": 3, "owner_seq": null, "correction_seq": 5, "verification_seq": null } }
     },
     {
       "name": "directive_accepted: a checkpoint before the acceptance does not address the directive",
@@ -184,7 +184,7 @@
         { "seq": 4, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_c", "statement": "Noting the directive.", "refs": ["#3"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 5, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting now." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "directive_accepted", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "directive_accepted", "ruling_seq": 3, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "conflicted: the worker names an owner decision (one that answers nothing does not overrule)",
@@ -195,7 +195,7 @@
         { "seq": 4, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 2, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 5, "type": "acknowledged", "class": "control", "payload": { "ack_of": 4, "disposition": "conflicts", "conflicts_with": 1, "note": "The owner's decision asks for this refactor." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
-      "expected": { "2": { "status": "conflicted", "ruling_seq": 4, "owner_seq": 1 } }
+      "expected": { "2": { "status": "conflicted", "ruling_seq": 4, "owner_seq": 1, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "overruled: an owner decision answering the challenge wins over accepted",
@@ -205,7 +205,7 @@
         { "seq": 3, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Keep the refactor.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } },
         { "seq": 4, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Really, keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 3 } }
+      "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 3, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "overruled: an owner decision answering the ruling wins over directive_accepted",
@@ -216,7 +216,7 @@
         { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting now." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 5, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Do not revert.", "answers": 3 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "overruled", "ruling_seq": 3, "owner_seq": 5 } }
+      "expected": { "1": { "status": "overruled", "ruling_seq": 3, "owner_seq": 5, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "overruled: wins over conflicted",
@@ -228,7 +228,7 @@
         { "seq": 5, "type": "acknowledged", "class": "control", "payload": { "ack_of": 4, "disposition": "conflicts", "conflicts_with": 1, "note": "Owner asked." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 6, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Keep it.", "answers": 2 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
-      "expected": { "2": { "status": "overruled", "ruling_seq": 4, "owner_seq": 6 } }
+      "expected": { "2": { "status": "overruled", "ruling_seq": 4, "owner_seq": 6, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "overruled: wins over addressed",
@@ -238,7 +238,7 @@
         { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 4, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Put it back.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 4 } }
+      "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 4, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "an owner decision answering another event does not overrule",
@@ -248,7 +248,7 @@
         { "seq": 3, "type": "acknowledged", "class": "control", "payload": { "ack_of": 2, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 4, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Because of the outage.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
-      "expected": { "2": { "status": "accepted", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "2": { "status": "accepted", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "the latest position across sessions wins",
@@ -258,7 +258,7 @@
         { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
         { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "Session b disagrees: it is in scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-b", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "declined", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "declined", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "a relayed owner decision (owner_relayed) answering a challenge or its ruling does not overrule",
@@ -269,7 +269,7 @@
         { "seq": 4, "type": "owner.decided", "class": "owner", "authority": "owner_relayed", "payload": { "text": "Keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-sup", "is_investigation_author": true } },
         { "seq": 5, "type": "owner.decided", "class": "owner", "authority": "owner_relayed", "payload": { "text": "Do not revert.", "answers": 3 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-sup", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "directive", "ruling_seq": 3, "owner_seq": null } }
+      "expected": { "1": { "status": "directive", "ruling_seq": 3, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "an owner.decided without an authority does not overrule",
@@ -277,7 +277,7 @@
         { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "Out of scope change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
         { "seq": 2, "type": "owner.decided", "class": "owner", "payload": { "text": "Keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-sup", "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null } }
+      "expected": { "1": { "status": "open", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "the lowest web owner decision overrules, after a relayed one",
@@ -286,7 +286,7 @@
         { "seq": 2, "type": "owner.decided", "class": "owner", "authority": "owner_relayed", "payload": { "text": "Keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-sup", "is_investigation_author": true } },
         { "seq": 3, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Keep it.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
       ],
-      "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 3 } }
+      "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 3, "correction_seq": null, "verification_seq": null } }
     },
     {
       "name": "several challenges in one stream are independent",
@@ -301,9 +301,705 @@
         { "seq": 8, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_a", "statement": "Did A.", "refs": ["#1", "#3"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
       ],
       "expected": {
-        "1": { "status": "withdrawn", "ruling_seq": 7, "owner_seq": null },
-        "2": { "status": "directive", "ruling_seq": 6, "owner_seq": null },
-        "3": { "status": "open", "ruling_seq": null, "owner_seq": null }
+        "1": { "status": "withdrawn", "ruling_seq": 7, "owner_seq": null, "correction_seq": null, "verification_seq": null },
+        "2": { "status": "directive", "ruling_seq": 6, "owner_seq": null, "correction_seq": null, "verification_seq": null },
+        "3": { "status": "open", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null }
+      }
+    },
+    {
+      "name": "rejected: a rejected test_run then a verified code_review on the same correction stays rejected (rejected dominates)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } }
+    },
+    {
+      "name": "verified: a later summary citing the challenge without revision or artifacts does not displace a judged correction",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_summary", "statement": "Summary: the restore change is reverted.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } }
+    },
+    {
+      "name": "rejected: a later summary citing only the challenge cannot hide a rejection; correctionOf stays the judged correction",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_summary", "statement": "Summary: all done.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } }
+    },
+    {
+      "name": "addressed: a citing event answering a rejection by #<verdict> supersedes it without a revision; the old verdict no longer counts",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert2", "statement": "Also reverted the second call site.", "refs": ["#1", "#4"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 5, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: a correction with a revision after a verified verdict re-opens verification",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert2", "statement": "Reworked the revert.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 5, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: artifacts make a correction substantive too",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "fixture_validation", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "fixture_validation: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert2", "statement": "Regenerated the golden file.", "refs": ["#1"], "artifacts": [{ "path": "testdata/restore.golden", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 5, "verification_seq": null } }
+    },
+    {
+      "name": "directive_rejected: a rejected verdict on a directive's correction",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "In scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Revert the shared restore change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting now." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 5, "type": "experiment.completed", "class": "semantic", "payload": { "semantic_id": "exp_revert", "statement": "Reverted; tests green.", "refs": ["#3"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 5, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "directive_rejected", "ruling_seq": 3, "owner_seq": null, "correction_seq": 5, "verification_seq": 6 } }
+    },
+    {
+      "name": "verified: on the directive path too (there is no separate directive_verified)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "In scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Revert the shared restore change." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 4, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting now." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 5, "type": "experiment.completed", "class": "semantic", "payload": { "semantic_id": "exp_revert", "statement": "Reverted; tests green.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 5, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": 3, "owner_seq": null, "correction_seq": 5, "verification_seq": 6 } }
+    },
+    {
+      "name": "overruled: wins over verified",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Keep it as it is.", "answers": 1 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "overruled", "ruling_seq": null, "owner_seq": 5, "correction_seq": null, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: an unjudged correction with a revision is not displaced by a later plain summary (a verdict naming the summary is correction_not_current)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_summary", "statement": "Summary: reverted.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: a plain correction is displaced by a later plain citing event (nothing distinguishes them)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_summary", "statement": "Summary: reverted.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 4, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: an answer to a rejection stays the correction when a plain summary follows",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert2", "statement": "Fixed the flaky ordering the rejection named.", "refs": ["#1", "#4"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_summary", "statement": "Summary: all done.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 5, "verification_seq": null } }
+    },
+    {
+      "name": "verified: a checkpoint citing a verified verdict's #<seq> reopens nothing",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_thanks", "statement": "Supervisor verified the revert.", "refs": ["#1", "#4"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } }
+    },
+    {
+      "name": "unverifiable: every verdict on the correction is unverifiable",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "unverifiable", "scope": "deployment", "subject": { "target": "k8s prod-us maestro/deploy/maestro gen 41", "observed_at": "2026-10-18T12:00:00Z" }, "text": "deployment: unverifiable.", "evidence": [] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "unverifiable", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } }
+    },
+    {
+      "name": "verified: an unverifiable verdict in another scope does not stop verified (the earliest verified decides)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "unverifiable", "scope": "deployment", "subject": { "target": "k8s prod-us maestro/deploy/maestro gen 41", "observed_at": "2026-10-18T12:00:00Z" }, "text": "deployment: unverifiable.", "evidence": [] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 6, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 5 } }
+    },
+    {
+      "name": "rejected: a ref to a LATER verdict answers nothing (refs point backwards)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_note", "statement": "Note.", "refs": ["#1", "#6"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "unverifiable", "scope": "deployment", "subject": { "target": "k8s prod-us maestro/deploy/maestro gen 41", "observed_at": "2026-10-18T12:00:00Z" }, "text": "deployment: unverifiable.", "evidence": [] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } }
+    },
+    {
+      "name": "verified: an unverifiable code_review revised by the same lineage's verified (supersedes_verdict)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "unverifiable", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: unverifiable.", "evidence": [] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"], "supersedes_verdict": 4 }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 5 } }
+    },
+    {
+      "name": "verified: a rejection revised by the same lineage's verified no longer counts",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"], "supersedes_verdict": 4 }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 5 } }
+    },
+    {
+      "name": "rejected: lineage A's rejection stands beside lineage B's verified in another scope",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000003" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } }
+    },
+    {
+      "name": "verified: a worker checkpoint citing a rejection its lineage already revised answers nothing (correctionOf unchanged)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"], "supersedes_verdict": 4 }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 6, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_more", "statement": "Noted the earlier review.", "refs": ["#1", "#4"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 5 } }
+    },
+    {
+      "name": "verified: a successor grant (lineage_root_id) revises its predecessor's verdict",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"], "supersedes_verdict": 4 }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000002" }, "lineage_root_id": "grt_000000000000000000000001", "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 5 } }
+    },
+    {
+      "name": "rejected: another lineage's supersedes_verdict revises nothing",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"], "supersedes_verdict": 4 }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000003" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } }
+    },
+    {
+      "name": "verified: a revised verdict still judged a plain correction, so a summary before the revision does not displace it",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "unverifiable", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: unverifiable.", "evidence": [] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_summary", "statement": "Summary: reverted.", "refs": ["#1"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"], "supersedes_verdict": 4 }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 6 } }
+    },
+    {
+      "name": "addressed: citing a rejection BEFORE its revision answers it; the revision (on the old correction) does not count for the new one",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_more", "statement": "Fixed what the review named.", "refs": ["#1", "#4"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"], "supersedes_verdict": 4 }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 5, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: a correction with no verdict is awaiting verification",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": null } }
+    },
+    {
+      "name": "verified: a verified verdict on the current correction",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 13 } }
+    },
+    {
+      "name": "rejected: a rejected test_run then a verified code_review on the same correction stays rejected",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 13 } }
+    },
+    {
+      "name": "verified: another scope's unverifiable verdict does not hide it",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "unverifiable", "scope": "deployment", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 14 } }
+    },
+    {
+      "name": "unverifiable: only unverifiable verdicts on the current correction",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "unverifiable", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "unverifiable", "scope": "deployment", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "unverifiable", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 13 } }
+    },
+    {
+      "name": "verified: a later summary citing the challenge without revision does not reopen it",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Summary: all done.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 13 } }
+    },
+    {
+      "name": "rejected: a later summary citing only the challenge does not hide the rejection (correction stays #12)",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Summary: all done.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 13 } }
+    },
+    {
+      "name": "addressed: a citing event answering the rejection by #v, without revision, is a new correction (the old verdict is superseded)",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "The rejected case now passes.", "refs": ["#10", "#13"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 14, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: a correction with revision after a verified verdict re-opens verification",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 14, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: a correction with artifacts after a verified verdict re-opens verification",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "artifacts": [{ "path": "reports/replay.txt", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 14, "verification_seq": null } }
+    },
+    {
+      "name": "directive_rejected: a rejected verdict on the directive's correction",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "declined", "note": "Out of scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 10, "outcome": "upheld", "text": "Fix the retry." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 13, "type": "acknowledged", "class": "control", "payload": { "ack_of": 12, "disposition": "accepted", "note": "Fixing it." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 14, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#12"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 15, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 14, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "directive_rejected", "ruling_seq": 12, "owner_seq": null, "correction_seq": 14, "verification_seq": 15 } }
+    },
+    {
+      "name": "verified: a verified verdict on the directive's correction",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "declined", "note": "Out of scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 10, "outcome": "upheld", "text": "Fix the retry." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 13, "type": "acknowledged", "class": "control", "payload": { "ack_of": 12, "disposition": "accepted", "note": "Fixing it." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 14, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 15, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 14, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": 12, "owner_seq": null, "correction_seq": 14, "verification_seq": 15 } }
+    },
+    {
+      "name": "overruled: an owner decision wins over verified",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Ship it as is.", "answers": 10 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": null, "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "overruled", "ruling_seq": null, "owner_seq": 14, "correction_seq": null, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: an unjudged correction with revision is not displaced by a later summary (correction stays #12)",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 14, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Summary: all done.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: a verdict naming a citing event that is not the current correction does not count",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 14, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Summary: all done.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 15, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 14, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: an unjudged plain correction is displaced by a later citing event",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 14, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Summary: all done.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 14, "verification_seq": null } }
+    },
+    {
+      "name": "addressed: an answer to a rejection by #v is not displaced by a later summary (correction #15)",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 15, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "The rejected case now passes.", "refs": ["#10", "#13"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 17, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Summary: all done.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 15, "verification_seq": null } }
+    },
+    {
+      "name": "verified: a checkpoint citing the verified verdict's #v reopens nothing",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Thanks; moving on.", "refs": ["#10", "#13"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 13 } }
+    },
+    {
+      "name": "verified: an unverifiable verdict superseded by the same lineage's verified verdict",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "unverifiable", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "No access to the test cluster." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "supersedes_verdict": 13, "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 14 } }
+    },
+    {
+      "name": "verified: a rejected verdict superseded by the same lineage's verified verdict (a successor grant, lineage_root_id)",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Misread the log.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "supersedes_verdict": 13, "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000002" }, "session_id": null, "is_investigation_author": false, "lineage_root_id": "grt_000000000000000000000001" } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 14 } }
+    },
+    {
+      "name": "rejected: lineage A rejected and lineage B verified on different scopes",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000003" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 13 } }
+    },
+    {
+      "name": "rejected: another lineage's supersedes_verdict supersedes nothing",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "test_run", "supersedes_verdict": 13, "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000003" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 13 } }
+    },
+    {
+      "name": "verified: a superseded verdict still judged a plain correction, so a summary before the revision does not displace it",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "unverifiable", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "No access to the test cluster." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 15, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_done", "statement": "Summary: all done.", "refs": ["#10"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 16, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "supersedes_verdict": 13, "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 16 } }
+    },
+    {
+      "name": "verified: citing a rejection the same lineage already revised to verified reopens nothing (#v answers only an active verdict)",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Misread the log.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "supersedes_verdict": 13, "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 15, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_ack", "statement": "Noted the rejection.", "refs": ["#10", "#13"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "10": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": 14 } }
+    },
+    {
+      "name": "addressed: citing a rejection before it is revised answers it (a new correction; the later revision judges the old one)",
+      "events": [
+        { "seq": 10, "type": "challenge.added", "class": "control", "payload": { "text": "The restore retry drops the last batch." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 10, "disposition": "accepted", "note": "Will fix the retry." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "finding.revised", "class": "semantic", "payload": { "semantic_id": "finding_retry", "statement": "Retry fixed.", "refs": ["#10"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Misread the log.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_ack", "statement": "Fixed what #13 named.", "refs": ["#10", "#13"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 15, "type": "verification.recorded", "class": "control", "payload": { "verifies": 10, "correction": 12, "verdict": "verified", "scope": "code_review", "supersedes_verdict": 13, "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "Checked the retry loop.", "evidence": ["rcpt_cccccccccccccccccccccccc"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "10": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 14, "verification_seq": null } }
+    },
+    {
+      "name": "verified: a summary citing a rejection of an earlier, replaced correction answers nothing (correctionOf stays the verified one)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert2", "statement": "Fixed the ordering the rejection named.", "refs": ["#1", "#4"], "revision": { "repo": "github.com/acme/restore", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 5, "verdict": "verified", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }, "text": "test_run: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 7, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_summary", "statement": "Summary: the rejection is addressed.", "refs": ["#1", "#4"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 5, "verification_seq": 6 } }
+    },
+    {
+      "name": "addressed: a summary citing a rejection of a replaced correction does not displace the unjudged current one",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert2", "statement": "Fixed the ordering the rejection named.", "refs": ["#1", "#4"], "revision": { "repo": "github.com/acme/restore", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "finding.proposed", "class": "semantic", "payload": { "semantic_id": "finding_summary", "statement": "Summary: the rejection is addressed.", "refs": ["#1", "#4"] }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": { "1": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 5, "verification_seq": null } }
+    },
+    {
+      "name": "next action: verified at the correction's own revision: nobody",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } },
+      "expected_next": { "1": { "actor": "nobody", "action_kind": "none" } }
+    },
+    {
+      "name": "next action: verified at another commit than the correction's (revision mismatch): the supervisor re-verifies",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } },
+      "expected_next": { "1": { "actor": "supervisor", "action_kind": "reverify" } }
+    },
+    {
+      "name": "next action: verified on a dirty correction without a tree (snapshot unbound): the supervisor re-verifies",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "dirty": true } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "dirty": true, "tree": "cccccccccccccccccccccccccccccccccccccccc" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } },
+      "expected_next": { "1": { "actor": "supervisor", "action_kind": "reverify" } }
+    },
+    {
+      "name": "next action: two dirty snapshots at the same HEAD with different trees mismatch: the supervisor re-verifies",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "dirty": true, "tree": "dddddddddddddddddddddddddddddddddddddddd" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "verified", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "dirty": true, "tree": "cccccccccccccccccccccccccccccccccccccccc" }, "text": "code_review: verified.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "verified", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } },
+      "expected_next": { "1": { "actor": "supervisor", "action_kind": "reverify" } }
+    },
+    {
+      "name": "next action: unverifiable: the owner decides",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 3, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_revert", "statement": "Reverted the restore change.", "refs": ["#1"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 4, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 1, "correction": 3, "verdict": "unverifiable", "scope": "deployment", "subject": { "target": "k8s prod-us maestro gen 41", "observed_at": "2026-10-18T12:00:00Z" }, "text": "deployment: unverifiable.", "evidence": [] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": { "1": { "status": "unverifiable", "ruling_seq": null, "owner_seq": null, "correction_seq": 3, "verification_seq": 4 } },
+      "expected_next": { "1": { "actor": "owner", "action_kind": "decide_unverifiable" } }
+    },
+    {
+      "name": "next action: the plain statuses (open, accepted, addressed, rejected, declined, withdrawn)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 3, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 4, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 6, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 7, "type": "acknowledged", "class": "control", "payload": { "ack_of": 2, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 8, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 9, "type": "acknowledged", "class": "control", "payload": { "ack_of": 4, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 10, "type": "acknowledged", "class": "control", "payload": { "ack_of": 5, "disposition": "declined", "note": "In scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 11, "type": "acknowledged", "class": "control", "payload": { "ack_of": 6, "disposition": "declined", "note": "In scope." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 12, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_three", "statement": "Reverted the restore change.", "refs": ["#3"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 13, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_four", "statement": "Reverted the restore change.", "refs": ["#4"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 14, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 4, "correction": 13, "verdict": "rejected", "scope": "test_run", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "test_run: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 15, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 6, "outcome": "withdrawn", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } }
+      ],
+      "expected": {
+        "1": { "status": "open", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null },
+        "2": { "status": "accepted", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null },
+        "3": { "status": "addressed", "ruling_seq": null, "owner_seq": null, "correction_seq": 12, "verification_seq": null },
+        "4": { "status": "rejected", "ruling_seq": null, "owner_seq": null, "correction_seq": 13, "verification_seq": 14 },
+        "5": { "status": "declined", "ruling_seq": null, "owner_seq": null, "correction_seq": null, "verification_seq": null },
+        "6": { "status": "withdrawn", "ruling_seq": 15, "owner_seq": null, "correction_seq": null, "verification_seq": null }
+      },
+      "expected_next": {
+        "1": { "actor": "worker", "action_kind": "take_position" },
+        "2": { "actor": "worker", "action_kind": "submit_correction" },
+        "3": { "actor": "supervisor", "action_kind": "verify_correction" },
+        "4": { "actor": "worker", "action_kind": "submit_correction" },
+        "5": { "actor": "supervisor", "action_kind": "rule" },
+        "6": { "actor": "nobody", "action_kind": "none" }
+      }
+    },
+    {
+      "name": "next action: the directive path (directive, conflicted, directive_rejected, overruled)",
+      "events": [
+        { "seq": 1, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 2, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 3, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 4, "type": "challenge.added", "class": "control", "payload": { "text": "The fix changes shared restore code beyond what was approved." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 5, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Keep the shared restore change." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 6, "type": "acknowledged", "class": "control", "payload": { "ack_of": 1, "disposition": "declined", "note": "No." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 7, "type": "acknowledged", "class": "control", "payload": { "ack_of": 2, "disposition": "declined", "note": "No." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 8, "type": "acknowledged", "class": "control", "payload": { "ack_of": 3, "disposition": "declined", "note": "No." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 9, "type": "acknowledged", "class": "control", "payload": { "ack_of": 4, "disposition": "accepted", "note": "Ok." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 10, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 1, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 11, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 2, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 12, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 3, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 13, "type": "ruling.issued", "class": "control", "payload": { "ruling_of": 4, "outcome": "upheld", "text": "Revert it." }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 14, "type": "acknowledged", "class": "control", "payload": { "ack_of": 11, "disposition": "conflicts", "note": "The owner decided otherwise.", "conflicts_with": 5 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 15, "type": "acknowledged", "class": "control", "payload": { "ack_of": 12, "disposition": "accepted", "note": "Reverting." }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 16, "type": "decision.proposed", "class": "semantic", "payload": { "semantic_id": "decision_d3", "statement": "Reverted the restore change.", "refs": ["#12"], "revision": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } },
+        { "seq": 17, "type": "verification.recorded", "class": "control", "authority": "supervisor_attestation", "payload": { "verifies": 3, "correction": 16, "verdict": "rejected", "scope": "code_review", "subject": { "repo": "github.com/acme/restore", "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "text": "code_review: rejected.", "evidence": ["ev_0123456789ab"] }, "producer": { "principal": { "kind": "grantee", "id": "grt_000000000000000000000001" }, "session_id": null, "is_investigation_author": false } },
+        { "seq": 18, "type": "owner.decided", "class": "owner", "authority": "owner_decision", "payload": { "text": "Drop it.", "answers": 4 }, "producer": { "principal": { "kind": "user", "id": "owner" }, "session_id": "sess-a", "is_investigation_author": true } }
+      ],
+      "expected": {
+        "1": { "status": "directive", "ruling_seq": 10, "owner_seq": null, "correction_seq": null, "verification_seq": null },
+        "2": { "status": "conflicted", "ruling_seq": 11, "owner_seq": 5, "correction_seq": null, "verification_seq": null },
+        "3": { "status": "directive_rejected", "ruling_seq": 12, "owner_seq": null, "correction_seq": 16, "verification_seq": 17 },
+        "4": { "status": "overruled", "ruling_seq": 13, "owner_seq": 18, "correction_seq": null, "verification_seq": null }
+      },
+      "expected_next": {
+        "1": { "actor": "worker", "action_kind": "comply" },
+        "2": { "actor": "owner", "action_kind": "decide_conflict" },
+        "3": { "actor": "worker", "action_kind": "submit_correction" },
+        "4": { "actor": "nobody", "action_kind": "none" }
       }
     }
   ]

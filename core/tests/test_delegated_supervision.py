@@ -75,23 +75,30 @@ class FixtureParity(unittest.TestCase):
 
     def test_every_fixture_case(self):
         data = json.loads(FIXTURE.read_text(encoding="utf-8"))
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], 3)
         self.assertGreater(len(data["cases"]), 10)
         for case in data["cases"]:
             with self.subTest(case["name"]):
                 got = {str(k): v for k, v in sv.challenge_statuses(case["events"]).items()}
                 self.assertEqual(got, case["expected"])
+                if "expected_next" in case:   # the next-action rule: actor and action_kind
+                    nxt = {str(k): {f: v[f] for f in ("actor", "action_kind")}
+                           for k, v in sv.next_actions(case["events"]).items() if str(k) in case["expected_next"]}
+                    self.assertEqual(nxt, case["expected_next"])
 
     def test_every_status_is_covered_by_the_fixture(self):
         data = json.loads(FIXTURE.read_text(encoding="utf-8"))
         seen = {s["status"] for c in data["cases"] for s in c["expected"].values()}
         self.assertEqual(seen, set(sv.STATUSES))
+        kinds = {n["action_kind"] for c in data["cases"] for n in c.get("expected_next", {}).values()}
+        self.assertEqual(kinds, set(sv.NEXT_ACTION_KINDS))
 
     def test_order_and_junk_do_not_matter(self):
         stream = [checkpoint(5, "#3"), ack(4, 3, "accepted"), ruling(3, 1), ack(2, 1, "declined"), challenge(1),
                   "junk", {"seq": "x"}, None]
         self.assertEqual(sv.challenge_statuses(stream),
-                         {1: {"status": "directive_addressed", "ruling_seq": 3, "owner_seq": None}})
+                         {1: {"status": "directive_addressed", "ruling_seq": 3, "owner_seq": None,
+                              "correction_seq": 5, "verification_seq": None}})
 
 
 class Base(unittest.TestCase):
@@ -487,8 +494,10 @@ class GrantAndEvents(Base):
         with patch.object(ie, "read_events", side_effect=page):
             code, out, _ = self.run_cli("events", INV, "--json")
         self.assertEqual(json.loads(out)["challenge_statuses"],
-                         {"1": {"status": "directive", "ruling_seq": 3, "owner_seq": None},
-                          "4": {"status": "accepted", "ruling_seq": None, "owner_seq": None}})
+                         {"1": {"status": "directive", "ruling_seq": 3, "owner_seq": None, "correction_seq": None,
+                                "verification_seq": None},
+                          "4": {"status": "accepted", "ruling_seq": None, "owner_seq": None, "correction_seq": None,
+                                "verification_seq": None}})
 
 
 class AgentGuidance(Base):
