@@ -1018,8 +1018,11 @@ class ChallengesCli(SupervisorBase):
                                                 "unverified)"))
 
     def test_without_gh_heads_are_unchecked(self):
-        os.environ["PATH"] = "/usr/bin:/bin"
-        code, out, err = self.call("challenges", "--credential-file", str(self.cred), "--check-heads")
+        # Hide gh itself, not by PATH: CI runners install it in /usr/bin.
+        import shutil
+        real_which = shutil.which
+        with patch("shutil.which", lambda name, *a, **k: None if name == "gh" else real_which(name, *a, **k)):
+            code, out, err = self.call("challenges", "--credential-file", str(self.cred), "--check-heads")
         self.assertEqual(code, 0, err)
         self.assertIn("heads unchecked", err)
         self.assertNotIn("[head moved]", out)
