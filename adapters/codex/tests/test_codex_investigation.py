@@ -174,6 +174,19 @@ class InvestigationTests(unittest.TestCase):
         self.start(CARDINAL_STORYBOARD_SESSION_START="0")
         self.assertEqual(self.fake.requests, [])
 
+    def test_ephemeral_thread_does_not_bootstrap_or_discover(self):
+        # The Codex app's ambient suggestions run as ephemeral threads:
+        # SessionStart with transcript_path null.
+        self.setup_live()
+        ctx = self.session_context({**SESSION_START, "transcript_path": None}, CARDINAL_INVESTIGATION_POLLER="0")
+        self.assertIn("one branch = one initiative", ctx)
+        self.assertNotIn("Cardinal session id", ctx)
+        self.assertNotIn(f"/storyboards/{SB}", ctx)
+        self.assertEqual(self.fake.requests, [])
+        out = self.cli("question", "Suggest the next user message")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("has no investigation yet", out.stderr)
+
     def test_grantee_does_not_bootstrap_or_checkpoint(self):
         self.setup_live()
         self.start(CARDINAL_INVESTIGATION_TOKEN="not-an-author-token")
