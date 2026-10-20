@@ -139,9 +139,18 @@ This validates runtime transport and the reader contract; it is not acceptance
 against deployed authentication or Postgres. Phase 1's database/authentication
 tests remain the separate backend evidence.
 
-The configured live server was probed read-only and did not advertise
-`event_snapshot`. Authenticated deployed acceptance remains pending Phase 1
-deployment. The [testbed report](../../testbeds/coordination_gate_phase3/REPORT.md)
-records passing cases, failed fixture attempts, exact versions and artifacts.
+The production server now advertises `event_snapshot` version 1 after the
+Maestro/MCP gateway `v1.124.0` deployment (Conductor PR2156, GitOps PR2424).
+Independent review confirmed both replicas and sidecars healthy at the verified
+image digest. All 15 authenticated deployed HTTP/MCP snapshot checks passed,
+including fixed-head continuation across appends, scoped visibility, owner-input
+exclusion and revoked-grant rejection. Dedicated installed Codex and Claude worker and scoped supervisor cases passed
+with the reviewed packaged artifacts. Each original action was denied before
+explicit handling and a revised action; supervisors posted exactly one revised
+verdict. Temporary grants were revoked and credential files/session bindings
+removed. These runs validate the declared direct CLI paths; normal sessions
+remain disabled.
+The [testbed report](../../testbeds/coordination_gate_phase3/REPORT.md) records
+passing cases, failed fixture attempts, exact versions and artifacts.
 Phase 4 still owns 1,000 quiet checks per runtime, matched token/latency baselines,
 fleet request load and broader fault/performance acceptance.
