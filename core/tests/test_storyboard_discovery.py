@@ -734,7 +734,10 @@ class FetchAndDiscoverTests(_RepoCase):
                 block = self.discover(session=session)
                 self.assertIsNotNone(block)
                 arrange()
-                self.assertIsNone(self.discover(session=session, deadline=time.monotonic() + 0.5))
+                # Response semantics must not turn into an accidental timeout
+                # when git/context work is scheduled alongside release checks.
+                budget = 0.5 if name == "timeout" else 10.0
+                self.assertIsNone(self.discover(session=session, deadline=time.monotonic() + budget))
                 self.assertEqual(self.discover(event="SubagentStart", session=session), block if kept else None)
                 self.fake.delay = 0.0
 
