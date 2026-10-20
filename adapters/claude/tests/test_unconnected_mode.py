@@ -54,6 +54,9 @@ STORYBOARD_HOOKS = ("storyboard-session.py", "storyboard-preview.py", "storyboar
 # checks-gate.py enforces the Checks opt-in (skill install / Skill deny) with
 # or without a connection; its routing text alone needs one.
 LOCAL_ONLY_HOOKS = ("invariant-check.py", "checks-gate.py")
+# Coordination is silent without an explicitly enabled private route. Its
+# active route may use a scoped grant without a global author connection.
+OPT_IN_GATE_HOOKS = ("coordination-gate.py",)
 # A POSIX sh fast path (no Python, no network) in front of a gated Python
 # hook: the sh only checks for a local binding file.
 FAST_PATH_HOOKS = {"investigation-events.sh": "investigation-events.py"}
@@ -299,7 +302,7 @@ class HookRegistrationTests(unittest.TestCase):
         hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
         commands = {h["command"].rsplit("/", 1)[-1].split()[0] for groups in hooks.values() for g in groups
                     for h in g["hooks"]}
-        self.assertEqual(commands, set(GATED_HOOKS) | set(STORYBOARD_HOOKS) | set(LOCAL_ONLY_HOOKS) | set(FAST_PATH_HOOKS),
+        self.assertEqual(commands, set(GATED_HOOKS) | set(STORYBOARD_HOOKS) | set(LOCAL_ONLY_HOOKS) | set(FAST_PATH_HOOKS) | set(OPT_IN_GATE_HOOKS),
                          "a new hook must be gated on _connection or listed as working unconnected")
         for sh in FAST_PATH_HOOKS:
             text = (HOOKS / sh).read_text()
@@ -364,6 +367,19 @@ class _GuardedCase(unittest.TestCase):
 class GatedHooksUnconnectedTests(_GuardedCase):
     """Every golden scenario (the connected runs test_parity pins byte-equal),
     replayed with no Cardinal connection: silent, no network, no subprocess."""
+
+    def test_coordination_default_is_silent_without_network_or_subprocess(self):
+        home = self.guard_dir / "home"
+        other_vendor_settings(home, "http://127.0.0.1:9")
+        env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        for tool, value in (("Bash", {"command": "git commit -m test"}),
+                            ("Write", {"file_path": "/unused", "content": "test"})):
+            with self.subTest(tool):
+                proc = self.guarded_run(HOOKS / "coordination-gate.py", {
+                    "session_id": SESSION, "hook_event_name": "PreToolUse",
+                    "tool_name": tool, "tool_input": value}, env)
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
+                self.assertEqual(self.guard_lines(), [], "default gate must not connect or spawn")
 
     def _replay(self, name: str, connected: bool) -> tuple:
         procs: list = []
