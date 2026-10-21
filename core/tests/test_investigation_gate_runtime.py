@@ -1,16 +1,20 @@
-"""Direct CLI hook routing, readiness and legacy delivery coexistence."""
+"""Explicit intent coordination, waiting and legacy delivery coexistence."""
 import contextlib
 import io
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from cardinal_core import investigation_cli as cli
 from cardinal_core import investigation_gate_runtime as rt
-from cardinal_core import investigation_poller as poller
 from cardinal_core import investigation_turn as turn
 from cardinal_core import investigation_text as text
 from tests.test_investigation_gate import Fixture, POLICY, CONN, INV, SID, event, c, g, ie
+from tests.test_investigation_requests import created, response, resolved
+
+PURPOSE = "Choose the next hypothesis"
 
 
 class Runtime(Fixture):
@@ -18,226 +22,146 @@ class Runtime(Fixture):
         super().setUp()
         self.cli = self.root / "plugin/scripts/cardinal-storyboard"
         self.hook = rt.hook_path(self.cli, "codex")
-        self.hook.parent.mkdir(parents=True)
-        self.hook.write_text("# fixture hook\n")
-        self.env = {rt.MODE: "direct-cli"}
-        self.pid = patch.object(rt, "runtime_pid", return_value=1234)
-        self.pid.start()
-        self.addCleanup(self.pid.stop)
+        self.wiring = SimpleNamespace(runtime="codex", environ={}, cli=str(self.cli), client="test",
+            paths=SimpleNamespace(home=self.root / ".codex"), connection=Mock(return_value=CONN))
 
-    def probes(self, runtime="codex", path=None):
-        for tool in rt.REQUIRED[runtime]:
-            rt.record_ready(self.root, SID, runtime, tool, {}, path or self.hook, self.env)
+    def run_cli(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status = cli.cli_main([*args, "--session", SID, "--investigation", INV], self.wiring)
+        return status, json.loads(out.getvalue())
 
-    def activate(self):
-        self.probes()
-        return rt.activate(self.gate, POLICY, runtime="codex", cli=self.cli, environ=self.env)
+    def prepare(self):
+        return rt.prepare_intent(session=SID, runtime="codex", home=self.root, conn=CONN,
+            client="test", cli=self.cli)[0]
 
-    def dispatch(self, tool="apply_patch", args=None, **extra):
-        payload = {"hook_event_name": "PreToolUse", "session_id": SID, "tool_name": tool,
-                   "tool_input": args or {"command": "git commit -m test"}, **extra}
-        return rt.dispatch(payload, runtime="codex", home=self.root, connection=lambda: CONN,
-                           client="test", hook=self.hook, environ=self.env)
-
-    def test_unconnected_is_silent_and_disabled_bound_routes_rearm(self):
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertIsNone(rt.dispatch({"hook_event_name": "PreToolUse", "session_id": SID,
-                "tool_name": "apply_patch", "tool_input": "patch"}, runtime="codex", home=self.root,
-                connection=lambda: None, client="test", hook=self.hook, environ={}))
-            self.activate()
-            self.assertIsNone(self.dispatch())
-            rt.deactivate(self.gate)
-            self.server.add(event(1))
-            self.assertEqual(self.dispatch()["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertEqual(out.getvalue(), "")
-
-    def test_enable_requires_current_all_transport_receipts_and_mode(self):
-        with self.assertRaises(ValueError):
-            rt.preflight(self.root, SID, "codex", self.cli, self.env)
-        rt.record_ready(self.root, SID, "codex", "Bash", {}, self.hook, self.env)
-        with self.assertRaisesRegex(ValueError, "apply_patch"):
-            rt.preflight(self.root, SID, "codex", self.cli, self.env)
-        self.probes()
-        rt.preflight(self.root, SID, "codex", self.cli, self.env)
-        for env in ({}, {rt.MODE: "desktop"}):
-            with self.assertRaises(ValueError):
-                rt.preflight(self.root, SID, "codex", self.cli, env)
-        with patch.object(rt, "runtime_pid", return_value=999), self.assertRaises(ValueError):
-            rt.preflight(self.root, SID, "codex", self.cli, self.env)
-        self.hook.write_text("# changed hook version")
-        with self.assertRaises(ValueError):
-            rt.preflight(self.root, SID, "codex", self.cli, self.env)
-
-    def test_stale_receipts_and_wrong_runtime_refuse(self):
-        self.probes()
-        with patch.object(rt.time, "time", return_value=time.time() + 301), self.assertRaises(ValueError):
-            rt.preflight(self.root, SID, "codex", self.cli, self.env)
-        with self.assertRaises(ValueError):
-            rt.activate(self.gate, {**POLICY, "runtime": "claude"}, runtime="codex", cli=self.cli, environ=self.env)
-
-    def test_enable_argv_receipt_is_one_use_and_sandbox_needs_no_ps(self):
-        import shlex
-        self.probes()
-        argv = ["gate-enable", "--session", SID, "--gate-file", str(self.path), "--policy", "/policy.json"]
-        value = {**POLICY, "cli_prefixes": [[str(self.cli)]]}
-        command = shlex.join([str(self.cli), "investigation", *argv])
-        rt.record_ready(self.root, SID, "codex", "Bash", {"cmd": command}, self.hook, self.env)
-        with patch.object(rt, "runtime_pid", side_effect=PermissionError("sandbox ps is unavailable")):
-            with self.assertRaises(ValueError):
-                rt.preflight(self.root, SID, "codex", self.cli, self.env, argv=argv + ["--new-epoch"], prefixes=value["cli_prefixes"])
-            rt.activate(self.gate, value, runtime="codex", cli=self.cli, environ=self.env, argv=argv)
-            with self.assertRaises(ValueError):
-                rt.activate(self.gate, value, runtime="codex", cli=self.cli, environ=self.env, argv=argv)
-
-    def test_explicit_env_connection_never_reuses_a_saved_key(self):
-        from cardinal_core.storyboard_agent import Wiring
-        from types import SimpleNamespace
-        paths = Mock()
-        wiring = SimpleNamespace(paths=paths, environ={"CARDINAL_CONNECTION": "env",
-                                  "CARDINAL_MCP_URL": "http://127.0.0.1:1234/api/orgs/fixture/mcp"})
-        conn = Wiring.connection(wiring)
-        self.assertEqual(conn["origin"], "http://127.0.0.1:1234")
-        self.assertIsNone(conn["key"])
-        paths.read_secrets.assert_not_called()
-
-    def test_codex_real_bash_command_is_normalized_and_denied_with_bounded_feedback(self):
-        self.activate()
-        self.server.add(event(1))
-        answer = self.dispatch("Bash")
-        result = answer["hookSpecificOutput"]
-        self.assertEqual(result["permissionDecision"], "deny")
-        reason = result["permissionDecisionReason"]
-        self.assertLessEqual(len(reason.encode()), 1000)
-        self.assertTrue(reason.startswith(rt.PREFIX))
-        self.assertEqual(self.gate.status()["after"], 0)
-        self.assertIsNone(self.dispatch("Bash", {"command": "git status"}))
-        self.assertIsNone(self.dispatch("functions.exec", {"code": "nested()"}))
-        self.assertIsNone(self.dispatch(agent_id="subagent"))
-
-    def test_operational_error_mode_mismatch_and_incomplete_activation_deny(self):
-        self.activate()
-        self.server.fail = TimeoutError()
-        self.assertEqual(self.dispatch()["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.server.fail = None
-        self.env.clear()
-        self.assertIsNone(self.dispatch())  # No MODE opt-in is required.
+    def test_sync_from_any_process_has_no_mode_probes_or_action_policy(self):
+        status, result = self.run_cli("sync", "--intent", "Explain a scientific tradeoff")
+        self.assertEqual((status, result["status"]), (0, "ready"))
         selected = rt.route(self.root, SID)
-        selected["state"] = "activating"
-        c.private_write(rt.route_path(self.root, SID), selected)
-        self.assertIsNone(self.dispatch())  # Interrupted activation is retried automatically.
-        self.assertIsNone(self.dispatch("Bash", {"command": "cardinal-storyboard investigation gate-disable"}))
+        self.assertEqual(selected["policy"]["git"], [])
+        self.assertEqual(selected["policy"]["cli_prefixes"], [])
+        self.assertTrue(all(b.get("request_protocol") == 2 for op, b in self.server.requests if op == "read-investigation-events"))
 
-    def test_failed_activation_can_be_cancelled_without_engine_file(self):
-        self.probes()
-        self.server.cap["enabled"] = False
-        with self.assertRaises(ValueError):
-            rt.activate(self.gate, POLICY, runtime="codex", cli=self.cli, environ=self.env)
-        self.assertFalse(self.path.exists())
-        self.assertTrue(rt.owns_delivery(self.root, SID, INV))
-        self.assertTrue(rt.deactivate(self.gate)["activation_cancelled"])
-        self.assertFalse(rt.owns_delivery(self.root, SID, INV))
+    def test_stale_hooks_never_intercept_ordinary_tools_or_contact_server(self):
+        self.server.add(event(1))
+        for tool in ("apply_patch", "Bash", "Write", "reason", "arbitrary-tool"):
+            self.assertIsNone(rt.dispatch({"session_id": SID, "tool_name": tool},
+                connection=Mock(side_effect=AssertionError("hook must not read connection"))))
+        self.assertEqual(self.server.requests, [])
 
-    def test_missing_active_engine_file_never_becomes_a_disabled_allow(self):
-        self.activate()
-        self.path.unlink()
-        self.assertEqual(self.dispatch()["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertTrue(rt.owns_delivery(self.root, SID, INV))
-        self.assertFalse(rt.deactivate(self.gate)["enabled"])
-        self.assertFalse(rt.owns_delivery(self.root, SID, INV))
+    def test_new_feedback_is_bounded_and_requires_explicit_review(self):
+        self.server.add(event(1))
+        status, result = self.run_cli("sync", "--intent", "Answer the user")
+        self.assertEqual((status, result["status"]), (3, "needs_feedback"))
+        self.assertLessEqual(len(result["message"].encode()), 1000)
+        selected = rt.route(self.root, SID, batch=result["batch"])
+        gate = g.Gate(CONN, selected["gate_file"], session=SID, client="test", home=self.root)
+        self.gate, self.path = gate, gate.path
+        batch, hashes = self.delivered()
+        with self.assertRaises(ValueError): gate.reviewed(batch, hashes)
+        self.acknowledge(1)
+        gate.reviewed(batch, hashes)
+        self.assertEqual(self.run_cli("sync", "--intent", "Answer the user")[1]["status"], "ready")
 
-    def test_legacy_delivery_staged_inbox_and_poller_are_retained_until_disable(self):
+    def test_waiting_consumer_does_not_hide_another_consumers_feedback(self):
+        args = SimpleNamespace(intent=PURPOSE, requires=[1], intent_connection=c.identity(CONN))
+        first = SimpleNamespace(conn=CONN, synchronize=Mock(return_value=g.Result("defer", "Pending", reason="waiting")))
+        second = SimpleNamespace(conn=CONN, synchronize=Mock(return_value=g.Result("defer", "New information", "later-batch")))
+        service = cli.CLI(self.wiring, SimpleNamespace(credential_file=None))
+        result = service._sync_intent(args, [first, second])
+        self.assertEqual((result["status"], result["batch"]), ("needs_feedback", "later-batch"))
+        first.synchronize.assert_called_once_with(PURPOSE, [1])
+        second.synchronize.assert_called_once_with(PURPOSE, [1])
+        self.assertFalse(result["released"])
+
+    def test_handled_blocked_progress_cannot_hide_another_completed_result(self):
+        args = SimpleNamespace(intent=PURPOSE, requires=[1], intent_connection=c.identity(CONN), after_response=2)
+        first = SimpleNamespace(conn=CONN, synchronize=Mock(return_value=g.Result("defer", "Blocked", reason="needs_attention",
+            requests=({"request": 1, "status": "blocked", "response": 2},))))
+        second = SimpleNamespace(conn=CONN, synchronize=Mock(return_value=g.Result("defer", "Complete", reason="needs_attention",
+            requests=({"request": 3, "status": "complete", "response": 4},))))
+        service = cli.CLI(self.wiring, SimpleNamespace(credential_file=None))
+        result = service._sync_intent(args, [first, second])
+        self.assertEqual((result["status"], result["requests"][0]["request"]), ("needs_attention", 3))
+
+    def test_timeout_retains_requirement_and_restarts_without_request_id(self):
+        self.server.add(created(legacy=True))
+        status, result = self.run_cli("wait", "--intent", PURPOSE, "--request", "1", "--timeout", "0.03")
+        self.assertEqual((status, result["status"], result["released"]), (3, "timeout", False))
+        self.assertEqual(self.run_cli("sync", "--intent", PURPOSE)[1]["status"], "waiting")
+        self.assertEqual(self.run_cli("sync", "--intent", "Unrelated explanation")[1]["status"], "ready")
+
+    def test_wait_interrupts_on_feedback_and_never_treats_delivery_as_acceptance(self):
+        self.server.add(created())
+        with patch.object(cli.time, "sleep", side_effect=lambda _: self.server.add(response(2))):
+            status, result = self.run_cli("wait", "--intent", PURPOSE, "--timeout", "1")
+        self.assertEqual((status, result["status"]), (3, "needs_feedback"))
+        selected = rt.route(self.root, SID)
+        self.gate = g.Gate(CONN, selected["gate_file"], session=SID, client="test", home=self.root)
+        self.path = self.gate.path
+        batch, hashes = self.delivered(); self.gate.reviewed(batch, hashes)
+        self.assertEqual(self.run_cli("wait", "--intent", PURPOSE)[1]["status"], "needs_attention")
+        self.server.add(resolved(3))
+        self.assertEqual(self.run_cli("wait", "--intent", PURPOSE)[1]["status"], "ready")
+
+    def test_incoming_wait_interrupts_on_assignment(self):
+        with patch.object(cli.time, "sleep", side_effect=lambda _: self.server.add(created(requester="peer", assignee=SID))):
+            status, result = self.run_cli("wait", "--intent", "Await the next assignment", "--incoming", "--timeout", "1")
+        self.assertEqual((status, result["status"]), (3, "needs_feedback"))
+
+    def test_new_request_uses_purpose_without_action_categories(self):
+        with patch.object(ie, "append_event", return_value={"event": {"seq": 1}}) as append:
+            self.run_cli("request", "--intent", "Select a diagnosis", "--assignee", "user:owner",
+                "--assignee-session", "peer", "--text", "Evaluate the competing explanations")
+        payload = append.call_args.args[3]
+        self.assertEqual(payload["intent"], "Select a diagnosis")
+        self.assertNotIn("actions", payload)
+
+    def test_missing_intent_capability_and_missing_active_state_never_clear(self):
+        original = self.server.__call__
+        def old_server(*args, **kw):
+            result = original(*args, **kw)
+            result.get("capabilities", {}).pop("coordination_intents", None)
+            return result
+        with patch.object(ie.sync, "_post", side_effect=old_server), self.assertRaises(ValueError):
+            self.prepare()
+        gate = self.prepare()
+        gate.path.unlink()
+        with self.assertRaisesRegex(ValueError, "state is missing"):
+            self.prepare()
+
+    def test_delivery_notifies_normally_except_during_explicit_batch_handling(self):
         ie.write_binding(self.root, SID, {"investigation_id": INV, "cursor": 0, "org": "org", "question_status": "stated"})
+        gate = self.prepare()
+        self.assertFalse(rt.owns_delivery(self.root, SID, INV))
+        self.server.add(event(1))
+        gate.synchronize("Read the new feedback")
         turn.stage(self.root, SID, "legacy staged content")
-        self.activate()
-        with patch.object(ie, "deliver_inbox") as inbox, patch.object(ie, "resurface") as resurface:
-            self.assertEqual(turn.at_tool(self.root, SID, "org", "codex", is_subagent=False).agent_context, [])
-            self.assertEqual(turn.at_prompt(self.root, SID, "codex").agent_context, [])
-            flush = Mock()
-            result = turn.at_turn_end(self.root, SID, CONN, "test", "codex", environ={}, stop_hook_active=False,
-                                      deadline=time.monotonic() + 3, owner_input_flush=flush)
-            self.assertIsNone(result.turn_end_block)
-            flush.assert_called_once()
-            inbox.assert_not_called()
-            resurface.assert_not_called()
-        status = {"failures": 0}
-        with patch.object(ie, "poll_once") as poll, patch.object(poller.boot, "needs_retry", return_value=False):
-            poller._step(self.root, SID, lambda: CONN, "test", None, status, 10, time.time())
-        poll.assert_not_called()
-        self.assertEqual(status["last"], "gate_owned")
+        self.assertTrue(rt.owns_delivery(self.root, SID, INV))
+        self.assertEqual(turn.at_prompt(self.root, SID, "codex").agent_context, [])
         self.assertEqual(turn._read_staged(self.root, SID), ["legacy staged content"])
-        rt.deactivate(self.gate)
-        self.assertEqual(turn.at_prompt(self.root, SID, "codex").agent_context, ["legacy staged content"])
-
-    def test_another_investigation_and_runtime_keep_existing_delivery(self):
-        self.activate()
         self.assertFalse(rt.owns_delivery(self.root, SID, "inv_" + "b" * 24))
         self.assertFalse(rt.owns_delivery(self.root, SID, INV, "gemini"))
-        self.assertTrue(rt.owns_delivery(self.root, SID, INV, "codex"))
-        answer = rt.dispatch({"hook_event_name": "PreToolUse", "session_id": SID, "tool_name": "Write", "tool_input": {}},
-                             runtime="claude", home=self.root, connection=lambda: CONN,
-                             client="test", hook=self.hook, environ=self.env)
-        self.assertEqual(answer["hookSpecificOutput"]["permissionDecision"], "deny")
 
-    def test_route_lock_contention_does_not_drain_legacy(self):
-        self.activate()
+    def test_route_lock_contention_does_not_drain_feedback(self):
+        self.prepare()
         with c.locked(rt.route_path(self.root, SID)), rt.delivery_guard(self.root, SID, INV) as allowed:
             self.assertFalse(allowed)
-        # Exceptions from a legacy body must propagate without a second yield.
-        rt.deactivate(self.gate)
         with self.assertRaises(BlockingIOError), rt.delivery_guard(self.root, SID, INV):
             raise BlockingIOError()
 
-    def test_guidance_replacement_has_one_short_rule_and_default_text_unchanged(self):
+    def test_guidance_is_shared_and_not_action_specific(self):
         from tests.test_investigation_text import binding
-        original = text.session_text(SID, binding(), runtime="codex")
-        active = text.session_text(SID, binding(), runtime="codex", coordination_gate=True)
-        self.assertIn(rt.GATE_RULE, active)
-        self.assertEqual(active.count(rt.GATE_RULE), 1)
-        self.assertNotIn(ie.ACK_GUIDANCE, active)
-        self.assertLess(len(active.encode()), len(original.encode()))
-        self.assertEqual(original, text.session_text(SID, binding(), runtime="codex", coordination_gate=False))
-        for changed in ({"storyboard_id": None}, {"is_author": False}):
-            guide = text.session_text(SID, binding(**changed), runtime="codex", coordination_gate=True)
+        for runtime in ("codex", "claude"):
+            guide = text.session_text(SID, binding(), runtime=runtime, coordination_gate=True)
             self.assertEqual(guide.count(rt.GATE_RULE), 1)
+            self.assertNotIn("covered actions", guide)
+            self.assertIn("sync --intent", guide)
+            self.assertIn("wait --intent", guide)
 
-    def test_failed_policy_change_preserves_both_old_and_requested_coverage(self):
-        self.activate()
-        # Reconfiguration may not open a window for either the old executable
-        # or its requested replacement while the engine epoch is uncommitted.
-        changed = {**POLICY, "git": ["/new/git"]}
-        with self.assertRaises(ValueError):
-            rt.activate(self.gate, changed, runtime="codex", cli=self.cli, environ=self.env)
-        self.assertEqual(rt.route(self.root, SID)["state"], "activating")
-        for cmd in ("git commit -m old", "/new/git commit -m new"):
-            self.assertIsNone(self.dispatch("Bash", {"command": cmd}))
-        recovered = rt.route(self.root, SID)
-        self.assertIn("git", recovered["policy"]["git"])
-        self.assertIn("/new/git", recovered["policy"]["git"])
-        self.assertNotIn("previous_policy", recovered)
-
-    def test_legacy_cursor_never_suppresses_gate_obligation(self):
+    def test_legacy_cursor_never_suppresses_explicit_catchup(self):
         ie.write_binding(self.root, SID, {"investigation_id": INV, "cursor": 999, "org": "org"})
-        self.activate()
         self.server.add(event(1))
-        self.assertIsNotNone(self.dispatch())
-        self.assertEqual(self.batch()["page"]["events"][0]["seq"], 1)
+        self.assertEqual(self.run_cli("sync", "--intent", "Reassess the plan")[1]["status"], "needs_feedback")
         self.assertEqual(ie.read_binding(self.root, SID)["cursor"], 999)
-
-    def test_implicit_supervisor_route_uses_scoped_credential_without_owner_fallback(self):
-        from types import SimpleNamespace
-        from cardinal_core import investigation_cli as cli
-        credential = self.root / "grant.json"
-        c.private_write(credential, {"token": "fixture"})
-        conn = {**CONN, "grant_id": "grt_" + "b" * 24, "token": "fixture"}
-        self.server.viewer = "grantee:" + conn["grant_id"]
-        gate = g.Gate(conn, self.path, session=SID, client="test", home=self.root, credential_file=credential)
-        value = {**POLICY, "role": "supervisor"}
-        self.probes()
-        rt.activate(gate, value, runtime="codex", cli=self.cli, environ=self.env)
-        wiring = SimpleNamespace(runtime="codex", environ={}, cli=str(self.cli), client="test",
-                                 paths=SimpleNamespace(home=self.root / ".codex"), connection=Mock(return_value=CONN))
-        with patch.object(c, "credential_connection", return_value=conn) as read, contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(cli.cli_main(["gate-status", "--session", SID], wiring), 0)
-        read.assert_called_once_with(credential)
-        wiring.connection.assert_not_called()
-        self.assertTrue(json.loads(out.getvalue())["enabled"])

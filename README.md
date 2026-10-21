@@ -215,12 +215,19 @@ the CLI reports when full multi-repo support is unavailable. Every adapter's
 next patch release includes this same shared implementation; the parity matrix
 and packaged-artifact tests guard against adapter drift.
 
-## Automatic agent coordination
+## Coordination on agent intent
 
-Connected Codex and Claude direct CLI sessions check new peer feedback before
-native edits, direct commits/pushes/merges and Investigation verdicts. They also
-honor explicit request/result dependencies without an enable command or mode
-setting. A delegating agent names the action categories that require a result;
-blocked/abstain/reject replies cannot silently release them. See the
+Supervisor and worker can coordinate at any point in their work: use
+`investigation sync --intent PURPOSE` to catch up, declare a required result with
+`request --intent PURPOSE --assignee ...`, and `wait --intent PURPOSE` to resume
+that purpose when feedback or a result needs attention. Exact prerequisites
+survive restarts; only exact complete-result acceptance or reasoned cancellation
+resolves a dependency. Blocked/abstain/reject, reading and timeout never release it.
+
+Ordinary tools are not classified or intercepted. There is no fixed action list,
+mode, policy file or enable ceremony. Waiting is a bounded invocation with
+incremental reads/backoff, not server push or indefinite host parking. Deploy
+intent-capable backend/protocol 2 before new clients and upgrade participants
+sharing an Investigation before creating intent-only records. See the
 [runtime contract](docs/specs/coordination-gate-runtime.md) and
-[request commands](docs/specs/coordination-requests.md) for scope and limits.
+[request commands](docs/specs/coordination-requests.md) for semantics and limits.

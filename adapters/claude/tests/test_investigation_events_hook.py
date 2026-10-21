@@ -687,7 +687,7 @@ class SessionStartBootstrap(Base):
                        "`cardinal-storyboard investigation link`",
                        f"never storyboard__create another for this session",
                        "`cardinal-storyboard investigation question",
-                       "Coordination is automatic on supported direct CLI paths"):
+                       "Coordinate on intent at any point in your work"):
             self.assertIn(needle, ctx)
         self.assertNotIn("Pass it as session_id to storyboard__create", ctx)
         self.assertIn("after the user's consent", ctx)
@@ -768,7 +768,7 @@ class SessionStartBootstrap(Base):
                        "give these URLs",
                        "it cannot edit, frame or publish that storyboard, set the investigation's question, or "
                        "acknowledge its events (the author's session does)",
-                       "Coordination is automatic on supported direct CLI paths"):
+                       "Coordinate on intent at any point in your work"):
             self.assertIn(needle, ctx)
         for wrong in ("already created this session's Investigation", "improves this storyboard",
                       "never storyboard__create another", "investigation question",

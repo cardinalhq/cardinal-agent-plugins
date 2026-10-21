@@ -69,7 +69,7 @@ app.use((req: any, res: any, next: any) => {
 const base = `/api/orgs/${org}/storyboards/mcp-tools`;
 app.post(base + "/get-investigation", (_req: any, res: any) => res.json({investigation_id: inv,
   author: {kind: "user", id: owner}, capabilities: {event_snapshot: {enabled: true, version: 1},
-    coordination_requests: {enabled: true, version: 1}, supervision_verifications: {enabled: true, version: 1}}}));
+    coordination_requests: {enabled: true, version: 1}, coordination_intents: {enabled: true, version: 1}, supervision_verifications: {enabled: true, version: 1}}}));
 app.use(base, createInvestigationEventRouter({
   investigations: {get: async (_org: string, id: string) => id === inv ? {id: inv, orgId: org, author: {kind: "user", id: owner},
     question: "Phase 3 fixture", storyboardId: null, sessionId: "worker-session", createdAt: new Date()} : null},
