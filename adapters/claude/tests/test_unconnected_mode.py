@@ -54,9 +54,8 @@ STORYBOARD_HOOKS = ("storyboard-session.py", "storyboard-preview.py", "storyboar
 # checks-gate.py enforces the Checks opt-in (skill install / Skill deny) with
 # or without a connection; its routing text alone needs one.
 LOCAL_ONLY_HOOKS = ("invariant-check.py", "checks-gate.py")
-# Coordination is silent without an explicitly enabled private route. Its
-# active route may use a scoped grant without a global author connection.
-OPT_IN_GATE_HOOKS = ("coordination-gate.py",)
+# Stale coordination handlers are tested by path; none is registered.
+OPT_IN_GATE_HOOKS = ()
 # A POSIX sh fast path (no Python, no network) in front of a gated Python
 # hook: the sh only checks for a local binding file.
 FAST_PATH_HOOKS = {"investigation-events.sh": "investigation-events.py"}
