@@ -45,9 +45,18 @@ def helper(root, operation, arguments):
             case = case.split(":")[1]
         if case not in ("complete", "blocked", "abstain", "reject"):
             raise ValueError("attempted needs an outcome name: complete, blocked, abstain or reject")
-        wait_for(lambda: any(x.get("result", {}).get("status") == "timeout" and
-            "CASE:" + case + ":" in str(x.get("argv"))
-            for x in h.jsonl(root.parent / "requester/coordination-audit.jsonl") if isinstance(x.get("result"), dict)))
+        def entered_wait():
+            calls = h.jsonl(root.parent / "requester/coordination-audit.jsonl")
+            created = [x for x in calls if x["argv"][:1] == ["request"] and isinstance(x.get("result"), dict)]
+            index = ("complete", "blocked", "abstain", "reject").index(case)
+            if len(created) <= index:
+                return False
+            seq = str(created[index]["result"]["event"]["seq"])
+            return any(x["argv"][:1] == ["wait"] and "--request" in x["argv"] and
+                x["argv"][x["argv"].index("--request") + 1] == seq and
+                isinstance(x.get("result"), dict) and x["result"].get("status") == "timeout" and
+                x["result"].get("released") is False for x in calls)
+        wait_for(entered_wait)
         print("Requester actually waited and retained the dependency")
         return 0
     previous.helper(root, operation)
@@ -71,8 +80,9 @@ def prompt(role, runtime, root, cli, suffix):
     )
     if role == "requester":
         return intro + (
-            f"For each CASE in complete, blocked, abstain, reject, use purpose 'CASE:CASE:{suffix} choose the explanation' (replace CASE with the outcome). "
-            "Create one request --session SID --assignee PRINCIPAL --assignee-session PEER_SID --intent PURPOSE --text 'CASE:CASE evaluate the explanations'. "
+            f"Use these exact four purposes in order: 'CASE:complete:{suffix} choose the explanation', 'CASE:blocked:{suffix} choose the explanation', "
+            f"'CASE:abstain:{suffix} choose the explanation', 'CASE:reject:{suffix} choose the explanation'. The literal prefix CASE stays unchanged. "
+            "Create one request for each purpose with --session SID --assignee PRINCIPAL --assignee-session PEER_SID --intent PURPOSE --text 'Evaluate the explanations for this outcome'. "
             "Save its request sequence Q. Immediately call wait --session SID --intent PURPOSE --request Q --timeout 0.3; it must time out with released:false before the responder proceeds. "
             "Then wait again with --timeout 120. Handle any feedback completely and call sync --session SID --intent PURPOSE before resolving. "
             "That sync must show needs_attention with released:false after receiving the response; do not treat arrival or reading as acceptance. "
@@ -119,13 +129,17 @@ def check(root, processes, events, audit, suffix, witness, before):
     checks["four_intent_requests"] = len(requests) == 4 and all(e["payload"].get("intent") and "actions" not in e["payload"] for e in requests)
     calls = h.jsonl(root / "requester/coordination-audit.jsonl")
     hooks = h.jsonl(root / "requester/hook-audit.jsonl")
-    for case in ("complete", "blocked", "abstain", "reject"):
-        req = next((e for e in requests if "CASE:" + case in e["payload"]["text"]), None)
+    own_sid = c.private_read(root / "requester/session.json")["session"]
+    peer_sid = c.private_read(root / "responder/session.json")["session"]
+    for index, case in enumerate(("complete", "blocked", "abstain", "reject")):
+        req = requests[index] if index < len(requests) else None
         replies = [e for e in events if req and e["type"] == "request.responded" and e["payload"]["request"] == req["seq"]]
         resolutions = [e for e in events if req and e["type"] == "request.resolved" and e["payload"]["request"] == req["seq"]]
         checks[case + "_outcomes"] = [e["payload"]["outcome"] for e in replies] == (["blocked", "complete"] if case == "blocked" else [case])
         checks[case + "_resolution"] = len(resolutions) == 1 and resolutions[0]["payload"]["outcome"] == ("accepted" if case in ("complete", "blocked") else "cancelled")
         checks[case + "_exact_result"] = case not in ("complete", "blocked") or bool(replies and resolutions and resolutions[0]["payload"].get("response") == replies[-1]["seq"])
+        checks[case + "_identities"] = bool(req and replies and resolutions) and req["producer"].get("sessionId") == own_sid and all(
+            e["producer"].get("sessionId") == peer_sid for e in replies) and resolutions[0]["producer"].get("sessionId") == own_sid and req["payload"]["assignee"]["session"] == peer_sid
         relevant = [r for r in calls if req and req["payload"]["intent"] in r["argv"] and isinstance(r.get("result"), dict)]
         checks[case + "_wait_retained"] = any(r["result"].get("status") == "timeout" and r["result"].get("released") is False for r in relevant)
         reply_at = next((r["at"] for r in audit if replies and r.get("kind") == "append" and r["event"]["seq"] == replies[0]["seq"]), None)
@@ -134,9 +148,12 @@ def check(root, processes, events, audit, suffix, witness, before):
         checks[case + "_ready_after_resolution"] = bool(resolved_at) and any(r["at"] / 1000000 >= resolved_at and r["result"].get("released") is True for r in relevant)
         note = root / "requester" / ("decision-" + case + ".txt")
         checks[case + "_decision_note"] = note.exists() and "RESULT_" + case + "_" + suffix in note.read_text()
+        ready_at = min((r["at"] for r in relevant if r["result"].get("released") is True and resolved_at and r["at"] / 1000000 >= resolved_at), default=None)
+        writes = [r for r in hooks if r.get("tool") in ("apply_patch", "functions.apply_patch", "Write", "Edit") and note.name in str(r.get("input"))]
+        checks[case + "_decision_after_ready"] = bool(ready_at and writes) and all(r["at"] >= ready_at for r in writes)
         if case == "blocked":
             complete_at = next((r["at"] for r in audit if len(replies) == 2 and r.get("kind") == "append" and r["event"]["seq"] == replies[1]["seq"]), None)
-            checks["independent_native_work_while_blocked"] = bool(reply_at and complete_at) and any("blocked-fix.txt" in str(r.get("input")) and reply_at <= r["at"] / 1000000 <= complete_at for r in hooks)
+            checks["independent_native_work_while_blocked"] = bool(reply_at and complete_at) and any(r.get("tool") in ("apply_patch", "functions.apply_patch", "Write", "Edit") and "blocked-fix.txt" in str(r.get("input")) and reply_at <= r["at"] / 1000000 <= complete_at for r in hooks)
     return checks
 
 
