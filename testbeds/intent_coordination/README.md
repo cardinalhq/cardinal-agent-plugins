@@ -29,7 +29,9 @@ entries are archived/cleaned, with cleanup failures preventing success.
 
 The first draft's barrier accepted only a bare outcome, while one agent supplied
 its full CASE marker. The helper now normalizes either representation and the
-prompt explicitly asks for a bare outcome. Preserve those attempts as harness
+prompt explicitly asks for a bare outcome. A later assertion also relied on the
+agent preserving a literal CASE marker; barriers now use exact request IDs and
+the prompt lists all literal purposes. Preserve those attempts as harness
 evidence; this change does not relax any product assertion.
 
 This does not establish server push, indefinite host parking, fleet performance,
