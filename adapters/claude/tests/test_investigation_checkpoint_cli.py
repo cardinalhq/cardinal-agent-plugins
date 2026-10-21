@@ -380,8 +380,8 @@ class Guidance(CheckpointBase):
                        "`--help`", "not private reasoning", "routine tool use", "unchanged knowledge",
                        "your claims, not established facts"):
             self.assertIn(needle, line)
-        self.assertIn("authority: ADVISORY", ctx, "the control-event line is kept")
-        self.assertLess(ctx.index("authority: ADVISORY"), start)
+        self.assertIn("Coordination is automatic on supported direct CLI paths", ctx)
+        self.assertLess(ctx.index("Coordination is automatic"), start)
         # Resume: the same guidance, still once.
         self.assertEqual(self.start().count(CHECKPOINT_SENTENCE), 1)
 
