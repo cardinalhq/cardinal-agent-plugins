@@ -59,7 +59,7 @@ class Server:
             raise self.fail
         if operation == "get-investigation":
             return {"investigation_id": INV, "author": {"kind": "user", "id": "owner"},
-                    "capabilities": {"event_snapshot": self.cap}}
+                    "capabilities": {"event_snapshot": self.cap, "coordination_requests": {"enabled": True, "version": 1}}}
         assert operation == "read-investigation-events", operation
         assert body["snapshot"] is True
         bound = body.get("through_seq", self.head)
