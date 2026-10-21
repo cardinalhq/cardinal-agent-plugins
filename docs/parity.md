@@ -62,7 +62,7 @@ authority and privacy rules behind the turn-end and owner-input rows).
 
 | Feature | Claude Code | Codex | Cursor | Gemini CLI |
 |---|---|---|---|---|
-| Opt-in mechanical coordination gate (direct CLI scope) (`coordination_gate`) | P | P | N/A | N/A |
+| Intent-based agent synchronization and required results (`coordination_intents`) | P | P | N/A | N/A |
 | Investigation bootstrap and binding at session start (`investigation_bootstrap`) | P | P | P | P |
 | Background poller and capability refresh (`investigation_poller`) | P | P | P | P |
 | Owner-input capture (what the owner typed, shared gate) (`owner_input_capture`) | P | P | P | P |
@@ -82,10 +82,10 @@ authority and privacy rules behind the turn-end and owner-input rows).
 | Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back) (`supervise_stepback`) | P | P | L | P |
 | Additive repository provenance, saved-edit backfill and parent-workspace sessions (`session_repository_provenance`) | P | P | P | P |
 
-- **Opt-in mechanical coordination gate (direct CLI scope)**, Claude Code (P): Explicit direct CLI mode and per-transport readiness required; hook crash/timeout remain fail-open
-- **Opt-in mechanical coordination gate (direct CLI scope)**, Codex (P): Explicit direct CLI mode and per-transport readiness required; nested feedback suppression and interactive stdin remain uncovered
-- **Opt-in mechanical coordination gate (direct CLI scope)**, Cursor (N/A): Phase 0 did not validate this runtime; no gate adapter is enabled
-- **Opt-in mechanical coordination gate (direct CLI scope)**, Gemini CLI (N/A): Phase 0 did not validate this runtime; no gate adapter is enabled
+- **Intent-based agent synchronization and required results**, Claude Code (P): Explicit sync/wait at any agent intent; durable dependencies; bounded waits; no automatic tool interception
+- **Intent-based agent synchronization and required results**, Codex (P): Explicit sync/wait at any agent intent; durable dependencies; bounded waits; no automatic tool interception
+- **Intent-based agent synchronization and required results**, Cursor (N/A): Intent runtime integration has not been validated for Cursor
+- **Intent-based agent synchronization and required results**, Gemini CLI (N/A): Intent runtime integration has not been validated for Gemini
 - **Owner-input disclosure, per session, before the first capture**, Cursor (L): Cursor has no user-visible, non-blocking hook message: beforeSubmitPrompt's user_message shows only when the prompt is blocked, and the other outputs are model context (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#owner-input-opt-in-consent). Compensated by the connect-time, versioned consent (owner_input_consent).
 - **Owner-input consent given in the user's terminal (cardinal-connect --owner-input)**, Claude Code (N/A): capture follows the per-session disclosure (plan R3); no separate consent is required
 - **Owner-input consent given in the user's terminal (cardinal-connect --owner-input)**, Codex (N/A): capture follows the per-session disclosure (plan R3); no separate consent is required

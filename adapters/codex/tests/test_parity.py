@@ -407,15 +407,9 @@ class ConnectTests(unittest.TestCase):
         self.assertIn("Stop", hooks["hooks"])
         self.assertIn("SubagentStop", hooks["hooks"])
         self.assertIn("cardinal-codex-plugin", json.dumps(hooks))
-        # Coordination is synchronous and scoped to the validated native
-        # transports. Storyboard context keeps its separate tool matcher.
-        gate_group, stamp_group = hooks["hooks"]["PreToolUse"]
-        self.assertEqual(gate_group["matcher"], "Bash|apply_patch")
-        (gate_handler,) = gate_group["hooks"]
-        self.assertEqual(gate_handler["type"], "command")
-        self.assertIn("--event CoordinationGate", gate_handler["command"])
-        self.assertEqual(gate_handler["timeout"], 5)
-        self.assertFalse(gate_handler.get("async", False))
+        # Coordination is explicit; only storyboard context keeps a pre-tool registration.
+        (stamp_group,) = hooks["hooks"]["PreToolUse"]
+        self.assertNotIn("CoordinationGate", json.dumps(hooks))
         self.assertEqual(stamp_group["matcher"], "^mcp__cardinal__storyboard__(create|add_act|publish|find)$")
         (handler,) = stamp_group["hooks"]
         self.assertIn("--event StoryboardContext", handler["command"])
@@ -577,7 +571,7 @@ class ConnectTests(unittest.TestCase):
         # The stale groups held nothing else, so they go away; current
         # coordination and storyboard context registrations remain.
         self.assertEqual([g["matcher"] for g in hooks["PreToolUse"]],
-                         ["Bash|apply_patch", "^mcp__cardinal__storyboard__(create|add_act|publish|find)$"])
+                         ["^mcp__cardinal__storyboard__(create|add_act|publish|find)$"])
         self.assertIn("SessionStart", hooks)
         self.assertTrue((self.home / ".codex" / "cardinal" / "cardinal-codex-telemetry.py").is_file())
         manifest = read_json(ROOT / ".codex-plugin" / "plugin.json")

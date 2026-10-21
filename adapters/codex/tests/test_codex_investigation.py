@@ -102,10 +102,10 @@ class InvestigationTests(unittest.TestCase):
     def test_session_guidance_declares_automatic_coordination_and_explicit_dependencies(self):
         self.setup_live()
         ctx = self.start()
-        self.assertIn("Coordination is automatic on supported direct CLI paths", ctx)
-        self.assertIn("record an investigation request with its assignee and dependent actions", ctx)
+        self.assertIn("Coordinate on intent at any point in your work", ctx)
+        self.assertIn("create an investigation request with its assignee and intent", ctx)
         self.assertIn("complete, blocked, abstain or reject", ctx)
-        self.assertIn("resolve to accept the exact completed result or cancel with a reason", ctx)
+        self.assertIn("only exact-result acceptance or reasoned cancellation resolves the dependency", ctx)
 
     def test_existing_session_receives_actionable_cue_guidance_at_tool_completion(self):
         self.setup_live()

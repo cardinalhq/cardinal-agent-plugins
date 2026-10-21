@@ -59,7 +59,7 @@ class Server:
             raise self.fail
         if operation == "get-investigation":
             return {"investigation_id": INV, "author": {"kind": "user", "id": "owner"},
-                    "capabilities": {"event_snapshot": self.cap, "coordination_requests": {"enabled": True, "version": 1}}}
+                    "capabilities": {"event_snapshot": self.cap, "coordination_requests": {"enabled": True, "version": 1}, "coordination_intents": {"enabled": True, "version": 1}}}
         assert operation == "read-investigation-events", operation
         assert body["snapshot"] is True
         bound = body.get("through_seq", self.head)
@@ -94,7 +94,7 @@ class Fixture(unittest.TestCase):
         return self.gate.enable(POLICY, **kwargs)
 
     def check(self):
-        return self.gate.check("apply_patch", "*** Begin Patch")
+        return self.gate.synchronize("Investigate the cause before deciding")
 
     def batch(self):
         return c.private_read(self.path)["gate"]["batch"]
@@ -170,42 +170,10 @@ class Policy(unittest.TestCase):
         return g.classify(g.policy(value or POLICY), tool, {"cmd": command, "command": command},
                           session=SID, investigation=INV, gate_file="/private/gate.json")
 
-    def test_supported_direct_forms(self):
-        for command in ("git commit -m 'a; b'", "git -C /repo --no-pager push origin HEAD",
-                        "/usr/bin/git commit --amend --no-edit", "gh -R org/repo pr merge 12 --squash",
-                        "git push --force-with-lease origin HEAD", "git push --force-with-lease=main:abc",
-                        "git commit --message='quoted value' -- path.py",
-                        "/plugin/cardinal-storyboard investigation verdict --session worker-session 1"):
-            with self.subTest(command=command):
-                self.assertEqual(self.classify(command), "covered")
-        self.assertEqual(self.classify("", tool="apply_patch"), "covered")
-        claude = {**POLICY, "runtime": "claude"}
-        for tool in ("Write", "Edit", "NotebookEdit", "Bash"):
-            self.assertEqual(self.classify("git push", value=claude, tool=tool), "covered")
-
-    def test_supported_exemptions_are_exact_whole_commands(self):
-        prefix = "/plugin/cardinal-storyboard investigation "
-        for tail in ("ack --session worker-session 1 accepted --note 'Will do; thanks'",
-                     "gate-status --session worker-session --gate-file /private/gate.json",
-                     "events --session worker-session --investigation " + INV):
-            self.assertEqual(self.classify(prefix + tail), "coordination")
-        for tail in ("ack --session another 1 accepted", "ack --session worker-session 0 accepted",
-                     "ack --session worker-session 1 accepted --typo x",
-                     "gate-status --session worker-session --gate-file /another.json",
-                     "ack --session worker-session 1 accepted; git push"):
-            self.assertEqual(self.classify(prefix + tail), "uncovered")
-
-    def test_unsupported_equivalents_and_nested_calls_never_claim_coverage(self):
-        for command in ("env git push", "cd /repo && git push", "git push | cat", "git push\ntrue",
-                        "git push $(echo origin)", "git push `echo origin`", "git push $REMOTE",
-                        "git push *", "sh -c 'git push'", "echo git push", "git -c alias.x=push x",
-                        "/other/git push", "gh --hostname example.test pr merge 1",
-                        "git push --invented", "git commit --unregistered-flag", "git push \\\norigin",
-                        "/other/cardinal-storyboard investigation ack --session worker-session 1 accepted"):
-            with self.subTest(command=command):
-                self.assertEqual(self.classify(command), "uncovered")
-        for tool in ("functions.exec", "write_stdin", "MultiEdit"):
-            self.assertEqual(self.classify("git push", tool=tool), "uncovered")
+    def test_ordinary_calls_are_never_classified_as_coordination(self):
+        for tool in ("apply_patch", "Write", "Bash", "functions.exec", "arbitrary-tool"):
+            for command in ("git commit -m decision", "git push", "gh pr merge 12", "arbitrary reasoning"):
+                self.assertEqual(self.classify(command, tool=tool), "uncovered")
 
     def test_policy_is_explicit_and_digest_changes(self):
         for raw in ({}, {**POLICY, "version": True}, {**POLICY, "peers": []}, {**POLICY, "unknown": True}):
@@ -420,7 +388,7 @@ class Engine(Fixture):
         with self.assertRaises(ValueError):
             self.gate.status()
         control = "/plugin/cardinal-storyboard investigation gate-disable --session " + SID + " --gate-file " + str(self.path)
-        self.assertEqual(self.gate.check("exec_command", {"cmd": control}).status, "coordination")
+        self.assertEqual(self.gate.check("exec_command", {"cmd": control}).status, "uncovered")
         self.assertFalse(self.gate.disable()["enabled"])
         self.assertEqual(self.check().status, "disabled")
         self.assertIsNotNone(c.private_read(self.path)["gate"]["batch"])

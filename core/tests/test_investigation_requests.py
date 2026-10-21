@@ -11,9 +11,10 @@ from cardinal_core import investigation_requests as requests
 from cardinal_core import investigation_gate_runtime as rt
 
 
-def created(seq=1, *, actions=None, requester=SID, assignee="peer"):
-    return event(seq, "request.created", sid=requester, payload={"text": "Review before committing",
-        "assignee": {"principal": "user:owner", "session": assignee}, "actions": actions or ["commit"]})
+def created(seq=1, *, intent="Choose the next hypothesis", requester=SID, assignee="peer", legacy=False):
+    purpose = {"actions": ["commit"]} if legacy else {"intent": intent}
+    return event(seq, "request.created", sid=requester, payload={"text": "Review the evidence",
+        "assignee": {"principal": "user:owner", "session": assignee}, **purpose})
 
 
 def response(seq, request=1, outcome="complete", sid="peer"):
@@ -28,37 +29,41 @@ def resolved(seq, request=1, *, outcome="accepted", reply=2, sid=SID):
 
 
 class Requests(Fixture):
-    def test_wait_survives_restart_and_only_blocks_declared_action(self):
+    def test_arbitrary_intent_survives_restart_and_unrelated_work_stays_available(self):
         self.enable()
         self.server.add(created())
-        args = {"cmd": "git commit -m guarded"}
-        self.assertIn("Waiting for request #1", self.gate.check("exec_command", args).message)
-        self.assertEqual(self.make_gate().check("exec_command", args).status, "defer")
-        self.assertEqual(self.make_gate().check("apply_patch", "patch").status, "allow")
-        self.server.add(event(2, "acknowledged", sid=SID,
-            payload={"ack_of": 1, "disposition": "noted", "note": "Seen"}))
-        self.assertIn("Waiting for request #1", self.gate.check("exec_command", args).message)
+        purpose = "Choose the next hypothesis"
+        self.assertEqual(self.gate.synchronize(purpose).reason, "waiting")
+        self.assertEqual(self.make_gate().synchronize(purpose).reason, "waiting")
+        self.assertEqual(self.gate.synchronize("Explain the already verified timeline").status, "allow")
+        self.assertEqual(self.gate.check("anything", {}).status, "uncovered")
 
-    def test_complete_needs_explicit_acceptance_and_feedback_review(self):
+    def test_legacy_request_selected_explicitly_is_durable_without_action_matching(self):
+        self.enable()
+        self.server.add(created(legacy=True))
+        self.assertEqual(self.gate.synchronize("Answer the user", [1]).reason, "waiting")
+        self.assertEqual(self.make_gate().synchronize("Answer the user").reason, "waiting")
+        self.assertEqual(self.gate.synchronize("Independent calculation").status, "allow")
+
+    def test_complete_needs_exact_acceptance_after_feedback_review(self):
         self.enable()
         self.server.add(created(), response(2))
-        call = lambda: self.gate.check("exec_command", {"cmd": "git commit -m guarded"})
-        self.assertEqual(call().status, "defer")
+        self.assertEqual(self.gate.synchronize("Choose the next hypothesis").status, "defer")
         batch, hashes = self.delivered()
         self.gate.reviewed(batch, hashes)
-        self.assertIn("Waiting for request #1", call().message)
+        self.assertEqual(self.gate.synchronize("Choose the next hypothesis").reason, "needs_attention")
         self.server.add(resolved(3))
-        self.assertEqual(call().status, "allow")
+        self.assertEqual(self.gate.synchronize("Choose the next hypothesis").status, "allow")
 
     def test_blocked_abstain_reject_and_silence_never_release(self):
         for outcome in ("blocked", "abstain", "reject"):
             state = {}
             requests.fold(state, [created(), response(2, outcome=outcome)])
-            self.assertTrue(requests.waiting(state, "user:owner", SID, "commit"))
+            self.assertTrue(requests.waiting(state, "user:owner", SID, [1]))
             with self.assertRaises(ValueError):
                 requests.fold(copy.deepcopy(state), [resolved(3)])
             requests.fold(state, [resolved(3, outcome="cancelled", reply=None)])
-            self.assertFalse(requests.waiting(state, "user:owner", SID, "commit"))
+            self.assertFalse(requests.waiting(state, "user:owner", SID, [1]))
 
     def test_identity_wrong_response_and_stale_result_refused(self):
         for bad in (response(2, sid="intruder"), resolved(2, reply=99), resolved(2, sid="intruder")):
@@ -70,52 +75,25 @@ class Requests(Fixture):
     def test_blocked_can_progress_to_complete(self):
         state = {}
         requests.fold(state, [created(), response(2, outcome="blocked"), response(3), resolved(4, reply=3)])
-        self.assertFalse(requests.waiting(state, "user:owner", SID, "commit"))
+        self.assertFalse(requests.waiting(state, "user:owner", SID, [1]))
 
-    def test_fresh_read_failure_retains_outstanding_request(self):
+    def test_missing_or_foreign_requirement_never_clears_intent(self):
+        self.enable()
+        self.assertEqual(self.gate.synchronize("Publish a conclusion", [99]).status, "defer")
+        self.server.add(created(requester="another"))
+        self.assertEqual(self.gate.synchronize("Other conclusion", [1]).status, "defer")
+
+    def test_fresh_read_failure_retains_requirement(self):
         self.enable()
         self.server.add(created())
-        self.gate.check("apply_patch", "probe")
+        self.gate.synchronize("Choose the next hypothesis")
         self.server.fail = TimeoutError()
-        self.assertEqual(self.gate.check("exec_command", {"cmd": "git commit -m x"}).status, "defer")
+        self.assertEqual(self.gate.synchronize("Choose the next hypothesis").status, "defer")
         self.assertTrue(c.private_read(self.path)["requests"]["1"])
-
-    def test_automatic_first_edit_without_mode_policy_or_enable(self):
-        hook = self.root / "plugin/hooks/cardinal-codex-telemetry.py"
-        hook.parent.mkdir(parents=True)
-        hook.write_text("# fixture")
-        ie.write_binding(self.root, SID, {"investigation_id": INV, "cursor": 0})
-        self.server.add(event(1, sid="new-peer"))
-        original = self.server.__call__
-        def server(conn, operation, body, **kw):
-            out = original(conn, operation, body, **kw)
-            if operation == "get-investigation":
-                out["capabilities"]["coordination_requests"] = {"enabled": True, "version": 1}
-            return out
-        with patch.object(ie.sync, "_post", side_effect=server), patch.object(rt, "runtime_pid", return_value=123):
-            out = rt.dispatch({"hook_event_name": "PreToolUse", "session_id": SID,
-                "tool_name": "apply_patch", "tool_input": "patch"}, runtime="codex", home=self.root,
-                connection=lambda: CONN, client="test", hook=hook, environ={})
-        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
-        routes = rt.all_routes(self.root, SID)
-        self.assertEqual(len(routes), 1)
-        self.assertTrue(routes[0][1]["automatic"])
-        self.assertTrue(c.private_read(Path(routes[0][1]["gate_file"]))["pending"])
-        self.assertTrue(any(b.get("request_protocol") == 1 for op, b in self.server.requests if op == "read-investigation-events"))
-
-    def test_request_cli_commands_are_exempt_but_verdict_is_covered(self):
-        base = ["/plugin/cardinal-storyboard", "investigation"]
-        import shlex
-        for suffix in (["request", "--assignee", "user:owner", "--assignee-session", "peer", "--blocks", "commit", "--text", "Review"],
-                       ["respond", "1", "--outcome", "abstain", "--text", "Cannot judge"],
-                       ["resolve", "1", "--outcome", "cancelled", "--text", "Reassigned"], ["requests"]):
-            self.assertEqual(g.classify(POLICY, "exec_command", {"cmd": shlex.join(base + suffix + ["--session", SID])},
-                session=SID, investigation=INV, gate_file=self.path), "coordination")
 
     def test_identical_later_request_is_new_but_uncertain_retry_keeps_identity(self):
         payload = created()["payload"]
-        observed = []
-        lose = [True]
+        observed, lose = [], [True]
         def append(conn, inv, typ, value, **kw):
             observed.append(kw["idempotency_key"])
             if lose[0]:
@@ -125,10 +103,10 @@ class Requests(Fixture):
         with patch.object(ie, "append_event", side_effect=append):
             with self.assertRaises(ie.ist.FetchError):
                 requests.create(CONN, INV, SID, payload, home=self.root, client="test")
-            self.assertTrue(requests.uncertain(self.root, SID, CONN, "commit"))
-            self.assertFalse(requests.uncertain(self.root, SID, CONN, "edit"))
+            self.assertTrue(requests.uncertain(self.root, SID, CONN, payload["intent"]))
+            self.assertFalse(requests.uncertain(self.root, SID, CONN, "Independent work"))
             requests.create(CONN, INV, SID, payload, home=self.root, client="test")
-            self.assertFalse(requests.uncertain(self.root, SID, CONN, "commit"))
+            self.assertFalse(requests.uncertain(self.root, SID, CONN, payload["intent"]))
             requests.create(CONN, INV, SID, payload, home=self.root, client="test")
         self.assertEqual(observed[0], observed[1])
         self.assertNotEqual(observed[1], observed[2])
@@ -156,9 +134,6 @@ class AutomaticConsumers(Fixture):
         self.protocol = patch.object(ie.sync, "_post", side_effect=server)
         self.protocol.start()
         self.addCleanup(self.protocol.stop)
-        self.pid = patch.object(rt, "runtime_pid", return_value=123)
-        self.pid.start()
-        self.addCleanup(self.pid.stop)
 
     def credential(self, path, gid):
         encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
@@ -167,10 +142,24 @@ class AutomaticConsumers(Fixture):
         c.private_write(path, {"token": token, "origin": CONN["origin"]})
         return c.credential_connection(path)
 
-    def dispatch(self, command="git commit -m should_wait"):
-        return rt.dispatch({"hook_event_name": "PreToolUse", "session_id": SID, "tool_name": "Bash",
-            "tool_input": {"command": command}}, runtime="codex", home=self.root, connection=lambda: None,
-            client="test", hook=self.hook, environ={})
+    def dispatch(self, credential=None):
+        credential = credential or self.root / "credential.json"
+        try:
+            if credential.exists():
+                conn = c.credential_connection(credential)
+            else:
+                journal = c.private_read(credential.with_suffix(".json.successor.json"))
+                credential = Path(journal["credential_file"])
+                conn = c.credential_connection(credential)
+            gates = rt.prepare_intent(session=SID, runtime="codex", home=self.root,
+                conn=conn, client="test", cli=self.cli, credential_file=credential)
+            for gate in gates:
+                result = gate.synchronize("Review the finding")
+                if result.status == "defer":
+                    return rt.denial(result.message)
+        except Exception as exc:
+            return rt.denial(str(exc))
+        return None
 
     def setup_old(self):
         path = self.root / "credential.json"
@@ -211,9 +200,7 @@ class AutomaticConsumers(Fixture):
         c.private_write(path.with_suffix(".json.successor.json"), {"old_identity": c.identity(old),
             "new_identity": c.identity(new), "credential_file": str(new_path)})
         path.unlink()
-        command = shlex.join(["python3", str(self.cli), "investigation", "events", "--session", SID,
-            "--credential-file", str(new_path)])
-        self.assertIsNone(self.dispatch(command))
+        self.assertEqual(self.dispatch(new_path)["hookSpecificOutput"]["permissionDecision"], "deny")
         active = [r for _, r in rt.all_routes(self.root, SID) if r["state"] == "active"]
         self.assertEqual(len(active), 1)
         self.assertEqual(c.private_read(Path(active[0]["gate_file"]))["gate"]["budget_file"], pin)
@@ -225,11 +212,7 @@ class AutomaticConsumers(Fixture):
         copied_path = self.root / "copied/credential.json"
         copied_path.parent.mkdir(mode=0o700)
         c.private_write(copied_path, c.private_read(path))
-        command = shlex.join(["python3", str(self.cli), "investigation", "events", "--session", SID,
-            "--credential-file", str(copied_path)])
-        parsed = rt._command_credential(rt.default_policy("codex", self.hook), "exec_command", {"cmd": command})
-        self.assertEqual(parsed.credential_file, copied_path)
-        self.assertIsNone(self.dispatch(command))
+        self.assertEqual(self.dispatch(copied_path)["hookSpecificOutput"]["permissionDecision"], "deny")
         active = [r for _, r in rt.all_routes(self.root, SID) if r["state"] == "active"]
         self.assertEqual(len(active), 2)
         self.assertTrue(any(r["gate_file"] == str(gate.path) for r in active))
@@ -239,31 +222,9 @@ class AutomaticConsumers(Fixture):
             self.assertEqual(self.dispatch()["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertTrue(any(r["state"] == "active" and r["gate_file"] == str(gate.path) for _, r in rt.all_routes(self.root, SID)))
 
-    def test_resolved_hook_recognizes_literal_installed_cli_alias(self):
-        import shlex
-        alias = self.root / "alias"
-        alias.symlink_to(self.hook.parent.parent, target_is_directory=True)
-        cli = alias / "scripts/cardinal-storyboard"
-        resolved_hook = rt.hook_path(cli, "codex")
-        value = rt.default_policy("codex", resolved_hook)
-        args = {"cmd": shlex.join(["python3", str(cli), "investigation", "events", "--session", SID,
-            "--credential-file", str(self.root / "scope.json")])}
-        self.assertEqual(rt._command_credential(value, "exec_command", args).credential_file, self.root / "scope.json")
-        args["cmd"] = shlex.join(["python3", str(cli), "investigation", "verdict", "1"])
-        self.assertEqual(g.classify(value, "exec_command", args, session=SID, investigation=INV, gate_file=self.path), "covered")
-
     def test_missing_indexed_route_and_orphan_activation_deny(self):
         path, _, gate, _ = self.setup_old()
         index = rt.index_path(self.root, SID)
         selected = c.private_read(index)["routes"][0]
         Path(selected).unlink()
         self.assertEqual(self.dispatch()["hookSpecificOutput"]["permissionDecision"], "deny")
-
-    def test_connected_missing_binding_initializes_instead_of_allowing(self):
-        with patch.object(ie, "read_binding", return_value=None), patch("cardinal_core.investigation_bootstrap.ensure",
-                return_value={"status": "failed", "binding": None}) as bootstrap:
-            answer = rt.dispatch({"hook_event_name": "PreToolUse", "session_id": SID, "tool_name": "apply_patch",
-                "tool_input": "patch"}, runtime="codex", home=self.root, connection=lambda: CONN,
-                client="test", hook=self.hook, environ={})
-        self.assertIn("initializing", answer["hookSpecificOutput"]["permissionDecisionReason"])
-        bootstrap.assert_called_once()

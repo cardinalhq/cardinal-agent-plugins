@@ -380,8 +380,8 @@ class Guidance(CheckpointBase):
                        "`--help`", "not private reasoning", "routine tool use", "unchanged knowledge",
                        "your claims, not established facts"):
             self.assertIn(needle, line)
-        self.assertIn("Coordination is automatic on supported direct CLI paths", ctx)
-        self.assertLess(ctx.index("Coordination is automatic"), start)
+        self.assertIn("Coordinate on intent at any point in your work", ctx)
+        self.assertLess(ctx.index("Coordinate on intent"), start)
         # Resume: the same guidance, still once.
         self.assertEqual(self.start().count(CHECKPOINT_SENTENCE), 1)
 
