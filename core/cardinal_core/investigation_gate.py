@@ -152,6 +152,23 @@ def _arguments(tokens, flags, valued):
     return True
 
 
+def prefix_matches(tokens, prefix):
+    """Match literal registered tokens, allowing equivalent absolute paths."""
+    if len(tokens) < len(prefix):
+        return False
+    for actual, expected in zip(tokens, prefix):
+        if actual == expected:
+            continue
+        if not (Path(actual).is_absolute() and Path(expected).is_absolute()):
+            return False
+        try:
+            if Path(actual).resolve() != Path(expected).resolve():
+                return False
+        except (OSError, RuntimeError):
+            return False
+    return True
+
+
 def classify(value, tool, arguments, *, session, investigation, gate_file, credential_file=None):
     """covered|coordination|uncovered, with no shell execution or network reads."""
     edits = {"codex": {"apply_patch", "functions.apply_patch"},
@@ -182,7 +199,7 @@ def classify(value, tool, arguments, *, session, investigation, gate_file, crede
         return "covered"
     for prefix in sorted(value["cli_prefixes"], key=len, reverse=True):
         n = len(prefix)
-        if tokens[:n] != prefix or tokens[n:n + 1] != ["investigation"]:
+        if not prefix_matches(tokens, prefix) or tokens[n:n + 1] != ["investigation"]:
             continue
         argv = tokens[n + 1:]
         if not argv:

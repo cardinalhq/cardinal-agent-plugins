@@ -21,7 +21,8 @@ optional. Automatic activation requires authenticated `event_snapshot` and
 `coordination_requests` version 1 capabilities, and requests protocol 1 on every
 read. An incompatible backend returns a deferral, never legacy clearance.
 
-Executable prefixes are literal token arrays, not basename matches. Prefer
+Executable prefixes are literal token arrays, not basename matches. Equivalent
+absolute installed paths are normalized when matching CLI prefixes. Prefer
 absolute executable/interpreter paths. A bare registered executable relies on
 the declared shell's PATH and absence of aliases/functions; the engine does not
 inspect shell configuration. This is an operational coverage declaration, not

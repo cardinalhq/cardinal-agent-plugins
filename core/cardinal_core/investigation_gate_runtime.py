@@ -305,7 +305,7 @@ def _command_credential(value, tool, args):
         return None
     tokens = engine.simple_command(args.get("cmd", args.get("command"))) or []
     for prefix in value["cli_prefixes"]:
-        if tokens[:len(prefix) + 1] != prefix + ["investigation"]:
+        if not engine.prefix_matches(tokens, prefix) or tokens[len(prefix):len(prefix) + 1] != ["investigation"]:
             continue
         from .investigation_cli import build_parser, normalize_argv
         from types import SimpleNamespace

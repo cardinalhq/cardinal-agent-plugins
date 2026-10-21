@@ -239,6 +239,19 @@ class AutomaticConsumers(Fixture):
             self.assertEqual(self.dispatch()["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertTrue(any(r["state"] == "active" and r["gate_file"] == str(gate.path) for _, r in rt.all_routes(self.root, SID)))
 
+    def test_resolved_hook_recognizes_literal_installed_cli_alias(self):
+        import shlex
+        alias = self.root / "alias"
+        alias.symlink_to(self.hook.parent.parent, target_is_directory=True)
+        cli = alias / "scripts/cardinal-storyboard"
+        resolved_hook = rt.hook_path(cli, "codex")
+        value = rt.default_policy("codex", resolved_hook)
+        args = {"cmd": shlex.join(["python3", str(cli), "investigation", "events", "--session", SID,
+            "--credential-file", str(self.root / "scope.json")])}
+        self.assertEqual(rt._command_credential(value, "exec_command", args).credential_file, self.root / "scope.json")
+        args["cmd"] = shlex.join(["python3", str(cli), "investigation", "verdict", "1"])
+        self.assertEqual(g.classify(value, "exec_command", args, session=SID, investigation=INV, gate_file=self.path), "covered")
+
     def test_missing_indexed_route_and_orphan_activation_deny(self):
         path, _, gate, _ = self.setup_old()
         index = rt.index_path(self.root, SID)
