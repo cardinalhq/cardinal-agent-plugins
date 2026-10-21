@@ -123,6 +123,7 @@ def helper(root, operation):
         except ValueError:
             decision = {}
         entry = {"tool": payload.get("tool_name"), "input": payload.get("tool_input"), "exit": result.returncode,
+                 "reason": decision.get("permissionDecisionReason", ""),
                  "stdout_bytes": len(result.stdout.encode()),
                  "decision": decision.get("permissionDecision"),
                  "reason_bytes": len(decision.get("permissionDecisionReason", "").encode()), "at": time.time_ns()}

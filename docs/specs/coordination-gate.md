@@ -1,39 +1,28 @@
 # Coordination gate engine (Phase 2)
 
-Implemented in `core/cardinal_core/investigation_gate.py`. This is an opt-in
-shared engine and CLI, with a strict Phase 1 snapshot reader. Phase 3 adds
-[runtime adapters, readiness checks and delivery coexistence](coordination-gate-runtime.md).
-Gate activation remains explicit; deployed-server acceptance remains pending
-Phase 1 deployment. The engine contract below also documents the Phase 2 layer
-independently of those runtime integrations.
+Implemented in `core/cardinal_core/investigation_gate.py`. Supported connected
+Codex and Claude direct CLI paths activate automatically before their first
+covered action. There is no opt-in mode or manual policy prerequisite. The
+[runtime specification](coordination-gate-runtime.md) owns activation, routing,
+credential renewal and delivery coexistence. [Request/result coordination](coordination-requests.md)
+adds a separate durable dependency check after feedback handling.
 
 ## Policy and declared coverage
 
-A policy is explicit JSON. Example for a worker (replace the peer identity,
-session and installation paths with the actual collaboration):
+The adapter generates a versioned policy from actual installed executable paths,
+authenticated consumer identity and role. `authenticated_peers: 1` selects peers
+within this Investigation; `peers` is empty for that automatic selection. Roles
+are worker (author), supervisor (supervise grant), or participant (other admitted
+user/key or read/advise grant). Each consumer has separate durable state.
 
-```json
-{
-  "version": 1,
-  "runtime": "codex",
-  "role": "worker",
-  "peers": [{"principal": "grantee:grt_REPLACE", "session": "supervisor-session"}],
-  "cli_prefixes": [
-    ["/absolute/plugin/scripts/cardinal-storyboard"],
-    ["/absolute/python3", "/absolute/plugin/scripts/cardinal-storyboard"]
-  ],
-  "git": ["/usr/bin/git"],
-  "gh": ["/opt/homebrew/bin/gh"]
-}
-```
+The low-level engine retains explicit JSON policies and manual activation for
+compatibility and isolated tests. Those APIs do not make normal runtime use
+optional. Automatic activation requires authenticated `event_snapshot` and
+`coordination_requests` version 1 capabilities, and requests protocol 1 on every
+read. An incompatible backend returns a deferral, never legacy clearance.
 
-Set `runtime` to `claude` for Claude. A supervisor uses role `supervisor` and the
-worker's principal/session as its peer. It requires a scoped credential file so
-its existing supervisor review guard can run. Workers require the investigation
-author's own credential. Enablement verifies the server's investigation identity,
-author, viewer and `event_snapshot: {enabled: true, version: 1}` capability.
-
-Executable prefixes are literal token arrays, not basename matches. Prefer
+Executable prefixes are literal token arrays, not basename matches. Equivalent
+absolute installed paths are normalized when matching CLI prefixes. Prefer
 absolute executable/interpreter paths. A bare registered executable relies on
 the declared shell's PATH and absence of aliases/functions; the engine does not
 inspect shell configuration. This is an operational coverage declaration, not
@@ -47,7 +36,7 @@ a shell security boundary.
 | Registered git executable; optional repeated `-C DIR` and `--no-pager`; `commit` or `push` | Covered with the finite option grammar below |
 | Registered gh executable; optional repeated `-R REPO`/`--repo REPO`; `pr merge` | Covered with the finite option grammar below |
 | Registered CLI prefix + `investigation verdict ...` | Covered for every outcome, including malformed arguments |
-| Exact CLI `ack`, `events`, `show`, `challenges`, `link`, five `gate-*` operations | Coordination when the real CLI parser validates arguments and consumer context matches |
+| Exact CLI `ack`, `events`, `show`, `challenges`, `link`, `request`, `respond`, `resolve`, `requests` and five `gate-*` operations | Coordination when the real CLI parser validates arguments and consumer context matches |
 | Other tools/commands, wrappers, compound commands, pipelines, redirects, substitutions, shell expansions, aliases, interactive input, nested `functions.exec`, `write_stdin`, `MultiEdit` | Uncovered; no enforcement claim |
 
 The option grammar accepts separate option values and `--option=value`, literal
@@ -123,11 +112,11 @@ Delivery attempts change no handled position. Explicit review requires the
 exact batch, every ordered chunk hash and a delivery attempt for every chunk.
 This proves transport identity, not that a model understood the contribution.
 
-Worker review requires committed server acknowledgments for every pending event
+Worker review requires committed server acknowledgments for every non-request pending event
 from this principal **and** session. It validates acknowledgment payload shape;
 the existing server append route is authoritative for challenge/directive
 positions, conflicts citing web owner decisions, and closed-target exceptions.
-Another consumer's acknowledgment does not count. Positive immutable proofs and
+Another consumer's acknowledgment does not count. Request lifecycle records require explicit hash review only, and non-author participants do not forge author acknowledgments. Positive immutable proofs and
 fixed-head scan progress survive capped/interrupted scans. Missing proofs cause
 a new scan on retry after the old proof snapshot completes.
 
@@ -145,16 +134,16 @@ user-supplied outboxes elsewhere are not discovered automatically. The successfu
 server acknowledgment is the worker's response evidence; removing a local
 failure marker alone is insufficient.
 
-Disabling preserves pending state. Re-enabling an identical consumer/policy
-preserves its cursor. Policy/peer/role/response-cache changes require an explicit
-new epoch: archive old private state, then rescan from zero. A different consumer,
-credential, session, investigation or grant requires a separate gate file; grant
-succession is deliberately not implemented here. A registry/schema upgrade that
-cannot validate the old file also requires a fresh file and rescan.
+The runtime preserves pending content and compatible old registry hashes through
+upgrades. Disabled legacy routes rearm automatically on the next covered action.
+Changed consumer identity uses separate state and a rescan from zero. Explicit
+server-verified grant succession can retire the predecessor while retaining its
+private pages and pinned response obligations; unrelated credentials cannot.
+See the runtime specification for the durable index and renewal protocol.
 
 ## CLI and engine API
 
-The five operations are shared by both adapters' existing CLI dispatch:
+The five low-level operations are shared by both adapters' existing CLI dispatch:
 
 ```sh
 cardinal-storyboard investigation gate-enable --session SID --investigation INV \
@@ -186,25 +175,19 @@ actual supported denial with main-agent feedback. The supervisor review callback
 is trusted integration code and must use the existing budget review guard, as
 the provided CLI does.
 
-## Validation and remaining integration
+## Validation boundary
 
-`core/tests/test_investigation_gate.py` supplies a deterministic Phase 1 server
-fixture, malformed response cases, explicit policy forms/exclusions, all five
-CLI commands, lossless Unicode chunk reconstruction, identity/epoch checks,
-partial scans, acknowledgment ownership/progress, parallel lock contention,
-required-post failure/retry and persistence fault/restart tests. Existing core
-and repository regression suites remain the compatibility checks.
+Core tests cover classification, bounded lossless chunks, explicit review,
+acknowledgment identity, partial snapshots, restart, lock contention, supervisor
+budget guards, automatic consumer discovery/renewal and durable request state.
+Backend checks separately exercise typed HTTP transitions and real Postgres
+serialization, cycle refusal and quota continuity across grant succession.
+Installed-runtime and deployed results must name their exact source/artifacts;
+unit test success alone makes no claim about those surfaces. The
+[automatic testbed](../../testbeds/automatic_coordination/README.md) defines the
+new paired-runtime acceptance, while historical Phase 3 results apply to the
+previous explicitly activated preview.
 
-Validation on October 20, 2026: 41 focused gate tests passed; the expanded full
-core suite passed 1,192 tests; repository regressions passed 35; Codex adapter
-Investigation regressions passed 15; Claude adapter Investigation regressions
-passed 90. Both packaged CLI entry points expose all five operations. Vendored
-artifacts are local build outputs; installed plugins were not modified.
-
-No live server deployment or installed-runtime gate validation is claimed by
-these tests. Phase 3 must validate real hook normalization, denial/feedback,
-delivery/poller coexistence, enablement readiness and operational errors on the
-Phase 0 direct CLI paths. Phase 4 owns measured token/latency budgets, 1,000 quiet
-checks per runtime, fault acceptance and matched-baseline task trials. Nested
-denial suppression, continuing interactive stdin and other Phase 0 exclusions
-remain excluded.
+Broad Phase 4 token/latency baselines, fleet request load and 1,000 quiet checks
+per runtime remain separate work. Nested denial suppression, continuing stdin,
+wrappers and other coverage exclusions still apply.

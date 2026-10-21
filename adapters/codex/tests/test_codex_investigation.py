@@ -99,13 +99,13 @@ class InvestigationTests(unittest.TestCase):
         ensure = next(r for r in self.fake.requests if r["path"].endswith("/ensure-session-investigation"))
         self.assertNotIn("context", ensure["body"])
 
-    def test_session_guidance_separates_accepting_work_from_owner_authority(self):
+    def test_session_guidance_declares_automatic_coordination_and_explicit_dependencies(self):
         self.setup_live()
         ctx = self.start()
-        self.assertIn("If work is planned or underway, use accepted, not noted, even for a cue", ctx)
-        self.assertIn("does not make it owner authorization or widen your permissions", ctx)
-        self.assertIn("use challenge for a requested correction", ctx)
-        self.assertIn("--note '<response>'", ctx)
+        self.assertIn("Coordination is automatic on supported direct CLI paths", ctx)
+        self.assertIn("record an investigation request with its assignee and dependent actions", ctx)
+        self.assertIn("complete, blocked, abstain or reject", ctx)
+        self.assertIn("resolve to accept the exact completed result or cancel with a reason", ctx)
 
     def test_existing_session_receives_actionable_cue_guidance_at_tool_completion(self):
         self.setup_live()

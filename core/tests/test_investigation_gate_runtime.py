@@ -39,14 +39,16 @@ class Runtime(Fixture):
         return rt.dispatch(payload, runtime="codex", home=self.root, connection=lambda: CONN,
                            client="test", hook=self.hook, environ=self.env)
 
-    def test_unconfigured_and_disabled_hooks_are_silent(self):
+    def test_unconnected_is_silent_and_disabled_bound_routes_rearm(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertIsNone(self.dispatch())
+            self.assertIsNone(rt.dispatch({"hook_event_name": "PreToolUse", "session_id": SID,
+                "tool_name": "apply_patch", "tool_input": "patch"}, runtime="codex", home=self.root,
+                connection=lambda: None, client="test", hook=self.hook, environ={}))
             self.activate()
             self.assertIsNone(self.dispatch())
             rt.deactivate(self.gate)
             self.server.add(event(1))
-            self.assertIsNone(self.dispatch())
+            self.assertEqual(self.dispatch()["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertEqual(out.getvalue(), "")
 
     def test_enable_requires_current_all_transport_receipts_and_mode(self):
@@ -118,12 +120,11 @@ class Runtime(Fixture):
         self.assertEqual(self.dispatch()["hookSpecificOutput"]["permissionDecision"], "deny")
         self.server.fail = None
         self.env.clear()
-        self.assertIn("direct CLI", self.dispatch()["hookSpecificOutput"]["permissionDecisionReason"])
-        self.env[rt.MODE] = "direct-cli"
+        self.assertIsNone(self.dispatch())  # No MODE opt-in is required.
         selected = rt.route(self.root, SID)
         selected["state"] = "activating"
         c.private_write(rt.route_path(self.root, SID), selected)
-        self.assertIn("activation", self.dispatch()["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIsNone(self.dispatch())  # Interrupted activation is retried automatically.
         self.assertIsNone(self.dispatch("Bash", {"command": "cardinal-storyboard investigation gate-disable"}))
 
     def test_failed_activation_can_be_cancelled_without_engine_file(self):
@@ -208,9 +209,11 @@ class Runtime(Fixture):
             rt.activate(self.gate, changed, runtime="codex", cli=self.cli, environ=self.env)
         self.assertEqual(rt.route(self.root, SID)["state"], "activating")
         for cmd in ("git commit -m old", "/new/git commit -m new"):
-            self.assertIsNotNone(self.dispatch("Bash", {"command": cmd}))
-        rt.activate(self.gate, changed, runtime="codex", cli=self.cli, environ=self.env, new_epoch=True)
-        self.assertNotIn("previous_policy", rt.route(self.root, SID))
+            self.assertIsNone(self.dispatch("Bash", {"command": cmd}))
+        recovered = rt.route(self.root, SID)
+        self.assertIn("git", recovered["policy"]["git"])
+        self.assertIn("/new/git", recovered["policy"]["git"])
+        self.assertNotIn("previous_policy", recovered)
 
     def test_legacy_cursor_never_suppresses_gate_obligation(self):
         ie.write_binding(self.root, SID, {"investigation_id": INV, "cursor": 999, "org": "org"})

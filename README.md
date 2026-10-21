@@ -214,3 +214,13 @@ change). Older servers continue to accept the existing context request, and
 the CLI reports when full multi-repo support is unavailable. Every adapter's
 next patch release includes this same shared implementation; the parity matrix
 and packaged-artifact tests guard against adapter drift.
+
+## Automatic agent coordination
+
+Connected Codex and Claude direct CLI sessions check new peer feedback before
+native edits, direct commits/pushes/merges and Investigation verdicts. They also
+honor explicit request/result dependencies without an enable command or mode
+setting. A delegating agent names the action categories that require a result;
+blocked/abstain/reject replies cannot silently release them. See the
+[runtime contract](docs/specs/coordination-gate-runtime.md) and
+[request commands](docs/specs/coordination-requests.md) for scope and limits.
