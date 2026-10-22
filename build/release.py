@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Release an adapter to its mirror repo.
 
-The mirror repos (cardinal-{claude,codex,cursor,gemini}-plugin) are where
+The mirror repos (cardinal-{claude,codex,cursor,gemini,copilot}-plugin) are where
 users install from; development happens in this monorepo (spec §Repo shape
 and release flow). This script builds one adapter's artifact — product
 code plus vendored cardinal_core, minus monorepo-only files — and pushes
@@ -35,6 +35,37 @@ MIRRORS = {
     "codex": ("cardinalhq/cardinal-codex-plugin", "plugins/cardinal-codex-plugin"),
     "cursor": ("cardinalhq/cardinal-cursor-plugin", "plugins/cardinal-cursor-plugin"),
     "gemini": ("cardinalhq/cardinal-gemini-plugin", "plugins/cardinal-gemini-plugin"),
+    # Copilot CLI installs a marketplace plugin to
+    # ~/.copilot/installed-plugins/<marketplace>/<plugin>; the subpath's last
+    # segment is the plugin's name (.plugin/plugin.json "name").
+    "copilot": ("cardinalhq/cardinal-copilot-plugin", "plugins/cardinal"),
+}
+
+# The marketplace manifest each mirror carries, relative to the mirror root.
+# Copilot CLI reads .github/plugin/marketplace.json (it also falls back to
+# .claude-plugin/marketplace.json); the others are Claude-style or absent.
+MARKETPLACE_PATHS = {
+    "copilot": ".github/plugin/marketplace.json",
+}
+DEFAULT_MARKETPLACE_PATH = ".claude-plugin/marketplace.json"
+# A marketplace manifest created on a mirror's first release (one without
+# one): only Copilot's mirror needs it to be installable.
+MARKETPLACE_TEMPLATES = {
+    "copilot": {
+        "name": "cardinal-copilot-plugin",
+        "metadata": {"description": "Cardinal plugin for GitHub Copilot CLI: telemetry, Investigations and the unified Cardinal MCP tools."},
+        "owner": {"name": "CardinalHQ", "url": "https://cardinalhq.io"},
+        "plugins": [
+            {
+                "name": "cardinal",
+                "source": "./plugins/cardinal",
+                "description": "Connect GitHub Copilot CLI to Cardinal: telemetry to the Outcomes Dashboard, Investigations and Storyboards, and the unified Cardinal MCP tools.",
+                "version": "0.0.0",
+                "homepage": "https://github.com/cardinalhq/cardinal-copilot-plugin",
+                "license": "Apache-2.0",
+            }
+        ],
+    },
 }
 
 # Monorepo-only files never shipped to mirrors.
@@ -68,6 +99,9 @@ REQUIRED_ARTIFACTS = {
               + BEHAVIOR_ARTIFACTS,
     "gemini": (".gemini-plugin/plugin.json", "extension/gemini-extension.json", "scripts/cardinal-behavior",
                "scripts/cardinal-checks") + BEHAVIOR_ARTIFACTS,
+    "copilot": (".plugin/plugin.json", "hooks/hooks.json", "hooks/cardinal-copilot-telemetry.py",
+                "scripts/cardinal-connect", "scripts/cardinal-behavior", "scripts/cardinal-checks")
+               + BEHAVIOR_ARTIFACTS,
 }
 
 BANNER = (
@@ -197,14 +231,18 @@ def main() -> int:
     # the plugin dir level only, were removed with the subpath above.
     ensure_banner(clone / "README.md")
 
-    # Sync .claude-plugin/marketplace.json's declared version with the
-    # plugin.json version we just laid down. Claude Code's `/plugin`
-    # command reads marketplace.json to determine what version to offer;
-    # if it stays stale, users see no update available even after the
-    # plugin folder itself has advanced. Skip cleanly when the file
-    # doesn't exist (codex/cursor/gemini mirrors are for their respective
-    # CLIs — no Claude Code marketplace manifest at the root).
-    marketplace_json = clone / ".claude-plugin" / "marketplace.json"
+    # Sync the mirror's marketplace.json declared version with the
+    # plugin.json version we just laid down. Claude Code's `/plugin` and
+    # Copilot CLI's `copilot plugin` read marketplace.json to determine what
+    # version to offer; if it stays stale, users see no update available
+    # even after the plugin folder itself has advanced. A mirror whose
+    # adapter has a template gets one created on its first release; skip
+    # cleanly otherwise (codex/cursor/gemini mirrors have none).
+    marketplace_json = clone / MARKETPLACE_PATHS.get(adapter, DEFAULT_MARKETPLACE_PATH)
+    if not marketplace_json.exists() and adapter in MARKETPLACE_TEMPLATES:
+        marketplace_json.parent.mkdir(parents=True, exist_ok=True)
+        marketplace_json.write_text(json.dumps(MARKETPLACE_TEMPLATES[adapter], indent=2) + "\n")
+        print(f"{adapter}: created {marketplace_json.relative_to(clone)}")
     if marketplace_json.exists():
         mf = json.loads(marketplace_json.read_text())
         for entry in mf.get("plugins", []):

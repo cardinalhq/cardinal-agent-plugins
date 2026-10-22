@@ -1,5 +1,5 @@
 """Exercise the behavior MCP and the Checks preview using the same artifact
-shipped to users of every adapter (Claude, Codex, Cursor, Gemini CLI)."""
+shipped to users of every adapter (Claude, Codex, Cursor, Gemini CLI, Copilot CLI)."""
 from __future__ import annotations
 
 import importlib.util
@@ -17,7 +17,7 @@ RELEASE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RELEASE)
 
 
-ADAPTERS = ("claude", "codex", "cursor", "gemini")
+ADAPTERS = ("claude", "codex", "cursor", "gemini", "copilot")
 CHECKS_TOOLS = {'get_behavior_range', 'list_accepted_checks', 'set_check_example', 'approve_check_example',
                 'remove_check_example', 'get_check_draft', 'lock_check_examples',
                 'execute_behavior_range', 'continue_behavior_range'}

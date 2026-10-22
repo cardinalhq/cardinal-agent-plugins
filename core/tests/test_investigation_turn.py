@@ -62,7 +62,8 @@ class TurnBase(unittest.TestCase):
 
 class TurnEndBlock(TurnBase):
     def test_who_may_block(self):
-        self.assertEqual(turn.TURN_END_BLOCK, {"claude": True, "codex": True, "gemini": False, "cursor": False})
+        self.assertEqual(turn.TURN_END_BLOCK, {"claude": True, "codex": True, "gemini": False, "cursor": False,
+                                               "copilot": False})
         self.assertFalse(turn.can_block("opencode"))
 
     def test_claude_and_codex_block_with_the_inbox(self):
@@ -75,8 +76,8 @@ class TurnEndBlock(TurnBase):
                 self.assertEqual(d.agent_context, [])
                 self.assertFalse(turn.staged_path(self.home, SID).exists())
 
-    def test_gemini_and_cursor_never_block_they_stage_for_the_next_boundary(self):
-        for runtime in ("gemini", "cursor"):
+    def test_gemini_cursor_and_copilot_never_block_they_stage_for_the_next_boundary(self):
+        for runtime in ("gemini", "cursor", "copilot"):
             with self.subTest(runtime=runtime):
                 self.setUp()
                 self.arrive(challenge(1))
@@ -89,7 +90,7 @@ class TurnEndBlock(TurnBase):
                 self.assertIn("challenge.added", got[0])
                 self.assertEqual(turn.at_prompt(self.home, SID, runtime).agent_context, [], "delivered once")
 
-    def test_no_deliverable_of_any_kind_ever_blocks_gemini_or_cursor(self):
+    def test_no_deliverable_of_any_kind_ever_blocks_gemini_cursor_or_copilot(self):
         def emitting(text):
             def fn(*a, **k):
                 emit = next(x for x in a if callable(x))
@@ -103,7 +104,7 @@ class TurnEndBlock(TurnBase):
             "reminder": [patch.object(ie, "supervision_stop", return_value=False),
                          patch.object(ie, "remind_decisions", side_effect=emitting("pending decision"))],
         }
-        for runtime in ("gemini", "cursor", "claude"):
+        for runtime in ("gemini", "cursor", "copilot", "claude"):
             for name, patches in cases.items():
                 with self.subTest(runtime=runtime, case=name):
                     self.setUp()

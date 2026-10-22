@@ -33,7 +33,7 @@ print(json.dumps(sorted(c["repo"] for c in session_repos.pending(home, sid, "org
 class SessionRepoReleaseTests(unittest.TestCase):
     def test_every_release_contains_the_same_core_and_replays_multiple_repos(self):
         source = ROOT / "core/cardinal_core"
-        for adapter in ("claude", "codex", "cursor", "gemini"):
+        for adapter in ("claude", "codex", "cursor", "gemini", "copilot"):
             with self.subTest(adapter=adapter), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 package = root / "package"

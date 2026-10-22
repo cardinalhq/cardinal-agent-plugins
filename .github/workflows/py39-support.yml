@@ -107,7 +107,7 @@ jobs:
         run: |
           set -e
           fail=0
-          for adapter in claude codex cursor gemini; do
+          for adapter in claude codex cursor gemini copilot; do
             python3 build/vendor.py "$adapter"
           done
           while IFS= read -r f; do

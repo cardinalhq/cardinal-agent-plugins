@@ -9,7 +9,7 @@ core/cardinal_core/     shared runtime — OTLP emission, initiative
                         resolution, spend limits, device consent,
                         session counters
 adapters/               per-agent surfaces (codex, gemini, cursor,
-                        claude, opencode, pi, devin)
+                        claude, copilot, opencode, pi, devin)
 build/vendor.py         copies core into each plugin artifact so shipped
                         plugins stay self-contained (no pip for users)
 docs/specs/             the extraction spec and migration plan
@@ -129,6 +129,13 @@ your home only, allow) rules go in `~/.cardinal/evidence-rules.json`. See
 [docs/specs/generic-evidence-capture.md](docs/specs/generic-evidence-capture.md)
 for the per-runtime hook wiring.
 
+The [GitHub Copilot CLI](adapters/copilot/README.md) plugin installs from its mirror's
+plugin marketplace (`copilot plugin marketplace add cardinalhq/cardinal-copilot-plugin`,
+then `copilot plugin install cardinal@cardinal-copilot-plugin`). Its hooks ship in the
+plugin and stay silent until `scripts/cardinal-connect`; it has the Cursor adapter's
+shape (no prompt-time context, no turn-end block) and no token usage. It has not yet
+been exercised in a live Copilot session.
+
 Native [OpenCode](adapters/opencode/README.md) and [Pi](adapters/pi/README.md)
 packages provide session/tool/usage telemetry and Cardinal MCP access. Build
 them with `python3 build/native.py`; test with `npm ci --ignore-scripts` and
@@ -154,6 +161,7 @@ working; the mirrors are build outputs, not sources.
 - [cardinal-codex-plugin](https://github.com/cardinalhq/cardinal-codex-plugin)
 - [cardinal-cursor-plugin](https://github.com/cardinalhq/cardinal-cursor-plugin)
 - [cardinal-gemini-plugin](https://github.com/cardinalhq/cardinal-gemini-plugin)
+- [cardinal-copilot-plugin](https://github.com/cardinalhq/cardinal-copilot-plugin) (GitHub Copilot CLI; also its plugin marketplace)
 
 Bumping an adapter's `plugin.json` version on `main` triggers
 `.github/workflows/release-mirrors.yml`, which runs `build/release.py` to

@@ -1,10 +1,10 @@
 """The cross-agent parity matrix (docs/parity.json) is true of the code.
 
-docs/parity.json lists every feature of the four plugin adapters (claude,
-codex, cursor, gemini) and, per adapter, "present", "limit:<citation>" or
-"na:<reason>". This suite checks:
+docs/parity.json lists every feature of the five plugin adapters (claude,
+codex, cursor, gemini, copilot) and, per adapter, "present",
+"limit:<citation>" or "na:<reason>". This suite checks:
 
-- every cell is one of the three, and every feature names all four adapters;
+- every cell is one of the three, and every feature names all five adapters;
 - every "present" cell has at least one probe, and every probe passes
   (a hook registration, a skill, a file, an MCP server, or a grep);
 - every limit cites something checkable (a URL, a `*.md#anchor` that
@@ -19,9 +19,10 @@ Codex and Cursor register their hooks and MCP servers from code
 (scripts/cardinal-connect). The probes read what that code writes: each
 connect script is loaded in a child `python3 -I` with HOME pointed at a
 scratch directory and its own writer functions are run against scratch
-files (nothing under the real HOME is touched, nothing is sent). Claude
-and Gemini register from static files (hooks/hooks.json, .mcp.json,
-extension/hooks/hooks.json).
+files (nothing under the real HOME is touched, nothing is sent). Claude,
+Gemini and Copilot register hooks from static files (hooks/hooks.json,
+extension/hooks/hooks.json); Copilot's MCP servers come from its connect
+script's mcp-config.json writer.
 
 Stdlib only; Python 3.9.
 """
@@ -41,7 +42,7 @@ from typing import Dict, List, Optional
 ROOT = Path(__file__).resolve().parent.parent
 PARITY_JSON = ROOT / "docs" / "parity.json"
 PARITY_MD = ROOT / "docs" / "parity.md"
-ADAPTERS = ("claude", "codex", "cursor", "gemini")
+ADAPTERS = ("claude", "codex", "cursor", "gemini", "copilot")
 PROBE_KINDS = ("hook", "skill", "script", "agent", "mcp", "grep")
 
 
@@ -91,6 +92,11 @@ elif adapter == "cursor":
 elif adapter == "gemini":
     hooks = None  # extension/hooks/hooks.json is the registration
     servers = list(mod.merged_mcp_servers(None, url, key))
+elif adapter == "copilot":
+    hooks = None  # the plugin's hooks/hooks.json is the registration
+    mcp = scratch / "mcp-config.json"
+    mod.write_mcp_config(mcp, url, key, None)
+    servers = list(json.loads(mcp.read_text())["mcpServers"])
 else:
     raise SystemExit("no connect probe for " + adapter)
 print(json.dumps({"hooks": hooks, "mcp_servers": sorted(servers)}))
@@ -107,8 +113,8 @@ def features(data: dict) -> Dict[str, dict]:
 
 def flatten_hooks(hooks: dict) -> List[dict]:
     """[{event, matcher, command}] from a hooks map: Claude / Codex / Gemini
-    groups ({matcher, hooks: [{command}]}) or Cursor's flat entries
-    ({command, matcher?})."""
+    groups ({matcher, hooks: [{command}]}), Cursor's flat entries
+    ({command, matcher?}) or Copilot's ({bash, powershell?, matcher?})."""
     out = []
     for event, entries in (hooks or {}).items():
         if not isinstance(entries, list):
@@ -123,7 +129,7 @@ def flatten_hooks(hooks: dict) -> List[dict]:
                                     "command": str(handler.get("command") or "")})
             else:
                 out.append({"event": event, "matcher": str(entry.get("matcher") or ""),
-                            "command": str(entry.get("command") or "")})
+                            "command": str(entry.get("command") or entry.get("bash") or "")})
     return out
 
 
@@ -149,6 +155,9 @@ def registrations(adapter: str) -> List[dict]:
         return flatten_hooks(data.get("hooks"))
     if adapter == "gemini":
         data = json.loads((ROOT / "adapters/gemini/extension/hooks/hooks.json").read_text())
+        return flatten_hooks(data.get("hooks"))
+    if adapter == "copilot":
+        data = json.loads((ROOT / "adapters/copilot/hooks/hooks.json").read_text())
         return flatten_hooks(data.get("hooks"))
     return flatten_hooks(connect_probe(adapter)["hooks"])
 
@@ -250,7 +259,7 @@ class ParityMatrixShape(unittest.TestCase):
     def test_has_features(self):
         self.assertGreater(len(self.features), 20)
 
-    def test_every_feature_names_all_four_adapters_with_a_valid_cell(self):
+    def test_every_feature_names_all_five_adapters_with_a_valid_cell(self):
         for fid, f in self.features.items():
             with self.subTest(feature=fid):
                 self.assertTrue(f.get("title"), f"{fid}: no title")
@@ -346,7 +355,7 @@ class ClaudeHookGuard(unittest.TestCase):
             with self.subTest(event=reg["event"], script=script):
                 self.assertTrue(covered or (reg["event"], script) in allow,
                                 f"Claude registers {script} on {reg['event']} but no feature in docs/parity.json "
-                                f"references it: add a feature row (and wire Codex/Cursor/Gemini or declare "
+                                f"references it: add a feature row (and wire Codex/Cursor/Gemini/Copilot or declare "
                                 f"limit/na), or allowlist it in _claude_internal_hooks with a reason")
 
     def test_allowlist_entries_are_real_and_explained(self):

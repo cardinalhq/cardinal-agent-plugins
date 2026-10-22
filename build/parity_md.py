@@ -19,8 +19,9 @@ from typing import List
 ROOT = Path(__file__).resolve().parent.parent
 PARITY_JSON = ROOT / "docs" / "parity.json"
 PARITY_MD = ROOT / "docs" / "parity.md"
-ADAPTERS = ("claude", "codex", "cursor", "gemini")
-ADAPTER_NAMES = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "gemini": "Gemini CLI"}
+ADAPTERS = ("claude", "codex", "cursor", "gemini", "copilot")
+ADAPTER_NAMES = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "gemini": "Gemini CLI",
+                 "copilot": "Copilot CLI"}
 # Adapters outside the matrix (a feature's optional `outside_matrix` cells).
 OUTSIDE_NAMES = {"opencode": "OpenCode", "pi": "Pi", "devin": "Devin"}
 # group id -> heading, in document order

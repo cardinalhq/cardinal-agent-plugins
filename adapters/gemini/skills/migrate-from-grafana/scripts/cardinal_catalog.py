@@ -63,7 +63,7 @@ def load_env_file(path):
 
 # Where the agent's Cardinal connect wrote its state: CARDINAL_AGENT_HOME (each
 # adapter's SKILL.md sets it, e.g. ~/.codex), else the first agent home that has one.
-AGENT_HOMES = ["~/.claude", "~/.codex", "~/.cursor", "~/.gemini"]
+AGENT_HOMES = ["~/.claude", "~/.codex", "~/.cursor", "~/.gemini", "~/.copilot"]
 # --check exit codes the skill branches on: connect, or reconnect with --rotate.
 EXIT_NOT_CONNECTED, EXIT_CONNECT_REJECTED, EXIT_NEEDS_TOKEN = 3, 4, 6
 EXIT_PICK_INSTANCE = 7  # several data lakes and no --instance: ask the user which one

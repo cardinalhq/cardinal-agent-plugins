@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Report Cardinal Copilot CLI connection status."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+COPILOT_DIR = Path.home() / ".copilot"
+STATE_PATH = COPILOT_DIR / "cardinal.json"
+SECRETS_PATH = COPILOT_DIR / "cardinal-secrets.json"
+MCP_SERVER_NAME = "cardinal"
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+HOOKS_DIR = PLUGIN_ROOT / "hooks"
+HOOKS_FILE = HOOKS_DIR / "hooks.json"
+sys.path.insert(0, str(HOOKS_DIR))
+import _copilot_config as config  # noqa: E402
+
+
+def load_json(path: Path, label: str) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except Exception as exc:
+        print(f"{label} ({path}) is unreadable: {exc}")
+        sys.exit(1)
+    if not isinstance(data, dict):
+        print(f"{label} ({path}) is not a JSON object.")
+        sys.exit(1)
+    return data
+
+
+def mcp_entry(path: Path) -> dict:
+    data = load_json(path, path.name)
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        return {}
+    entry = servers.get(MCP_SERVER_NAME)
+    return entry if isinstance(entry, dict) else {}
+
+
+def probe_mcp(mcp_url: str, api_key: str) -> str:
+    req = urllib.request.Request(
+        mcp_url,
+        method="GET",
+        headers={"x-cardinalhq-api-key": api_key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return f"OK MCP reachable (HTTP {resp.status})"
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return f"FAIL MCP returned HTTP {exc.code}; run cardinal-connect --rotate."
+        return f"OK MCP reachable (HTTP {exc.code}; auth accepted)"
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return f"FAIL MCP network error: {exc}"
+
+
+def probe_ingest(endpoint: str, api_key: str, api_header: str) -> str:
+    req = urllib.request.Request(
+        endpoint.rstrip("/") + "/v1/metrics",
+        data=b"",
+        method="POST",
+        headers={
+            "content-type": "application/x-protobuf",
+            api_header: api_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return f"OK ingest reachable (HTTP {resp.status})"
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return f"FAIL ingest returned HTTP {exc.code}; run cardinal-connect --rotate."
+        if exc.code < 500:
+            return f"OK ingest reachable (HTTP {exc.code}; auth accepted)"
+        return f"FAIL ingest returned HTTP {exc.code}"
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return f"FAIL ingest network error: {exc}"
+
+
+def owner_input_line() -> str:
+    """Whether this machine's Copilot CLI sessions may record typed prompts as
+    owner input: the connect-time consent (cardinal-connect --owner-input)
+    and the kill switch, which wins over it."""
+    try:
+        from cardinal_core import owner_input
+    except Exception:
+        return "unknown (the plugin's vendored core is missing)"
+    home = Path.home()
+    if owner_input.kill_switch("copilot", home, os.environ):
+        return (f"off (kill switch: CARDINAL_OWNER_INPUT=0 or {owner_input.kill_switch_path(home)}; "
+                "nothing is recorded whatever the consent says)")
+    if owner_input.consent("copilot", home):
+        return ("on (you consented with cardinal-connect --owner-input on; prompts are recorded in sessions "
+                "whose Investigation turns owner input on; --owner-input off stops it)")
+    try:
+        prior = json.loads(owner_input.consent_path("copilot", home).read_text())
+    except (OSError, ValueError):
+        prior = None
+    if isinstance(prior, dict) and prior.get("on") is True:
+        return ("off (you consented to an earlier text; run cardinal-connect --owner-input on to read the "
+                "current one and consent again)")
+    return "off (cardinal-connect --owner-input on turns it on, in your own terminal)"
+
+
+def main() -> int:
+    if not STATE_PATH.exists():
+        print("Not connected. Run cardinal-connect to configure Cardinal for Copilot CLI.")
+        print(f"(The plugin's hooks are installed from {HOOKS_FILE} and stay silent until then;")
+        print(" evidence capture keeps tool results on this machine.)")
+        return 1
+
+    state = load_json(STATE_PATH, "cardinal.json")
+    secrets = load_json(SECRETS_PATH, "cardinal-secrets.json")
+    mcp_path = Path(state.get("mcp_config_path") or config.mcp_config_path())
+    user_entry = mcp_entry(mcp_path)
+
+    print(f"Mode:        {state.get('mode', 'unknown')}")
+    print(f"User:        {state.get('user_email')}")
+    print(f"Org:         {state.get('org_slug') or state.get('org_id')}")
+    if state.get("act_key_id"):
+        scopes = state.get("act_scopes") or ["maestro:act"]
+        print(f"Actions:     enabled ({', '.join(scopes)})")
+    print(f"Host:        {state.get('host')}")
+    print(f"Plugin ver:  {state.get('plugin_version')}")
+
+    written_at = state.get("written_at")
+    if written_at:
+        try:
+            connected_at = datetime.fromisoformat(written_at.replace("Z", "+00:00"))
+            age_days = (datetime.now(timezone.utc) - connected_at).days
+            print(f"Connected:   {age_days} day(s) ago")
+        except Exception:
+            pass
+
+    print()
+    telemetry = state.get("telemetry") if isinstance(state.get("telemetry"), dict) else {}
+    if telemetry.get("enabled"):
+        telemetry_line = "enabled"
+    elif telemetry.get("unavailable_reason"):
+        # Connected without an ingest key (org has no Lakerunner, or the
+        # server has no ingest endpoint). Informational — not a failure.
+        telemetry_line = f"unavailable ({telemetry['unavailable_reason']}); re-run cardinal-connect --rotate once ingest is available"
+    else:
+        telemetry_line = "disabled"
+    print(f"Telemetry:      {telemetry_line}")
+    print(f"Ingest endpoint:{' ' if state.get('ingest_endpoint') else ''}{state.get('ingest_endpoint')}")
+    print(f"Ingest key pref:{' ' if state.get('ingest_key_prefix') else ''}{state.get('ingest_key_prefix')}")
+    print(f"Hooks:          {HOOKS_FILE} (shipped with the plugin)")
+    print(f"Secrets path:   {SECRETS_PATH}")
+    print()
+    print(f"MCP endpoint:   {state.get('mcp_url')}")
+    print(f"MCP key prefix: {state.get('mcp_key_prefix')}")
+    print(f"MCP config:     {mcp_path}")
+    behavior = config.servers_of(load_json(mcp_path, mcp_path.name)).get(config.BEHAVIOR_SERVER_NAME)
+    print(f"Behavior MCP:   {'registered' if behavior else 'missing (re-run cardinal-connect to register it)'}")
+    print(f"Owner input:    {owner_input_line()}")
+
+    failures = 0
+
+    ingest_endpoint = state.get("ingest_endpoint")
+    ingest_key = secrets.get("ingest_api_key")
+    ingest_header = secrets.get("ingest_api_header") or "x-cardinalhq-api-key"
+    if ingest_endpoint and ingest_key:
+        msg = probe_ingest(str(ingest_endpoint), str(ingest_key), str(ingest_header))
+        print(msg)
+        if msg.startswith("FAIL"):
+            failures += 1
+    elif state.get("telemetry", {}).get("enabled"):
+        print("FAIL Cardinal ingest endpoint or local ingest key is missing.")
+        failures += 1
+
+    if state.get("mcp_url"):
+        if not user_entry:
+            print(f"FAIL No mcpServers.{MCP_SERVER_NAME} entry found in {mcp_path}.")
+            failures += 1
+        else:
+            config_url = user_entry.get("url")
+            headers = user_entry.get("headers")
+            api_key = headers.get("X-CardinalHQ-API-Key") if isinstance(headers, dict) else None
+
+            if config_url != state.get("mcp_url"):
+                print(f"WARN MCP URL in config differs from state: {config_url}")
+            if not config_url or not api_key:
+                print(f"FAIL Cardinal MCP URL or API-key header is missing from {mcp_path}.")
+                failures += 1
+            else:
+                msg = probe_mcp(str(config_url), str(api_key))
+                print(msg)
+                if msg.startswith("FAIL"):
+                    failures += 1
+
+    print()
+    print("Start a new Copilot CLI session (or /restart) if you connected or disconnected since it started.")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

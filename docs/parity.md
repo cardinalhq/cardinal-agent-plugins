@@ -1,7 +1,7 @@
-# Cross-agent parity: Claude Code, Codex, Cursor, Gemini CLI
+# Cross-agent parity: Claude Code, Codex, Cursor, Gemini CLI, Copilot CLI
 
-What each of the four plugin adapters (`adapters/claude`, `adapters/codex`,
-`adapters/cursor`, `adapters/gemini`) does, feature by feature, and where an
+What each of the five plugin adapters (`adapters/claude`, `adapters/codex`,
+`adapters/cursor`, `adapters/gemini`, `adapters/copilot`) does, feature by feature, and where an
 agent runtime can't support a feature. The native and API adapters
 (`opencode`, `pi`, `devin`) are not in this matrix.
 
@@ -14,7 +14,9 @@ generated from it by `python3 build/parity_md.py`, and
   a file, an MCP server, or a grep for the shared core call in the adapter's
   hook. Codex and Cursor register hooks and MCP servers from
   `scripts/cardinal-connect`; the test runs those writers against scratch
-  files to read what they register.
+  files to read what they register. Copilot CLI ships its hooks in the
+  plugin (`hooks/hooks.json`) and registers MCP servers from
+  `scripts/cardinal-connect`.
 - **L (limit)**: the runtime can't support it. Each limit cites a doc URL, a
   README section or a gemini-cli bundle reference, and says what the plugin
   does instead.
@@ -32,7 +34,7 @@ authority and privacy rules behind the turn-end and owner-input rows).
 ## How to add a feature
 
 1. Add the row to `docs/parity.json`: an id, `title`, `group`, and a cell
-   for all four adapters.
+   for all five adapters.
 2. Add the probe for every `present` cell (`probes.<adapter>`, one probe or
    a list): `hook`, `skill`, `script`, `agent`, `mcp` or `grep`. Paths are
    relative to `adapters/<adapter>/`.
@@ -52,150 +54,170 @@ authority and privacy rules behind the turn-end and owner-input rows).
 
 59 features. P = present (a probe checks it), L = platform limit (cited below), N/A = not a parity item (reason below).
 
-| | Claude Code | Codex | Cursor | Gemini CLI |
-|---|---|---|---|---|
-| P | 58 | 53 | 43 | 49 |
-| L | 0 | 4 | 14 | 7 |
-| N/A | 1 | 2 | 2 | 3 |
+| | Claude Code | Codex | Cursor | Gemini CLI | Copilot CLI |
+|---|---|---|---|---|---|
+| P | 58 | 53 | 43 | 49 | 44 |
+| L | 0 | 4 | 14 | 7 | 13 |
+| N/A | 1 | 2 | 2 | 3 | 2 |
 
 ### Investigation and supervision
 
-| Feature | Claude Code | Codex | Cursor | Gemini CLI |
-|---|---|---|---|---|
-| Intent-based agent synchronization and required results (`coordination_intents`) | P | P | N/A | N/A |
-| Investigation bootstrap and binding at session start (`investigation_bootstrap`) | P | P | P | P |
-| Background poller and capability refresh (`investigation_poller`) | P | P | P | P |
-| Owner-input capture (what the owner typed, shared gate) (`owner_input_capture`) | P | P | P | P |
-| Owner-input disclosure, per session, before the first capture (`owner_input_disclosure`) | P | P | L | P |
-| Owner-input consent given in the user's terminal (cardinal-connect --owner-input) (`owner_input_consent`) | N/A | N/A | P | N/A |
-| Owner-input outbox flushed at turn end (`owner_input_flush`) | P | P | P | P |
-| Advisory delivery at a tool boundary (staged items, then the inbox) (`advisory_tool_boundary`) | P | P | P | P |
-| A subagent's tool call does not consume the main thread's advisories (`advisory_subagent_guard`) | P | P | L | L |
-| Re-surfacing accepted challenges and directives (`advisory_resurface`) | P | P | P | P |
-| Turn end: inbox, sync check when the poller is stale, supervision stop, decision reminders (`turn_end_delivery`) | P | P | P | P |
-| Turn-end deliveries block the stop in the same turn (else staged for the next boundary) (`turn_end_block`) | P | P | L | L |
-| Session guidance text (links, question, checkpoint, ACK/POST, SUPERVISION), one shared builder (`session_guidance`) | P | P | P | P |
-| Labeled links (Storyboard private draft; Investigation timeline) (`labeled_links`) | P | P | P | P |
-| A recording command that could not reach Cardinal is reported (`investigation_failures_observe`) | P | P | P | P |
-| Supervisor watch guidance (events --follow, --exclude-self, --fields compact) (`supervisor_watch_guidance`) | P | P | P | P |
-| Relayed owner decisions (the owner approves in the supervisor terminal) (`relayed_owner_decisions`) | P | P | P | P |
-| Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back) (`supervise_stepback`) | P | P | L | P |
-| Additive repository provenance, saved-edit backfill and parent-workspace sessions (`session_repository_provenance`) | P | P | P | P |
+| Feature | Claude Code | Codex | Cursor | Gemini CLI | Copilot CLI |
+|---|---|---|---|---|---|
+| Intent-based agent synchronization and required results (`coordination_intents`) | P | P | N/A | N/A | N/A |
+| Investigation bootstrap and binding at session start (`investigation_bootstrap`) | P | P | P | P | P |
+| Background poller and capability refresh (`investigation_poller`) | P | P | P | P | P |
+| Owner-input capture (what the owner typed, shared gate) (`owner_input_capture`) | P | P | P | P | P |
+| Owner-input disclosure, per session, before the first capture (`owner_input_disclosure`) | P | P | L | P | L |
+| Owner-input consent given in the user's terminal (cardinal-connect --owner-input) (`owner_input_consent`) | N/A | N/A | P | N/A | P |
+| Owner-input outbox flushed at turn end (`owner_input_flush`) | P | P | P | P | P |
+| Advisory delivery at a tool boundary (staged items, then the inbox) (`advisory_tool_boundary`) | P | P | P | P | P |
+| A subagent's tool call does not consume the main thread's advisories (`advisory_subagent_guard`) | P | P | L | L | L |
+| Re-surfacing accepted challenges and directives (`advisory_resurface`) | P | P | P | P | P |
+| Turn end: inbox, sync check when the poller is stale, supervision stop, decision reminders (`turn_end_delivery`) | P | P | P | P | P |
+| Turn-end deliveries block the stop in the same turn (else staged for the next boundary) (`turn_end_block`) | P | P | L | L | L |
+| Session guidance text (links, question, checkpoint, ACK/POST, SUPERVISION), one shared builder (`session_guidance`) | P | P | P | P | P |
+| Labeled links (Storyboard private draft; Investigation timeline) (`labeled_links`) | P | P | P | P | P |
+| A recording command that could not reach Cardinal is reported (`investigation_failures_observe`) | P | P | P | P | P |
+| Supervisor watch guidance (events --follow, --exclude-self, --fields compact) (`supervisor_watch_guidance`) | P | P | P | P | P |
+| Relayed owner decisions (the owner approves in the supervisor terminal) (`relayed_owner_decisions`) | P | P | P | P | L |
+| Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back) (`supervise_stepback`) | P | P | L | P | L |
+| Additive repository provenance, saved-edit backfill and parent-workspace sessions (`session_repository_provenance`) | P | P | P | P | P |
 
 - **Intent-based agent synchronization and required results**, Claude Code (P): Explicit sync/wait at any agent intent; durable dependencies; bounded waits; no automatic tool interception
 - **Intent-based agent synchronization and required results**, Codex (P): Explicit sync/wait at any agent intent; durable dependencies; bounded waits; no automatic tool interception
 - **Intent-based agent synchronization and required results**, Cursor (N/A): Intent runtime integration has not been validated for Cursor
 - **Intent-based agent synchronization and required results**, Gemini CLI (N/A): Intent runtime integration has not been validated for Gemini
+- **Intent-based agent synchronization and required results**, Copilot CLI (N/A): Intent runtime integration has not been validated for Copilot CLI
 - **Owner-input disclosure, per session, before the first capture**, Cursor (L): Cursor has no user-visible, non-blocking hook message: beforeSubmitPrompt's user_message shows only when the prompt is blocked, and the other outputs are model context (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#owner-input-opt-in-consent). Compensated by the connect-time, versioned consent (owner_input_consent).
+- **Owner-input disclosure, per session, before the first capture**, Copilot CLI (L): Copilot CLI has no user-visible, non-blocking hook message: sessionStart additionalContext reaches only the model and userPromptSubmitted output is dropped for config-file hooks (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#owner-input-opt-in-consent). Compensated by the connect-time, versioned consent (owner_input_consent).
 - **Owner-input consent given in the user's terminal (cardinal-connect --owner-input)**, Claude Code (N/A): capture follows the per-session disclosure (plan R3); no separate consent is required
 - **Owner-input consent given in the user's terminal (cardinal-connect --owner-input)**, Codex (N/A): capture follows the per-session disclosure (plan R3); no separate consent is required
 - **Owner-input consent given in the user's terminal (cardinal-connect --owner-input)**, Gemini CLI (N/A): capture follows the per-session disclosure (plan R3); no separate consent is required
 - **A subagent's tool call does not consume the main thread's advisories**, Cursor (L): the guard is coded (a payload naming agent_id / subagent_id gets nothing), but Cursor documents no subagent id on tool hooks (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#investigation-sessions), so a subagent's tool call may be delivered the advisories.
 - **A subagent's tool call does not consume the main thread's advisories**, Gemini CLI (L): AfterTool carries no agent id and subagents run tools through the same hooks; Gemini CLI has no subagent hook events (gemini-cli 0.50.0 HookEventName, chunk-W4YMYD53.js:324340-324352; adapters/gemini/README.md#limits).
+- **A subagent's tool call does not consume the main thread's advisories**, Copilot CLI (L): the guard is coded (a payload naming agentId / parentToolCallId gets nothing), but Copilot CLI documents no agent id on tool hooks (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli), so a subagent's tool call may be delivered the advisories.
 - **Turn-end deliveries block the stop in the same turn (else staged for the next boundary)**, Cursor (L): stop's followup_message is submitted as the next user message, so advisory text would become owner input (plan R1; https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#limits-on-cursor). Staged for the next postToolUse or sessionStart instead.
 - **Turn-end deliveries block the stop in the same turn (else staged for the next boundary)**, Gemini CLI (L): an AfterAgent block re-enters the model as plain user-role text and re-fires BeforeAgent with the reason as the prompt (gemini-cli 0.50.0 chunk-W4YMYD53.js:335749-335757; adapters/gemini/README.md#limits). Staged for the next BeforeAgent or AfterTool instead.
+- **Turn-end deliveries block the stop in the same turn (else staged for the next boundary)**, Copilot CLI (L): agentStop can block, but Copilot CLI does not document whether the reason re-enters as hook-originated text or as a user turn that re-fires userPromptSubmitted (plan R1; https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli). Staged for the next postToolUse or sessionStart instead.
 - **Relayed owner decisions (the owner approves in the supervisor terminal)**, Claude Code (P): Claude Code fires UserPromptSubmit for scheduled-task, /loop and peer prompts too, with no origin in the payload: a detached verifier confirms from the transcript that a person typed it before anything is sent; the outcome is shown at Stop or with the next prompt.
 - **Relayed owner decisions (the owner approves in the supervisor terminal)**, Cursor (P): Cursor's beforeSubmitPrompt shows the user a hook's words only for a blocked prompt, so a relay-form prompt is blocked with the outcome as user_message (the model never sees that prompt; the outcome is staged for its next tool call).
+- **Relayed owner decisions (the owner approves in the supervisor terminal)**, Copilot CLI (L): a relay holds the owner's prompt back from the model; Copilot CLI's userPromptSubmitted can neither block nor rewrite a prompt from a config-file hook (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli). The owner posts decisions from their signed-in Cardinal web session.
 - **Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back)**, Codex (P): The step back runs as `codex exec --ignore-user-config --ignore-rules --disable hooks --disable apps --disable plugins --sandbox read-only --ephemeral` (the sandbox covers only shell commands; the flags drop the user's MCP servers, apps and hooks). Verified from a shell on 2026-10-15, codex-cli 0.162.1: no MCP tools, apply_patch and a shell write refused; not yet from inside a Codex session.
 - **Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back)**, Cursor (L): cursor-agent was not available to verify a read-only headless pass, so the supervise skill keeps the plan and its trigger and tells the owner the step back needs a Claude, Codex or Gemini supervisor (adapters/cursor/skills/supervise/SKILL.md#fresh-context-passes-step-backs; docs/specs/supervise-stepback.md#runtimes; docs/specs/supervise-stepback-trigger.md).
 - **Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back)**, Gemini CLI (P): The step back runs as `gemini -e none --policy skills/supervise/stepback-policy.toml ... --approval-mode default -p`: headless, enter_plan_mode/exit_plan_mode are allowed and leaving plan mode switches to YOLO, so the policy denies them and every tool but file reads and searches (denied tools are not offered). Verified from a shell on 2026-10-15, gemini-cli 0.64.0: without the policy a shell write succeeded via plan mode; with it only read_file/grep_search/glob/list_directory exist; not yet from inside a Gemini session.
+- **Supervise step backs on a work budget (estimator plan, per-milestone rate trigger, fresh-context step back)**, Copilot CLI (L): a read-only headless `copilot -p` pass was not verified, so the supervise skill keeps the plan and its trigger and tells the owner the step back needs a Claude, Codex or Gemini supervisor (adapters/copilot/skills/supervise/SKILL.md#fresh-context-passes-step-backs; docs/specs/supervise-stepback.md#runtimes).
 
 ### Storyboard authoring and discovery
 
-| Feature | Claude Code | Codex | Cursor | Gemini CLI |
-|---|---|---|---|---|
-| Preview auto-render to local PNGs (plus cover and unfurl mock) (`preview_render`) | P | P | P | P |
-| Hero render uploaded on publish (link previews) (`hero_upload`) | P | P | P | P |
-| Evidence token stored from create / add_act / preview (`evidence_token`) | P | P | P | P |
-| Edit lookup: storyboards about a file the agent edits (`edit_lookup`) | P | P | P | P |
-| Context stamping on storyboard tools (session_id, context filled automatically) (`context_stamping`) | P | L | L | P |
-| Related storyboards shown at session start (`discovery_session_start`) | P | P | P | P |
-| Discovery re-look on a prompt when the branch or HEAD moved (`discovery_relook_prompt`) | P | P | P | P |
-| Discovery block handed to a subagent at its start (`discovery_subagent_start`) | P | P | L | L |
-| Connect hint (unconnected) and stray-key warning at session start (`connect_hint_stray_key`) | P | P | P | P |
-| Continue an earlier session's storyboard (find, add_act before promote, no duplicate) (`storyboard_continuation`) | P | P | P | P |
+| Feature | Claude Code | Codex | Cursor | Gemini CLI | Copilot CLI |
+|---|---|---|---|---|---|
+| Preview auto-render to local PNGs (plus cover and unfurl mock) (`preview_render`) | P | P | P | P | P |
+| Hero render uploaded on publish (link previews) (`hero_upload`) | P | P | P | P | P |
+| Evidence token stored from create / add_act / preview (`evidence_token`) | P | P | P | P | P |
+| Edit lookup: storyboards about a file the agent edits (`edit_lookup`) | P | P | P | P | P |
+| Context stamping on storyboard tools (session_id, context filled automatically) (`context_stamping`) | P | L | L | P | P |
+| Related storyboards shown at session start (`discovery_session_start`) | P | P | P | P | P |
+| Discovery re-look on a prompt when the branch or HEAD moved (`discovery_relook_prompt`) | P | P | P | P | P |
+| Discovery block handed to a subagent at its start (`discovery_subagent_start`) | P | P | L | L | P |
+| Connect hint (unconnected) and stray-key warning at session start (`connect_hint_stray_key`) | P | P | P | P | P |
+| Continue an earlier session's storyboard (find, add_act before promote, no duplicate) (`storyboard_continuation`) | P | P | P | P | P |
 
+- **Edit lookup: storyboards about a file the agent edits**, Copilot CLI (P): Copilot CLI has no file-edit hook: the edited files come from postToolUse of create / edit / str_replace_editor / apply_patch, and the lookup's block is returned on that call.
 - **Context stamping on storyboard tools (session_id, context filled automatically)**, Codex (L): Codex applies a PreToolUse updatedInput only together with permissionDecision "allow", which may skip the approval prompt, so the hook stamps only in bypassPermissions mode or with CARDINAL_STORYBOARD_CONTEXT=always; elsewhere the agent passes cardinal-storyboard context (adapters/codex/README.md#storyboard-associations; https://learn.chatgpt.com/docs/hooks).
 - **Context stamping on storyboard tools (session_id, context filled automatically)**, Cursor (L): beforeMCPExecution answers with a permission (allow / deny / ask) and cannot rewrite the call's input (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#storyboard-associations). The sessionStart text and the cardinal-storyboard context CLI are used instead.
+- **Context stamping on storyboard tools (session_id, context filled automatically)**, Copilot CLI (P): preToolUse returns modifiedArgs (never a permission decision); the session text still names cardinal-storyboard context, since modifiedArgs without a decision is unverified on a live Copilot CLI.
+- **Discovery re-look on a prompt when the branch or HEAD moved**, Copilot CLI (P): userPromptSubmitted cannot add context, so the block is staged for the next tool call.
 - **Discovery block handed to a subagent at its start**, Cursor (L): subagentStart answers {permission, user_message} only, with no additional_context (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#limits-on-cursor). Staged items still reach the subagent at its first postToolUse.
 - **Discovery block handed to a subagent at its start**, Gemini CLI (L): Gemini CLI has no SubagentStart / SubagentStop hook event (gemini-cli 0.50.0 HookEventName, chunk-W4YMYD53.js:324340-324352; adapters/gemini/README.md#limits).
 
 ### Skills and agents
 
-| Feature | Claude Code | Codex | Cursor | Gemini CLI |
-|---|---|---|---|---|
-| canvas skill (shared common/canvas core) (`canvas_skill`) | P | P | P | P |
-| decision skill (status, and how to toggle capture) (`decision_skill`) | P | P | P | P |
-| supervise skill (watch another session's Investigation; shared common/supervise core) (`supervise_skill`) | P | P | P | P |
-| connect / disconnect / status skills (`connection_skills`) | P | P | P | P |
-| storyboard skill (shared common/storyboard core) (`storyboard_skill`) | P | P | P | P |
-| install-site, migrate-from-grafana and optimize-toolkit skills (`other_skills`) | P | P | P | P |
-| brainstorm subagent (`brainstorm_agent`) | P | P | P | P |
+| Feature | Claude Code | Codex | Cursor | Gemini CLI | Copilot CLI |
+|---|---|---|---|---|---|
+| canvas skill (shared common/canvas core) (`canvas_skill`) | P | P | P | P | P |
+| decision skill (status, and how to toggle capture) (`decision_skill`) | P | P | P | P | P |
+| supervise skill (watch another session's Investigation; shared common/supervise core) (`supervise_skill`) | P | P | P | P | P |
+| connect / disconnect / status skills (`connection_skills`) | P | P | P | P | P |
+| storyboard skill (shared common/storyboard core) (`storyboard_skill`) | P | P | P | P | P |
+| install-site, migrate-from-grafana and optimize-toolkit skills (`other_skills`) | P | P | P | P | P |
+| brainstorm subagent (`brainstorm_agent`) | P | P | P | P | P |
 
 ### Evidence capture
 
-| Feature | Claude Code | Codex | Cursor | Gemini CLI |
-|---|---|---|---|---|
-| Evidence capture of every tool call (local spool, scrubbed) (`evidence_capture`) | P | P | P | P |
-| Evidence capture of a failed tool call (`evidence_capture_failure`) | P | L | P | P |
-| cardinal-evidence CLI (promote what a storyboard cites) (`evidence_promote`) | P | P | P | P |
-| Best-effort evidence hold (checkpoint via CLI or MCP, cardinal-evidence hold / status) (`evidence_hold`) | P | P | P | P |
+| Feature | Claude Code | Codex | Cursor | Gemini CLI | Copilot CLI |
+|---|---|---|---|---|---|
+| Evidence capture of every tool call (local spool, scrubbed) (`evidence_capture`) | P | P | P | P | P |
+| Evidence capture of a failed tool call (`evidence_capture_failure`) | P | L | P | P | P |
+| cardinal-evidence CLI (promote what a storyboard cites) (`evidence_promote`) | P | P | P | P | P |
+| Best-effort evidence hold (checkpoint via CLI or MCP, cardinal-evidence hold / status) (`evidence_hold`) | P | P | P | P | P |
 
 - **Evidence capture of a failed tool call**, Codex (L): Codex has no tool-failure hook event; a failed call that reaches PostToolUse (a shell command's non-zero exit) is captured, one that does not is not (adapters/codex/README.md#evidence-capture-storyboards; https://learn.chatgpt.com/docs/hooks).
 
 ### Checks preview
 
-| Feature | Claude Code | Codex | Cursor | Gemini CLI |
-|---|---|---|---|---|
-| cardinal-behavior MCP server registered (`checks_behavior_mcp`) | P | P | P | P |
-| cardinal-checks on / off / status (`checks_cli`) | P | P | P | P |
-| Checks skill template over the shared common/checks core (`checks_skill_template`) | P | P | P | P |
-| Session start reconciles the installed checks skill and adds the routing rule (`checks_session_reconcile`) | P | P | P | P |
-| The checks skill is denied while the preview is off (`checks_skill_deny`) | P | L | L | P |
-| A checks on / off change is picked up by the running session (skill reload) (`checks_skill_reload`) | P | L | L | L |
-| Following a range run (Claude: Monitor; elsewhere: polling get_behavior_range) (`checks_range_follow`) | P | P | P | P |
+| Feature | Claude Code | Codex | Cursor | Gemini CLI | Copilot CLI |
+|---|---|---|---|---|---|
+| cardinal-behavior MCP server registered (`checks_behavior_mcp`) | P | P | P | P | P |
+| cardinal-checks on / off / status (`checks_cli`) | P | P | P | P | P |
+| Checks skill template over the shared common/checks core (`checks_skill_template`) | P | P | P | P | P |
+| Session start reconciles the installed checks skill and adds the routing rule (`checks_session_reconcile`) | P | P | P | P | P |
+| The checks skill is denied while the preview is off (`checks_skill_deny`) | P | L | L | P | L |
+| A checks on / off change is picked up by the running session (skill reload) (`checks_skill_reload`) | P | L | L | L | L |
+| Following a range run (Claude: Monitor; elsewhere: polling get_behavior_range) (`checks_range_follow`) | P | P | P | P | P |
 
 - **The checks skill is denied while the preview is off**, Codex (L): Codex has no skill tool call to deny: it lists the plugin's skills when the session starts and the model opens a SKILL.md itself; a running session keeps the list it started with (adapters/codex/README.md#checks-preview-opt-in; https://learn.chatgpt.com/docs/hooks).
 - **The checks skill is denied while the preview is off**, Cursor (L): no Cursor hook event names a skill being used, so there is nothing to deny; a change applies to sessions started afterwards (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#limits-on-cursor).
+- **The checks skill is denied while the preview is off**, Copilot CLI (L): Copilot CLI documents no tool that names a skill being used, so there is nothing to deny; a change applies to sessions started afterwards (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli).
 - **A checks on / off change is picked up by the running session (skill reload)**, Codex (L): a Codex SessionStart hook can only add context, with no skill-reload output; on / off apply to sessions started afterwards (adapters/codex/README.md#checks-preview-opt-in; https://learn.chatgpt.com/docs/hooks).
 - **A checks on / off change is picked up by the running session (skill reload)**, Cursor (L): Cursor's sessionStart output is additional_context (and env), with no skill-reload field; on / off apply to sessions started afterwards (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#limits-on-cursor).
 - **A checks on / off change is picked up by the running session (skill reload)**, Gemini CLI (L): Gemini CLI loads an extension's skills when it loads the extension and no hook output can reload them; the user can type /skills reload (gemini-cli 0.63.0 chunk-ED56GFWH.js:101678; adapters/gemini/README.md#limits).
+- **A checks on / off change is picked up by the running session (skill reload)**, Copilot CLI (L): Copilot CLI's sessionStart output is additionalContext only, with no skill-reload field; on / off apply to sessions started afterwards (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli).
 
 ### Telemetry, spend limits and decisions
 
-| Feature | Claude Code | Codex | Cursor | Gemini CLI |
-|---|---|---|---|---|
-| cardinal.git_state on each prompt (repo, branch, PR, initiative) (`git_state`) | P | P | P | P |
-| Spend-limits gate on each prompt (block) (`spend_limits_gate`) | P | P | P | P |
-| Spend-limits warn / notify shown with the prompt (`spend_limits_notice_at_prompt`) | P | P | L | P |
-| Initiative branch-naming convention and budget standing at session start (`initiative_convention`) | P | P | P | P |
-| Decision capture (cardinal-decision; cardinal.decision events) (`decision_capture`) | P | P | P | P |
-| Decision-capture instructions and ledger refreshed on each prompt (`decision_context_per_prompt`) | P | P | L | P |
-| Per-model-call token usage (cardinal.turn_usage / api_request) (`token_usage`) | P | P | L | P |
-| Cached-token counts (cost with cache discounts) (`cached_tokens`) | P | P | L | L |
-| cardinal.subagent_usage per subagent (`subagent_usage`) | P | P | P | L |
-| cardinal.plan_state (subscription plan / rate-limit tier) (`plan_state`) | P | P | L | P |
-| cardinal.plan_usage subscription utilization (rate-limit windows) (`plan_usage`) | P | P | L | L |
+| Feature | Claude Code | Codex | Cursor | Gemini CLI | Copilot CLI |
+|---|---|---|---|---|---|
+| cardinal.git_state on each prompt (repo, branch, PR, initiative) (`git_state`) | P | P | P | P | P |
+| Spend-limits gate on each prompt (block) (`spend_limits_gate`) | P | P | P | P | P |
+| Spend-limits warn / notify shown with the prompt (`spend_limits_notice_at_prompt`) | P | P | L | P | L |
+| Initiative branch-naming convention and budget standing at session start (`initiative_convention`) | P | P | P | P | P |
+| Decision capture (cardinal-decision; cardinal.decision events) (`decision_capture`) | P | P | P | P | P |
+| Decision-capture instructions and ledger refreshed on each prompt (`decision_context_per_prompt`) | P | P | L | P | L |
+| Per-model-call token usage (cardinal.turn_usage / api_request) (`token_usage`) | P | P | L | P | L |
+| Cached-token counts (cost with cache discounts) (`cached_tokens`) | P | P | L | L | L |
+| cardinal.subagent_usage per subagent (`subagent_usage`) | P | P | P | L | P |
+| cardinal.plan_state (subscription plan / rate-limit tier) (`plan_state`) | P | P | L | P | L |
+| cardinal.plan_usage subscription utilization (rate-limit windows) (`plan_usage`) | P | P | L | L | L |
 
+- **Spend-limits gate on each prompt (block)**, Copilot CLI (P): a block denies tool calls on preToolUse (permissionDecision deny): userPromptSubmitted cannot block the prompt.
 - **Spend-limits warn / notify shown with the prompt**, Cursor (L): beforeSubmitPrompt has no context output ({continue, user_message} only), so warn / notify are staged and surface at the next postToolUse (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#session-context--spend-limits).
+- **Spend-limits warn / notify shown with the prompt**, Copilot CLI (L): userPromptSubmitted output is dropped for config-file hooks, so warn / notify are staged and surface at the next postToolUse (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli).
 - **Decision-capture instructions and ledger refreshed on each prompt**, Cursor (L): beforeSubmitPrompt cannot add context, so the instructions and the decisions so far arrive once, at sessionStart (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#decision-capture-opt-in).
+- **Decision-capture instructions and ledger refreshed on each prompt**, Copilot CLI (L): userPromptSubmitted cannot add context, so the instructions and the decisions so far arrive once, at sessionStart (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#decision-capture-opt-in).
 - **Per-model-call token usage (cardinal.turn_usage / api_request)**, Cursor (L): Cursor's hook surface and transcript expose no per-model-call token counts (https://forum.cursor.com/t/accessing-the-full-agent-transcript-in-cursor/157311; adapters/cursor/README.md#telemetry-scope).
+- **Per-model-call token usage (cardinal.turn_usage / api_request)**, Copilot CLI (L): no hook payload carries token counts or the model, and Copilot CLI's per-call assistant.usage events are ephemeral, never written to the session's events.jsonl (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli).
 - **Cached-token counts (cost with cache discounts)**, Cursor (L): no token counts at all on Cursor (https://forum.cursor.com/t/accessing-the-full-agent-transcript-in-cursor/157311; adapters/cursor/README.md#telemetry-scope).
 - **Cached-token counts (cost with cache discounts)**, Gemini CLI (L): cached-content tokens are not exposed to Gemini CLI hooks (AfterModel usageMetadata), so cost ignores cache discounts (adapters/gemini/README.md#telemetry-scope).
+- **Cached-token counts (cost with cache discounts)**, Copilot CLI (L): no token counts at all reach Copilot CLI hooks (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli).
 - **cardinal.subagent_usage per subagent**, Gemini CLI (L): Gemini CLI has no subagent stop event; AfterAgent fires once per main-agent turn (gemini-cli 0.50.0 HookEventName, chunk-W4YMYD53.js:324340-324352; adapters/gemini/README.md#telemetry-scope).
+- **cardinal.subagent_usage per subagent**, Copilot CLI (P): subagentStop carries the agent name, type and stop reason only: no tokens, duration or counts.
 - **cardinal.plan_state (subscription plan / rate-limit tier)**, Cursor (L): Cursor's common hook fields (conversation and generation ids, model, Cursor version, workspace roots, user email, transcript path) carry no subscription plan or rate-limit tier (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#telemetry-scope).
+- **cardinal.plan_state (subscription plan / rate-limit tier)**, Copilot CLI (L): Copilot CLI's hook payloads (sessionId, timestamp, cwd and the event fields) carry no subscription plan or quota (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli).
 - **cardinal.plan_usage subscription utilization (rate-limit windows)**, Cursor (L): Cursor's hook payloads carry no rate-limit utilization; the plugin's plan_usage on Cursor is a context-window slice from preCompact (https://cursor.com/docs/agent/hooks; adapters/cursor/README.md#telemetry-scope).
 - **cardinal.plan_usage subscription utilization (rate-limit windows)**, Gemini CLI (L): gemini-cli reads subscription quota itself through the Code Assist retrieveUserQuota RPC (gemini-cli 0.63.0 chunk-IVQKNOQE.js:retrieveUserQuota) with the user's Google OAuth credentials and passes it to no hook; the plugin does not reuse the user's Google token against that internal API. plan_usage carries only the PreCompress compaction slice (adapters/gemini/README.md#telemetry-scope)
+- **cardinal.plan_usage subscription utilization (rate-limit windows)**, Copilot CLI (L): Copilot CLI's hook payloads carry no quota utilization; the plugin's plan_usage on Copilot CLI is the compaction trigger from preCompact (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference; adapters/copilot/README.md#limits-on-copilot-cli).
 
 ### Developer gates
 
-| Feature | Claude Code | Codex | Cursor | Gemini CLI |
-|---|---|---|---|---|
-| Invariant check before an edit (`invariant_check`) | P | N/A | N/A | N/A |
+| Feature | Claude Code | Codex | Cursor | Gemini CLI | Copilot CLI |
+|---|---|---|---|---|---|
+| Invariant check before an edit (`invariant_check`) | P | N/A | N/A | N/A | N/A |
 
 - **Invariant check before an edit**, Codex (N/A): an internal developer gate for Cardinal's own repos (it runs Invariant's check-pr.ts from a local conductor checkout), not a product feature to carry to other runtimes
 - **Invariant check before an edit**, Cursor (N/A): an internal developer gate for Cardinal's own repos (it runs Invariant's check-pr.ts from a local conductor checkout), not a product feature to carry to other runtimes
 - **Invariant check before an edit**, Gemini CLI (N/A): an internal developer gate for Cardinal's own repos (it runs Invariant's check-pr.ts from a local conductor checkout), not a product feature to carry to other runtimes
+- **Invariant check before an edit**, Copilot CLI (N/A): an internal developer gate for Cardinal's own repos (it runs Invariant's check-pr.ts from a local conductor checkout), not a product feature to carry to other runtimes
 
 ### Claude-only hooks outside the matrix
 

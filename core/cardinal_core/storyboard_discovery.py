@@ -366,8 +366,8 @@ def write_caps(caps_path: Optional[Path], origin: Optional[str], version: int,
 # The runtimes whose capability caches (<runtime home>/cardinal/server-caps.json)
 # all describe the same server per origin, and the environment variable that
 # moves a runtime's home where the runtime has one (Claude Code, Codex).
-CAPS_RUNTIMES = ("claude", "codex", "cursor", "gemini")
-RUNTIME_HOME_ENV = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+CAPS_RUNTIMES = ("claude", "codex", "cursor", "gemini", "copilot")
+RUNTIME_HOME_ENV = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "copilot": "COPILOT_HOME"}
 
 
 def caps_paths(home: Optional[Path], environ: Optional[dict] = None) -> list:

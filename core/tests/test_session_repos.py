@@ -23,7 +23,7 @@ class SessionReposTests(Base):
     def test_all_runtimes_replay_every_saved_repo_and_preserve_the_original_context(self):
         original = {"repo": "acme/original", "branch": "fix/one"}
         boot.ensure(self.home, SID, self.fake.conn, "codex/1", context=original)
-        for runtime in ("claude", "codex", "cursor", "gemini"):
+        for runtime in ("claude", "codex", "cursor", "gemini", "copilot"):
             with self.subTest(runtime=runtime):
                 files = AgentPaths(home=self.home / f".{runtime}").runtime_dir / "storyboard-files"
                 files.mkdir(parents=True)
@@ -32,7 +32,8 @@ class SessionReposTests(Base):
                     {"repo": "acme/shared", "path": "y.py"}]}))
                 repos.replay(self.home, SID, runtime, f"{runtime}/1", env={})
         contexts = repos.pending(self.home, SID, self.fake.conn["org"])
-        self.assertEqual({c["repo"] for c in contexts}, {"acme/shared", "acme/claude", "acme/codex", "acme/cursor", "acme/gemini"})
+        self.assertEqual({c["repo"] for c in contexts}, {"acme/shared", "acme/claude", "acme/codex", "acme/cursor", "acme/gemini",
+                                                         "acme/copilot"})
         self.assertEqual(boot.session_context(self.home, SID, self.fake.conn), original)
         boot.refresh_capabilities(self.home, SID, self.fake.conn, "codex/1")
         sent = [r[1].get("context", {}).get("repo") for r in self.ensures()]

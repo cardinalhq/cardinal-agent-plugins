@@ -21,6 +21,10 @@ product surface, see docs/specs/agent-core.md §Adapter variance table):
   the compact slice only.
 - gemini: thought_tokens on usage events; plan_usage is the compact slice.
 - codex: transcript-derived; plan_usage is the rate-limit slice.
+- copilot: no api_request / cardinal.turn_usage / plan_state (Copilot CLI
+  hooks carry no token counts, model or plan); plan_usage is the compaction
+  trigger only; subagent_usage has no model (subagentStop names none). Its
+  goldens are captured from the adapter itself (no pre-migration plugin).
 - devin: a server-side poller over Devin's REST API (docs/specs/devin-adapter.md),
   not a CLI plugin. Only git_state and decision; git_state has no
   cardinal_cwd (no local checkout) and no cardinal_command (no slash
@@ -40,7 +44,7 @@ from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-ADAPTERS = ("claude", "codex", "cursor", "gemini", "devin")
+ADAPTERS = ("claude", "codex", "cursor", "gemini", "copilot", "devin")
 
 # Which Cardinal events each adapter's goldens must contain.
 EXPECTED_EVENTS: dict[str, set[str]] = {
@@ -62,6 +66,10 @@ EXPECTED_EVENTS: dict[str, set[str]] = {
         "cardinal.git_state", "cardinal.turn_tool", "cardinal.turn_usage",
         "cardinal.subagent_usage", "cardinal.plan_state", "cardinal.plan_usage",
         "api_request", "tool_result",
+    },
+    "copilot": {
+        "cardinal.git_state", "cardinal.turn_tool", "cardinal.subagent_usage",
+        "cardinal.plan_usage", "tool_result",
     },
     "devin": {"cardinal.git_state", "cardinal.decision"},
 }
@@ -106,6 +114,8 @@ REQUIRED_KEYS: dict[str, set[str]] = {
 REQUIRED_KEY_EXEMPTIONS: dict[tuple[str, str], set[str]] = {
     # Devin runs in Cognition's cloud; the poller has no working directory.
     ("devin", "cardinal.git_state"): {"cardinal_cwd"},
+    # Copilot CLI's subagentStop carries agent name / type / stop reason only.
+    ("copilot", "cardinal.subagent_usage"): {"model"},
 }
 
 # Capability-identity fields the lakerunner identity extractor (T1.2, see
@@ -120,14 +130,14 @@ REQUIRED_KEY_EXEMPTIONS: dict[tuple[str, str], set[str]] = {
 # tool_result/tool_parameters event, which this repo does not emit
 # (turn-usage.py has no mcp__ branch). codex/cursor/gemini split into
 # mcp_server_name + mcp_tool_name alongside the raw name.
-MCP_SPLIT_ADAPTERS = {"codex", "cursor", "gemini"}
+MCP_SPLIT_ADAPTERS = {"codex", "cursor", "gemini", "copilot"}
 MCP_SPLIT_KEYS = {"mcp_server_name", "mcp_tool_name"}
 
 # subagent_type: emitted by all 4 CLI adapters on cardinal.subagent_usage
 # (probed on codex/cursor/gemini — their SubagentStop-equivalent payload
 # shape is unconfirmed in the wild; see the CARDINAL_*_DEBUG_PAYLOADS
 # capture affordances).
-SUBAGENT_TYPE_ADAPTERS = {"claude", "codex", "cursor", "gemini"}
+SUBAGENT_TYPE_ADAPTERS = {"claude", "codex", "cursor", "gemini", "copilot"}
 
 # cardinal_command on cardinal.git_state, sourced from the shared
 # cardinal_core.initiative.detect_command. Present only on the subset of
