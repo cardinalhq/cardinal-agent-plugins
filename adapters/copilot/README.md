@@ -146,6 +146,14 @@ the PR lookup on `userPromptSubmitted` (1.5 s cap, cached).
 - **Windows** is not supported (local storyboard preview needs macOS or Linux;
   the hooks have `powershell` commands but are untested there).
 
+## Backend rollout dependency
+
+Raw OTLP ingestion accepts `service.name` / `agent.runtime` `copilot`, but
+Lakerunner's agent-session tap selects only the runtimes it knows, so Copilot
+sessions reach session analytics only after
+[cardinalhq/lakerunner#2022](https://github.com/cardinalhq/lakerunner/issues/2022)
+(the tap selector and a `copilot` identity dispatch).
+
 ## Owner input (opt-in consent)
 
 Owner input is recorded only after you consent in your own terminal:
