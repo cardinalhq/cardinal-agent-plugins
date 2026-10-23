@@ -102,4 +102,4 @@ jobs:
           (cd adapters/codex && python3 -m unittest tests.test_codex_checks -v)
           (cd adapters/cursor && python3 -m unittest tests.test_cursor_checks -v)
           (cd adapters/gemini && python3 -m unittest tests.test_gemini_checks tests.test_connect -v)
-          (cd adapters/copilot && python3 -m unittest tests.test_copilot_checks -v)
+          (cd adapters/copilot && python3 -m unittest discover -s tests -p test_copilot_checks.py -v)
