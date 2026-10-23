@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event sessionStart || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event sessionStart; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 10
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event userPromptSubmitted || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event userPromptSubmitted; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 5
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preToolUse || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preToolUse; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 15
+      },
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse --role authoring || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse --role authoring; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 150,
+        "matcher": ".*storyboard__(preview|publish)"
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUseFailure || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUseFailure; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 5
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event agentStop || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event agentStop; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 10
+      }
+    ],
+    "subagentStart": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStart || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStart; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 5
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStop || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStop; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 5
+      }
+    ],
+    "preCompact": [
+      {
+        "type": "command",
+        "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preCompact || true",
+        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preCompact; exit 0",
+        "env": {
+          "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+        },
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

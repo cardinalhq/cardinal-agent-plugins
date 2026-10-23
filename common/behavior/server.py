@@ -32,7 +32,7 @@ DESCRIPTION = ('Flag an investigator run when the assistant states it has enough
                'that its evidence was sufficient or insufficient, or that submission succeeded.')
 
 
-RUNTIMES = ('claude', 'codex', 'cursor', 'gemini')
+RUNTIMES = ('claude', 'codex', 'cursor', 'gemini', 'copilot')
 
 
 def resolve_runtime(runtime=None, environ=None):

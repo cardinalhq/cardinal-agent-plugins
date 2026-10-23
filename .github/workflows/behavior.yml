@@ -19,6 +19,7 @@ on:
       - 'adapters/claude/tests/test_checks.py'
       - 'adapters/codex/tests/test_codex_checks.py'
       - 'adapters/cursor/tests/test_cursor_checks.py'
+      - 'adapters/copilot/tests/test_copilot_checks.py'
       - 'adapters/gemini/tests/test_gemini_checks.py'
       - 'adapters/gemini/tests/test_connect.py'
       - 'adapters/*/checks/**'
@@ -27,6 +28,7 @@ on:
       - 'adapters/*/.codex-plugin/plugin.json'
       - 'adapters/*/.cursor-plugin/plugin.json'
       - 'adapters/*/.gemini-plugin/plugin.json'
+      - 'adapters/*/.plugin/plugin.json'
       - 'adapters/gemini/extension/gemini-extension.json'
       - 'build/release.py'
       - 'build/sync_skills.py'
@@ -52,6 +54,7 @@ on:
       - 'adapters/claude/tests/test_checks.py'
       - 'adapters/codex/tests/test_codex_checks.py'
       - 'adapters/cursor/tests/test_cursor_checks.py'
+      - 'adapters/copilot/tests/test_copilot_checks.py'
       - 'adapters/gemini/tests/test_gemini_checks.py'
       - 'adapters/gemini/tests/test_connect.py'
       - 'adapters/*/checks/**'
@@ -60,6 +63,7 @@ on:
       - 'adapters/*/.codex-plugin/plugin.json'
       - 'adapters/*/.cursor-plugin/plugin.json'
       - 'adapters/*/.gemini-plugin/plugin.json'
+      - 'adapters/*/.plugin/plugin.json'
       - 'adapters/gemini/extension/gemini-extension.json'
       - 'build/release.py'
       - 'build/sync_skills.py'
@@ -87,14 +91,15 @@ jobs:
         run: cd core && python3 -m unittest tests.test_checks_install -v
       - name: Checks skill templates in sync
         run: python3 build/sync_skills.py --check
-      - name: Packaged behavior MCP smoke test (all four adapters)
+      - name: Packaged behavior MCP smoke test (all five adapters)
         run: python3 -m unittest discover -s tests -p test_behavior_release.py -v
       # Adapter suites need 3.11+ (tomllib, runtime `X | None`), as in investigation-tests.yml.
       - name: Checks preview in each adapter (connect, disconnect, skill, gate)
         if: matrix.python-version != '3.9'
         run: |
-          python3 build/vendor.py claude codex cursor gemini
+          python3 build/vendor.py claude codex cursor gemini copilot
           (cd adapters/claude && python3 -m unittest tests.test_checks -v)
           (cd adapters/codex && python3 -m unittest tests.test_codex_checks -v)
           (cd adapters/cursor && python3 -m unittest tests.test_cursor_checks -v)
           (cd adapters/gemini && python3 -m unittest tests.test_gemini_checks tests.test_connect -v)
+          (cd adapters/copilot && python3 -m unittest discover -s tests -p test_copilot_checks.py -v)

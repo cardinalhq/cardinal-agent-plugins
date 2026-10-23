@@ -1,0 +1,516 @@
+#!/usr/bin/env python3
+"""Connect GitHub Copilot CLI to Cardinal telemetry and MCP.
+
+Runs Cardinal's device-code flow, mints ingest and MCP keys, verifies both
+endpoints, and writes the managed `cardinal` (remote gateway) and
+`cardinal-behavior` (local stdio) entries into Copilot CLI's user MCP config,
+`~/.copilot/mcp-config.json` ($COPILOT_HOME/mcp-config.json when set). The
+plugin's hooks ship with the plugin (hooks/hooks.json); they stay silent
+until this script has written ~/.copilot/cardinal.json.
+
+Monorepo adapter: the device flow, endpoint probes, and file primitives come
+from `cardinal_core` (vendored under ../hooks by build/vendor.py); the
+mcp-config.json writer is hooks/_copilot_config.py.
+
+`--owner-input on|off` does not connect: it records whether this machine's
+Copilot CLI sessions may record the prompts you type as owner input of their
+Cardinal Investigation (owner_input.consent). It prints the full text you
+consent to first, and `on` asks you to confirm it in this terminal. Copilot
+CLI has no channel to tell you that per session, so this consent is the only
+way capture starts there.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PLUGIN_ROOT / "hooks"))
+import _copilot_config as config  # noqa: E402
+from cardinal_core import deviceflow  # noqa: E402
+from cardinal_core.paths import atomic_write, atomic_write_secret, backup  # noqa: E402
+
+
+def _load_plugin_version() -> str:
+    manifest = PLUGIN_ROOT / ".plugin" / "plugin.json"
+    try:
+        return json.loads(manifest.read_text(encoding="utf-8")).get("version") or "unknown"
+    except (OSError, ValueError):
+        return "unknown"
+
+
+PLUGIN_VERSION = _load_plugin_version()
+CLIENT_ID = "cardinal-copilot-plugin"
+
+HOOK_SCRIPT = PLUGIN_ROOT / "hooks" / "cardinal-copilot-telemetry.py"
+BEHAVIOR_SCRIPT = PLUGIN_ROOT / "scripts" / "cardinal-behavior"
+
+COPILOT_DIR = Path.home() / ".copilot"
+STATE_PATH = COPILOT_DIR / "cardinal.json"
+SECRETS_PATH = COPILOT_DIR / "cardinal-secrets.json"
+PENDING_PATH = COPILOT_DIR / "cardinal-pending.json"
+
+DEFAULT_POLL_TIMEOUT_SECS = deviceflow.DEFAULT_POLL_TIMEOUT_SECS
+DEFAULT_POLL_INTERVAL_SECS = deviceflow.DEFAULT_POLL_INTERVAL_SECS
+
+
+def mcp_path() -> Path:
+    return config.mcp_config_path()
+
+
+def read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_pending(grant: dict) -> None:
+    payload = {
+        "verification_uri": grant.get("verification_uri", ""),
+        "user_code": grant.get("user_code", ""),
+        "expires_in": grant.get("expires_in", DEFAULT_POLL_TIMEOUT_SECS),
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "plugin_version": PLUGIN_VERSION,
+    }
+    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(PENDING_PATH, json.dumps(payload, indent=2) + "\n")
+
+
+def clear_pending() -> None:
+    try:
+        PENDING_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# mcp-config.json
+# ---------------------------------------------------------------------------
+
+def write_mcp_config(path: Path, mcp_url: str, api_key: str, managed: dict | None) -> tuple[Path | None, dict]:
+    """Write the managed entries; (backup path, the managed_mcp record)."""
+    try:
+        data, warnings = config.write_entries(path, mcp_url, api_key, PLUGIN_VERSION, BEHAVIOR_SCRIPT, managed)
+    except config.ConfigError as exc:
+        sys.exit(f"Refusing to write: {exc}")
+    for line in warnings:
+        print(f"WARN {line}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = backup(path)
+    atomic_write_secret(path, json.dumps(data, indent=2) + "\n")
+    return backup_path, config.managed_record(data, BEHAVIOR_SCRIPT)
+
+
+def repair_registration() -> list[str]:
+    """Refresh, without new credentials, the managed `cardinal-behavior` entry
+    of an existing connection (a connection made before the plugin moved, or
+    one whose entry was removed). The `cardinal` entry and its key are left
+    as they are; an entry Cardinal did not write is never replaced. Returns
+    the paths rewritten."""
+    state = read_json(STATE_PATH)
+    managed = state.get("managed_mcp") if isinstance(state.get("managed_mcp"), dict) else {}
+    path = Path(state.get("mcp_config_path") or mcp_path())
+    try:
+        data = config.load(path)
+    except config.ConfigError as exc:
+        print(f"WARN {exc}; not repaired.")
+        return []
+    servers = config.servers_of(data)
+    if not config.is_managed(config.MCP_SERVER_NAME, servers.get(config.MCP_SERVER_NAME), managed):
+        return []
+    wanted = config.build_behavior_entry(BEHAVIOR_SCRIPT)
+    current = servers.get(config.BEHAVIOR_SERVER_NAME)
+    if current == wanted:
+        return []
+    if current is not None and not config.is_managed(config.BEHAVIOR_SERVER_NAME, current, managed):
+        return []
+    servers[config.BEHAVIOR_SERVER_NAME] = wanted
+    data["mcpServers"] = servers
+    backup(path)
+    atomic_write_secret(path, json.dumps(data, indent=2) + "\n")
+    state["managed_mcp"] = config.managed_record(data, BEHAVIOR_SCRIPT)
+    atomic_write(STATE_PATH, json.dumps(state, indent=2) + "\n")
+    return [str(path)]
+
+
+# ---------------------------------------------------------------------------
+# State + secrets
+# ---------------------------------------------------------------------------
+
+def write_secrets(bundle: dict) -> None:
+    ingest = bundle.get("ingest") or {}
+    mcp = bundle.get("mcp") or {}
+    payload = {
+        "schema_version": 1,
+        "ingest_api_key": ingest.get("api_key"),
+        "ingest_api_header": ingest.get("api_header") or "x-cardinalhq-api-key",
+        "mcp_api_key": mcp.get("api_key"),
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # The control-plane token acts as the user across their orgs; it lives only
+    # here (0600). migrate-from-grafana reads act_api_key / act_endpoint.
+    act = deviceflow.act_credential(bundle)
+    if act:
+        payload["act_api_key"] = act["api_key"]
+        payload["act_endpoint"] = act.get("endpoint")
+    atomic_write_secret(SECRETS_PATH, json.dumps(payload, indent=2) + "\n")
+
+
+def write_state(bundle: dict, host: str, deployment_env: str, telemetry_only: bool,
+                mcp_config: Path | None, managed: dict) -> None:
+    org = bundle.get("org", {})
+    user = bundle.get("user", {})
+    mcp = bundle.get("mcp") or {}
+    ingest = bundle.get("ingest") or {}
+    mode = (
+        "telemetry-only" if telemetry_only or not mcp
+        else "mcp-only" if not ingest
+        else "telemetry-and-mcp"
+    )
+    state: dict = {
+        "schema_version": 1,
+        "host": host,
+        "mode": mode,
+        "org_id": org.get("id"),
+        "org_slug": org.get("slug"),
+        "user_email": user.get("email"),
+        "deployment_environment": deployment_env,
+        "plugin_version": PLUGIN_VERSION,
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        "secrets_path": str(SECRETS_PATH),
+        "telemetry": {"enabled": bool(ingest)},
+    }
+    if mcp_config is not None:
+        state["mcp_config_path"] = str(mcp_config)
+        state["managed_mcp"] = managed
+    reason = deviceflow.ingest_unavailable_reason(bundle)
+    if reason:
+        state["telemetry"]["unavailable_reason"] = reason
+    if ingest:
+        state["ingest_endpoint"] = ingest.get("endpoint")
+        state["ingest_key_id"] = ingest.get("key_id")
+        state["ingest_key_prefix"] = (ingest.get("api_key") or "")[:8]
+    if mcp:
+        state["mcp_url"] = mcp.get("url")
+        state["mcp_key_id"] = mcp.get("key_id")
+        state["mcp_key_prefix"] = mcp.get("key_prefix") or (mcp.get("api_key") or "")[:8]
+        state["mcp_created_at"] = mcp.get("created_at")
+    act = deviceflow.act_credential(bundle)
+    if act:
+        state["act_key_id"] = act.get("key_id")
+        state["act_key_prefix"] = act.get("key_prefix")
+        state["act_created_at"] = act.get("created_at")
+        state["act_scopes"] = deviceflow.act_granted_scopes(act)
+    limits = bundle.get("limits")
+    if isinstance(limits, dict) and limits.get("status_url"):
+        state["limits"] = {
+            "status_url": limits["status_url"],
+            "enabled": bool(limits.get("enabled", True)),
+        }
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(STATE_PATH, json.dumps(state, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+def revoke_dropped_act_token(host: str, act: dict | None) -> None:
+    """A re-connect whose bundle carries no control-plane token revokes the
+    prior one server-side before its key_id leaves the state file — otherwise
+    a live "acts as you" token orbits un-revokable."""
+    if act:
+        return
+    prior = read_json(STATE_PATH)
+    key_id = prior.get("act_key_id")
+    if not key_id:
+        return
+    plaintext = read_json(SECRETS_PATH).get("act_api_key")
+    ok, msg = deviceflow.revoke_maestro_key(host, key_id, plaintext)
+    prefix = prior.get("act_key_prefix") or key_id
+    if ok:
+        print(f"Revoked prior control-plane token {prefix} server-side ({msg})")
+    else:
+        print(f"Could not revoke prior control-plane token {prefix} ({msg}).")
+        print(f"Visit {host}/settings/api-keys to revoke it manually.")
+
+
+def continue_after_grant(args: argparse.Namespace, grant: dict) -> int:
+    expires_in = int(grant.get("expires_in") or DEFAULT_POLL_TIMEOUT_SECS)
+    interval = int(grant.get("interval") or DEFAULT_POLL_INTERVAL_SECS)
+    verification_uri = grant.get("verification_uri") or ""
+
+    print()
+    print("Open this URL in your browser to approve Cardinal for Copilot CLI:")
+    print(f"  {verification_uri}")
+    print()
+    print(f"Waiting up to {expires_in // 60} minute(s) for browser approval...")
+
+    try:
+        bundle = deviceflow.poll_device_token(
+            args.host, grant["device_code"], CLIENT_ID, interval, expires_in
+        )
+    except deviceflow.DeviceFlowError as exc:
+        sys.exit(str(exc))
+    org = bundle.get("org", {})
+    user = bundle.get("user", {})
+    ingest = bundle.get("ingest")
+    mcp = bundle.get("mcp")
+    act = deviceflow.act_credential(bundle)
+
+    ingest_reason = deviceflow.ingest_unavailable_reason(bundle)
+
+    if not ingest and not mcp:
+        sys.exit(
+            "Cardinal did not return an ingest credential "
+            f"({deviceflow.ingest_unavailable_note(ingest_reason or 'unknown', mcp_connected=False)}). "
+            "Nothing to connect."
+        )
+    if not args.telemetry_only and not mcp:
+        sys.exit("Cardinal did not return an MCP credential. Check the requested scopes.")
+
+    deployment_env = args.deployment_env or deviceflow.derive_deployment_env(args.host)
+    target = mcp_path()
+
+    if args.dry_run:
+        print(json.dumps(
+            {
+                "org": org,
+                "user": user,
+                "deployment_env": deployment_env,
+                "would_write": {
+                    "mcp_config": str(target) if mcp else None,
+                    "state": str(STATE_PATH),
+                    "secrets": str(SECRETS_PATH),
+                    "ingest_endpoint": (ingest or {}).get("endpoint"),
+                    "ingest_unavailable_reason": ingest_reason,
+                    "mcp_url": (mcp or {}).get("url"),
+                    "act_scopes": deviceflow.act_granted_scopes(act) if act else None,
+                },
+            },
+            indent=2,
+        ))
+        return 0
+
+    if ingest:
+        ok, msg = deviceflow.verify_ingest_reachable(ingest)
+        if not ok:
+            sys.exit(f"Ingest reachability failed: {msg}")
+        print(f"Ingest endpoint reachable ({msg})")
+
+    if mcp:
+        ok, msg = deviceflow.verify_mcp_reachable(mcp.get("url"), mcp.get("api_key"))
+        if not ok:
+            sys.exit(f"MCP reachability failed: {msg}")
+        print(f"MCP endpoint reachable ({msg})")
+
+    if not HOOK_SCRIPT.exists():
+        sys.exit(f"Telemetry hook script is missing: {HOOK_SCRIPT}")
+
+    prior = read_json(STATE_PATH)
+    managed: dict = {}
+    if mcp:
+        b, managed = write_mcp_config(target, mcp["url"], mcp["api_key"], prior.get("managed_mcp"))
+        print(f"Wrote Cardinal MCP entries to {target}")
+        if b:
+            print(f"MCP config backup: {b}")
+
+    revoke_dropped_act_token(args.host, act)
+    write_secrets(bundle)
+    print(f"Wrote Cardinal local secrets to {SECRETS_PATH}")
+
+    write_state(bundle, args.host, deployment_env, args.telemetry_only, target if mcp else None, managed)
+    print(f"Wrote Cardinal state to {STATE_PATH}")
+
+    print()
+    print(f"Connected as {user.get('email') or 'unknown'} ({org.get('slug') or org.get('id')})")
+    if ingest:
+        print(f"Telemetry endpoint: {ingest['endpoint']}")
+    else:
+        print(f"WARN {deviceflow.ingest_unavailable_note(ingest_reason or 'unknown', mcp_connected=bool(mcp))}")
+        print("     Re-run cardinal-connect --rotate once telemetry ingest is available.")
+    if mcp:
+        print(f"MCP endpoint: {mcp['url']}")
+    if act:
+        granted = deviceflow.act_granted_scopes(act)
+        print(f"Actions: enabled ({', '.join(granted)}, key {act.get('key_prefix')})")
+        missing = [s for s in getattr(args, "extra_scopes", []) if s not in granted]
+        if missing:
+            print(f"WARN Not granted: {', '.join(missing)} — the server didn't grant them "
+                  "(your org role, or this Cardinal server doesn't offer them yet).")
+    elif getattr(args, "act_requested", False):
+        print("WARN Cardinal returned no control-plane token: skills that write dashboards or")
+        print("     alert rules as you (migrate-from-grafana) need a login token or API key.")
+    print()
+    print("Start a new Copilot CLI session (or /restart) so it loads the MCP servers and the")
+    print("connected hooks, then run cardinal-status.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Owner-input consent (--owner-input on|off)
+# ---------------------------------------------------------------------------
+
+CONFIRM_WORD = "yes"
+
+
+def owner_input_consent(on: bool, *, home: Path | None = None, stdin=None, stdout=None) -> int:
+    """Print the full consent text, then record the answer
+    (owner_input.set_consent, versioned by the text's sha256). `on` needs
+    the user to type "yes" in an interactive terminal: the agent's own
+    shell must not consent on the user's behalf. Exit code."""
+    from cardinal_core import owner_input
+
+    home = Path.home() if home is None else home
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+    text = owner_input.consent_text("copilot")
+    path = owner_input.consent_path("copilot", home)
+    stdout.write("Cardinal owner input for Copilot CLI\n\n" + text + "\n\n")
+    if on:
+        if not (hasattr(stdin, "isatty") and stdin.isatty()):
+            stdout.write("Not recorded: run this in your own terminal and type yes when asked "
+                         "(it cannot be answered for you).\n")
+            return 2
+        stdout.write(f'Type "{CONFIRM_WORD}" to turn owner input on for Copilot CLI on this machine: ')
+        stdout.flush()
+        answer = (stdin.readline() or "").strip().lower()
+        if answer != CONFIRM_WORD:
+            stdout.write("Not recorded: owner input stays off.\n")
+            return 1
+    try:
+        owner_input.set_consent("copilot", home, on)
+    except (OSError, ValueError) as exc:
+        stdout.write(f"Could not record it in {path}: {exc}\n")
+        return 1
+    if on:
+        stdout.write(f"Owner input is ON for Copilot CLI on this machine (recorded in {path}). It applies to "
+                     "sessions whose Investigation turns owner input on; new Copilot CLI sessions pick it up.\n")
+        if owner_input.kill_switch("copilot", home, os.environ):
+            stdout.write(f"Note: the kill switch is set (CARDINAL_OWNER_INPUT=0, or "
+                         f"{owner_input.kill_switch_path(home)}), so nothing is recorded until you remove it.\n")
+    else:
+        stdout.write(f"Owner input is OFF for Copilot CLI on this machine (recorded in {path}). Queued prompts "
+                     "are deleted, not sent.\n")
+    stdout.write("Run `cardinal-connect --owner-input off` to stop; CARDINAL_OWNER_INPUT=0 or "
+                 f'{{"copilot": "off"}} in {owner_input.kill_switch_path(home)} turns it off whatever this '
+                 "file says.\n")
+    return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="cardinal-connect",
+        description="Connect GitHub Copilot CLI to Cardinal telemetry and its unified MCP endpoint.",
+    )
+    parser.add_argument(
+        "--host",
+        default="https://app.cardinalhq.io",
+        help="Cardinal app host (default: https://app.cardinalhq.io)",
+    )
+    parser.add_argument(
+        "--rotate",
+        action="store_true",
+        help="Proceed even if Cardinal state already exists and mint a fresh key.",
+    )
+    parser.add_argument(
+        "--telemetry-only",
+        action="store_true",
+        help="Only configure Cardinal telemetry; skip the MCP credential.",
+    )
+    parser.add_argument(
+        "--deployment-env",
+        default=None,
+        help="Override deployment.environment (default derived from --host).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the device-code flow and print what would be written.",
+    )
+    parser.add_argument(
+        "--owner-input", choices=("on", "off"), default=None,
+        help="Don't connect: record whether this machine's Copilot CLI sessions may record the prompts "
+             "you type as owner input of their Cardinal Investigation. Prints what you consent to; `on` "
+             "asks you to type yes.",
+    )
+    parser.add_argument(
+        "scopes", nargs="*", metavar="SCOPE",
+        help="Extra scopes for the control-plane token: "
+             f"{', '.join(deviceflow.ACT_EXTRA_SCOPES)} (space- or comma-separated). "
+             "All are requested by default; naming them only matters with "
+             "--minimal-scopes. They let agents create/edit dashboards and alert "
+             "rules, and query telemetry (read-only), as you — within your org role.",
+    )
+    parser.add_argument(
+        "--minimal-scopes", action="store_true",
+        help="Don't request the control-plane token and its extra scopes by default — "
+             "only those named as positional args (none: no token). Skills that write "
+             "dashboards or alert rules as you (migrate-from-grafana) then need a "
+             "reconnect or an org API key.",
+    )
+    args = parser.parse_args()
+    try:
+        args.named_scopes = deviceflow.parse_act_scopes(args.scopes)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
+
+
+def main() -> int:
+    args = parse_args()
+
+    if args.owner_input is not None:
+        return owner_input_consent(args.owner_input == "on")
+
+    if STATE_PATH.exists() and not args.rotate:
+        user = read_json(STATE_PATH).get("user_email") or "this account"
+        repaired = repair_registration()
+        if repaired:
+            print("Refreshed the Cardinal registration (credentials unchanged):")
+            for path in repaired:
+                print(f"  {path}")
+            print(f"Cardinal is already connected as {user}. Start a new Copilot CLI session to load it.")
+            return 0
+        sys.stderr.write(
+            f"Cardinal is already connected as {user}. "
+            "Re-run with --rotate to overwrite.\n"
+        )
+        return 2
+
+    scopes = ["ingest:write"]
+    if not args.telemetry_only:
+        scopes.append("mcp:invoke")
+    named = args.named_scopes
+    extra = deviceflow.default_act_scopes(named, args.minimal_scopes)
+    act_scopes = ["maestro:act", *extra] if extra else []
+    required = scopes + (["maestro:act", *named] if named else [])
+    print(f"Requesting Cardinal consent for scopes: {', '.join(scopes + act_scopes)}")
+    if act_scopes:
+        print("WARN maestro:act grants a long-lived token that acts as you across your orgs.")
+        print(f"     It is stored 0600 in {SECRETS_PATH}; cardinal-disconnect revokes it.")
+        for line in deviceflow.act_scope_warnings(extra):
+            print(line)
+    try:
+        grant, requested = deviceflow.start_device_code_with_fallback(
+            args.host, required, act_scopes, CLIENT_ID)
+        args.act_requested = "maestro:act" in requested
+        args.extra_scopes = [s for s in extra if s in requested]
+    except deviceflow.DeviceFlowError as exc:
+        sys.exit(str(exc))
+    write_pending(grant)
+    try:
+        return continue_after_grant(args, grant)
+    finally:
+        clear_pending()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -8,6 +8,7 @@ on:
       - 'adapters/codex/**'
       - 'adapters/cursor/**'
       - 'adapters/gemini/**'
+      - 'adapters/copilot/**'
       - 'build/vendor.py'
       - '.github/workflows/investigation-tests.yml'
 
@@ -40,3 +41,6 @@ jobs:
       - name: Gemini CLI adapter unittest suite
         if: matrix.python-version != '3.9'
         run: python3 build/vendor.py gemini && (cd adapters/gemini && python3 -m unittest discover tests)
+      - name: Copilot CLI adapter unittest suite
+        if: matrix.python-version != '3.9'
+        run: python3 build/vendor.py copilot && (cd adapters/copilot && python3 -m unittest discover tests)

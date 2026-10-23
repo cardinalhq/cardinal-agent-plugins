@@ -4,14 +4,14 @@ This repo ships several independent kinds of artifact. Pick the one you're publi
 
 | What you're shipping | Trigger | Workflow |
 | --- | --- | --- |
-| Adapter plugin (`claude`, `codex`, `cursor`, `gemini`) | Bump `plugin.json` → merge to `main` | [`.github/workflows/release-mirrors.yml`](../.github/workflows/release-mirrors.yml) |
+| Adapter plugin (`claude`, `codex`, `cursor`, `gemini`, `copilot`) | Bump `plugin.json` → merge to `main` | [`.github/workflows/release-mirrors.yml`](../.github/workflows/release-mirrors.yml) |
 | PyPI package (`cardinal-agent-core`) | Push a `core-vX.Y.Z` tag | [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
 | Devin poller (tarball + `ghcr.io/cardinalhq/cardinal-devin-poller` image) | Push a `devin-vX.Y.Z` tag | [`.github/workflows/devin-release.yml`](../.github/workflows/devin-release.yml) |
 | Native OpenCode / Pi packages | Push an `opencode-vX.Y.Z` / `pi-vX.Y.Z` tag | [`.github/workflows/native-adapters.yml`](../.github/workflows/native-adapters.yml), see [RELEASING-NATIVE.md](RELEASING-NATIVE.md) |
 
 ---
 
-## 1. Adapter plugin (claude / codex / cursor / gemini)
+## 1. Adapter plugin (claude / codex / cursor / gemini / copilot)
 
 Users install these from mirror repos (`cardinalhq/cardinal-<adapter>-plugin`). Development happens here; the workflow copies the adapter + vendored `cardinal_core` into the mirror as a release commit + tag.
 
@@ -25,6 +25,7 @@ Users install these from mirror repos (`cardinalhq/cardinal-<adapter>-plugin`). 
    | codex | `adapters/codex/.codex-plugin/plugin.json` |
    | cursor | `adapters/cursor/.cursor-plugin/plugin.json` |
    | gemini | `adapters/gemini/.gemini-plugin/plugin.json` |
+   | copilot | `adapters/copilot/.plugin/plugin.json` |
 
 2. Open a PR, merge to `main`.
 
@@ -42,6 +43,17 @@ Actions → **Release adapter to mirror** → *Run workflow* → choose adapter.
 ### Bumping multiple adapters at once
 
 Merging one commit that changes several `plugin.json`s triggers the matrix over the affected adapters and releases them in parallel. Unchanged adapters no-op.
+
+### First Copilot CLI release (one-time setup)
+
+The Copilot mirror does not exist until someone creates it:
+
+1. Create the public repo `cardinalhq/cardinal-copilot-plugin` with a README (an empty repo can't be cloned with `--depth 1`).
+2. Add a write deploy key to it, and save the private half on this repo as `MIRROR_DEPLOY_KEY_COPILOT`. Until that secret exists, a push to `main` releases only the other four adapters (the workflow's matrix step leaves `copilot` out), so a missing mirror never fails a release.
+3. Add the new repo to the `MIRROR_PR_TOKEN` PAT's repository access.
+4. Run Actions → **Release adapter to mirror** → `copilot`. On a mirror without one, `build/release.py` creates `.github/plugin/marketplace.json` (marketplace `cardinal-copilot-plugin`, plugin `cardinal` at `./plugins/cardinal`) and keeps its version in sync from then on.
+
+Users then install with `copilot plugin marketplace add cardinalhq/cardinal-copilot-plugin` and `copilot plugin install cardinal@cardinal-copilot-plugin`.
 
 ### Troubleshooting
 

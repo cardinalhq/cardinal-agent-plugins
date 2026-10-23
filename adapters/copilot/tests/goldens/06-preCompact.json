@@ -1,0 +1,90 @@
+{
+  "stdout": null,
+  "batches": [
+    {
+      "resourceLogs": [
+        {
+          "resource": {
+            "attributes": [
+              {
+                "key": "service.name",
+                "value": {
+                  "stringValue": "copilot"
+                }
+              },
+              {
+                "key": "agent.runtime",
+                "value": {
+                  "stringValue": "copilot"
+                }
+              },
+              {
+                "key": "deployment.environment",
+                "value": {
+                  "stringValue": "prod"
+                }
+              },
+              {
+                "key": "user.email",
+                "value": {
+                  "stringValue": "golden@cardinalhq.io"
+                }
+              },
+              {
+                "key": "cardinal.org",
+                "value": {
+                  "stringValue": "cardinal-golden"
+                }
+              },
+              {
+                "key": "cardinal.plugin_version",
+                "value": {
+                  "stringValue": "<normalized>"
+                }
+              }
+            ]
+          },
+          "scopeLogs": [
+            {
+              "scope": {
+                "name": "cardinal-copilot-plugin",
+                "version": "<normalized>"
+              },
+              "logRecords": [
+                {
+                  "timeUnixNano": "0",
+                  "observedTimeUnixNano": "0",
+                  "severityNumber": 9,
+                  "severityText": "INFO",
+                  "body": {
+                    "stringValue": "cardinal.plan_usage"
+                  },
+                  "attributes": [
+                    {
+                      "key": "event_name",
+                      "value": {
+                        "stringValue": "cardinal.plan_usage"
+                      }
+                    },
+                    {
+                      "key": "session_id",
+                      "value": {
+                        "stringValue": "5b7c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d"
+                      }
+                    },
+                    {
+                      "key": "plan.compact_trigger",
+                      "value": {
+                        "stringValue": "auto"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

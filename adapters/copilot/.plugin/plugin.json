@@ -1,0 +1,17 @@
+{
+  "name": "cardinal",
+  "version": "0.1.0",
+  "description": "Connect GitHub Copilot CLI to Cardinal: telemetry to the Outcomes Dashboard + unified Cardinal MCP tools, with hooks that derive initiative name and type from the current branch and keep Cardinal Investigations and Storyboards in step with the session.",
+  "author": {
+    "name": "CardinalHQ",
+    "url": "https://cardinalhq.io"
+  },
+  "homepage": "https://github.com/cardinalhq/cardinal-copilot-plugin",
+  "repository": "https://github.com/cardinalhq/cardinal-agent-plugins",
+  "license": "Apache-2.0",
+  "keywords": ["observability", "telemetry", "cardinal", "mcp"],
+  "skills": "skills",
+  "agents": "agents",
+  "hooks": "hooks/hooks.json",
+  "postInstallMessage": "Run the cardinal-connect skill (or `python3 <plugin directory>/scripts/cardinal-connect` in your own terminal) to connect this machine to Cardinal, then start a new Copilot CLI session."
+}

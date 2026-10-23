@@ -1,7 +1,7 @@
 name: Cross-agent parity matrix
 
 # docs/parity.json says, per feature, whether each plugin adapter (claude,
-# codex, cursor, gemini) has it, cannot (a cited platform limit), or need
+# codex, cursor, gemini, copilot) has it, cannot (a cited platform limit), or need
 # not (n/a). tests/test_parity_matrix.py probes every "present" cell in the
 # code, fails when a Claude hook is not mapped to a feature, and checks that
 # docs/parity.md matches parity.json. Stdlib only, no vendoring needed.
