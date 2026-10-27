@@ -391,6 +391,21 @@ class DeviceFlowTests(unittest.TestCase):
         self.assertEqual(deviceflow.derive_deployment_env("https://x.cardinalhq.io"), "cardinal")
         self.assertEqual(deviceflow.derive_deployment_env("https://acme.example.com"), "customer")
 
+    def test_relative_server_urls_resolve_against_the_host(self):
+        # A Cardinal without MAESTRO_BASE_URL answers with paths.
+        host = "https://cardinal.example/"
+        self.assertEqual(deviceflow.resolve_url(host, "/connect?code=AB"), "https://cardinal.example/connect?code=AB")
+        self.assertEqual(deviceflow.resolve_url(host, "https://other/x"), "https://other/x")
+        self.assertEqual(deviceflow.resolve_url(host, "//cdn/x"), "//cdn/x")
+        self.assertIsNone(deviceflow.resolve_url(host, None))
+        bundle = {"ingest": {"endpoint": "/ingest", "api_key": "k"}, "mcp": {"url": "/api/orgs/o/mcp"},
+                  "act": {"endpoint": None}, "limits": {"status_url": "/api/agent-limits/status"}, "org": {}}
+        out = deviceflow.resolve_bundle_urls(host, bundle)
+        self.assertEqual(out["ingest"]["endpoint"], "https://cardinal.example/ingest")
+        self.assertEqual(out["mcp"]["url"], "https://cardinal.example/api/orgs/o/mcp")
+        self.assertIsNone(out["act"]["endpoint"])
+        self.assertEqual(out["limits"]["status_url"], "https://cardinal.example/api/agent-limits/status")
+
     def test_ingest_probe_auth_ok_via_stub(self) -> None:
         stub = StubIngest().start()
         try:

@@ -48,7 +48,7 @@ The initial implementation does not publish the package automatically.
 ## Connection commands
 
 ```sh
-cardinal-opencode connect [--host https://app.cardinalhq.io] [--telemetry-only]
+cardinal-opencode connect [--host https://app.cardinalhq.io] [--telemetry-only] [--trust-cert <sha256>]
 cardinal-opencode status
 cardinal-opencode disconnect
 ```

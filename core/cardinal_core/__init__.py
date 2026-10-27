@@ -12,3 +12,9 @@ Design constraints honored throughout (spec §omnigent constraints):
 """
 
 CORE_VERSION = "0.4.0"
+
+# A Cardinal host whose certificate the machine does not trust (self-hosted,
+# self-signed) is pinned by cardinal-connect under ~/.cardinal/tls; every
+# module here that talks HTTP imports cardinal_core.tls, which installs a
+# urllib opener verifying a pinned host against its pin (nothing pinned: the
+# opener is urllib's own). Not imported here: a hook's fast path stays light.

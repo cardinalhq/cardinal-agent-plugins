@@ -52,7 +52,7 @@ Keep the extracted directory intact: `bin/cardinal-devin` loads
 3. **Connect to Cardinal** (device flow; mints an `ingest:write` key):
 
    ```sh
-   adapters/devin/bin/cardinal-devin connect [--host https://app.cardinalhq.io]
+   adapters/devin/bin/cardinal-devin connect [--host https://app.cardinalhq.io] [--trust-cert <sha256>]
    ```
 
    Credentials go in `~/.cardinal-devin/` (`--state-dir` or

@@ -82,6 +82,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
+from . import tls as _tls  # noqa: F401  (a pinned self-signed Cardinal host verifies)
 
 from . import storyboard_context
 from .evidence_promote import no_redirect_opener

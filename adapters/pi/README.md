@@ -47,7 +47,7 @@ until MCP consent is granted through a new connection.
 ## Connection commands
 
 ```sh
-cardinal-pi connect [--host https://app.cardinalhq.io] [--telemetry-only]
+cardinal-pi connect [--host https://app.cardinalhq.io] [--telemetry-only] [--trust-cert <sha256>]
 cardinal-pi status
 cardinal-pi disconnect
 ```

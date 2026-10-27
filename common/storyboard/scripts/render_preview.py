@@ -447,7 +447,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _opener():
-    return urllib.request.build_opener(_NoRedirect())
+    handlers = [_NoRedirect()]
+    try:
+        from cardinal_core.tls import https_handler  # a pinned self-signed Cardinal host
+        handlers.append(https_handler())
+    except ImportError:
+        pass
+    return urllib.request.build_opener(*handlers)
 
 
 def _error_body(err: urllib.error.HTTPError) -> dict:

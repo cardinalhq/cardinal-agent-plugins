@@ -25,7 +25,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from cardinal_core import bashclass, decisions, deviceflow, initiative, otlp, session
+from cardinal_core import bashclass, decisions, deviceflow, initiative, otlp, session, tls
 from cardinal_core.paths import AgentPaths, atomic_write_json, atomic_write_secret
 
 # Telemetry batches run in a detached child the host never awaits, but they
@@ -188,6 +188,9 @@ def save_bundle(paths, bundle, host, runtime, version, deployment_env):
         "mode": "telemetry-and-mcp" if mcp else "telemetry-only",
         "telemetry": {"enabled": True},
     }
+    tls_state = tls.state_block(bundle, host)
+    if tls_state:
+        state["tls"] = tls_state
     atomic_write_json(paths.state_path, state)
 
 
@@ -196,6 +199,15 @@ def connect(args, paths):
         raise ValueError("Cardinal is already connected. Disconnect before connecting another account.")
     scopes = ["ingest:write"] + ([] if args.telemetry_only else ["mcp:invoke"])
     client = f"cardinal-{args.runtime}-plugin"
+    command = f"cardinal-{args.runtime} connect --host {args.host}"
+    # A host whose certificate this machine does not trust (self-hosted,
+    # self-signed) is shown and pinned with the user's consent first; a
+    # trusted host passes silently. docs/specs/tls-trust.md.
+    try:
+        tls.ensure_trusted(args.host, trust=getattr(args, "trust_cert", []), command=command)
+    except tls.CertificateError as exc:
+        print(str(exc), file=sys.stderr)
+        return tls.EXIT_UNTRUSTED_CERT
     grant = deviceflow.start_device_code(args.host, scopes, client)
     print(f"Approve Cardinal for {args.runtime}: {grant.get('verification_uri', '')}", flush=True)
     if grant.get("user_code"):
@@ -205,6 +217,11 @@ def connect(args, paths):
         bundle = deviceflow.poll_device_token(args.host, grant["device_code"], client,
             int(grant.get("interval") or 5), int(grant.get("expires_in") or 600))
         ingest, mcp = bundle.get("ingest") or {}, bundle.get("mcp") or {}
+        try:
+            tls.ensure_hosts_trusted(tls.connection_urls(bundle, args.host), trust=getattr(args, "trust_cert", []), command=command)
+        except tls.CertificateError as exc:
+            print(str(exc), file=sys.stderr)
+            return tls.EXIT_UNTRUSTED_CERT
         if not ingest.get("endpoint") or not ingest.get("api_key"):
             raise ValueError("Cardinal did not return an ingest credential.")
         if not args.telemetry_only and (not mcp.get("url") or not mcp.get("api_key")):
@@ -213,6 +230,8 @@ def connect(args, paths):
         # with status/disconnect rather than leaving an untracked live credential.
         save_bundle(paths, bundle, args.host, args.runtime, args.version, args.deployment_env)
         result = status(paths)
+        for line in tls.runtime_lines(args.runtime, bundle, args.host):
+            print(line)
         print(f"Restart {args.runtime} to load the connection.")
         return result
     finally:
@@ -526,6 +545,10 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     conn = sub.add_parser("connect", help="Connect through Cardinal browser consent")
     conn.add_argument("--host", default="https://app.cardinalhq.io")
+    conn.add_argument("--trust-cert", action="append", default=[], metavar="SHA256",
+                      help="Trust the certificate with this SHA-256 fingerprint for the host that "
+                           "presents it (a self-hosted Cardinal behind a self-signed certificate); "
+                           "connect shows it and asks only when the host is not already trusted.")
     conn.add_argument("--telemetry-only", action="store_true")
     conn.add_argument("--deployment-env")
     sub.add_parser("status", help="Probe the saved telemetry and MCP endpoints")
