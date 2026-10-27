@@ -3521,7 +3521,7 @@
         },
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/tls.py"
+          "path": "../../core/cardinal_core/tls.py"
         }
       ],
       "codex": [
@@ -3537,7 +3537,7 @@
         },
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/tls.py"
+          "path": "../../core/cardinal_core/tls.py"
         }
       ],
       "cursor": [
@@ -3553,7 +3553,7 @@
         },
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/tls.py"
+          "path": "../../core/cardinal_core/tls.py"
         }
       ],
       "gemini": [
@@ -3569,7 +3569,7 @@
         },
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/tls.py"
+          "path": "../../core/cardinal_core/tls.py"
         }
       ],
       "copilot": [
@@ -3585,7 +3585,7 @@
         },
         {
           "kind": "script",
-          "path": "hooks/cardinal_core/tls.py"
+          "path": "../../core/cardinal_core/tls.py"
         }
       ]
     },
