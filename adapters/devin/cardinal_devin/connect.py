@@ -14,7 +14,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
-from cardinal_core import deviceflow
+from cardinal_core import deviceflow, tls
 from cardinal_core.paths import AgentPaths, atomic_write_json, atomic_write_secret
 
 from . import __version__, ingest
@@ -46,11 +46,22 @@ def run_connect(
     deployment_env: Optional[str] = None,
     out: Callable[[str], None] = print,
     probe_sleeps: Sequence[float] = deviceflow.INGEST_PROBE_RETRY_SLEEPS,
+    trust: Sequence[str] = (),
 ) -> int:
     if paths.state_path.exists() and not rotate and not dry_run:
         who = paths.read_state().get("user_email") or "this account"
         out(f"Cardinal is already connected as {who}. Re-run with --rotate to overwrite.")
         return 2
+
+    # A host whose certificate this machine does not trust (self-hosted,
+    # self-signed) is shown and pinned with the user's consent first; a
+    # trusted host passes silently. docs/specs/tls-trust.md.
+    command = f"cardinal-devin connect --host {host}" + (" --rotate" if rotate else "")
+    try:
+        tls.ensure_trusted(host, trust=trust, command=command, log=out)
+    except tls.CertificateError as exc:
+        out(str(exc))
+        return tls.EXIT_UNTRUSTED_CERT
 
     out(f"Requesting Cardinal consent for scopes: {', '.join(SCOPES)}")
     try:
@@ -65,7 +76,7 @@ def run_connect(
                 "plugin_version": __version__,
             })
         try:
-            return _finish(paths, grant, host, dry_run, deployment_env, out, probe_sleeps)
+            return _finish(paths, grant, host, dry_run, deployment_env, out, probe_sleeps, trust, command)
         finally:
             try:
                 paths.pending_path.unlink()
@@ -84,6 +95,8 @@ def _finish(
     deployment_env: Optional[str],
     out: Callable[[str], None],
     probe_sleeps: Sequence[float],
+    trust: Sequence[str] = (),
+    command: str = "cardinal-devin connect",
 ) -> int:
     device_code = grant.get("device_code")
     if not device_code:
@@ -99,6 +112,12 @@ def _finish(
     out(f"Waiting up to {max(1, expires_in // 60)} minute(s) for approval...")
 
     bundle = deviceflow.poll_device_token(host, device_code, CLIENT_ID, interval, expires_in)
+    # The ingest endpoint may sit on another hostname: the same trust check.
+    try:
+        tls.ensure_hosts_trusted(tls.connection_urls(bundle, host), trust=trust, command=command, log=out)
+    except tls.CertificateError as exc:
+        out(str(exc))
+        return tls.EXIT_UNTRUSTED_CERT
     ingest = bundle.get("ingest")
     if not isinstance(ingest, dict) or not ingest.get("endpoint") or not ingest.get("api_key"):
         out("error: Cardinal did not return an ingest credential. Check the requested scopes.")

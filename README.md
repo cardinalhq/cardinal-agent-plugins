@@ -43,6 +43,16 @@ Writing to Cardinal needs an API key (sign up at https://app.cardinalhq.io,
 then `/cardinal:connect` creates one for the machine); there is no OAuth sign-in. See
 [adapters/claude/README.md](adapters/claude/README.md).
 
+A self-hosted Cardinal behind a certificate the machine does not trust
+(self-signed, private CA) works in every adapter: connect probes the host
+first and, only then, shows the certificate (subject, names, validity,
+SHA-256 fingerprint) and asks; `--trust-cert <sha256>` pins exactly that
+certificate for that hostname under `~/.cardinal/tls/`, which every hook,
+script and skill then verifies against (`core/cardinal_core/tls.py`; nothing
+else is weakened). Claude also gets `NODE_EXTRA_CA_CERTS` for its own MCP
+client and telemetry; the other runtimes' own clients are told what to set.
+See [docs/specs/tls-trust.md](docs/specs/tls-trust.md).
+
 Connected, every Claude session automatically has an Investigation and a
 private live Investigation Storyboard on Cardinal (session id → investigation
 id → storyboard id → URL), created at session start by

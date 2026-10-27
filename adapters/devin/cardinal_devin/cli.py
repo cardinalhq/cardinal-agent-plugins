@@ -74,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--rotate", action="store_true", help="Overwrite an existing connection.")
     connect.add_argument("--deployment-env", default=None, help="Override deployment.environment.")
     connect.add_argument("--dry-run", action="store_true", help="Run the flow and print what would be written.")
+    connect.add_argument("--trust-cert", action="append", default=[], metavar="SHA256",
+                         help="Trust the certificate with this SHA-256 fingerprint for the host that presents "
+                              "it (a self-hosted Cardinal behind a self-signed certificate); connect shows it "
+                              "and asks only when the host is not already trusted.")
 
     status = sub.add_parser("status", parents=[common], help="Show connection, Devin config and poll state.")
     _devin_options(status)
@@ -230,7 +234,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "connect":
         return run_connect(
             _paths(args), host=args.host, rotate=args.rotate, dry_run=args.dry_run,
-            deployment_env=args.deployment_env,
+            deployment_env=args.deployment_env, trust=args.trust_cert,
         )
     if args.command == "status":
         _, source = resolve_devin_key(args.devin_key_file)

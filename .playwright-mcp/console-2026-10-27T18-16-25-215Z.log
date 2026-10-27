@@ -1,0 +1,8 @@
+[ 2147779ms] [ERROR] Failed to load resource: the server responded with a status of 410 () @ https://cardinal-alb-fd0nbaoa6wpt-233509399.us-east-1.elb.amazonaws.com/api/auth/device/grants/by-code/E46B-FD8P:0
+[ 2147897ms] [ERROR] Failed to load resource: the server responded with a status of 410 () @ https://cardinal-alb-fd0nbaoa6wpt-233509399.us-east-1.elb.amazonaws.com/api/auth/device/grants/by-code/E46B-FD8P:0
+[ 2170123ms] [ERROR] [auth] OIDC error: {name: Error, message: No end session endpoint, stack: Error: No end session endpoint
+    at mi.createSig…amazonaws.com/assets/index-DSjnWZ6M.js:10:140007), innerError: Error: No end session endpoint
+    at mi.createSignoutRequest (https://cardinal-alb-fd0nbaoa6wpt-23…, source: signoutRedirect} @ https://cardinal-alb-fd0nbaoa6wpt-233509399.us-east-1.elb.amazonaws.com/assets/index-DSjnWZ6M.js:9
+[ 2216892ms] [ERROR] [auth] OIDC error: {name: Error, message: No end session endpoint, stack: Error: No end session endpoint
+    at mi.createSig…amazonaws.com/assets/index-DSjnWZ6M.js:10:140007), innerError: Error: No end session endpoint
+    at mi.createSignoutRequest (https://cardinal-alb-fd0nbaoa6wpt-23…, source: signoutRedirect} @ https://cardinal-alb-fd0nbaoa6wpt-233509399.us-east-1.elb.amazonaws.com/assets/index-DSjnWZ6M.js:9

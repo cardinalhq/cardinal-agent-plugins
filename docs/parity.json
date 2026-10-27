@@ -3496,5 +3496,110 @@
         }
       ]
     }
+  },
+  "self_signed_tls_trust": {
+    "title": "Connect to a self-hosted Cardinal behind a self-signed certificate (probe, show, --trust-cert pin)",
+    "group": "connection",
+    "adapters": {
+      "claude": "present",
+      "codex": "present",
+      "cursor": "present",
+      "gemini": "present",
+      "copilot": "present"
+    },
+    "probes": {
+      "claude": [
+        {
+          "kind": "grep",
+          "path": "bin/cardinal-connect",
+          "pattern": "tls\\.ensure_trusted\\("
+        },
+        {
+          "kind": "grep",
+          "path": "bin/cardinal-connect",
+          "pattern": "\"--trust-cert\""
+        },
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/tls.py"
+        }
+      ],
+      "codex": [
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-connect",
+          "pattern": "tls\\.ensure_trusted\\("
+        },
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-connect",
+          "pattern": "\"--trust-cert\""
+        },
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/tls.py"
+        }
+      ],
+      "cursor": [
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-connect",
+          "pattern": "tls\\.ensure_trusted\\("
+        },
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-connect",
+          "pattern": "\"--trust-cert\""
+        },
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/tls.py"
+        }
+      ],
+      "gemini": [
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-connect",
+          "pattern": "tls\\.ensure_trusted\\("
+        },
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-connect",
+          "pattern": "\"--trust-cert\""
+        },
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/tls.py"
+        }
+      ],
+      "copilot": [
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-connect",
+          "pattern": "tls\\.ensure_trusted\\("
+        },
+        {
+          "kind": "grep",
+          "path": "scripts/cardinal-connect",
+          "pattern": "\"--trust-cert\""
+        },
+        {
+          "kind": "script",
+          "path": "../../core/cardinal_core/tls.py"
+        }
+      ]
+    },
+    "notes": {
+      "claude": "also writes NODE_EXTRA_CA_CERTS (and, with --insecure-runtime-tls, NODE_TLS_REJECT_UNAUTHORIZED=0) to settings.json env for Claude Code's own MCP client and telemetry exporter",
+      "codex": "Codex's own MCP client trusts the system store; connect prints what to add",
+      "cursor": "Cursor's own MCP client is not configured; connect prints the system-store note",
+      "gemini": "Gemini CLI's own clients need NODE_EXTRA_CA_CERTS exported before launch; connect prints it",
+      "copilot": "Copilot CLI's own client needs NODE_EXTRA_CA_CERTS exported before launch; connect prints it"
+    },
+    "outside_matrix": {
+      "opencode": "limit:docs/specs/tls-trust.md#the-runtimes-own-clients",
+      "pi": "limit:docs/specs/tls-trust.md#the-runtimes-own-clients",
+      "devin": "limit:docs/specs/tls-trust.md#the-runtimes-own-clients"
+    }
   }
 }

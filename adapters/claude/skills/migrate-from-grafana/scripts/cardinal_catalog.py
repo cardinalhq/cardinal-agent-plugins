@@ -45,6 +45,15 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from convert import guess_kind_from_query, post_parser_spans  # noqa: E402
 
+# A pinned self-signed Cardinal host (docs/specs/tls-trust.md): the plugin's
+# vendored core installs the urllib opener that verifies it. Absent in the
+# common/ checkout, where the script only ever talks to a trusted host.
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "hooks"))
+try:
+    from cardinal_core import tls as _tls  # noqa: E402,F401
+except ImportError:
+    pass
+
 UNIT_SUFFIXES = ["_seconds", "_milliseconds", "_microseconds", "_nanoseconds", "_bytes", "_bits",
                  "_ratio", "_percent", "_celsius", "_meters", "_hertz", "_volts", "_amperes",
                  "_joules", "_grams", "_minutes", "_hours", "_days"]
