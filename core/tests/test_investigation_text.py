@@ -93,6 +93,11 @@ class ClaudeText(unittest.TestCase):
         self.assertNotIn("record a concise, one-line description", claude(question_stated=True))
         self.assertIn("record a concise, one-line description", claude(binding(question_status="stated"), question_stated=False))
 
+    def test_the_tag_line_rides_with_the_question_line(self):
+        self.assertIn(it.TAG_LINE.format(sb=SB), claude())
+        self.assertNotIn("storyboard__set_tags", claude(binding(question_status="stated")))
+        self.assertNotIn("storyboard__set_tags", claude(binding(is_author=False)))
+
     def test_owner_input_sentence_only_when_recorded(self):
         told = owner_input.DISCLOSURE.format(inv=INV)
         self.assertNotIn(told, claude())
