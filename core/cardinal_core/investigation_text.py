@@ -89,6 +89,14 @@ SKILL_LINE = ("The storyboard skill authors this storyboard's visualization ({sb
               "Updating visuals does not authorize publishing or sharing; a publish request includes updating and "
               "previewing first.")
 
+# Tagging the session's storyboard as soon as its question is named, so it is
+# not left under the browser's "Untagged" (nothing else tags it). Shown with
+# the question line, until the question is stated.
+TAG_LINE = ("Right after naming the question, tag this storyboard ({sb}) so the org can find it: "
+            "storyboard__list_tags, reuse 1 to 3 tags that fit (storyboard__create_tag only when none does), "
+            "then storyboard__set_tags. Tagging is not a content change and needs no consent; skip it if "
+            "storyboard__list_tags is not available.")
+
 # Lines only the runtimes other than Claude get (their former builder's,
 # kept): the links shown unasked in the first progress update (Claude gives
 # them when asked); the ack command spelled out (Claude's events carry
@@ -187,6 +195,7 @@ def session_text(sid: str, binding: dict, *, cmd: str = CLAUDE_CMD, target: str 
                      f"`{_cmd(cmd, 'question', target)} \"<their question>\"` (your statement of it, not "
                      "owner authority); do not invent one. Implementation and review requests also name an "
                      "investigation; do not wait for findings or a request to publish.")
+        parts.append(TAG_LINE.format(sb=sb))
     if told:
         parts.append(told)
     if coordination_gate:
