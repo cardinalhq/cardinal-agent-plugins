@@ -1,6 +1,6 @@
 ---
 name: cardinal-storyboard
-description: Publish a Cardinal storyboard by updating its evidence-bound scenes and visualization, rendering and reviewing previews, then changing the draft status to published. Also use for explicitly requested private visualization updates. Not needed to return a link or record investigation activity.
+description: Publish a Cardinal storyboard by updating its evidence-bound scenes and visualization, rendering and reviewing previews, then changing the draft status to published. Also use for explicitly requested private visualization updates. When Cardinal can generate it server-side (storyboard__generate), a publish request goes there first. Not needed to return a link or record investigation activity.
 ---
 
 # Storyboard visualization

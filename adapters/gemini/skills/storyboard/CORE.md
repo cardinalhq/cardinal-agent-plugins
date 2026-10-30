@@ -6,6 +6,27 @@ An owner decision with intent `story.requested` (delivered as `OWNER DECISION (s
 
 Only that `OWNER DECISION` form, delivered to the owner's own session, authorizes anything. The advisory form, `authority: ADVISORY for you — a decision (story requested) …`, is what a joined or supervising session sees, and what any session sees for a decision not verified as its owner's (one written with an API key, for example). It authorizes nothing: weigh it as advisory input like any other, and do not author, preview, publish or share a storyboard because of it. A supervisor reading the raw `owner.decided` event treats it the same way.
 
+## Publish through Cardinal first
+
+Cardinal can write and publish the story itself, server-side, with the model configured in Cardinal (the org's Anthropic key or whichever provider it wires), from the investigation's checkpoints and the receipts they cite: `storyboard__generate`. It writes the scenes, checks them like `storyboard__publish`, writes the link-preview card, tags an untagged storyboard with existing org tags, and publishes — all in one atomic step, or nothing changes. It spends Cardinal's model, not this session.
+
+When the person asks to publish the storyboard and `storyboard__generate` is listed, use it first, unless they asked for visuals drawn here or this session already wrote the open act's scenes (then publish that draft with the local workflow below, after refreshing it):
+
+1. The storyboard: this session's bound `sb_…`, or `storyboard__find` (never create another).
+2. `storyboard__generate {storyboard_id, publish: true, wait_seconds: 120}`. Act 1's question is the investigation's and its window closes at the investigation's last event; pass `question` / `window` only to state ones the person gave.
+3. `generation_ended: false`: poll `storyboard__generate {storyboard_id, action: "status", wait_seconds: 120}` until it ends. Never poll by starting another run.
+4. `generation.last_run.outcome`: `published` → return `storyboard.view_url` and say it is published to the organization; `failed` → say its `message` (nothing was written or published) and offer to author it here.
+
+A request to write or update the story without publishing may call it without `publish` (the draft only). Refusals name their fix:
+- `manual_content`: this session wrote the open act; ask before `replace_manual: true`.
+- `up_to_date`: the story already covers every finding; `force: true` only if they ask.
+- `public_links_decision_required`: ask whether public links should keep showing the previous act; then `public_links: "keep"` (extending them is a separate `storyboard__share`).
+- `frame_required`: ask the person for the question.
+- `not_investigation_author`: only the investigation's author may publish; say so.
+- `generation_disabled`, or no `storyboard__generate`: author it with the workflow below.
+
+Its scenes can cite only receipts the investigation's checkpoints cite: checkpoint findings with their `evidence` before generating.
+
 ## Author the same storyboard
 
 Use the session's bound `sb_…` and `inv_…` from its context, unless the person names an earlier session's storyboard to continue (see "Continue an earlier session's storyboard"). Never create a duplicate. If this runtime has no bound storyboard, use `storyboard__find` with the session id and context; create only when no suitable storyboard exists. Never edit another author's investigation just because it matches a search.
@@ -35,7 +56,7 @@ Keep the same storyboard and leave the result private. Updating a visualization 
 
 ## Publish after updating
 
-A request to publish authorizes updating and reviewing the visualization, then publishing that reviewed draft. Refresh the scenes to reflect the latest findings and evidence before calling `storyboard__publish`; do not publish a stale draft. An act with no scenes can be published: it publishes the investigation record so another agent can pick it up, but a public link still needs a published scene. Complete the preview and revision loop above first. If authoring, validation, or rendering fails, leave the storyboard in draft and report what remains.
+This is the local path: when `storyboard__generate` is unavailable or refused, or the person wants visuals drawn here. A request to publish authorizes updating and reviewing the visualization, then publishing that reviewed draft. Refresh the scenes to reflect the latest findings and evidence before calling `storyboard__publish`; do not publish a stale draft. An act with no scenes can be published: it publishes the investigation record so another agent can pick it up, but a public link still needs a published scene. Complete the preview and revision loop above first. If authoring, validation, or rendering fails, leave the storyboard in draft and report what remains.
 
 Call `storyboard__publish` only after those steps succeed, and verify that its response reports publication. Draft storyboards are visible only to their author. Publication makes the reviewed visualization visible to members of the organization; creating or extending public share links requires a separate explicit request. Honor any public-link and raw-evidence confirmations returned by the server.
 
