@@ -1,6 +1,6 @@
 ---
 name: storyboard
-description: Publish a Cardinal storyboard by updating its evidence-bound scenes and visualization, rendering and reviewing previews, then changing the draft status to published. Also use for explicitly requested private visualization updates. Not needed to return a link or record investigation activity.
+description: Publish a Cardinal storyboard by updating its evidence-bound scenes and visualization, rendering and reviewing previews, then changing the draft status to published. Also use for explicitly requested private visualization updates. When Cardinal can generate it server-side (storyboard__generate), a publish request goes there first. Not needed to return a link or record investigation activity.
 ---
 
 # storyboard — update the session's visualization
@@ -30,6 +30,15 @@ Needs Cardinal (maestro) newer than v1.97.16; ask the user to upgrade an older o
 
 No `storyboard__*` tools: not connected. Tell the user once: sign up at
 https://app.cardinalhq.io, run `/cardinal:connect`, restart Claude Code.
+
+## Publish through Cardinal first
+
+A publish request goes to `storyboard__generate {publish: true}` when it is listed: see
+"Publish through Cardinal first" in [CORE.md](CORE.md). The server writes, checks,
+cards, tags and publishes in one atomic step with Cardinal's configured model; nothing
+renders locally on that path. Author here (the rest of this skill) when the person asks
+for visuals drawn in this session, when this session already wrote the open act, or when
+generation is unavailable (`generation_disabled`) or the run failed and they agree.
 
 ## Evidence in Claude Code
 
