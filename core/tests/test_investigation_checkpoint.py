@@ -588,5 +588,76 @@ class Rendering(unittest.TestCase):
         self.assertEqual((ident, body), ("unknown", ""))
 
 
+class AgentMilestones(unittest.TestCase):
+    """A checkpoint event's milestone (maestro storyboard/agent-milestones.ts):
+    the agent writes the storyboard's milestones on its own checkpoints."""
+
+    M = {"title": "Preparing the data takes most of the request time",
+         "description": "Most of each slow request is spent preparing data before any of it is read."}
+    CAPS = {"capabilities": {"agent_milestones": {"enabled": True, "version": 1}}}
+
+    def test_flat_and_nested_events_carry_the_milestone_beside_the_payload(self):
+        flat = {"type": "finding.proposed", "id": "finding_prep", "statement": "s", "evidence": [RCPT],
+                "milestone": dict(self.M, state="supported")}
+        nested = {"type": "finding.proposed", "payload": {"semantic_id": "finding_prep", "statement": "s",
+                                                           "evidence": [RCPT]},
+                  "milestone": dict(self.M, state="supported")}
+        want = [{"type": "finding.proposed", "payload": {"semantic_id": "finding_prep", "statement": "s",
+                                                         "evidence": [RCPT]},
+                 "milestone": dict(self.M, state="supported")}]
+        self.assertEqual(ie.checkpoint_events([flat]), want)
+        self.assertEqual(ie.checkpoint_events([nested]), want)
+        # No milestone: the event is exactly as before.
+        self.assertNotIn("milestone", ie.checkpoint_events([{"type": "finding.proposed", "id": "finding_prep",
+                                                             "statement": "s"}])[0])
+
+    def test_a_malformed_milestone_is_refused_before_anything_is_sent(self):
+        base = {"type": "finding.proposed", "id": "finding_prep", "statement": "s"}
+        for bad, said in (({"title": "t"}, '"description" is required'),
+                          (dict(self.M, colour="red"), "unknown field"),
+                          (dict(self.M, state="proven"), '"state" is one of'),
+                          (dict(self.M, replaces="m1"), '"replaces" is a list'),
+                          (dict(self.M, id="has space"), '"id" is 1-64'),
+                          ("a title", "is an object")):
+            with self.assertRaises(ie.CheckpointInputError) as cm:
+                ie.checkpoint_events([dict(base, milestone=bad)])
+            self.assertIn(said, str(cm.exception))
+
+    def test_an_older_server_gets_the_events_without_the_milestone(self):
+        events = ie.checkpoint_events([{"type": "finding.proposed", "id": "finding_prep", "statement": "s",
+                                        "milestone": self.M}])
+        kept = ie.checkpoint_capabilities([dict(e) for e in events], self.CAPS)
+        self.assertEqual(kept[0]["milestone"], self.M)
+        stripped = ie.checkpoint_capabilities([dict(e) for e in events], {})
+        self.assertNotIn("milestone", stripped[0])
+
+    def test_cited_ev_ids_become_receipts_and_the_milestone_is_kept(self):
+        events = ie.checkpoint_events([{"type": "finding.proposed", "id": "finding_prep", "statement": "s",
+                                        "evidence": [EV], "milestone": self.M}])
+        out = ie.with_receipts(events, {EV: RCPT})
+        self.assertEqual(out[0]["payload"]["evidence"], [RCPT])
+        self.assertEqual(out[0]["milestone"], self.M)
+
+    def test_the_line_says_what_was_written_and_what_was_not(self):
+        out = {"events": [{"seq": 4, "type": "finding.proposed", "payload": {"semantic_id": "finding_prep"}}],
+               "milestones": [{"index": 0, "milestone_id": "m-finding_prep", "created": True, "state": "supported",
+                               "replaced": ["m-hyp_a", "m-hyp_b"], "warnings": ["title says \"API\": use plain words"]}],
+               "milestone_errors": [{"index": 0, "milestone_id": "m-x", "code": "quota_exceeded", "message": "used up"}]}
+        self.assertEqual(ie.checkpoint_line(out),
+                         "checkpointed #4 (finding.proposed finding_prep)\n"
+                         "milestone written: m-finding_prep (supported), merging m-hyp_a, m-hyp_b\n"
+                         "  warning: title says \"API\": use plain words\n"
+                         "milestone not written: m-x (quota_exceeded): used up")
+
+    def test_a_refused_milestone_says_every_issue_in_full(self):
+        long = "the open act already has 8 milestones and a story holds at most 8: merge related ones " + "x" * 400
+        err = sync.ServerError(422, {"error": "milestone_invalid", "message": "Nothing was recorded.",
+                                     "issues": [{"index": 0, "path": "events.0.milestone", "code": "too_many_milestones",
+                                                 "message": long}]}, "refused")
+        line = ie.checkpoint_refusal(err)
+        self.assertTrue(line.startswith("milestone_invalid: Nothing was recorded."), line)
+        self.assertIn("events.0.milestone (too_many_milestones): " + long, line)
+
+
 if __name__ == "__main__":
     unittest.main()
