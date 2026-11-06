@@ -1,6 +1,6 @@
 {
   "name": "cardinal",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Connect GitHub Copilot CLI to Cardinal: telemetry to the Outcomes Dashboard + unified Cardinal MCP tools, with hooks that derive initiative name and type from the current branch and keep Cardinal Investigations and Storyboards in step with the session.",
   "author": {
     "name": "CardinalHQ",

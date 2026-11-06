@@ -82,6 +82,15 @@ class ClaudeText(unittest.TestCase):
         for line in (it.ADVISORY_LINE, ie.ACK_GUIDANCE, ie.POST_GUIDANCE, ie.SUPERVISION_LINE):
             self.assertIn(line, text)
 
+    def test_milestone_guidance_only_on_a_server_that_takes_agent_milestones(self):
+        self.assertNotIn(it.MILESTONE_LINE, claude())
+        caps = {"delegated_supervision": {"enabled": True}, "agent_milestones": {"enabled": True, "version": 1}}
+        text = claude(binding(capabilities=caps))
+        self.assertIn(it.MILESTONE_LINE, text)
+        self.assertNotIn("\n", text)
+        self.assertIn('"milestone":{"title"', it.MILESTONE_LINE)
+        self.assertIn("needs no consent and publishes nothing", it.MILESTONE_LINE)
+
     def test_claude_gives_links_when_asked_and_is_not_sandboxed(self):
         text = claude()
         self.assertNotIn(it.FIRST_UPDATE_LINE, text)
