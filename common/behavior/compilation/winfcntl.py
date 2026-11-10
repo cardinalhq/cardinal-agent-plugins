@@ -16,7 +16,21 @@ import os
 import time
 
 LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
-HELD = (errno.EACCES, errno.EDEADLK, 0)  # 0: how Wine's C runtime reports it (seen in the Wine CI job)
+
+
+def held(error):
+    """Whether a failed msvcrt.locking means the byte is held. Wine's C
+    runtime reports that with errno 0 (seen in the Wine CI job); it counts
+    only under Wine, where ntdll exports wine_get_version."""
+    if error.errno in (errno.EACCES, errno.EDEADLK):
+        return True
+    if error.errno != 0:
+        return False
+    try:
+        import ctypes
+        return hasattr(ctypes.windll.ntdll, 'wine_get_version')
+    except (AttributeError, OSError):
+        return False
 
 
 def flock(file, operation, sleep=time.sleep):
@@ -29,7 +43,7 @@ def flock(file, operation, sleep=time.sleep):
             msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & LOCK_UN else msvcrt.LK_NBLCK, 1)
             return
         except OSError as error:
-            if operation & LOCK_UN or error.errno not in HELD:
+            if operation & LOCK_UN or not held(error):
                 raise
             if operation & LOCK_NB:  # what flock raises, and what the callers catch
                 raise BlockingIOError(errno.EWOULDBLOCK, 'the lock is held') from error
