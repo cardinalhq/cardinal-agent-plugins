@@ -142,8 +142,9 @@ class WindowsFlockTests(unittest.TestCase):
 
     def test_a_held_lock_is_blocking_io_error_and_other_errors_pass_through(self):
         from cardinal_core import _winfcntl as w
-        with self.assertRaises(BlockingIOError):  # the class flock raises and callers catch
-            self.flock(w.LOCK_EX | w.LOCK_NB, PermissionError(errno.EACCES, "held"))
+        for held in (PermissionError(errno.EACCES, "held"), OSError(0, "Error")):  # the second is Wine's report
+            with self.subTest(error=held), self.assertRaises(BlockingIOError):  # what flock raises, callers catch
+                self.flock(w.LOCK_EX | w.LOCK_NB, held)
         with self.assertRaises(OSError) as raised:
             self.flock(w.LOCK_EX | w.LOCK_NB, OSError(errno.EINVAL, "bad handle"))
         self.assertEqual((type(raised.exception), raised.exception.errno), (OSError, errno.EINVAL))

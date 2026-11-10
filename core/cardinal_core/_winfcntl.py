@@ -18,6 +18,9 @@ import errno
 import os
 
 LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
+# A held byte: EACCES from the C runtime (EDEADLOCK when it gives up). Wine's runtime
+# reports it with errno 0, seen in the Wine CI job.
+HELD = (errno.EACCES, errno.EDEADLK, 0)
 
 
 def flock(fd: int, operation: int) -> None:
@@ -29,6 +32,6 @@ def flock(fd: int, operation: int) -> None:
     try:
         msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & LOCK_UN else msvcrt.LK_NBLCK, 1)
     except OSError as error:
-        if operation & LOCK_UN or error.errno not in (errno.EACCES, errno.EDEADLK):
+        if operation & LOCK_UN or error.errno not in HELD:
             raise
         raise BlockingIOError(errno.EWOULDBLOCK, "the lock is held") from error  # what flock raises
