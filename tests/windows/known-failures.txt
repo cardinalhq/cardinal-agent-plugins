@@ -29,7 +29,6 @@ copilot@3.14 test_copilot_decisions.GitStatePrLinkageTest.test_pr_keys_on_git_st
 copilot@3.14 test_copilot_decisions.HookRecordsDecisionTest.test_hook_emits_tagged_decision  # #255: unclassified
 copilot@3.14 test_copilot_decisions.SessionStartDecisionContextTest.test_on_describes_the_sandbox_safe_flow_and_ledger  # #245: test asserts the POSIX command text
 copilot@3.14 test_copilot_evidence_capture.CopilotEvidenceCaptureTests.test_mcp_result_is_spooled_and_its_id_returned  # #255: unclassified
-copilot@3.14 test_copilot_evidence_capture.CopilotEvidenceCaptureTests.test_sensitive_call_is_withheld  # #250: evidence gate paths
 copilot@3.14 test_copilot_hooks.RobustnessTests.test_registered_commands_exit_zero_when_core_is_missing  # #255: POSIX program in a test (WinError 2)
 copilot@3.14 test_copilot_hooks.RobustnessTests.test_registered_pre_tool_use_command_does_not_deny_on_crash  # #255: POSIX program in a test (WinError 2)
 copilot@3.14 test_copilot_hooks.ToolNameUnitTests.test_edited_paths  # #255: unclassified
