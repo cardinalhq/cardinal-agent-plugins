@@ -53,11 +53,12 @@ from typing import Callable, Optional
 from . import investigation_bootstrap as boot
 from . import investigation_events as ie
 from . import investigation_state_sync as sync
+from .paths import replace as _replace
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
+except ImportError:  # Windows: the same calls on msvcrt.locking
+    from . import _winfcntl as fcntl  # type: ignore[no-redef]
 
 POLL_INTERVAL = 5.0
 MIN_INTERVAL = 1.0          # the floor for an override (CARDINAL_INVESTIGATION_POLL_INTERVAL)
@@ -147,9 +148,6 @@ def _ps(pid: int) -> Optional[tuple]:
 
 @contextlib.contextmanager
 def _single(home: Path, sid: str, wait: float):
-    if fcntl is None:  # pragma: no cover
-        yield True
-        return
     d = ie._ensure_dirs(home)
     fd = os.open(str(d / f"{ie.binding_path(home, sid).stem}.poller.lock"), os.O_RDWR | os.O_CREAT, 0o600)
     got = False
@@ -211,7 +209,7 @@ def _write_pid(home: Path, sid: str) -> None:
     p = pid_path(home, sid)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
     tmp.write_text(f"{os.getpid()}\n")
-    os.replace(str(tmp), str(p))
+    _replace(str(tmp), str(p))
 
 
 def _loop(home, sid, connection, client, anchor, connected, interval, idle, max_lifetime, once, tick,

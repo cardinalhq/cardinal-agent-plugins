@@ -133,6 +133,16 @@ class PowerShellCommandTests(HookCase):
                 self.assertEqual(hook.decision_invocations(command.replace("/", "\\"), windows=True),
                                  ([["record", "--choice", "Use X"]], None))
 
+    def test_quoted_arguments_arrive_as_written(self):
+        # shell_quote's Windows form, as the watch / grant commands use it for paths (issue #247).
+        from cardinal_core.paths import shell_quote
+        script = self.base / "argv.py"
+        script.write_text("import json, sys; print(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
+        args = ["inv_abc123", "C:\\Users\\O'Brien folder\\permit.json", "do$llar", "ba`ck", "a b", ""]
+        command = script_command(script, "", windows=True) + " " + " ".join(shell_quote(a, windows=True) for a in args)
+        res = self.pwsh(command, {}, self.echo_root)
+        self.assertEqual((res.returncode, json.loads(res.stdout.decode("utf-8"))), (0, args), res.stderr)
+
     def test_the_real_hook_answers_through_powershell(self):
         [entry] = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))["hooks"]["sessionStart"]
         res = self.pwsh(entry["powershell"], self.payload(source="startup"), ADAPTER)

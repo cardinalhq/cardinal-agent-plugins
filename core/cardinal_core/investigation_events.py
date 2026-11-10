@@ -125,11 +125,12 @@ from . import investigation_state as ist
 from . import investigation_state_sync as sync
 from . import supervision_status as sv
 from .paths import state_home
+from .paths import replace as _replace
 
-try:  # POSIX only; without it (Windows) the binding is written unlocked.
+try:
     import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
+except ImportError:  # Windows: the same calls on msvcrt.locking
+    from . import _winfcntl as fcntl  # type: ignore[no-redef]
 
 SESSION_ID_RE = sync.SESSION_ID_RE
 INVESTIGATION_ID_RE = ist.INVESTIGATION_ID_RE
@@ -320,9 +321,6 @@ def write_binding(home: Path, sid: str, binding: dict) -> None:
 def locked(home: Path, sid: str, wait: float = 1.0) -> Iterator[bool]:
     """flock on the session's lock file; yields whether it was acquired
     within `wait` seconds."""
-    if fcntl is None:  # pragma: no cover
-        yield True
-        return
     d = _ensure_dirs(home)
     path = d / f"{binding_path(home, sid).stem}.lock"
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
@@ -372,10 +370,11 @@ def write_json(path: Path, data: dict) -> None:
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            os.fchmod(f.fileno(), 0o600)
+            if hasattr(os, "fchmod"):  # not on Windows before Python 3.13; os.open above already made it 0600
+                os.fchmod(f.fileno(), 0o600)
             json.dump(data, f, indent=2)
             f.write("\n")
-        os.replace(str(tmp), str(path))
+        _replace(str(tmp), str(path))
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(str(tmp))

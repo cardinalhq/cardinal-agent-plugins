@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -69,6 +70,33 @@ def state_home(home: Path, environ: Any = None) -> Path:
     return sandboxed_home(home) if in_seatbelt_sandbox(environ) else home
 
 
+def replace(src: Any, dst: Any, windows: Any = None) -> None:
+    """os.replace. On Windows it raises PermissionError while another process
+    has the destination open (a concurrent hook reading the file), so it is
+    retried there for about two seconds."""
+    if not (os.name == "nt" if windows is None else windows):
+        os.replace(src, dst)
+        return
+    for attempt in range(40):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(0.05)
+
+
+def shell_quote(text: Any, windows: Any = None) -> str:
+    """One argument of a command shown to the agent or the user: POSIX
+    quoting, except on Windows, where the shell is PowerShell (see
+    script_command) and a literal is single-quoted with `'` doubled."""
+    text = str(text)
+    if not (os.name == "nt" if windows is None else windows):
+        return shlex.quote(text)
+    return text if text and shlex.quote(text) == text else "'" + text.replace("'", "''") + "'"
+
+
 def utf8_stdio() -> None:
     """Make the standard streams UTF-8 where they are not. Before Python
     3.15, Windows opens piped streams in the ANSI code page: non-ASCII input
@@ -111,7 +139,7 @@ def atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
+    replace(tmp, path)
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -126,7 +154,7 @@ def atomic_write_json_compact(path: Path, obj: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(obj, f)
-        os.replace(tmp, path)
+        replace(tmp, path)
     except OSError:
         try:
             os.unlink(tmp)
@@ -141,7 +169,7 @@ def atomic_write_secret(path: Path, content: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
-        os.replace(tmp, path)
+        replace(tmp, path)
         os.chmod(path, 0o600)
     except Exception:
         try:

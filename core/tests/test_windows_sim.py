@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from cardinal_core import paths
 from tests import winsim
@@ -40,9 +41,7 @@ class ImportTests(WindowsSimCase):
 
 
 class FileHandlingTests(WindowsSimCase):
-    # Fixed by #247: os.fchmod does not exist on Windows before Python 3.13.
-    @unittest.expectedFailure
-    def test_write_json_writes_the_session_file(self):
+    def test_write_json_writes_the_session_file(self):  # os.fchmod is missing before Python 3.13
         out = self.sim("import json, pathlib, tempfile\n"
                        "from cardinal_core import investigation_events as events\n"
                        "with tempfile.TemporaryDirectory() as d:\n"
@@ -50,6 +49,34 @@ class FileHandlingTests(WindowsSimCase):
                        "    events.write_json(path, {'cursor': 0})\n"
                        "    print(json.loads(path.read_text(encoding='utf-8')))\n")
         self.assertEqual(out.strip(), "{'cursor': 0}")
+
+    def test_a_session_binds_and_a_second_holder_is_locked_out(self):
+        out = self.sim("import pathlib, tempfile\n"
+                       "from cardinal_core import investigation_events as events\n"
+                       "sid, inv = '5b7c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d', 'inv_' + 'a' * 24\n"
+                       "with tempfile.TemporaryDirectory() as d:\n"
+                       "    home = pathlib.Path(d)\n"
+                       "    print(events.bind(home, sid, inv, 'test')[1], events.read_binding(home, sid)['cursor'])\n"
+                       "    with events.locked(home, sid) as first:\n"
+                       "        with events.locked(home, sid, wait=0.1) as second:\n"
+                       "            print(first, second)\n"
+                       "    with events.locked(home, sid) as again:\n"
+                       "        print(again)\n")
+        self.assertEqual(out.split(), ["True", "0", "True", "False", "True"])
+
+    def test_grant_files_are_read_written_and_locked(self):
+        # No os.getuid / O_NOFOLLOW / fcntl: the owner and mode checks do not apply.
+        out = self.sim("import pathlib, tempfile\n"
+                       "from cardinal_core import investigation_consumer as consumer\n"
+                       "with tempfile.TemporaryDirectory() as d:\n"
+                       "    directory = consumer.private_directory(pathlib.Path(d) / 'supervise')\n"
+                       "    path = directory / 'cursor.json'\n"
+                       "    consumer.private_write(path, {'after': 3}, create=True)\n"
+                       "    consumer.private_write(path, {'after': 4})\n"
+                       "    with consumer.locked(path):\n"
+                       "        print(consumer.private_read(path))\n"
+                       "    consumer.fsync_directory(directory)\n")
+        self.assertEqual(out.strip(), "{'after': 4}")
 
 
 class Utf8Tests(unittest.TestCase):
@@ -72,6 +99,37 @@ class Utf8Tests(unittest.TestCase):
                              input=self.TEXT.encode("utf-8"), capture_output=True, cwd=str(CORE),
                              env={**os.environ, "PYTHONIOENCODING": "cp1252"}, timeout=60)
         self.assertEqual((res.returncode, res.stdout.decode("utf-8")), (0, self.TEXT), res.stderr)
+
+
+class AtomicReplaceTests(unittest.TestCase):
+    def test_windows_retries_while_the_destination_is_open_elsewhere(self):
+        calls = []
+
+        def busy_twice(src, dst):
+            calls.append((src, dst))
+            if len(calls) < 3:
+                raise PermissionError(13, "sharing violation")
+
+        with mock.patch.object(paths.os, "replace", busy_twice), mock.patch.object(paths.time, "sleep"):
+            paths.replace("a.tmp", "a", windows=True)
+        self.assertEqual(calls, [("a.tmp", "a")] * 3)
+
+    def test_elsewhere_it_is_os_replace_once(self):
+        with mock.patch.object(paths.os, "replace", side_effect=PermissionError(13, "denied")) as replace:
+            with self.assertRaises(PermissionError):
+                paths.replace("a.tmp", "a", windows=False)
+        self.assertEqual(replace.call_count, 1)
+
+
+class ShellQuoteTests(unittest.TestCase):
+    def test_windows_arguments_are_powershell_literals(self):
+        self.assertEqual(paths.shell_quote(r"C:\Users\O'Brien folder\permit.json", windows=True),
+                         r"'C:\Users\O''Brien folder\permit.json'")
+        self.assertEqual(paths.shell_quote("inv_abc123", windows=True), "inv_abc123")
+        self.assertEqual(paths.shell_quote("", windows=True), "''")
+
+    def test_elsewhere_it_is_shlex_quote(self):
+        self.assertEqual(paths.shell_quote("/tmp/my grant.json", windows=False), "'/tmp/my grant.json'")
 
 
 class ScriptCommandTests(unittest.TestCase):

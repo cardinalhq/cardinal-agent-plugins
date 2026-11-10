@@ -26,7 +26,25 @@ MISSING_OS = ("O_NOFOLLOW", "fchmod", "fchown", "getegid", "geteuid", "getgid", 
 MISSING_SIGNAL = ("ITIMER_REAL", "SIGALRM", "SIGHUP", "SIGUSR1", "alarm", "setitimer")
 
 
+def _fake_msvcrt():
+    """msvcrt.locking on the host's flock (which, like a Windows region
+    lock, conflicts between two opens in one process), so lock code runs here."""
+    import fcntl
+    import types
+
+    module = types.ModuleType("msvcrt")
+    module.LK_UNLCK, module.LK_LOCK, module.LK_NBLCK = 0, 1, 2
+
+    def locking(fd: int, mode: int, nbytes: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN if mode == module.LK_UNLCK else fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    module.locking = locking
+    return module
+
+
 def apply() -> None:
+    if os.name != "nt":
+        sys.modules["msvcrt"] = _fake_msvcrt()
     for name in MISSING_MODULES:
         sys.modules[name] = None  # type: ignore[assignment]  # import raises ImportError
     for module, names in ((os, MISSING_OS), (signal, MISSING_SIGNAL)):

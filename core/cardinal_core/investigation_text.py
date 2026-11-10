@@ -38,6 +38,8 @@ import os
 import shlex
 from typing import Optional
 
+from .paths import shell_quote
+
 CLAUDE_CMD = "cardinal-storyboard investigation"
 
 SESSION_ID_LINE = ("Cardinal session id for this session: {sid}. "
@@ -234,8 +236,8 @@ def watch_command(investigation_id: str, *, credential_file: Optional[str] = Non
     supervise skill's default directory) has not committed, so re-running it
     skips what was committed."""
     if credential_file:
-        cred = f" --credential-file {shlex.quote(credential_file)}"
-        cursor = shlex.quote(os.path.join(os.path.dirname(credential_file), "cursor.json"))
+        cred = f" --credential-file {shell_quote(credential_file)}"
+        cursor = shell_quote(os.path.join(os.path.dirname(credential_file), "cursor.json"))
     else:
         cred, cursor = "", f"~/.cardinal/supervise/{shlex.quote(investigation_id)}/cursor.json"
     return f"{cmd} events {investigation_id}{cred} --cursor-file {cursor} --follow"
