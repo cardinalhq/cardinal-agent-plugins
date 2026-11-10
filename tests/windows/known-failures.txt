@@ -5,10 +5,12 @@
 # (mostly test fixtures that assume POSIX); the cause was assigned from the traceback.
 behavior@3.14 test_behavior.BehaviorTests.test_running_incremental_projection_and_completed_receipt  # #247: POSIX mode bits asserted
 behavior@3.14 test_checks_tools.LedgerToolTests.test_the_ledger_is_private  # #247: POSIX mode bits asserted
+behavior@3.14 test_compilation_history.CompilationHistoryTests.test_concurrent_atomic_receipt_writes_never_share_a_temporary_file  # #246: fixture: its barrier wraps every os.replace (a retry re-enters it) and it asserts mode 0600
 behavior@3.14 test_hosted.HostedBehaviorTests.test_sdk_tool_and_no_frozen_default  # #247: POSIX mode bits asserted
 behavior@3.14 test_range_run.RangeOrchestrationTests.test_spawn_starts_a_detached_worker_once  # #248: test asserts the POSIX Popen arguments
 behavior@3.9 test_behavior.BehaviorTests.test_running_incremental_projection_and_completed_receipt  # #247: POSIX mode bits asserted
 behavior@3.9 test_checks_tools.LedgerToolTests.test_the_ledger_is_private  # #247: POSIX mode bits asserted
+behavior@3.9 test_compilation_history.CompilationHistoryTests.test_concurrent_atomic_receipt_writes_never_share_a_temporary_file  # #246: fixture: its barrier wraps every os.replace (a retry re-enters it) and it asserts mode 0600
 behavior@3.9 test_hosted.HostedBehaviorTests.test_sdk_tool_and_no_frozen_default  # #247: POSIX mode bits asserted
 behavior@3.9 test_range_run.RangeOrchestrationTests.test_spawn_starts_a_detached_worker_once  # #248: test asserts the POSIX Popen arguments
 copilot@3.14 test_copilot_checks.BehaviorServerTests.test_the_registered_server_starts_for_copilot  # #246: fcntl import
