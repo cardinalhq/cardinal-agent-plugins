@@ -19,7 +19,9 @@ behavior@3.9 unittest.loader._FailedTest.test_mcp  # #246: fcntl import
 behavior@3.9 unittest.loader._FailedTest.test_range_run  # #246: fcntl import
 copilot@3.14 test_copilot_checks.BehaviorServerTests.test_launcher_adds_the_runtime_when_missing  # #246: fcntl import
 copilot@3.14 test_copilot_checks.BehaviorServerTests.test_the_registered_server_starts_for_copilot  # #246: fcntl import
+copilot@3.14 test_copilot_connect.ConfigTests.test_a_managed_entry_may_be_rewritten  # #245: test asserts the POSIX command text
 copilot@3.14 test_copilot_connect.ConfigTests.test_copilot_home  # #255: unclassified
+copilot@3.14 test_copilot_connect.ConfigTests.test_write_into_a_missing_file  # #245: test asserts the POSIX command text
 copilot@3.14 test_copilot_connect.ConnectScriptTests.test_paths_live_under_the_sandboxed_home  # #255: unclassified
 copilot@3.14 test_copilot_connect.ConnectScriptTests.test_repair_registration_restores_the_behavior_entry  # #255: unclassified
 copilot@3.14 test_copilot_connect.ConnectScriptTests.test_write_into_a_fresh_home  # #247: POSIX mode bits asserted
@@ -28,6 +30,7 @@ copilot@3.14 test_copilot_connect.DisconnectTests.test_disconnect_revokes_and_re
 copilot@3.14 test_copilot_connect.OwnerInputConsentTests.test_on_needs_a_typed_yes_in_a_terminal  # #247: POSIX mode bits asserted
 copilot@3.14 test_copilot_decisions.GitStatePrLinkageTest.test_pr_keys_on_git_state_and_cached  # #255: unclassified
 copilot@3.14 test_copilot_decisions.HookRecordsDecisionTest.test_hook_emits_tagged_decision  # #255: unclassified
+copilot@3.14 test_copilot_decisions.SessionStartDecisionContextTest.test_on_describes_the_sandbox_safe_flow_and_ledger  # #245: test asserts the POSIX command text
 copilot@3.14 test_copilot_evidence_capture.CopilotEvidenceCaptureTests.test_mcp_result_is_spooled_and_its_id_returned  # #255: unclassified
 copilot@3.14 test_copilot_evidence_capture.CopilotEvidenceCaptureTests.test_sensitive_call_is_withheld  # #250: evidence gate paths
 copilot@3.14 test_copilot_hooks.RobustnessTests.test_registered_commands_exit_zero_when_core_is_missing  # #255: POSIX program in a test (WinError 2)
@@ -39,6 +42,7 @@ copilot@3.14 test_copilot_investigation.InvestigationTests.test_session_start_bo
 copilot@3.14 test_copilot_investigation.InvestigationTests.test_session_start_delivers_what_was_staged  # #255: unclassified
 copilot@3.14 test_copilot_investigation.InvestigationTests.test_session_start_says_prompts_are_recorded_only_with_consent  # #255: unclassified
 copilot@3.14 test_copilot_investigation.InvestigationTests.test_subagent_tool_call_gets_nothing_and_consumes_nothing  # #255: unclassified
+copilot@3.14 test_copilot_investigation.StoryboardTests.test_session_start_names_the_session_and_discovers  # #245: test asserts the POSIX command text
 copilot@3.14 test_goldens.GoldenTests.test_hook_output_matches_committed_goldens  # #255: unclassified
 copilot@3.14 test_install_site.InstallSiteTests.test_add_lakerunner_maps_all_slots_used  # #255: unclassified
 copilot@3.14 test_install_site.InstallSiteTests.test_add_lakerunner_maps_not_operator_managed  # #255: unclassified
@@ -244,6 +248,8 @@ core@3.14 test_owner_relay.Deferred.test_scheduled_peer_and_unconfirmable_prompt
 core@3.14 test_owner_relay.ReviewFixes.test_a_locked_store_counts_nothing_as_fresh  # #255: unclassified
 core@3.14 test_owner_relay.Store.test_file_is_private_ids_are_dp_hex_and_entries_hash_their_text  # #247: POSIX mode bits asserted
 core@3.14 test_owner_relay.Targets.test_supervising_registers_lists_renames_and_removes  # #247: POSIX mode bits asserted
+core@3.14 test_storyboard_agent.SessionLineTests.test_auto_context_wording  # #245: test asserts the POSIX command text
+core@3.14 test_storyboard_agent.SessionLineTests.test_names_the_id_and_the_cli  # #245: test asserts the POSIX command text
 core@3.14 test_storyboard_authoring.PreviewTests.test_the_card_renders_cover_and_mock_in_the_runtimes_dir  # #251: local preview
 core@3.14 test_storyboard_authoring.TokenTests.test_a_successful_mcp_checkpoint_holds_the_sessions_evidence  # #247: POSIX mode bits asserted
 core@3.14 test_storyboard_files.StoryboardFilesTests.test_file_mode_and_directory_mode  # #247: POSIX mode bits asserted
@@ -744,6 +750,8 @@ core@3.9 test_session_repos.SessionReposTests.test_edits_arriving_during_a_refre
 core@3.9 test_session_repos.SessionReposTests.test_explicit_tool_workdir_is_observed_without_parsing_shell_commands  # #255: unclassified
 core@3.9 test_session_repos.SessionReposTests.test_opt_out_non_author_org_change_cap_and_deduplication  # #255: unclassified
 core@3.9 test_session_repos.SessionReposTests.test_successful_edits_in_two_repos_stage_labels_in_every_adapter  # #255: unclassified
+core@3.9 test_storyboard_agent.SessionLineTests.test_auto_context_wording  # #245: test asserts the POSIX command text
+core@3.9 test_storyboard_agent.SessionLineTests.test_names_the_id_and_the_cli  # #245: test asserts the POSIX command text
 core@3.9 test_storyboard_authoring.PreviewTests.test_the_card_renders_cover_and_mock_in_the_runtimes_dir  # #251: local preview
 core@3.9 test_storyboard_authoring.TokenTests.test_a_successful_mcp_checkpoint_holds_the_sessions_evidence  # #247: POSIX mode bits asserted
 core@3.9 test_storyboard_files.StoryboardFilesTests.test_file_mode_and_directory_mode  # #247: POSIX mode bits asserted
