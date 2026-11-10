@@ -8,6 +8,7 @@ Windows Python (the Wine job) it also runs with os.path being ntpath.
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from cardinal_core import evidence_gate as gate
 
@@ -30,6 +31,16 @@ class WindowsGateTests(unittest.TestCase):
             ("ls Env:*", "cmd.env-dump"), ("Get-Item Env:", "cmd.env-dump"),
             ("echo $env:GITHUB_TOKEN", "cmd.secret-var"), ("Write-Output $env:AWS_SECRET_ACCESS_KEY", "cmd.secret-var"),
             ('Write-Host "token: $env:NPM_TOKEN"', "cmd.secret-var"),
+            # names are case-insensitive on Windows; braces; the Env: drive item; the .NET API
+            ("echo $env:github_token", "cmd.secret-var"), ("echo ${env:GITHUB_TOKEN}", "cmd.secret-var"),
+            ("Get-Content Env:GITHUB_TOKEN", "cmd.secret-var"), (r"gc env:\api_key", "cmd.secret-var"),
+            ("[Environment]::GetEnvironmentVariable('GITHUB_TOKEN')", "cmd.secret-var"),
+            ("[System.Environment]::GetEnvironmentVariables()", "cmd.env-dump"),
+            # through a nested PowerShell
+            ('powershell -NoProfile -Command "Get-ChildItem Env:"', "cmd.env-dump"),
+            ("pwsh -c 'echo $env:GITHUB_TOKEN'", "cmd.env-dump"),  # the existing interpreter rule sees it first
+            ("powershell.exe -Command echo $env:GITHUB_TOKEN", "cmd.secret-var"),
+            ("powershell -EncodedCommand RwBlAHQALQBDAGgAaQBsAGQASQB0AGUAbQA=", "cmd.decoded-exec"),
         ):
             with self.subTest(command=text):
                 hit = self.command(text)
@@ -49,12 +60,26 @@ class WindowsGateTests(unittest.TestCase):
 
     def test_ordinary_powershell_and_windows_paths_are_still_captured(self):
         for text in ("Get-ChildItem C:\\src", "echo $env:PATH", r"type C:\Users\alice\app\notes.txt",
-                     "Get-ChildItem -Recurse src", "dir", r"gc C:\repo\README.md", "Write-Output $env:USERNAME"):
+                     "Get-ChildItem -Recurse src", "dir", r"gc C:\repo\README.md", "Write-Output $env:USERNAME",
+                     "Get-Content Env:PATH", "[Environment]::GetEnvironmentVariable('PATH')",
+                     'powershell -Command "Get-ChildItem C:\\src"'):
             with self.subTest(command=text):
                 self.assertIsNone(self.command(text), text)
         for text in (r"C:\Users\alice\app\main.py", "C:/repo/src/app.ts", r"\\fileserver\share\docs\plan.md"):
             with self.subTest(path=text):
                 self.assertIsNone(self.path(text), text)
+
+    def test_long_path_prefixes_and_on_windows_any_backslash_path(self):
+        self.assertIsNotNone(self.path("\\\\?\\C:\\Users\\alice\\.ssh\\id_rsa"))
+        relative = (r"app\.env", r"..\.ssh\id_rsa", r".\secrets\prod.json")
+        for text in relative:  # ambiguous with an escape elsewhere, so only where `\` is the separator
+            self.assertIsNone(gate.windows_path(text), text)
+        with mock.patch.object(gate, "WINDOWS", True):
+            for text in relative:
+                with self.subTest(path=text):
+                    self.assertIsNotNone(self.path(text), text)
+                    self.assertIsNotNone(self.command("gc " + text), text)
+            self.assertIsNone(self.path(r"src\app\main.py"))
 
     def test_a_windows_path_is_read_as_its_posix_shape(self):
         self.assertEqual(gate.windows_path(r"C:\Users\a\.ssh\id_rsa"), "/Users/a/.ssh/id_rsa")

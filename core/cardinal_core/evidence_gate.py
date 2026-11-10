@@ -490,6 +490,7 @@ def _brace_words(s: str) -> list:
 # Windows spellings of a path (issue #250): a drive letter, a UNC share, the
 # profile variable, or `~\`. Unambiguous, so they are read on every OS.
 _WINDOWS_PATH = re.compile(r"(?i)^(?:[a-z]:[\\/]|\\\\[^\\/]+[\\/]|(?:\$env:|%)(?:userprofile|home)%?[\\/]|~\\)")
+WINDOWS = os.name == "nt"
 _WINDOWS_HOME = re.compile(r"(?i)^(?:\$env:|%)(?:userprofile|home)%?/")
 
 
@@ -497,8 +498,11 @@ def windows_path(tok: str) -> Optional[str]:
     """`tok` as the POSIX path the rules read when it is a Windows path,
     else None: `\\` is `/`, the drive letter or UNC server is dropped and
     the profile variable is `~`. C:\\Users\\a\\.ssh\\id_rsa -> /Users/a/.ssh/id_rsa."""
+    if tok.startswith(("\\\\?\\", "\\\\.\\")):  # \\\\?\\C:\\... device and long-path prefixes
+        tok = tok[4:]
     if not _WINDOWS_PATH.match(tok):
-        return None
+        # Where `\\` is the separator (the gate running on Windows), any path written with it.
+        return tok.replace("\\", "/") if WINDOWS and "\\" in tok else None
     t = _WINDOWS_HOME.sub("~/", tok.replace("\\", "/"))
     return re.sub(r"^(?:[A-Za-z]:|//[^/]+)/", "/", t)
 
@@ -735,7 +739,30 @@ _DECODED_EXEC = re.compile(r"\$\([^()]*" + _DECODE + r"|`[^`]*" + _DECODE + r"|"
 
 
 _PS_LISTERS = frozenset(("get-childitem", "gci", "dir", "ls", "get-item", "gi"))
-_PS_ENV_REF = re.compile(r"(?i)\$env:([A-Za-z_][A-Za-z0-9_]*)")
+_POWERSHELLS = frozenset(("powershell", "pwsh", "powershell.exe", "pwsh.exe"))
+# $env:NAME, ${env:NAME}, and the Env: drive item (Get-Content Env:NAME).
+_PS_ENV_REF = re.compile(r"(?i)\$\{?env:([A-Za-z_][A-Za-z0-9_]*)|^env:[\\/]?([A-Za-z_][A-Za-z0-9_]*)$")
+# [Environment]::GetEnvironmentVariable('NAME') / ::GetEnvironmentVariables()
+_PS_ENV_API = re.compile(r"(?i)GetEnvironmentVariable(s)?\s*\(\s*(?:['\"]([A-Za-z_][A-Za-z0-9_]*))?")
+
+
+def _ps_secret_env(word: str) -> bool:
+    """A PowerShell read of a secret-named environment variable. Names are
+    case-insensitive on Windows, so `$env:github_token` counts."""
+    return ":" in word and any(secretish_name((m.group(1) or m.group(2)).upper())
+                               for m in _PS_ENV_REF.finditer(word))
+
+
+def powershell_env_rule(s: str) -> Optional[tuple]:
+    """The .NET environment API in a script: every variable, or a secret-named one."""
+    if "GetEnvironmentVariable" not in s:
+        return None
+    for m in _PS_ENV_API.finditer(s):
+        if m.group(1):
+            return REASON_COMMAND, "cmd.env-dump", "[Environment]::GetEnvironmentVariables()"
+        if m.group(2) and secretish_name(m.group(2).upper()):
+            return REASON_COMMAND, "cmd.secret-var", "[Environment]::GetEnvironmentVariable('SECRET_VAR')"
+    return None
 
 
 def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
@@ -757,8 +784,10 @@ def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
     # PowerShell (issue #250): the Env: drive lists every variable, $env:NAME reads one.
     if cmd in _PS_LISTERS and any(a.lower().rstrip("\\/*") == "env:" for a in pos):
         return REASON_COMMAND, "cmd.env-dump", "Get-ChildItem Env:"
-    if any("$" in a and any(secretish_name(m.group(1)) for m in _PS_ENV_REF.finditer(a)) for a in argv):
+    if any(_ps_secret_env(a) for a in argv):
         return REASON_COMMAND, "cmd.secret-var", "$env:SECRET_VAR"
+    if cmd in _POWERSHELLS and any(a.lower() in ("-encodedcommand", "-enc", "-ec", "-e") for a in args):
+        return REASON_COMMAND, "cmd.decoded-exec", "powershell -EncodedCommand"
     if cmd == "ps" and any((not a.startswith("-") and "e" in a) or (a.startswith("-") and "E" in a) for a in args):
         # BSD-style `ps eww` / `ps auxe`, macOS `ps -E`: every process's environment.
         return REASON_COMMAND, "cmd.env-dump", "ps e / ps -E"
@@ -912,6 +941,11 @@ def _inner_commands(argv: list) -> list:
             if a == "--command" and j + 1 < len(argv):
                 out.append(argv[j + 1])
                 break
+    if cmd in _POWERSHELLS:  # powershell -Command <script>: the rest of the line is the script
+        for j, a in enumerate(argv[1:], 1):
+            if a.lower() in ("-command", "-c") and j + 1 < len(argv):
+                out.append(" ".join(argv[j + 1:]))
+                break
     if cmd in _SHELLS or cmd in ("eval", "source", "."):
         for j, a in enumerate(argv[1:], 1):
             if a == "<<<" and j + 1 < len(argv):
@@ -969,7 +1003,7 @@ def check_command(s: str, rules: Rules, depth: int = 0, count: Optional[list] = 
         return None
     prose = "\n" in s.strip() or len(s) > PROSE_CHARS
     if depth == 0:
-        hit = env_code_rule(s)
+        hit = env_code_rule(s) or powershell_env_rule(s)
         if hit and hit[1] not in rules.allow_rules:
             return Withheld(*hit)
         if ("base64" in s or "xxd" in s or "openssl" in s) and _DECODED_EXEC.search(s) \
