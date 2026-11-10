@@ -71,6 +71,8 @@ jobs:
         run: python3 build/vendor.py copilot
       - name: The runner's own tests
         run: python3 -m unittest discover -s tests/windows -v
+      - name: What msvcrt.locking reports under Wine (informational)
+        run: wine "$WINPY" tests/windows/lock_probe.py || true
       - name: A crashed run cannot pass
         run: |
           if sh tests/windows/wine-suite.sh crash; then echo "a run with no status file passed"; exit 1; fi

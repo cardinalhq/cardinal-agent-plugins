@@ -934,14 +934,19 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(len(launches), 1)
         self.assertNotIn("--no-sandbox", launches[0]["argv"])
 
-    def test_windows_is_reported_as_unsupported(self):
+    def test_windows_without_a_browser_says_where_it_looked(self):
         page = self.home / "p.html"
         page.write_text("x")
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(rp.sys, "platform", "win32"), redirect_stdout(out), redirect_stderr(err):
+        env = {k: v for k, v in os.environ.items() if k not in ("CARDINAL_CHROMIUM", "PUPPETEER_EXECUTABLE_PATH",
+                                                                "CHROME_PATH")}
+        env.update({"ProgramFiles": r"C:\Program Files", "LOCALAPPDATA": r"C:\Users\a\AppData\Local"})
+        with mock.patch.object(rp, "host_system", return_value="Windows"), mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(rp.shutil, "which", return_value=None), redirect_stdout(out), redirect_stderr(err):
             code = rp.main(["--html", str(page), "--runtime", "claude"])
         self.assertEqual(code, 3)
-        self.assertIn("not supported on Windows", out.getvalue())
+        self.assertIn("msedge.exe", out.getvalue())
+        self.assertIn("chrome.exe", out.getvalue())
 
     def test_not_connected_exits_2(self):
         (self.home / ".claude" / "settings.json").unlink()

@@ -23,6 +23,8 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import mock
 
 from fixtures import ADAPTER, DECISION_CLI, HOOK, SID, HookCase, load_script
 
@@ -226,6 +228,50 @@ class PythonLauncherTests(unittest.TestCase):
         command = f"{self.hook.DECISION_CMD} record --choice 'Use X'"
         self.assertEqual(self.hook.decision_invocations(command), ([["record", "--choice", "Use X"]], None))
         self.assertIn(str(DECISION_CLI), self.hook.DECISION_CMD)
+
+
+class PreviewDiscoveryTests(unittest.TestCase):
+    """Where the local storyboard preview looks for a browser on Windows (issue #251)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.render = load_script(ADAPTER / "skills" / "storyboard" / "scripts" / "render_preview.py", "render_preview_win")
+
+    ENV = {"ProgramFiles": r"C:\Program Files", "ProgramFiles(x86)": r"C:\Program Files (x86)",
+           "LOCALAPPDATA": r"C:\Users\a\AppData\Local"}
+
+    def test_chrome_edge_and_chromium_installs_then_path(self):
+        found = self.render.chromium_candidates(self.ENV, "Windows", Path("/nonexistent-home"), which=lambda c: None)
+        paths = [path for _, path in found]
+        self.assertEqual(paths[:3], [r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                                     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                                     r"C:\Program Files\Chromium\Application\chrome.exe"])
+        self.assertIn(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", paths)
+        self.assertIn(r"C:\Users\a\AppData\Local\Google\Chrome\Application\chrome.exe", paths)
+        self.assertEqual([path for source, path in found if source == "PATH"], ["chrome", "msedge", "chromium"])
+
+    def test_the_explicit_binary_is_the_only_candidate(self):
+        env = dict(self.ENV, CARDINAL_CHROMIUM=r"D:\tools\chrome.exe")
+        self.assertEqual(self.render.chromium_candidates(env, "Windows", Path("/h")),
+                         [("$CARDINAL_CHROMIUM", r"D:\tools\chrome.exe")])
+
+    def test_other_systems_are_unchanged(self):
+        for system in ("Darwin", "Linux"):
+            found = self.render.chromium_candidates(self.ENV, system, Path("/nonexistent-home"), which=lambda c: None)
+            self.assertFalse([p for _, p in found if "Program Files" in p or p.endswith(".exe")], system)
+
+    def test_the_first_existing_browser_is_used(self):
+        with TemporaryDirectory() as d:
+            edge = Path(d) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+            edge.parent.mkdir(parents=True)
+            edge.write_text("")
+            edge.chmod(0o755)
+            join = self.render.ntpath.join
+            with mock.patch.object(self.render.ntpath, "join", lambda root, app: str(Path(root, *app.split("\\")))):
+                found, searched = self.render.find_chromium({"ProgramFiles": d}, "Windows", Path("/nonexistent-home"),
+                                                            which=lambda c: None, version_of=lambda p: None)
+            self.assertEqual((found["path"], found["source"]), (str(edge), "app"), searched)
+            self.assertTrue(callable(join))
 
 
 if __name__ == "__main__":
