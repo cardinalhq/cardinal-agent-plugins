@@ -73,7 +73,7 @@ def load_token() -> tuple[str, str]:
             "control-plane token.",
         )
     try:
-        data = json.loads(SECRETS_PATH.read_text())
+        data = json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         fail("secrets_unreadable", f"{SECRETS_PATH} is missing or malformed.")
     key = data.get("act_api_key")
@@ -161,7 +161,7 @@ def reservation_key_for(site_id: str) -> str:
     data = {}
     if INSTALLS_PATH.exists():
         try:
-            raw = INSTALLS_PATH.read_text()
+            raw = INSTALLS_PATH.read_text(encoding="utf-8")
         except OSError:
             # A read failure (permissions, races) must NOT lead to rewriting the
             # file with only this site — that would wipe every other site's
@@ -184,7 +184,7 @@ def reservation_key_for(site_id: str) -> str:
         key = str(uuid.uuid4())
         data[site_id] = {"reservation_key": key}
         COPILOT_DIR.mkdir(parents=True, exist_ok=True)
-        INSTALLS_PATH.write_text(json.dumps(data, indent=2) + "\n")
+        INSTALLS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return key
 
 

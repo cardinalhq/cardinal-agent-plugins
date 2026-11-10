@@ -141,8 +141,9 @@ class PowerShellCommandTests(HookCase):
 
 
 class WindowsEncodingTests(HookCase):
-    # Fixed by #249: stdin is decoded in the ANSI code page on Windows before Python 3.15.
-    @unittest.expectedFailure
+    """Windows before Python 3.15 opens piped streams and text files in the
+    ANSI code page (cp1252); Copilot and Cardinal use UTF-8 (issue #249)."""
+
     def test_utf8_payload_survives_a_cp1252_stdin(self):
         self.connect()
         self.run_hook("postToolUse", raw=json.dumps(self.tool(args={"command": TEXT}), ensure_ascii=False),
@@ -150,6 +151,15 @@ class WindowsEncodingTests(HookCase):
         [(_, result)] = self.records("tool_result")
         self.assertEqual(json.loads(result["tool_input"]), {"command": TEXT})
         self.assertEqual(result["session_id"], SID)
+
+    def test_a_utf8_mcp_config_is_read_whatever_the_default_encoding(self):
+        # A server Copilot names in UTF-8: its tools are split from the server name only if the file is read.
+        (self.copilot / "mcp-config.json").write_text(json.dumps({"mcpServers": {"caf\u00e9-\U0001f642": {}}},
+                                                                 ensure_ascii=False), encoding="utf-8")
+        self.connect()
+        self.run_hook("postToolUse", self.tool(name="caf\u00e9-\U0001f642-do_thing", args={}))
+        turn = self.records("cardinal.turn_tool")[-1][1]
+        self.assertEqual((turn["mcp_server_name"], turn["mcp_tool_name"]), ("caf\u00e9-\U0001f642", "do_thing"))
 
 
 class PythonLauncherTests(unittest.TestCase):

@@ -100,6 +100,8 @@ HANDLERS = {"record": cmd_record, "on": cmd_on, "off": cmd_off, "status": cmd_st
 
 
 def main(argv: list[str] | None = None) -> int:
+    from cardinal_core.paths import utf8_stdio
+    utf8_stdio()
     parser = _decision_cli.build_parser()
     args = parser.parse_args(argv)
     handler = HANDLERS.get(args.command)

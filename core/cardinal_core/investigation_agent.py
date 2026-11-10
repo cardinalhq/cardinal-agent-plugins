@@ -183,4 +183,6 @@ def prompt(wiring, sid: str) -> "turn.Delivery":
 
 def cli_main(argv, wiring, session_env=(), *, legacy=False) -> int:
     from . import investigation_cli
+    from .paths import utf8_stdio
+    utf8_stdio()
     return investigation_cli.cli_main(argv, wiring, session_env, legacy=legacy)

@@ -76,7 +76,7 @@ try:
         is_git_repo,
         resolve_initiative,
     )
-    from cardinal_core.paths import AgentPaths, script_command  # noqa: E402
+    from cardinal_core.paths import AgentPaths, script_command, utf8_stdio  # noqa: E402
 except Exception:
     # An install without its vendored core: exit 0 with no output, so a
     # preToolUse hook never denies a tool call on its account.
@@ -222,7 +222,7 @@ def dump_debug_payload(event: str, payload: dict[str, Any]) -> None:
     try:
         PATHS.debug_dir.mkdir(parents=True, exist_ok=True)
         path = PATHS.debug_dir / f"{event}-{time.time_ns()}.json"
-        path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+        path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
     except (OSError, TypeError, ValueError):
         pass
 
@@ -266,7 +266,7 @@ def configured_mcp_servers(cwd: str | None = None) -> list[str]:
     names: list[str] = []
     for f in files:
         try:
-            servers = json.loads(f.read_text()).get("mcpServers")
+            servers = json.loads(f.read_text(encoding="utf-8")).get("mcpServers")
         except (OSError, ValueError, AttributeError):
             continue
         if isinstance(servers, dict):
@@ -876,7 +876,7 @@ def spawn_background(job: dict[str, Any]) -> None:
         tmp = spool_dir / f".{base}.tmp"
         path = spool_dir / f"{base}.json"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(job, fh, default=str)
         os.replace(tmp, path)
     except (OSError, TypeError, ValueError):
@@ -907,7 +907,7 @@ def spawn_background(job: dict[str, Any]) -> None:
 
 def run_background_job(path: Path) -> None:
     try:
-        job = json.loads(path.read_text())
+        job = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     finally:
@@ -1580,6 +1580,7 @@ def main() -> None:
         silent_exit()
 
     try:
+        utf8_stdio()
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
     except (OSError, ValueError):

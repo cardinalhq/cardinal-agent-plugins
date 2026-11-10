@@ -20,7 +20,7 @@ from . import investigation_grants as grants
 
 def private_read(path: Path) -> dict:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd) as stream:
+    with os.fdopen(fd, encoding="utf-8") as stream:
         mode = os.fstat(stream.fileno())
         if not stat.S_ISREG(mode.st_mode) or mode.st_mode & 0o077 or mode.st_uid != os.getuid():
             raise ValueError("credential/state file must be owned by you and private (mode 0600)")
@@ -34,14 +34,14 @@ def private_write(path: Path, value: dict, *, create=False) -> None:
     data = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
     if create:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         return
     fd, tmp = tempfile.mkstemp(prefix="." + path.name, dir=path.parent)
     try:
-        with os.fdopen(fd, "w") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())

@@ -8,8 +8,12 @@ removes the mark.
 
 from __future__ import annotations
 
+import json
+import os
 import pkgutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -46,6 +50,28 @@ class FileHandlingTests(WindowsSimCase):
                        "    events.write_json(path, {'cursor': 0})\n"
                        "    print(json.loads(path.read_text(encoding='utf-8')))\n")
         self.assertEqual(out.strip(), "{'cursor': 0}")
+
+
+class Utf8Tests(unittest.TestCase):
+    """State files are UTF-8 whatever the default encoding is (cp1252 on
+    Windows before Python 3.15), and a non-UTF-8 stdin is read as UTF-8."""
+    TEXT = "say \u201chi\u201d \U0001f642"
+
+    def test_json_state_round_trips_non_ascii_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "state.json"
+            path.write_bytes(json.dumps({"text": self.TEXT}, ensure_ascii=False).encode("utf-8"))
+            self.assertEqual(paths.read_json(path), {"text": self.TEXT})
+            paths.atomic_write(path, json.dumps({"text": self.TEXT}, ensure_ascii=False))
+            self.assertEqual(json.loads(path.read_bytes().decode("utf-8")), {"text": self.TEXT})
+            self.assertEqual(json.loads(paths.backup(path).read_bytes().decode("utf-8")), {"text": self.TEXT})
+
+    def test_a_cp1252_stdin_is_read_as_utf8(self):
+        res = subprocess.run([sys.executable, "-c", "import sys; from cardinal_core.paths import utf8_stdio; "
+                              "utf8_stdio(); sys.stdout.buffer.write(sys.stdin.read().encode('utf-8'))"],
+                             input=self.TEXT.encode("utf-8"), capture_output=True, cwd=str(CORE),
+                             env={**os.environ, "PYTHONIOENCODING": "cp1252"}, timeout=60)
+        self.assertEqual((res.returncode, res.stdout.decode("utf-8")), (0, self.TEXT), res.stderr)
 
 
 class ScriptCommandTests(unittest.TestCase):

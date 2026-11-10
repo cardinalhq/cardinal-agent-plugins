@@ -69,6 +69,21 @@ def state_home(home: Path, environ: Any = None) -> Path:
     return sandboxed_home(home) if in_seatbelt_sandbox(environ) else home
 
 
+def utf8_stdio() -> None:
+    """Make the standard streams UTF-8 where they are not. Before Python
+    3.15, Windows opens piped streams in the ANSI code page: non-ASCII input
+    is garbled or rejected and non-ASCII output raises. stdin is switched
+    wherever it is not UTF-8 (what an agent sends always is); stdout and
+    stderr only on Windows."""
+    streams = [(sys.stdin, "replace")]
+    if os.name == "nt":
+        streams += [(sys.stdout, None), (sys.stderr, None)]
+    for stream, errors in streams:
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors=errors)
+
+
 def script_command(script: Any, posix: str, windows: Any = None) -> str:
     """How to run a plugin script in a command shown to the agent or the
     user: `posix` as given, except on Windows. There a script has no shebang
@@ -86,7 +101,7 @@ def safe_session(session_id: str) -> str:
 
 def read_json(path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -95,7 +110,7 @@ def read_json(path: Path) -> dict[str, Any]:
 def atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content)
+    tmp.write_text(content, encoding="utf-8")
     tmp.replace(path)
 
 
@@ -141,7 +156,7 @@ def backup(path: Path) -> Path | None:
         return None
     ts = time.strftime("%Y%m%d-%H%M%S")
     target = path.with_suffix(f"{path.suffix}.bak.{ts}")
-    target.write_text(path.read_text())
+    target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     return target
 
 
