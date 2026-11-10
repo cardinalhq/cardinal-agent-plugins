@@ -940,9 +940,13 @@ class EndToEndTests(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         env = {k: v for k, v in os.environ.items() if k not in ("CARDINAL_CHROMIUM", "PUPPETEER_EXECUTABLE_PATH",
                                                                 "CHROME_PATH")}
-        env.update({"ProgramFiles": r"C:\Program Files", "LOCALAPPDATA": r"C:\Users\a\AppData\Local"})
+        # An empty PATH: the renderer binds shutil.which when it is defined, so patching it would do nothing,
+        # and a machine with chromium on PATH (the Linux runner) must not have it found or started.
+        env.update({"ProgramFiles": r"C:\Program Files", "LOCALAPPDATA": r"C:\Users\a\AppData\Local",
+                    "PATH": str(self.home / "empty-bin")})
         with mock.patch.object(rp, "host_system", return_value="Windows"), mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch.object(rp.shutil, "which", return_value=None), redirect_stdout(out), redirect_stderr(err):
+                mock.patch.object(rp.Browser, "start", side_effect=AssertionError("a browser was started")), \
+                redirect_stdout(out), redirect_stderr(err):
             code = rp.main(["--html", str(page), "--runtime", "claude"])
         self.assertEqual(code, 3)
         self.assertIn("msedge.exe", out.getvalue())
