@@ -71,6 +71,13 @@ def patient_rmtree(rmtree, wait_s: float = 5.0, sleep=time.sleep, clock=time.mon
     return retrying
 
 
+def install_patient_rmtree() -> None:
+    """Put the retry around TemporaryDirectory's removal. `_rmtree` is a
+    classmethod that calls itself through the class: the wrapper goes in as
+    a staticmethod over the bound original, so both ways of calling it work."""
+    tempfile.TemporaryDirectory._rmtree = staticmethod(patient_rmtree(tempfile.TemporaryDirectory._rmtree))
+
+
 class QuietResult(unittest.TextTestResult):
     def printErrors(self) -> None:  # the report prints only the failures that are new
         pass
@@ -84,7 +91,7 @@ def run(suite: str) -> tuple:
     sys.path.insert(0, os.getcwd())
     faulthandler.dump_traceback_later(HANG_AFTER_S, exit=True)  # a hung test names itself
     if os.name == "nt":
-        tempfile.TemporaryDirectory._rmtree = patient_rmtree(tempfile.TemporaryDirectory._rmtree)
+        install_patient_rmtree()
 
     result = unittest.TextTestRunner(verbosity=1, resultclass=QuietResult).run(
         unittest.defaultTestLoader.discover(start))

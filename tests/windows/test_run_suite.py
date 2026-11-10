@@ -3,8 +3,11 @@
 Run: python3 -m unittest discover -s tests/windows -v
 """
 
+import gc
 import sys
+import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -47,6 +50,43 @@ class PatientRmtreeTests(unittest.TestCase):
         for error in (PermissionError(13, "access denied"), FileNotFoundError(2, "gone"), AssertionError("x")):
             calls, outcome = self.run_with([error])
             self.assertEqual((len(calls), outcome), (1, error))
+
+
+class InstalledTests(unittest.TestCase):
+    """The wrapper as run_suite installs it, through tempfile's real cleanup paths."""
+
+    def setUp(self):
+        original = tempfile.TemporaryDirectory.__dict__["_rmtree"]
+        self.addCleanup(setattr, tempfile.TemporaryDirectory, "_rmtree", original)
+        run_suite.install_patient_rmtree()
+
+    def test_with_block_explicit_cleanup_and_finalizer_all_remove_the_directory(self):
+        with tempfile.TemporaryDirectory() as name:
+            (Path(name) / "sub").mkdir()
+            (Path(name) / "sub" / "file").write_text("x")
+        self.assertFalse(Path(name).exists())
+
+        explicit = tempfile.TemporaryDirectory()
+        explicit.cleanup()
+        self.assertFalse(Path(explicit.name).exists())
+
+        dropped = tempfile.TemporaryDirectory()
+        name = dropped.name
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            del dropped
+            gc.collect()
+        self.assertFalse(Path(name).exists())
+
+    def test_a_body_failure_still_fails_the_test(self):
+        class Sample(unittest.TestCase):
+            def test_body(self):
+                with tempfile.TemporaryDirectory():
+                    self.fail("the test body failed")
+
+        result = run_suite.QuietResult(None, False, 0)
+        unittest.defaultTestLoader.loadTestsFromTestCase(Sample).run(result)
+        self.assertEqual((len(result.failures), len(result.errors)), (1, 0))
 
 
 if __name__ == "__main__":
