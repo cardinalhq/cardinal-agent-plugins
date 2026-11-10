@@ -162,8 +162,11 @@ class ShellQuoteTests(unittest.TestCase):
     def test_windows_arguments_are_powershell_literals(self):
         self.assertEqual(paths.shell_quote(r"C:\Users\O'Brien folder\permit.json", windows=True),
                          r"'C:\Users\O''Brien folder\permit.json'")
-        self.assertEqual(paths.shell_quote("inv_abc123", windows=True), "inv_abc123")
+        # Always quoted: `a,b` and a leading `@` are operators in PowerShell.
+        self.assertEqual(paths.shell_quote("inv_abc123", windows=True), "'inv_abc123'")
         self.assertEqual(paths.shell_quote("", windows=True), "''")
+        # PowerShell ends a literal at typographic quotes too.
+        self.assertEqual(paths.shell_quote("a\u2019b\u2018c", windows=True), "'a\u2019\u2019b\u2018\u2018c'")
 
     def test_elsewhere_it_is_shlex_quote(self):
         self.assertEqual(paths.shell_quote("/tmp/my grant.json", windows=False), "'/tmp/my grant.json'")

@@ -41,6 +41,7 @@ from . import investigation_events as ie
 from . import investigation_state as ist
 from . import investigation_state_sync as sync
 from . import supervision_status as sv
+from .paths import powershell_literal
 
 READ = "read"
 OWNER_INPUT_READ = "owner_input:read"
@@ -263,8 +264,7 @@ def env_line(token: str, origin: str, windows: Optional[bool] = None) -> str:
     PowerShell, where an assigned value must be a quoted literal even when
     it has no special character."""
     if os.name == "nt" if windows is None else windows:
-        token, origin = ("'" + value.replace("'", "''") + "'" for value in (token, origin))
-        return f"$env:{TOKEN_ENV} = {token}; $env:{ORIGIN_ENV} = {origin}"
+        return f"$env:{TOKEN_ENV} = {powershell_literal(token)}; $env:{ORIGIN_ENV} = {powershell_literal(origin)}"
     return f"export {TOKEN_ENV}={shlex.quote(token)} {ORIGIN_ENV}={shlex.quote(origin)}"
 
 

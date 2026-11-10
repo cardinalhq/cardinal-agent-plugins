@@ -87,14 +87,21 @@ def replace(src: Any, dst: Any, windows: Any = None) -> None:
             time.sleep(0.05)
 
 
+def powershell_literal(text: Any) -> str:
+    """`text` as a PowerShell single-quoted literal. PowerShell also ends a
+    literal at the typographic quotes U+2018 to U+201B, so each of those is
+    doubled like `'`. Always quoted: a bare word can still be an operator
+    there (`a,b`, a leading `@`)."""
+    return "'" + re.sub("(['\u2018\u2019\u201a\u201b])", r"\1\1", str(text)) + "'"
+
+
 def shell_quote(text: Any, windows: Any = None) -> str:
     """One argument of a command shown to the agent or the user: POSIX
     quoting, except on Windows, where the shell is PowerShell (see
-    script_command) and a literal is single-quoted with `'` doubled."""
-    text = str(text)
+    script_command)."""
     if not (os.name == "nt" if windows is None else windows):
-        return shlex.quote(text)
-    return text if text and shlex.quote(text) == text else "'" + text.replace("'", "''") + "'"
+        return shlex.quote(str(text))
+    return powershell_literal(text)
 
 
 def utf8_stdio() -> None:
@@ -120,7 +127,7 @@ def script_command(script: Any, posix: str, windows: Any = None) -> str:
     Copilot CLI uses on Windows)."""
     if not (os.name == "nt" if windows is None else windows):
         return posix
-    return "& " + " ".join("'" + str(word).replace("'", "''") + "'" for word in (sys.executable, script))
+    return f"& {powershell_literal(sys.executable)} {powershell_literal(script)}"
 
 
 def safe_session(session_id: str) -> str:

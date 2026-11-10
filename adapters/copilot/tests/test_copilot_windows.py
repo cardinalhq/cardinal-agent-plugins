@@ -138,14 +138,15 @@ class PowerShellCommandTests(HookCase):
         from cardinal_core.paths import shell_quote
         script = self.base / "argv.py"
         script.write_text("import json, sys; print(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
-        args = ["inv_abc123", "C:\\Users\\O'Brien folder\\permit.json", "do$llar", "ba`ck", "a b", ""]
+        args = ["inv_abc123", "C:\\Users\\O'Brien folder\\permit.json", "do$llar", "ba`ck", "a b", "",
+                "O\u2019Brien \u2018x\u201a\u201b", "a,b", "@splat", "x; Write-Output injected"]
         command = script_command(script, "", windows=True) + " " + " ".join(shell_quote(a, windows=True) for a in args)
         res = self.pwsh(command, {}, self.echo_root)
         self.assertEqual((res.returncode, json.loads(res.stdout.decode("utf-8"))), (0, args), res.stderr)
 
     def test_the_grant_env_line_sets_both_variables(self):
         from cardinal_core import investigation_grants as grants
-        token, origin = "abc123", "https://app.example.com/o'brien"  # fake values
+        token, origin = "abc123", "https://app.example.com/o'brien\u2019;x"  # fake values
         line = grants.env_line(token, origin, windows=True)
         show = f"; Write-Output $env:{grants.TOKEN_ENV}; Write-Output $env:{grants.ORIGIN_ENV}"
         res = self.pwsh(line + show, {}, self.echo_root)
