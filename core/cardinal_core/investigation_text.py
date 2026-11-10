@@ -100,7 +100,9 @@ MILESTONE_LINE = (
     "no model run: it is not authoring visuals, needs no consent and publishes nothing. Its state follows the "
     "event; supported or ruled out needs the evidence cited on the event. A story holds at most 8 milestones: when "
     "the checkpoint is refused as full, merge with \"replaces\":[\"<milestone ids>\"] (dead ends become one "
-    "\"ruled out …\"). No jargon, code names, internal ids or event numbers in milestone text.")
+    "\"ruled out …\"). When the work changes direction, write ONE milestone that says what was tried first and "
+    "why it was left, with \"replaces\" listing every milestone of the earlier direction. No jargon, code names, "
+    "internal ids or event numbers in milestone text.")
 
 SKILL_LINE = ("The storyboard skill authors this storyboard's visualization ({sb}) after the user's consent; "
               "never storyboard__create another for this session. "

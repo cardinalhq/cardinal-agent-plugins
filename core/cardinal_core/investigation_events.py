@@ -1033,6 +1033,9 @@ MILESTONE_STATES = ("supported", "ruled_out", "open", "context")
 MAX_MILESTONE_TITLE = 600
 MAX_MILESTONE_DESCRIPTION = 2000
 MILESTONE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# The server's one-line reminder names at most 8 milestones (id and a title
+# clipped to 60 characters).
+MAX_MILESTONE_HINT = 1500
 
 
 def _milestone(value: Any, where: str) -> dict:
@@ -1602,12 +1605,17 @@ def checkpoint_line(out: dict) -> str:
 def milestone_lines(out: dict) -> str:
     """What the server did with the checkpoint's milestones, one line each
     (nothing when it carried none): written / rewritten / merged, its state
-    and any warning to fix next time, or why it was not written."""
+    and any warning to fix next time, or why it was not written. A milestone
+    Cardinal itself marked as no longer holding (the event retracted or
+    contradicted it and carried no milestone of its own) says so, and the
+    server's reminder to merge an abandoned direction (milestone_hint) is
+    the last line."""
     lines = []
     for m in out.get("milestones") if isinstance(out.get("milestones"), list) else []:
         if not isinstance(m, dict):
             continue
-        did = "milestone written" if m.get("created") else "milestone rewritten"
+        did = ("milestone marked as no longer holding" if m.get("withdrawn") is True
+               else "milestone written" if m.get("created") else "milestone rewritten")
         line = f"{did}: {_tok(m.get('milestone_id'))} ({_tok(m.get('state'))})"
         replaced = m.get("replaced") if isinstance(m.get("replaced"), list) else []
         if replaced:
@@ -1619,6 +1627,8 @@ def milestone_lines(out: dict) -> str:
         if isinstance(m, dict):
             lines.append(f"milestone not written: {_tok(m.get('milestone_id'))} ({_tok(m.get('code'))}): "
                          f"{_one_line(m.get('message') or '', 300)}")
+    if isinstance(out.get("milestone_hint"), str) and out["milestone_hint"].strip():
+        lines.append(_one_line(out["milestone_hint"], MAX_MILESTONE_HINT))
     return "".join("\n" + x for x in lines)
 
 
