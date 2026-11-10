@@ -5,6 +5,8 @@ description: Publish a Cardinal storyboard by updating its evidence-bound scenes
 
 # Storyboard visualization
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 Follow [CORE.md](CORE.md) for the authoring, evidence, preview and completion workflow. Use the bound storyboard in this session's context.
 
 After `storyboard__preview`, the Cardinal plugin's hook renders the scenes locally and reports the PNG directory as additional context (see the canvas skill). Read those PNGs. When no such report follows the preview, render by hand as below.

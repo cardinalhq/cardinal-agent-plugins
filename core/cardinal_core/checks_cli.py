@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import checks_install
+from .paths import script_command
 
 EXIT_USAGE = 2
 EXIT_REFUSED = 3
@@ -155,7 +156,7 @@ class Cli:
         if not checks_install.is_connected(self.runtime, self.home):
             self.say(f"Not ready: Cardinal is not connected for {display}, so the cardinal-behavior MCP server "
                      "the checks skill uses is not registered. Connect, then restart "
-                     f"{display}:\n  python3 {shlex.quote(str(connect))}")
+                     f"{display}:\n  {script_command(connect, 'python3 ' + shlex.quote(str(connect)))}")
             return False
         self.say(f"Not ready: the cardinal-behavior MCP server the checks skill uses is not registered for "
                  f"{display} (a connection made before the Checks preview). Register it (no new key), then "

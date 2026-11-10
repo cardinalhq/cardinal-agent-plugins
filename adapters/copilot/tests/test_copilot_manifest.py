@@ -54,7 +54,9 @@ class HooksJsonTests(unittest.TestCase):
                 self.assertEqual(entry["type"], "command")
                 self.assertTrue(entry["bash"].startswith(f"python3 {SCRIPT_REF} --event {event}"), entry["bash"])
                 self.assertTrue(entry["bash"].endswith(" || true"), entry["bash"])
-                self.assertTrue(entry["powershell"].startswith(f"python3 {PS_SCRIPT_REF} --event {event}"))
+                # python3 is often missing on Windows: the first of python3 / python / py -3 that runs the script.
+                self.assertIn("foreach ($c in 'python3', 'python', 'py -3')", entry["powershell"])
+                self.assertIn(f"& $t[0] $t[1..2] {PS_SCRIPT_REF} --event {event}", entry["powershell"])
                 self.assertTrue(entry["powershell"].endswith("; exit 0"), entry["powershell"])
                 self.assertEqual(entry["env"], {"CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"})
                 self.assertIsInstance(entry["timeoutSec"], int)

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -79,10 +80,12 @@ def build_mcp_entry(mcp_url: str, api_key: str, plugin_version: str) -> dict:
     }
 
 
-def build_behavior_entry(script: Path) -> dict:
+def build_behavior_entry(script: Path, windows: Optional[bool] = None) -> dict:
+    """On Windows the command is the interpreter running cardinal-connect:
+    `python3` is often missing there, or is the Microsoft Store stub."""
     return {
         "type": "stdio",
-        "command": "python3",
+        "command": sys.executable if (os.name == "nt" if windows is None else windows) else "python3",
         "args": [str(script), "--runtime", "copilot"],
         "tools": ["*"],
     }

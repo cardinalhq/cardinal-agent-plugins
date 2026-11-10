@@ -5,6 +5,8 @@ description: Draw and preview the Canvas of a Cardinal Investigation Storyboard 
 
 # canvas — draw the scene, then look at it
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 Follow [CORE.md](CORE.md), co-located in this directory, for the Canvas workflow: fetch the
 `canvas` guide first, the exemplars, and the preview-then-critique loop. This file adds what
 is specific to Copilot CLI.

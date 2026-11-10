@@ -5,6 +5,8 @@ description: Install a Cardinal site (perch + optional POC Cardinal Data Lake) i
 
 # Cardinal Install Site
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 Use this skill when the user asks to install Cardinal, install Cardinal Data Lake, install a Cardinal site, add a Perch operator to a cluster, or set up a Cardinal deployment.
 
 ## Prerequisites

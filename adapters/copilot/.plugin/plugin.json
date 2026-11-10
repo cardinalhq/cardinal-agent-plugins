@@ -13,5 +13,5 @@
   "skills": "skills",
   "agents": "agents",
   "hooks": "hooks/hooks.json",
-  "postInstallMessage": "Run the cardinal-connect skill (or `python3 <plugin directory>/scripts/cardinal-connect` in your own terminal) to connect this machine to Cardinal, then start a new Copilot CLI session."
+  "postInstallMessage": "Run the cardinal-connect skill (or `python3 <plugin directory>/scripts/cardinal-connect` in your own terminal; `python` or `py -3` where `python3` is not found) to connect this machine to Cardinal, then start a new Copilot CLI session."
 }

@@ -5,6 +5,8 @@ description: Check the Cardinal Copilot CLI connection, the owner-input setting,
 
 # Cardinal Status
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 Use this skill when the user asks whether Copilot CLI is connected to Cardinal, whether Cardinal telemetry or MCP is configured, whether their prompts are recorded as owner input, or to verify Cardinal setup.
 
 The script is `scripts/cardinal-status` in the Cardinal plugin directory (two levels up from this skill's directory):

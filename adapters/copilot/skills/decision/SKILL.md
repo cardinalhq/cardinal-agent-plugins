@@ -5,6 +5,8 @@ description: Show Cardinal decision-capture status for Copilot CLI and tell the 
 
 # Cardinal Decision Capture
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 Use this skill when the user asks to turn Cardinal decision capture on or off, or asks whether it is on.
 
 The script is `scripts/cardinal-decision` in the Cardinal plugin directory (two levels up from this skill's directory):
