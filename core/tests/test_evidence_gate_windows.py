@@ -46,6 +46,8 @@ class WindowsGateTests(unittest.TestCase):
             ("pwsh /e RwBlAHQALQBDAGgAaQBsAGQASQB0AGUAbQA=", "cmd.decoded-exec"),
             ('powershell -NoP -Com "gci env:"', "cmd.env-dump"), ('powershell /c "dir env:"', "cmd.env-dump"),
             ("powershell Get-ChildItem Env:", "cmd.env-dump"),
+            ('powershell -ExecutionPolicy Bypass -Command "gci env:"', "cmd.env-dump"),
+            ("pwsh -NoProfile -WorkingDirectory C:\\src Get-ChildItem Env:", "cmd.env-dump"),
             ("[environment]::getenvironmentvariables()", "cmd.env-dump"),
         ):
             with self.subTest(command=text):
