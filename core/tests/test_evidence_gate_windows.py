@@ -97,8 +97,9 @@ class WindowsGateTests(unittest.TestCase):
     def test_long_path_prefixes_and_on_windows_any_backslash_path(self):
         self.assertIsNotNone(self.path("\\\\?\\C:\\Users\\alice\\.ssh\\id_rsa"))
         relative = (r"app\.env", r"..\.ssh\id_rsa", r".\secrets\prod.json")
-        for text in relative:  # ambiguous with an escape elsewhere, so only where `\` is the separator
-            self.assertIsNone(gate.windows_path(text), text)
+        with mock.patch.object(gate, "WINDOWS", False):
+            for text in relative:  # ambiguous with an escape elsewhere, so only where `\` is the separator
+                self.assertIsNone(gate.windows_path(text), text)
         with mock.patch.object(gate, "WINDOWS", True):
             for text in relative:
                 with self.subTest(path=text):
@@ -110,8 +111,9 @@ class WindowsGateTests(unittest.TestCase):
         self.assertEqual(gate.windows_path(r"C:\Users\a\.ssh\id_rsa"), "/Users/a/.ssh/id_rsa")
         self.assertEqual(gate.windows_path(r"$env:USERPROFILE\.aws\credentials"), "~/.aws/credentials")
         self.assertEqual(gate.windows_path(r"\\srv\share\x\.env"), "/share/x/.env")
-        for not_windows in ("/Users/a/.env", "src/app.py", "a:b", "https://example.com/x", r"foo\.env"):
-            self.assertIsNone(gate.windows_path(not_windows), not_windows)
+        with mock.patch.object(gate, "WINDOWS", False):
+            for not_windows in ("/Users/a/.env", "src/app.py", "a:b", "https://example.com/x", r"foo\.env"):
+                self.assertIsNone(gate.windows_path(not_windows), not_windows)
 
 
 if __name__ == "__main__":
