@@ -3,21 +3,18 @@
 # run_suite.py fails when a listed test passes: the PR that fixes it removes its line,
 # and fails on a failure that is not listed. #255 holds failures no other issue covers
 # (mostly test fixtures that assume POSIX); the cause was assigned from the traceback.
-behavior@3.14 unittest.loader._FailedTest.test_behavior  # #246: fcntl import
-behavior@3.14 unittest.loader._FailedTest.test_checks_tools  # #246: fcntl import
-behavior@3.14 unittest.loader._FailedTest.test_compilation_history  # #246: fcntl import
-behavior@3.14 unittest.loader._FailedTest.test_connection  # #246: fcntl import
-behavior@3.14 unittest.loader._FailedTest.test_hosted  # #246: fcntl import
-behavior@3.14 unittest.loader._FailedTest.test_mcp  # #246: fcntl import
-behavior@3.14 unittest.loader._FailedTest.test_range_run  # #246: fcntl import
-behavior@3.9 unittest.loader._FailedTest.test_behavior  # #246: fcntl import
-behavior@3.9 unittest.loader._FailedTest.test_checks_tools  # #246: fcntl import
-behavior@3.9 unittest.loader._FailedTest.test_compilation_history  # #246: fcntl import
-behavior@3.9 unittest.loader._FailedTest.test_connection  # #246: fcntl import
-behavior@3.9 unittest.loader._FailedTest.test_hosted  # #246: fcntl import
-behavior@3.9 unittest.loader._FailedTest.test_mcp  # #246: fcntl import
-behavior@3.9 unittest.loader._FailedTest.test_range_run  # #246: fcntl import
-copilot@3.14 test_copilot_checks.BehaviorServerTests.test_launcher_adds_the_runtime_when_missing  # #246: fcntl import
+behavior@3.14 test_behavior.BehaviorTests.test_running_incremental_projection_and_completed_receipt  # #247: POSIX mode bits asserted
+behavior@3.14 test_checks_tools.LedgerToolTests.test_the_ledger_is_private  # #247: POSIX mode bits asserted
+behavior@3.14 test_compilation_history.CompilationHistoryTests.test_concurrent_atomic_receipt_writes_never_share_a_temporary_file  # #246: fixture: its barrier wraps every os.replace (a retry re-enters it) and it asserts mode 0600
+behavior@3.14 test_hosted.HostedBehaviorTests.test_sdk_tool_and_no_frozen_default  # #247: POSIX mode bits asserted
+behavior@3.14 test_mcp.MCPSerializationTests.test_any_oversized_result_is_retained_on_disk_with_its_small_fields  # #247: POSIX mode bits asserted
+behavior@3.14 test_range_run.RangeOrchestrationTests.test_spawn_starts_a_detached_worker_once  # #248: test asserts the POSIX Popen arguments
+behavior@3.9 test_behavior.BehaviorTests.test_running_incremental_projection_and_completed_receipt  # #247: POSIX mode bits asserted
+behavior@3.9 test_checks_tools.LedgerToolTests.test_the_ledger_is_private  # #247: POSIX mode bits asserted
+behavior@3.9 test_compilation_history.CompilationHistoryTests.test_concurrent_atomic_receipt_writes_never_share_a_temporary_file  # #246: fixture: its barrier wraps every os.replace (a retry re-enters it) and it asserts mode 0600
+behavior@3.9 test_hosted.HostedBehaviorTests.test_sdk_tool_and_no_frozen_default  # #247: POSIX mode bits asserted
+behavior@3.9 test_mcp.MCPSerializationTests.test_any_oversized_result_is_retained_on_disk_with_its_small_fields  # #247: POSIX mode bits asserted
+behavior@3.9 test_range_run.RangeOrchestrationTests.test_spawn_starts_a_detached_worker_once  # #248: test asserts the POSIX Popen arguments
 copilot@3.14 test_copilot_checks.BehaviorServerTests.test_the_registered_server_starts_for_copilot  # #246: fcntl import
 copilot@3.14 test_copilot_connect.ConfigTests.test_a_managed_entry_may_be_rewritten  # #245: test asserts the POSIX command text
 copilot@3.14 test_copilot_connect.ConfigTests.test_copilot_home  # #255: unclassified

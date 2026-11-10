@@ -194,7 +194,9 @@ class PythonLauncherTests(unittest.TestCase):
     def test_the_behavior_mcp_entry_names_the_running_interpreter(self):
         script = Path("C:/plugin/scripts/cardinal-behavior")
         entry = self.config.build_behavior_entry(script, windows=True)
-        self.assertEqual((entry["command"], entry["args"]), (sys.executable, [str(script), "--runtime", "copilot"]))
+        self.assertEqual((entry["command"], entry["args"]),
+                         (sys.executable, ["-X", "utf8", str(script), "--runtime", "copilot"]))
+        self.assertEqual(entry["tools"], ["*"])
         self.assertEqual(self.config.build_behavior_entry(script, windows=False)["command"], "python3")
 
     def test_a_script_command_is_powershell_with_the_running_interpreter(self):
