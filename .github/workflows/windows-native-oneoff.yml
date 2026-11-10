@@ -4,6 +4,7 @@ name: Windows native (one-off)
 # allows "a one-off windows-latest run"). Not part of the required checks:
 # it runs when asked for (workflow_dispatch), and on a pull request that
 # changes this file, which is how it first ran. It does not run Copilot CLI.
+# Results of its runs are recorded on the pull request that added it (#261).
 
 on:
   workflow_dispatch:
