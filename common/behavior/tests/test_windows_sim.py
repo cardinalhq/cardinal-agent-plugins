@@ -13,6 +13,7 @@ from unittest import mock
 
 BEHAVIOR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BEHAVIOR.parents[1] / 'core' / 'tests'))
+sys.path.insert(0, str(BEHAVIOR))
 import winsim
 
 
@@ -37,7 +38,6 @@ class WindowsFlockTests(unittest.TestCase):
     """compilation/winfcntl.flock against a stand-in msvcrt."""
 
     def flock(self, operation, errors=()):
-        sys.path.insert(0, str(BEHAVIOR))
         from compilation import winfcntl
         errors, calls, sleeps = list(errors), [], []
 
@@ -62,11 +62,36 @@ class WindowsFlockTests(unittest.TestCase):
             self.flock(w.LOCK_EX, [OSError(errno.EINVAL, 'bad handle')] * 5)
         self.assertEqual(raised.exception.errno, errno.EINVAL)
 
-    def test_a_non_blocking_lock_reports_contention_and_unlock_is_one_call(self):
+    def test_a_held_non_blocking_lock_is_blocking_io_error(self):
         from compilation import winfcntl as w
-        with self.assertRaises(OSError):
-            self.flock(w.LOCK_EX | w.LOCK_NB, [OSError(errno.EACCES, 'held')])
+        with self.assertRaises(BlockingIOError):
+            self.flock(w.LOCK_EX | w.LOCK_NB, [PermissionError(errno.EACCES, 'held')])
+        with self.assertRaises(OSError) as raised:
+            self.flock(w.LOCK_EX | w.LOCK_NB, [OSError(errno.EINVAL, 'bad handle')])
+        self.assertEqual((type(raised.exception), raised.exception.errno), (OSError, errno.EINVAL))
         self.assertEqual(self.flock(w.LOCK_UN), ([0], []))
+
+
+class WorkerRunningTests(unittest.TestCase):
+    """The callers that ask whether a range worker holds its lock, without fcntl."""
+
+    def test_held_and_free_are_told_apart(self):
+        res = winsim.run('import pathlib, tempfile\n'
+                         'from compilation import winfcntl as fcntl\n'
+                         'import checks_ledger, range_runner\n'
+                         'with tempfile.TemporaryDirectory() as d:\n'
+                         '    directory = pathlib.Path(d)\n'
+                         '    runner = range_runner.RangeRunner.__new__(range_runner.RangeRunner)\n'
+                         '    runner.dir = directory\n'
+                         '    print(checks_ledger.range_worker_running(directory), runner.worker_running())\n'
+                         '    with (directory / "lock").open("a") as held:\n'
+                         '        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)\n'
+                         '        print(checks_ledger.range_worker_running(directory), runner.worker_running())\n'
+                         '        fcntl.flock(held, fcntl.LOCK_UN)\n'
+                         '    print(checks_ledger.range_worker_running(directory), runner.worker_running())\n',
+                         cwd=str(BEHAVIOR))
+        self.assertEqual((res.returncode, res.stdout.split()),
+                         (0, ['False', 'False', 'True', 'True', 'False', 'False']), res.stderr)
 
 
 if __name__ == '__main__':

@@ -6,8 +6,10 @@ lock file. A Windows region lock is always exclusive (LOCK_SH behaves as
 LOCK_EX), conflicts between two opens of the file even in one process, and
 is dropped by the system when the holder exits.
 
-A blocking lock waits like flock: it retries while the byte is held (EACCES,
-or EDEADLOCK when msvcrt gives up) and raises any other error at once.
+The byte being held is EACCES from msvcrt (EDEADLOCK when it gives up). A
+non-blocking request then raises BlockingIOError, the class flock raises and
+the callers catch; a blocking one waits like flock. Any other error is
+raised at once, unchanged.
 """
 import errno
 import os
@@ -27,6 +29,8 @@ def flock(file, operation, sleep=time.sleep):
             msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & LOCK_UN else msvcrt.LK_NBLCK, 1)
             return
         except OSError as error:
-            if operation & (LOCK_UN | LOCK_NB) or error.errno not in HELD:
+            if operation & LOCK_UN or error.errno not in HELD:
                 raise
+            if operation & LOCK_NB:  # what flock raises, and what the callers catch
+                raise BlockingIOError(errno.EWOULDBLOCK, 'the lock is held') from error
             sleep(0.05)
