@@ -3,7 +3,6 @@
 # run_suite.py fails when a listed test passes: the PR that fixes it removes its line,
 # and fails on a failure that is not listed. #255 holds failures no other issue covers
 # (mostly test fixtures that assume POSIX); the cause was assigned from the traceback.
-# Not listed: a temp directory Wine could not remove after a test (WinError 32); see cleanup_only().
 behavior@3.14 unittest.loader._FailedTest.test_behavior  # #246: fcntl import
 behavior@3.14 unittest.loader._FailedTest.test_checks_tools  # #246: fcntl import
 behavior@3.14 unittest.loader._FailedTest.test_compilation_history  # #246: fcntl import

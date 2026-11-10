@@ -1,86 +1,52 @@
-"""run_suite.cleanup_only: which errors the Wine job reports without counting.
+"""run_suite.patient_rmtree: the Wine job's bounded retry of temp-directory removal.
 
 Run: python3 -m unittest discover -s tests/windows -v
 """
 
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_suite  # noqa: E402
 
 
-def sharing_violation(*args, **kwargs):
+def sharing_violation():
     error = PermissionError(13, "Sharing violation")
     error.winerror = 32
-    raise error
+    return error
 
 
-# The same error raised from a frame whose file is shutil.py, as the real rmtree raises it.
-_in_shutil = {"sharing_violation": sharing_violation}
-exec(compile("def rmtree(*args, **kwargs):\n    sharing_violation()\n".replace(
-    "sharing_violation()", "e = PermissionError(13, 'Sharing violation'); e.winerror = 32; raise e"),
-    "/lib/shutil.py", "exec"), _in_shutil)
+class PatientRmtreeTests(unittest.TestCase):
+    def run_with(self, errors, wait_s=5.0):
+        """Calls made and the outcome, with a fake clock that advances one second per sleep."""
+        calls, now = [], [0.0]
 
+        def rmtree(name):
+            calls.append(name)
+            if len(calls) <= len(errors):
+                raise errors[len(calls) - 1]
+            return "removed"
 
-def caught(function) -> BaseException:
-    try:
-        function()
-    except BaseException as exc:  # noqa: BLE001
-        return exc
-    raise AssertionError("nothing raised")
+        retrying = run_suite.patient_rmtree(rmtree, wait_s, sleep=lambda s: now.__setitem__(0, now[0] + 1.0),
+                                            clock=lambda: now[0])
+        try:
+            return calls, retrying("d")
+        except BaseException as exc:  # noqa: BLE001
+            return calls, exc
 
+    def test_a_sharing_violation_is_retried_until_the_directory_is_free(self):
+        calls, outcome = self.run_with([sharing_violation(), sharing_violation()])
+        self.assertEqual((len(calls), outcome), (3, "removed"))
 
-class CleanupOnlyTests(unittest.TestCase):
-    def setUp(self):
-        patcher = mock.patch.object(tempfile.TemporaryDirectory, "_rmtree", _in_shutil["rmtree"])
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    def test_it_gives_up_after_the_wait_and_the_test_fails(self):
+        calls, outcome = self.run_with([sharing_violation()] * 50, wait_s=3.0)
+        self.assertEqual((len(calls), getattr(outcome, "winerror", None)), (4, 32))
 
-    def test_a_temp_directory_that_cannot_be_removed_is_not_counted(self):
-        self.assertTrue(run_suite.cleanup_only(caught(tempfile.TemporaryDirectory().cleanup)))
-
-        def at_exit():
-            with tempfile.TemporaryDirectory():
-                pass
-        self.assertTrue(run_suite.cleanup_only(caught(at_exit)))
-
-    def test_a_body_failure_before_the_cleanup_error_is_counted(self):
-        def body():
-            with tempfile.TemporaryDirectory():
-                raise AssertionError("the test body failed")
-        error = caught(body)
-        self.assertEqual(getattr(error, "winerror", None), 32)  # the cleanup error, chained to the body's
-        self.assertFalse(run_suite.cleanup_only(error))
-
-    def test_a_sharing_violation_in_the_body_before_the_cleanup_error_is_counted(self):
-        def body():
-            with tempfile.TemporaryDirectory():
-                sharing_violation()  # the same error type and code, raised by the test itself
-        error = caught(body)
-        self.assertEqual(getattr(error.__context__, "winerror", None), 32)
-        self.assertFalse(run_suite.cleanup_only(error))
-
-    def test_a_sharing_violation_outside_temp_directory_cleanup_is_counted(self):
-        self.assertFalse(run_suite.cleanup_only(caught(sharing_violation)))
-        self.assertFalse(run_suite.cleanup_only(AssertionError("1 != 2")))
-
-    def test_the_result_keeps_real_errors_and_sets_cleanup_errors_aside(self):
-        class Sample(unittest.TestCase):
-            def test_cleanup_only(self):
-                self.addCleanup(tempfile.TemporaryDirectory().cleanup)
-
-            def test_body_then_cleanup(self):
-                with tempfile.TemporaryDirectory():
-                    self.fail("the test body failed")
-
-        result = run_suite.QuietResult(None, False, 0)
-        unittest.defaultTestLoader.loadTestsFromTestCase(Sample).run(result)
-        self.assertEqual([t._testMethodName for t in result.unremoved], ["test_cleanup_only"])
-        self.assertEqual([t._testMethodName for t, _ in result.errors + result.failures], ["test_body_then_cleanup"])
+    def test_any_other_error_is_raised_at_once(self):
+        for error in (PermissionError(13, "access denied"), FileNotFoundError(2, "gone"), AssertionError("x")):
+            calls, outcome = self.run_with([error])
+            self.assertEqual((len(calls), outcome), (1, error))
 
 
 if __name__ == "__main__":

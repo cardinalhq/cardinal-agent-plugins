@@ -20,7 +20,8 @@ from __future__ import annotations
 import faulthandler
 import os
 import sys
-import traceback
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -51,38 +52,26 @@ def test_id(test) -> str:
     return getattr(test, "test_case", test).id()
 
 
-def cleanup_only(exc: BaseException) -> bool:
-    """A TemporaryDirectory that could not be removed, and nothing else:
-    every exception in the chain is `PermissionError [WinError 32]` (sharing
-    violation; tempfile retries, so they chain) raised inside shutil /
-    tempfile, and the traceback passes through TemporaryDirectory.cleanup /
-    __exit__. Under Wine this comes and
-    goes between identical runs (a child process's directory is released
-    late), so it cannot be held to the list; it is reported and tracked in
-    issue #255. A failure of the test body chained before it, or a sharing
-    violation anywhere else, does not match and is counted."""
-    first = exc
-    while exc is not None:
-        if not isinstance(exc, PermissionError) or getattr(exc, "winerror", None) != 32:
-            return False
-        raised_in = traceback.extract_tb(exc.__traceback__)[-1:]  # where this one was raised
-        if not raised_in or os.path.basename(raised_in[0].filename) not in ("shutil.py", "tempfile.py"):
-            return False
-        exc = exc.__cause__ or exc.__context__
-    return any(os.path.basename(frame.f_code.co_filename) == "tempfile.py"
-               and frame.f_code.co_name in ("cleanup", "__exit__")
-               for frame, _ in traceback.walk_tb(first.__traceback__))
+def patient_rmtree(rmtree, wait_s: float = 5.0, sleep=time.sleep, clock=time.monotonic):
+    """`rmtree`, retried while it raises `PermissionError [WinError 32]`
+    (sharing violation) for up to `wait_s`, then the error is raised as
+    usual. Under Wine a directory an exited child process was using is
+    released a moment late, which made identical runs differ in which tests
+    failed at TemporaryDirectory cleanup. Nothing is excluded from the
+    results: a directory still held after the wait fails its test."""
+    def retrying(*args, **kwargs):
+        deadline = clock() + wait_s
+        while True:
+            try:
+                return rmtree(*args, **kwargs)
+            except PermissionError as err:
+                if getattr(err, "winerror", None) != 32 or clock() >= deadline:
+                    raise
+                sleep(0.1)
+    return retrying
 
 
 class QuietResult(unittest.TextTestResult):
-    unremoved = ()  # tests whose only error was cleanup_only
-
-    def addError(self, test, err) -> None:
-        if cleanup_only(err[1]):
-            self.unremoved = (*self.unremoved, test)
-        else:
-            super().addError(test, err)
-
     def printErrors(self) -> None:  # the report prints only the failures that are new
         pass
 
@@ -94,13 +83,14 @@ def run(suite: str) -> tuple:
     os.chdir(ROOT / cwd)
     sys.path.insert(0, os.getcwd())
     faulthandler.dump_traceback_later(HANG_AFTER_S, exit=True)  # a hung test names itself
+    if os.name == "nt":
+        tempfile.TemporaryDirectory._rmtree = patient_rmtree(tempfile.TemporaryDirectory._rmtree)
 
     result = unittest.TextTestRunner(verbosity=1, resultclass=QuietResult).run(
         unittest.defaultTestLoader.discover(start))
     failed = {}
     for test, trace in result.failures + result.errors:
         failed.setdefault(test_id(test), trace)
-    unremoved = {test_id(test) for test in result.unremoved}
     known = known_failures(target)
     new = sorted(set(failed) - known)
     stale = sorted(known - set(failed))
@@ -113,7 +103,6 @@ def run(suite: str) -> tuple:
            f"{len(result.skipped)} skipped, {len(result.unexpectedSuccesses)} unexpected successes, "
            f"{len(blocked)} modules or classes did not run at all"]
     out += [f"DID NOT RUN {name}" for name in blocked]
-    out += [f"TEMP DIRECTORY NOT REMOVED (WinError 32, not counted, #255) {name}" for name in sorted(unremoved)]
     out += [f"\nNEW FAILURE {name}\n{failed[name]}" for name in new]
     if new:
         out += ["known-failures.txt lines for the new failures:"] + [f"{target} {name}" for name in new]
