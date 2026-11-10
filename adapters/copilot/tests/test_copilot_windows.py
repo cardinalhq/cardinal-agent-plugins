@@ -23,6 +23,8 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import mock
 
 from fixtures import ADAPTER, DECISION_CLI, HOOK, SID, HookCase, load_script
 
@@ -88,23 +90,32 @@ class PowerShellCommandTests(HookCase):
                 self.assertEqual((res.returncode, res.stdout), (0, b""), res.stderr)
 
     def fake_path(self, name: str, programs: dict) -> str:
-        """A PATH directory holding only the given programs (name -> sh script body)."""
+        """A PATH directory holding only the given programs (name -> kind):
+        `real` runs this interpreter, `stub` prints the Microsoft Store hint
+        and fails, `py` is the launcher (requires -3, then runs this
+        interpreter). sh scripts, or .cmd files under a Windows Python."""
+        hint = "Python was not found; run without arguments to install from the Microsoft Store"
         bin_dir = self.base / name
         bin_dir.mkdir()
-        for program, body in programs.items():
-            (bin_dir / program).write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
-            (bin_dir / program).chmod(0o755)
+        for program, kind in programs.items():
+            if os.name == "nt":
+                body = {"real": f'@"{sys.executable}" %*', "stub": f"@echo {hint}\r\n@exit /b 49",
+                        "py": f'@if not "%1"=="-3" exit /b 2\r\n@"{sys.executable}" %2 %3 %4 %5 %6 %7 %8 %9'}[kind]
+                (bin_dir / (program + ".cmd")).write_text(body + "\r\n", encoding="utf-8")
+            else:
+                body = {"real": f'exec "{sys.executable}" "$@"', "stub": f'echo "{hint}"; exit 49',
+                        "py": f'[ "$1" = -3 ] || exit 2; shift; exec "{sys.executable}" "$@"'}[kind]
+                (bin_dir / program).write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+                (bin_dir / program).chmod(0o755)
         return str(bin_dir)
 
     def test_the_first_interpreter_that_works_runs_the_hook(self):
         # python.org installs have no python3; the Microsoft Store stub is a
         # python3 that prints a message and fails; the py launcher takes -3.
-        real = f'exec "{sys.executable}" "$@"'
-        stub = 'echo "Python was not found; run without arguments to install from the Microsoft Store"; exit 49'
         cases = {
-            "python-only": {"python": real},
-            "store-stub-then-python": {"python3": stub, "python": real},
-            "py-launcher-only": {"py": f'[ "$1" = -3 ] || exit 2; shift; {real}'},
+            "python-only": {"python": "real"},
+            "store-stub-then-python": {"python3": "stub", "python": "real"},
+            "py-launcher-only": {"py": "py"},
         }
         payload = self.tool(args={"command": TEXT})
         for label, programs in cases.items():
@@ -226,6 +237,152 @@ class PythonLauncherTests(unittest.TestCase):
         command = f"{self.hook.DECISION_CMD} record --choice 'Use X'"
         self.assertEqual(self.hook.decision_invocations(command), ([["record", "--choice", "Use X"]], None))
         self.assertIn(str(DECISION_CLI), self.hook.DECISION_CMD)
+
+
+class PreviewDiscoveryTests(unittest.TestCase):
+    """Where the local storyboard preview looks for a browser on Windows (issue #251)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.render = load_script(ADAPTER / "skills" / "storyboard" / "scripts" / "render_preview.py", "render_preview_win")
+
+    ENV = {"ProgramFiles": r"C:\Program Files", "ProgramFiles(x86)": r"C:\Program Files (x86)",
+           "LOCALAPPDATA": r"C:\Users\a\AppData\Local"}
+
+    def test_chrome_edge_and_chromium_installs_then_path(self):
+        found = self.render.chromium_candidates(self.ENV, "Windows", Path("/nonexistent-home"), which=lambda c: None)
+        paths = [path for _, path in found]
+        self.assertEqual(paths[:3], [r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                                     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                                     r"C:\Program Files\Chromium\Application\chrome.exe"])
+        self.assertIn(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", paths)
+        self.assertIn(r"C:\Users\a\AppData\Local\Google\Chrome\Application\chrome.exe", paths)
+        self.assertEqual([path for source, path in found if source == "PATH"], [])  # nothing on PATH: no bare names
+
+    def test_the_explicit_binary_is_the_only_candidate(self):
+        env = dict(self.ENV, CARDINAL_CHROMIUM=r"D:\tools\chrome.exe")
+        self.assertEqual(self.render.chromium_candidates(env, "Windows", Path("/h")),
+                         [("$CARDINAL_CHROMIUM", r"D:\tools\chrome.exe")])
+
+    def test_other_systems_are_unchanged(self):
+        for system in ("Darwin", "Linux"):
+            found = self.render.chromium_candidates(self.ENV, system, Path("/nonexistent-home"), which=lambda c: None)
+            self.assertFalse([p for _, p in found if "Program Files" in p or p.endswith(".exe")], system)
+
+    def test_the_first_existing_browser_is_used(self):
+        with TemporaryDirectory() as d:
+            # ntpath.join, as the renderer builds it: nested folders on Windows, one odd file name elsewhere.
+            edge = self.render.ntpath.join(d, self.render.WINDOWS_APPS[1])
+            os.makedirs(os.path.dirname(edge), exist_ok=True)
+            Path(edge).write_text("")
+            os.chmod(edge, 0o755)
+            found, searched = self.render.find_chromium({"ProgramFiles": d}, "Windows", Path("/nonexistent-home"),
+                                                        which=lambda c: None, version_of=lambda p: None)
+            self.assertEqual((found["path"], found["source"]), (edge, "app"), searched)
+
+    def test_a_browser_in_the_workspace_or_a_bare_name_is_never_taken_from_path(self):
+        here = self.render.ntpath.abspath(os.getcwd())
+        planted = self.render.ntpath.join(here, "chrome.exe")
+        elsewhere = r"C:\Tools\Chromium\chrome.exe"
+        for which, expected in ((lambda c: planted, []), (lambda c: "chrome.exe", []), (lambda c: None, []),
+                                (lambda c: elsewhere, [elsewhere] * 3)):
+            found = self.render.chromium_candidates({}, "Windows", Path("/nonexistent-home"), which=which)
+            self.assertEqual([path for source, path in found if source == "PATH"], expected)
+
+    def test_environment_names_are_matched_in_any_case(self):
+        found = self.render.chromium_candidates({"PROGRAMFILES(X86)": r"C:\Program Files (x86)"}, "Windows",
+                                                Path("/nonexistent-home"), which=lambda c: None)
+        self.assertIn(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", [p for _, p in found])
+
+
+# A bundle page that speaks the preview protocol: two steps, each settling after a moment.
+PREVIEW_PAGE = """<!doctype html><body style="margin:0"><script>
+window.cardinalPreview = {version: 1, steps: 2, state: "loading", step: null, errors: [],
+  reveal(n) { return new Promise((r) => setTimeout(() => { this.state = "settled"; this.step = n; r(); }, 300)); },
+  abort(reason) { this.aborted = reason; },
+  report() { return {state: this.state, step: this.step, steps: 2, height: 800, error: null, frameErrors: [],
+                     protocolErrors: this.aborted ? [this.aborted] : []}; }};
+</script><iframe id="cv" sandbox="allow-scripts" style="border:0;width:1280px;height:800px;background:#246"
+srcdoc="preview"></iframe></body>"""
+
+
+@unittest.skipUnless(os.environ.get("CARDINAL_CHROMIUM_SMOKE") == "1",
+                     "real-browser smoke test: set CARDINAL_CHROMIUM_SMOKE=1")
+class RealBrowserPreviewTests(unittest.TestCase):
+    """`render_preview.py --runtime copilot --from-json` with a real browser,
+    a Copilot-format connection (~/.copilot/cardinal.json + cardinal-secrets.json)
+    and a local stub serving the bundle page: issue #251's check, without
+    Cardinal. With CARDINAL_PREVIEW_SMOKE_OUT set, the PNGs and the
+    renderer's output are copied there."""
+
+    def test_copilot_from_json_writes_pngs(self):
+        import hashlib
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        key, org, sb = "test-mcp-key", "0f0f0f0f-0000-4000-8000-000000000001", "sb_0123456789abcdef01234567"
+        body = PREVIEW_PAGE.encode("utf-8")
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                ok = "/scenes/rhythm/" in self.path and self.headers.get("X-CardinalHQ-API-Key") == key
+                self.send_response(200 if ok else 404)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body) if ok else 2))
+                self.end_headers()
+                self.wfile.write(body if ok else b"{}")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".copilot").mkdir()
+            origin = f"http://127.0.0.1:{server.server_address[1]}"
+            (home / ".copilot" / "cardinal.json").write_text(json.dumps(
+                {"schema_version": 1, "mcp_url": f"{origin}/api/orgs/{org}/mcp"}), encoding="utf-8")
+            (home / ".copilot" / "cardinal-secrets.json").write_text(json.dumps({"mcp_api_key": key}),
+                                                                     encoding="utf-8")
+            result = {
+                "storyboard_id": sb, "revision": 3, "ok": True, "errors": [], "warnings": [], "materialization": [],
+                "scenes": [{"id": "rhythm", "ok": True, "preview_bundle": {
+                    "path": f"/api/orgs/{org}/storyboards/{sb}/scenes/rhythm/preview.html?revision=3",
+                    "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(), "revision": 3}}],
+                "local_preview": {"contract": "test", "viewport": {"width": 1280, "height": 800,
+                                                                  "device_scale_factor": 2},
+                                  "ready_timeout_ms": 10000, "settle_timeout_ms": 5000,
+                                  "max_bundle_bytes": 33554432},
+                "view_url": f"https://app.example/storyboards/{sb}",
+            }
+            src = home / "preview.json"
+            src.write_text(json.dumps(result), encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("CARDINAL_") or k == "CARDINAL_CHROMIUM"}
+            env["HOME"] = str(home)  # where the renderer looks; the real profile stays, as the browser needs it
+            res = subprocess.run([sys.executable, str(ADAPTER / "skills" / "storyboard" / "scripts" / "render_preview.py"),
+                                  "--runtime", "copilot", "--from-json", str(src)], capture_output=True,
+                                 encoding="utf-8", env=env, timeout=600)
+            keep = os.environ.get("CARDINAL_PREVIEW_SMOKE_OUT")
+            if keep:
+                Path(keep).mkdir(parents=True, exist_ok=True)
+                (Path(keep) / "copilot-from-json.stdout.jsonl").write_text(res.stdout, encoding="utf-8")
+                (Path(keep) / "copilot-from-json.stderr.txt").write_text(res.stderr, encoding="utf-8")
+            self.assertEqual(res.returncode, 0, res.stderr[-2000:] + res.stdout[-2000:])
+            lines = [json.loads(line) for line in res.stdout.splitlines() if line.strip()]
+            steps = [ln for ln in lines if ln.get("scene_id") == "rhythm"]
+            self.assertEqual([s["step"] for s in steps], [0, 1])
+            out_dir = home / ".copilot" / "cardinal" / "storyboards" / sb / "r3"
+            for step in steps:
+                png = Path(step["png"])
+                self.assertEqual(png.parent, out_dir)
+                data = png.read_bytes()
+                self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 1000, data[:16])
+                self.assertIsNone(step["error"])
+                if keep:
+                    shutil.copy(str(png), str(Path(keep) / ("copilot-" + png.name)))
+            self.assertEqual(lines[-1]["summary"]["rendered"], 2)
 
 
 if __name__ == "__main__":
