@@ -43,7 +43,6 @@ copilot@3.14 test_copilot_investigation.InvestigationTests.test_session_start_de
 copilot@3.14 test_copilot_investigation.InvestigationTests.test_session_start_says_prompts_are_recorded_only_with_consent  # #255: unclassified
 copilot@3.14 test_copilot_investigation.InvestigationTests.test_subagent_tool_call_gets_nothing_and_consumes_nothing  # #255: unclassified
 copilot@3.14 test_copilot_investigation.StoryboardTests.test_session_start_names_the_session_and_discovers  # #245: test asserts the POSIX command text
-copilot@3.14 test_copilot_windows.WindowsEncodingTests.test_utf8_payload_survives_a_cp1252_stdin  # #249: times out under Wine, cause not established
 copilot@3.14 test_goldens.GoldenTests.test_hook_output_matches_committed_goldens  # #255: unclassified
 copilot@3.14 test_install_site.InstallSiteTests.test_add_lakerunner_maps_all_slots_used  # #255: unclassified
 copilot@3.14 test_install_site.InstallSiteTests.test_add_lakerunner_maps_not_operator_managed  # #255: unclassified
