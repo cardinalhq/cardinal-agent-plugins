@@ -50,6 +50,16 @@ def test_id(test) -> str:
     return getattr(test, "test_case", test).id()
 
 
+def cleanup_only(trace: str) -> bool:
+    """A temp directory that could not be removed after the test body ran:
+    `PermissionError [WinError 32]` (sharing violation) from rmtree. Under
+    Wine it comes and goes between identical runs (a child process's
+    directory is released late), so it cannot be held to the list; it is
+    reported and tracked in issue #255 instead. Any other error in the same
+    test still counts."""
+    return "[WinError 32]" in trace and "rmtree" in trace
+
+
 class QuietResult(unittest.TextTestResult):
     def printErrors(self) -> None:  # the report prints only the failures that are new
         pass
@@ -65,9 +75,12 @@ def run(suite: str) -> tuple:
 
     result = unittest.TextTestRunner(verbosity=1, resultclass=QuietResult).run(
         unittest.defaultTestLoader.discover(start))
-    failed = {}
+    failed, unremoved = {}, set()
     for test, trace in result.failures + result.errors:
-        failed.setdefault(test_id(test), trace)
+        if cleanup_only(trace):
+            unremoved.add(test_id(test))
+        else:
+            failed.setdefault(test_id(test), trace)
     known = known_failures(target)
     new = sorted(set(failed) - known)
     stale = sorted(known - set(failed))
@@ -80,6 +93,7 @@ def run(suite: str) -> tuple:
            f"{len(result.skipped)} skipped, {len(result.unexpectedSuccesses)} unexpected successes, "
            f"{len(blocked)} modules or classes did not run at all"]
     out += [f"DID NOT RUN {name}" for name in blocked]
+    out += [f"TEMP DIRECTORY NOT REMOVED (WinError 32, not counted, #255) {name}" for name in sorted(unremoved)]
     out += [f"\nNEW FAILURE {name}\n{failed[name]}" for name in new]
     if new:
         out += ["known-failures.txt lines for the new failures:"] + [f"{target} {name}" for name in new]

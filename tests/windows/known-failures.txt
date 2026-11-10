@@ -3,6 +3,7 @@
 # run_suite.py fails when a listed test passes: the PR that fixes it removes its line,
 # and fails on a failure that is not listed. #255 holds failures no other issue covers
 # (mostly test fixtures that assume POSIX); the cause was assigned from the traceback.
+# Not listed: a temp directory Wine could not remove after a test (WinError 32); see cleanup_only().
 behavior@3.14 unittest.loader._FailedTest.test_behavior  # #246: fcntl import
 behavior@3.14 unittest.loader._FailedTest.test_checks_tools  # #246: fcntl import
 behavior@3.14 unittest.loader._FailedTest.test_compilation_history  # #246: fcntl import
@@ -244,14 +245,8 @@ core@3.14 test_owner_relay.Deferred.test_scheduled_peer_and_unconfirmable_prompt
 core@3.14 test_owner_relay.ReviewFixes.test_a_locked_store_counts_nothing_as_fresh  # #255: unclassified
 core@3.14 test_owner_relay.Store.test_file_is_private_ids_are_dp_hex_and_entries_hash_their_text  # #247: POSIX mode bits asserted
 core@3.14 test_owner_relay.Targets.test_supervising_registers_lists_renames_and_removes  # #247: POSIX mode bits asserted
-core@3.14 test_session_links.CollectRepoHostTests.test_outside_git_never  # #255: file still open at cleanup (WinError 32)
-core@3.14 test_storyboard_agent.SessionStartTests.test_unreachable_server_is_bounded  # #255: file still open at cleanup (WinError 32)
 core@3.14 test_storyboard_authoring.PreviewTests.test_the_card_renders_cover_and_mock_in_the_runtimes_dir  # #251: local preview
 core@3.14 test_storyboard_authoring.TokenTests.test_a_successful_mcp_checkpoint_holds_the_sessions_evidence  # #247: POSIX mode bits asserted
-core@3.14 test_storyboard_context.AssociationsContextTests.test_no_paths_outside_git  # #255: file still open at cleanup (WinError 32)
-core@3.14 test_storyboard_context.CollectOutsideGitTests.test_bad_client_and_email_are_omitted  # #255: file still open at cleanup (WinError 32)
-core@3.14 test_storyboard_context.CollectOutsideGitTests.test_non_git_dir_has_only_machine_fields  # #255: file still open at cleanup (WinError 32)
-core@3.14 test_storyboard_context.ContractTests.test_output_keys_are_context_fields  # #255: file still open at cleanup (WinError 32)
 core@3.14 test_storyboard_files.StoryboardFilesTests.test_file_mode_and_directory_mode  # #247: POSIX mode bits asserted
 core@3.14 test_storyboard_session_visualization.SessionVisualizationTests.test_codex_preview_renders_reveal_steps_under_its_own_home  # #251: local preview
 core@3.14 test_supervision_friction.Friction.test_generated_outbox_timeout_retry_reuses_key_without_numbering  # #247: private-file check
