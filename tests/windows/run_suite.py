@@ -54,8 +54,9 @@ def test_id(test) -> str:
 def cleanup_only(exc: BaseException) -> bool:
     """A TemporaryDirectory that could not be removed, and nothing else:
     every exception in the chain is `PermissionError [WinError 32]` (sharing
-    violation; tempfile retries, so they chain) and the traceback passes
-    through TemporaryDirectory.cleanup / __exit__. Under Wine this comes and
+    violation; tempfile retries, so they chain) raised inside shutil /
+    tempfile, and the traceback passes through TemporaryDirectory.cleanup /
+    __exit__. Under Wine this comes and
     goes between identical runs (a child process's directory is released
     late), so it cannot be held to the list; it is reported and tracked in
     issue #255. A failure of the test body chained before it, or a sharing
@@ -63,6 +64,9 @@ def cleanup_only(exc: BaseException) -> bool:
     first = exc
     while exc is not None:
         if not isinstance(exc, PermissionError) or getattr(exc, "winerror", None) != 32:
+            return False
+        raised_in = traceback.extract_tb(exc.__traceback__)[-1:]  # where this one was raised
+        if not raised_in or os.path.basename(raised_in[0].filename) not in ("shutil.py", "tempfile.py"):
             return False
         exc = exc.__cause__ or exc.__context__
     return any(os.path.basename(frame.f_code.co_filename) == "tempfile.py"

@@ -19,6 +19,13 @@ def sharing_violation(*args, **kwargs):
     raise error
 
 
+# The same error raised from a frame whose file is shutil.py, as the real rmtree raises it.
+_in_shutil = {"sharing_violation": sharing_violation}
+exec(compile("def rmtree(*args, **kwargs):\n    sharing_violation()\n".replace(
+    "sharing_violation()", "e = PermissionError(13, 'Sharing violation'); e.winerror = 32; raise e"),
+    "/lib/shutil.py", "exec"), _in_shutil)
+
+
 def caught(function) -> BaseException:
     try:
         function()
@@ -29,7 +36,7 @@ def caught(function) -> BaseException:
 
 class CleanupOnlyTests(unittest.TestCase):
     def setUp(self):
-        patcher = mock.patch.object(tempfile.TemporaryDirectory, "_rmtree", sharing_violation)
+        patcher = mock.patch.object(tempfile.TemporaryDirectory, "_rmtree", _in_shutil["rmtree"])
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -47,6 +54,14 @@ class CleanupOnlyTests(unittest.TestCase):
                 raise AssertionError("the test body failed")
         error = caught(body)
         self.assertEqual(getattr(error, "winerror", None), 32)  # the cleanup error, chained to the body's
+        self.assertFalse(run_suite.cleanup_only(error))
+
+    def test_a_sharing_violation_in_the_body_before_the_cleanup_error_is_counted(self):
+        def body():
+            with tempfile.TemporaryDirectory():
+                sharing_violation()  # the same error type and code, raised by the test itself
+        error = caught(body)
+        self.assertEqual(getattr(error.__context__, "winerror", None), 32)
         self.assertFalse(run_suite.cleanup_only(error))
 
     def test_a_sharing_violation_outside_temp_directory_cleanup_is_counted(self):
