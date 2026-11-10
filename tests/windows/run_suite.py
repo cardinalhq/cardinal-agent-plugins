@@ -20,6 +20,7 @@ from __future__ import annotations
 import faulthandler
 import os
 import sys
+import traceback
 import unittest
 from pathlib import Path
 
@@ -50,17 +51,34 @@ def test_id(test) -> str:
     return getattr(test, "test_case", test).id()
 
 
-def cleanup_only(trace: str) -> bool:
-    """A temp directory that could not be removed after the test body ran:
-    `PermissionError [WinError 32]` (sharing violation) from rmtree. Under
-    Wine it comes and goes between identical runs (a child process's
-    directory is released late), so it cannot be held to the list; it is
-    reported and tracked in issue #255 instead. Any other error in the same
-    test still counts."""
-    return "[WinError 32]" in trace and "rmtree" in trace
+def cleanup_only(exc: BaseException) -> bool:
+    """A TemporaryDirectory that could not be removed, and nothing else:
+    every exception in the chain is `PermissionError [WinError 32]` (sharing
+    violation; tempfile retries, so they chain) and the traceback passes
+    through TemporaryDirectory.cleanup / __exit__. Under Wine this comes and
+    goes between identical runs (a child process's directory is released
+    late), so it cannot be held to the list; it is reported and tracked in
+    issue #255. A failure of the test body chained before it, or a sharing
+    violation anywhere else, does not match and is counted."""
+    first = exc
+    while exc is not None:
+        if not isinstance(exc, PermissionError) or getattr(exc, "winerror", None) != 32:
+            return False
+        exc = exc.__cause__ or exc.__context__
+    return any(os.path.basename(frame.f_code.co_filename) == "tempfile.py"
+               and frame.f_code.co_name in ("cleanup", "__exit__")
+               for frame, _ in traceback.walk_tb(first.__traceback__))
 
 
 class QuietResult(unittest.TextTestResult):
+    unremoved = ()  # tests whose only error was cleanup_only
+
+    def addError(self, test, err) -> None:
+        if cleanup_only(err[1]):
+            self.unremoved = (*self.unremoved, test)
+        else:
+            super().addError(test, err)
+
     def printErrors(self) -> None:  # the report prints only the failures that are new
         pass
 
@@ -75,12 +93,10 @@ def run(suite: str) -> tuple:
 
     result = unittest.TextTestRunner(verbosity=1, resultclass=QuietResult).run(
         unittest.defaultTestLoader.discover(start))
-    failed, unremoved = {}, set()
+    failed = {}
     for test, trace in result.failures + result.errors:
-        if cleanup_only(trace):
-            unremoved.add(test_id(test))
-        else:
-            failed.setdefault(test_id(test), trace)
+        failed.setdefault(test_id(test), trace)
+    unremoved = {test_id(test) for test in result.unremoved}
     known = known_failures(target)
     new = sorted(set(failed) - known)
     stale = sorted(known - set(failed))

@@ -69,6 +69,8 @@ jobs:
           wine "$WINPY" -c "import subprocess; print(subprocess.run(['git', '--version'], capture_output=True, text=True))"
       - name: Vendor cardinal_core into the Copilot adapter
         run: python3 build/vendor.py copilot
+      - name: The runner's own tests
+        run: python3 -m unittest discover -s tests/windows -v
       - name: A crashed run cannot pass
         run: |
           if sh tests/windows/wine-suite.sh crash; then echo "a run with no status file passed"; exit 1; fi
