@@ -179,11 +179,13 @@ class ProcessTests(unittest.TestCase):
     def test_the_anchor_skips_powershell_cmd_and_the_py_launcher(self):
         from cardinal_core import investigation_poller as poller
         tree = {50: (40, "python.exe"), 40: (30, "py.exe"), 30: (20, "PowerShell.EXE"), 20: (10, "cmd.exe"),
-                10: (4, "copilot.exe")}
+                10: (4, "copilot.exe"), 60: (55, "bash.exe"), 55: (10, "pwsh")}
         with mock.patch.object(poller, "WINDOWS", True):
             self.assertEqual(poller.resolve_anchor(40, tree.get), 10)
             self.assertEqual(poller.resolve_anchor(10, tree.get), 10)
-        self.assertEqual(poller.resolve_anchor(30, tree.get), 30)  # elsewhere PowerShell is not a shell to skip
+            self.assertEqual(poller.resolve_anchor(60, tree.get), 10)  # Git Bash, then pwsh
+        with mock.patch.object(poller, "WINDOWS", False):
+            self.assertEqual(poller.resolve_anchor(30, tree.get), 30)  # elsewhere PowerShell is not a shell to skip
 
     def test_detached_children(self):
         self.assertEqual(paths.detached(windows=False), {"start_new_session": True})

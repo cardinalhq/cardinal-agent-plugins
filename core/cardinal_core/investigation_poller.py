@@ -70,9 +70,10 @@ LOCK_WAIT = 10.0            # a poller of the previous process may still hold th
 FRESH = POLL_INTERVAL + 1.0  # a successful poll this recent covers the Stop backstop
 
 SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "busybox"}
-# On Windows a hook runs under PowerShell, and Python may be started by the py launcher.
+# On Windows a hook runs under PowerShell (or Git Bash), and Python may be
+# started by the py launcher; names there carry .exe and any letter case.
 WINDOWS = os.name == "nt"
-WINDOWS_SHELLS = {"powershell.exe", "pwsh.exe", "cmd.exe", "py.exe"}
+WINDOWS_SHELLS = SHELLS | {"powershell", "pwsh", "cmd", "py"}
 
 
 def pid_path(home: Path, sid: str) -> Path:
@@ -135,7 +136,9 @@ def resolve_anchor(pid: int, ps: Optional[Callable[[int], Optional[tuple]]] = No
             return pid
         ppid, comm = got
         name = os.path.basename(comm).lstrip("-")
-        if (name.lower() in WINDOWS_SHELLS if WINDOWS else name in SHELLS) and ppid > 1:
+        if WINDOWS:
+            name = name.lower()[:-4] if name.lower().endswith(".exe") else name.lower()
+        if name in (WINDOWS_SHELLS if WINDOWS else SHELLS) and ppid > 1:
             pid = ppid
             continue
         return pid

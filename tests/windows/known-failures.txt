@@ -103,6 +103,7 @@ core@3.14 test_investigation_text.GrantPrintsTheWatchLine.test_one_watch_line_on
 core@3.14 test_investigation_text.GrantPrintsTheWatchLine.test_with_out_the_watch_line_names_the_credential_file  # #255: unclassified
 core@3.14 test_investigation_text.WatchGuidance.test_the_watch_command  # #255: unclassified
 core@3.14 test_investigation_turn.OwnerInputContract.test_cursor_capture_requires_consent  # #247: POSIX mode bits asserted
+core@3.14 test_investigation_turn.OwnerInputContract.test_the_connection_travels_on_the_pipe_never_in_argv_or_env  # #248: test asserts the POSIX Popen arguments
 core@3.14 test_investigation_turn.TurnEndBlock.test_gemini_cursor_and_copilot_never_block_they_stage_for_the_next_boundary  # #247: POSIX mode bits asserted
 core@3.14 test_owner_input.NeverQueued.test_400_drops_that_prompt_only  # #247: POSIX mode bits asserted
 core@3.14 test_owner_input.NeverQueued.test_401_403_drop_and_turn_off  # #247: POSIX mode bits asserted
@@ -184,6 +185,7 @@ core@3.9 test_investigation_text.GrantPrintsTheWatchLine.test_one_watch_line_on_
 core@3.9 test_investigation_text.GrantPrintsTheWatchLine.test_with_out_the_watch_line_names_the_credential_file  # #247: os.fchmod
 core@3.9 test_investigation_text.WatchGuidance.test_the_watch_command  # #255: unclassified
 core@3.9 test_investigation_turn.OwnerInputContract.test_cursor_capture_requires_consent  # #247: os.fchmod
+core@3.9 test_investigation_turn.OwnerInputContract.test_the_connection_travels_on_the_pipe_never_in_argv_or_env  # #248: test asserts the POSIX Popen arguments
 core@3.9 test_investigation_turn.TurnEndBlock.test_gemini_cursor_and_copilot_never_block_they_stage_for_the_next_boundary  # #247: os.fchmod
 core@3.9 test_owner_input.NeverQueued.test_400_drops_that_prompt_only  # #247: os.fchmod
 core@3.9 test_owner_input.NeverQueued.test_401_403_drop_and_turn_off  # #247: os.fchmod
