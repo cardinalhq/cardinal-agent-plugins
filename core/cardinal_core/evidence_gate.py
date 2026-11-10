@@ -751,6 +751,16 @@ _PS_ENV_REF = re.compile(r"(?i)\$\{?env:([A-Za-z_][A-Za-z0-9_]*)|^env:[\\/]?([A-
 _PS_ENV_API = re.compile(r"(?i)GetEnvironmentVariable(s)?\s*\(\s*(?:['\"]([A-Za-z_][A-Za-z0-9_]*))?")
 
 
+def _ps_param(arg: str, name: str = "") -> Any:
+    """A PowerShell parameter without its lead (`-`, `--` or `/`), lowercased;
+    with `name`, whether it is that parameter: PowerShell takes any prefix
+    (`-enc`, `-e`, `-com`, `/c`)."""
+    low = arg.lower()
+    lead = next((x for x in ("--", "-", "/") if low.startswith(x)), None)
+    param = low[len(lead):] if lead else ""
+    return bool(param) and name.startswith(param) if name else param
+
+
 def _ps_secret_env(word: str) -> bool:
     """A PowerShell read of a secret-named environment variable. Names are
     case-insensitive on Windows, so `$env:github_token` counts."""
@@ -760,7 +770,7 @@ def _ps_secret_env(word: str) -> bool:
 
 def powershell_env_rule(s: str) -> Optional[tuple]:
     """The .NET environment API in a script: every variable, or a secret-named one."""
-    if "GetEnvironmentVariable" not in s:
+    if "getenvironmentvariable" not in s.lower():
         return None
     for m in _PS_ENV_API.finditer(s):
         if m.group(1):
@@ -791,7 +801,7 @@ def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
         return REASON_COMMAND, "cmd.env-dump", "Get-ChildItem Env:"
     if any(_ps_secret_env(a) for a in argv):
         return REASON_COMMAND, "cmd.secret-var", "$env:SECRET_VAR"
-    if cmd in _POWERSHELLS and any(a.lower() in ("-encodedcommand", "-enc", "-ec", "-e") for a in args):
+    if cmd in _POWERSHELLS and any(_ps_param(a, "encodedcommand") or _ps_param(a) == "ec" for a in args):
         return REASON_COMMAND, "cmd.decoded-exec", "powershell -EncodedCommand"
     if cmd == "ps" and any((not a.startswith("-") and "e" in a) or (a.startswith("-") and "E" in a) for a in args):
         # BSD-style `ps eww` / `ps auxe`, macOS `ps -E`: every process's environment.
@@ -948,8 +958,11 @@ def _inner_commands(argv: list) -> list:
                 break
     if cmd in _POWERSHELLS:  # powershell -Command <script>: the rest of the line is the script
         for j, a in enumerate(argv[1:], 1):
-            if a.lower() in ("-command", "-c") and j + 1 < len(argv):
+            if _ps_param(a, "command") and j + 1 < len(argv):
                 out.append(" ".join(argv[j + 1:]))
+                break
+            if not _ps_param(a):  # no parameter: the script itself (-Command is the default)
+                out.append(" ".join(argv[j:]))
                 break
     if cmd in _SHELLS or cmd in ("eval", "source", "."):
         for j, a in enumerate(argv[1:], 1):

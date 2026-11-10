@@ -41,6 +41,12 @@ class WindowsGateTests(unittest.TestCase):
             ("pwsh -c 'echo $env:GITHUB_TOKEN'", "cmd.env-dump"),  # the existing interpreter rule sees it first
             ("powershell.exe -Command echo $env:GITHUB_TOKEN", "cmd.secret-var"),
             ("powershell -EncodedCommand RwBlAHQALQBDAGgAaQBsAGQASQB0AGUAbQA=", "cmd.decoded-exec"),
+            # PowerShell takes any prefix of a parameter name, and / or -- as its lead
+            ("powershell -enco RwBlAHQALQBDAGgAaQBsAGQASQB0AGUAbQA=", "cmd.decoded-exec"),
+            ("pwsh /e RwBlAHQALQBDAGgAaQBsAGQASQB0AGUAbQA=", "cmd.decoded-exec"),
+            ('powershell -NoP -Com "gci env:"', "cmd.env-dump"), ('powershell /c "dir env:"', "cmd.env-dump"),
+            ("powershell Get-ChildItem Env:", "cmd.env-dump"),
+            ("[environment]::getenvironmentvariables()", "cmd.env-dump"),
         ):
             with self.subTest(command=text):
                 hit = self.command(text)
@@ -62,7 +68,8 @@ class WindowsGateTests(unittest.TestCase):
         for text in ("Get-ChildItem C:\\src", "echo $env:PATH", r"type C:\Users\alice\app\notes.txt",
                      "Get-ChildItem -Recurse src", "dir", r"gc C:\repo\README.md", "Write-Output $env:USERNAME",
                      "Get-Content Env:PATH", "[Environment]::GetEnvironmentVariable('PATH')",
-                     'powershell -Command "Get-ChildItem C:\\src"'):
+                     'powershell -Command "Get-ChildItem C:\\src"', "powershell -ExecutionPolicy Bypass -File build.ps1",
+                     "pwsh -NoProfile -File scripts/test.ps1"):
             with self.subTest(command=text):
                 self.assertIsNone(self.command(text), text)
         for text in (r"C:\Users\alice\app\main.py", "C:/repo/src/app.ts", r"\\fileserver\share\docs\plan.md"):
