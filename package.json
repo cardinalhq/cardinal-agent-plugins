@@ -7,13 +7,18 @@
     "test:native": "npm run build:native && tsc --project tests/native/tsconfig.json && node --import tsx --test tests/native/*.test.mjs"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@opencode-ai/plugin": "1.18.30",
     "@types/node": "^22.0.0",
     "tsx": "^4.20.0",
     "typebox": "1.3.30",
     "typescript": "^5.9.0",
-    "zod": "4.1.8"
+    "zod": "4.6.7"
+  },
+  "overrides": {
+    "effect": "4.1.3",
+    "toml": "^5.0.1",
+    "zod": "$zod"
   }
 }

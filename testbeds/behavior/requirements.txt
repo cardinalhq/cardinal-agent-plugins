@@ -1,20 +1,34 @@
 # Pinned runtime for generate.py (scripted mode). Installed with --no-deps, so
 # every transitive dependency is listed. Model mode additionally needs the
 # `anthropic` package and credentials; it is not installed by default.
-opentelemetry-api==1.36.0
-opentelemetry-sdk==1.36.0
-opentelemetry-semantic-conventions==0.57b0
-opentelemetry-exporter-otlp-proto-http==1.36.0
-opentelemetry-exporter-otlp-proto-common==1.36.0
-opentelemetry-proto==1.36.0
-protobuf==5.29.5
-googleapis-common-protos==1.70.0
-requests==2.32.4
-urllib3==2.5.0
-certifi==2025.8.3
-idna==3.10
+# The patched opentelemetry, requests and urllib3 releases need Python 3.10+;
+# Python 3.9 keeps the newest release that still installs there.
+opentelemetry-api==1.45.2; python_version >= "3.10"
+opentelemetry-sdk==1.45.2; python_version >= "3.10"
+opentelemetry-semantic-conventions==0.66b2; python_version >= "3.10"
+opentelemetry-exporter-otlp-proto-http==1.45.2; python_version >= "3.10"
+opentelemetry-exporter-otlp-proto-common==1.45.2; python_version >= "3.10"
+opentelemetry-exporter-http-transport==0.66b2; python_version >= "3.10"
+opentelemetry-exporter-otlp-common==0.66b2; python_version >= "3.10"
+opentelemetry-proto==1.45.2; python_version >= "3.10"
+protobuf==7.36.2; python_version >= "3.10"
+googleapis-common-protos==1.76.0; python_version >= "3.10"
+requests==2.34.2; python_version >= "3.10"
+urllib3==2.8.0; python_version >= "3.10"
+opentelemetry-api==1.36.0; python_version < "3.10"
+opentelemetry-sdk==1.36.0; python_version < "3.10"
+opentelemetry-semantic-conventions==0.57b0; python_version < "3.10"
+opentelemetry-exporter-otlp-proto-http==1.36.0; python_version < "3.10"
+opentelemetry-exporter-otlp-proto-common==1.36.0; python_version < "3.10"
+opentelemetry-proto==1.36.0; python_version < "3.10"
+protobuf==5.29.6; python_version < "3.10"
+googleapis-common-protos==1.70.0; python_version < "3.10"
+requests==2.32.4; python_version < "3.10"
+urllib3==2.6.3; python_version < "3.10"
+importlib_metadata==8.7.0; python_version < "3.10"
+zipp==3.23.0; python_version < "3.10"
+certifi==2026.10.23
+idna==3.20
 charset-normalizer==3.4.3
 typing_extensions==4.14.1
-importlib_metadata==8.7.0
-zipp==3.23.0
 PyYAML==6.0.2
