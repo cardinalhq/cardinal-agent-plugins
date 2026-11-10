@@ -487,6 +487,22 @@ def _brace_words(s: str) -> list:
     return out[:MAX_BRACE_WORDS]
 
 
+# Windows spellings of a path (issue #250): a drive letter, a UNC share, the
+# profile variable, or `~\`. Unambiguous, so they are read on every OS.
+_WINDOWS_PATH = re.compile(r"(?i)^(?:[a-z]:[\\/]|\\\\[^\\/]+[\\/]|(?:\$env:|%)(?:userprofile|home)%?[\\/]|~\\)")
+_WINDOWS_HOME = re.compile(r"(?i)^(?:\$env:|%)(?:userprofile|home)%?/")
+
+
+def windows_path(tok: str) -> Optional[str]:
+    """`tok` as the POSIX path the rules read when it is a Windows path,
+    else None: `\\` is `/`, the drive letter or UNC server is dropped and
+    the profile variable is `~`. C:\\Users\\a\\.ssh\\id_rsa -> /Users/a/.ssh/id_rsa."""
+    if not _WINDOWS_PATH.match(tok):
+        return None
+    t = _WINDOWS_HOME.sub("~/", tok.replace("\\", "/"))
+    return re.sub(r"^(?:[A-Za-z]:|//[^/]+)/", "/", t)
+
+
 def paths_in(s: str, cwd: Optional[str], home: Optional[str], budget: Optional["_Budget"] = None) -> Iterator[str]:
     prose = "\n" in s.strip() or len(s) > PROSE_CHARS
     budget = budget or _Budget()
@@ -495,6 +511,8 @@ def paths_in(s: str, cwd: Optional[str], home: Optional[str], budget: Optional["
     toks = _TOKEN_SPLIT.split(s)
     if not prose:
         toks = toks + _brace_words(s)
+    if "\\" in s or ":/" in s:
+        toks = toks + [w for w in map(windows_path, toks) if w]
     for tok in toks:
         if tok and _path_like(tok, prose, cwd, budget):
             p = _norm(tok, cwd, home)
@@ -716,6 +734,10 @@ _DECODED_EXEC = re.compile(r"\$\([^()]*" + _DECODE + r"|`[^`]*" + _DECODE + r"|"
                            r"[^;&]*\|\s*(?:sudo\s+)?(?:(?:ba|z|da|k)?sh|eval|source|xargs)\b")
 
 
+_PS_LISTERS = frozenset(("get-childitem", "gci", "dir", "ls", "get-item", "gi"))
+_PS_ENV_REF = re.compile(r"(?i)\$env:([A-Za-z_][A-Za-z0-9_]*)")
+
+
 def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
     """(reason, rule id, hint) for one simple command, else None."""
     for a in assigns:
@@ -732,6 +754,11 @@ def command_rule(argv: list, assigns: list, env_dump: bool) -> Optional[tuple]:
     lower = [a.lower() for a in pos]
     if cmd == "printenv":
         return REASON_COMMAND, "cmd.env-dump", "env / printenv / export -p"
+    # PowerShell (issue #250): the Env: drive lists every variable, $env:NAME reads one.
+    if cmd in _PS_LISTERS and any(a.lower().rstrip("\\/*") == "env:" for a in pos):
+        return REASON_COMMAND, "cmd.env-dump", "Get-ChildItem Env:"
+    if any("$" in a and any(secretish_name(m.group(1)) for m in _PS_ENV_REF.finditer(a)) for a in argv):
+        return REASON_COMMAND, "cmd.secret-var", "$env:SECRET_VAR"
     if cmd == "ps" and any((not a.startswith("-") and "e" in a) or (a.startswith("-") and "E" in a) for a in args):
         # BSD-style `ps eww` / `ps auxe`, macOS `ps -E`: every process's environment.
         return REASON_COMMAND, "cmd.env-dump", "ps e / ps -E"
@@ -866,6 +893,7 @@ _FILE_READERS = frozenset((
     "uniq", "nl", "tac", "tee", "diff", "cmp", "jq", "yq", "vim", "vi", "nano", "view", "open", "pbcopy", "wc",
     "dd", "openssl", "gpg", "xargs", "find", "curl", "wget", "python", "python3", "node", "ruby", "perl", "bash",
     "sh", "zsh", "column", "fold", "fmt", "paste", "join", "iconv", "file", "stat", "install", "ln", "readlink",
+    "get-content", "gc", "type", "select-string", "sls",  # PowerShell
 ))
 
 
@@ -969,6 +997,12 @@ def check_command(s: str, rules: Rules, depth: int = 0, count: Optional[list] = 
                         w = check_paths(word, cwd, home, rules, budget)
                         if w:
                             return w
+                if "\\" in seg:  # Windows paths as written: the POSIX unquoting above ate their separators
+                    for tok in _TOKEN_SPLIT.split(seg[:4096])[:MAX_SEGMENTS]:
+                        if windows_path(tok):
+                            w = check_paths(tok, cwd, home, rules, budget)
+                            if w:
+                                return w
             if not argv:
                 continue
             for inner in _inner_commands(argv):
