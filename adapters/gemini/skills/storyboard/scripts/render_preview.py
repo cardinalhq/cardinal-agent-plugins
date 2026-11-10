@@ -52,8 +52,8 @@ Exit codes:
      output; exit 0 does not mean every scene rendered)
   2  nothing rendered because of input, connection, auth or fetch problems
      (not connected, wrong org, stale revision, upgrade Cardinal, ...)
-  3  no usable local Chromium, unsupported platform (Windows) or Chromium could
-     not start with its sandbox on: skip the preview, tell the user, keep
+  3  no usable local Chromium, or Chromium could not start with its sandbox
+     on: skip the preview, tell the user, keep
      authoring
 
 Chromium: $CARDINAL_CHROMIUM, $PUPPETEER_EXECUTABLE_PATH or $CHROME_PATH, then
