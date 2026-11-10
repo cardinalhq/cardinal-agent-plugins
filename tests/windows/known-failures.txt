@@ -36,12 +36,6 @@ copilot@3.14 test_copilot_evidence_capture.CopilotEvidenceCaptureTests.test_sens
 copilot@3.14 test_copilot_hooks.RobustnessTests.test_registered_commands_exit_zero_when_core_is_missing  # #255: POSIX program in a test (WinError 2)
 copilot@3.14 test_copilot_hooks.RobustnessTests.test_registered_pre_tool_use_command_does_not_deny_on_crash  # #255: POSIX program in a test (WinError 2)
 copilot@3.14 test_copilot_hooks.ToolNameUnitTests.test_edited_paths  # #255: unclassified
-copilot@3.14 test_copilot_investigation.InvestigationTests.test_agent_stop_stages_and_prints_nothing  # #255: unclassified
-copilot@3.14 test_copilot_investigation.InvestigationTests.test_post_tool_use_delivers_the_inbox  # #255: unclassified
-copilot@3.14 test_copilot_investigation.InvestigationTests.test_session_start_bootstraps_and_gives_labeled_guidance  # #247: POSIX mode bits asserted
-copilot@3.14 test_copilot_investigation.InvestigationTests.test_session_start_delivers_what_was_staged  # #255: unclassified
-copilot@3.14 test_copilot_investigation.InvestigationTests.test_session_start_says_prompts_are_recorded_only_with_consent  # #255: unclassified
-copilot@3.14 test_copilot_investigation.InvestigationTests.test_subagent_tool_call_gets_nothing_and_consumes_nothing  # #255: unclassified
 copilot@3.14 test_copilot_investigation.StoryboardTests.test_session_start_names_the_session_and_discovers  # #245: test asserts the POSIX command text
 copilot@3.14 test_goldens.GoldenTests.test_hook_output_matches_committed_goldens  # #255: unclassified
 copilot@3.14 test_install_site.InstallSiteTests.test_add_lakerunner_maps_all_slots_used  # #255: unclassified
@@ -71,8 +65,6 @@ core@3.14 test_checks_install.CliTests.test_registration_probe_per_runtime  # #2
 core@3.14 test_checks_install.InstallTests.test_enabled_json_is_private  # #247: POSIX mode bits asserted
 core@3.14 test_decisions.ResolvePrTest.test_miss_is_rechecked_sooner  # #255: unclassified
 core@3.14 test_decisions.ResolvePrTest.test_resolves_and_caches  # #255: unclassified
-core@3.14 test_delegated_supervision.AgentGuidance.test_codex_delivery_counts_and_resurfaces  # #255: unclassified
-core@3.14 test_delegated_supervision.AgentGuidance.test_session_start_names_the_precedence_only_with_the_capability  # #247: os.O_NOFOLLOW
 core@3.14 test_evidence.CaptureTests.test_capture_writes_a_scrubbed_private_entry  # #247: POSIX mode bits asserted
 core@3.14 test_evidence.EntryTests.test_concurrent_writes_into_a_new_session_all_land  # #247: POSIX mode bits asserted
 core@3.14 test_evidence.EntryTests.test_loose_permissions_are_tightened  # #247: POSIX mode bits asserted
@@ -97,143 +89,21 @@ core@3.14 test_evidence_guarded.GuardedCaptureTests.test_budget_exhausted_is_a_w
 core@3.14 test_evidence_hold.SetHoldTests.test_marker_is_private_atomic_json_within_retention  # #247: POSIX mode bits asserted
 core@3.14 test_evidence_local_paths.SessionTmpAndEncodedPathTests.test_the_realpath_of_cwd_is_encoded_too  # #250: evidence gate paths
 core@3.14 test_evidence_spool_bounds.SpoolBoundsTests.test_size_cap_holds_when_one_pass_cannot_list_the_whole_spool  # #255: unclassified
-core@3.14 test_investigation_budget.BudgetSet.test_amend_replans_and_rearms  # #247: fcntl lock
-core@3.14 test_investigation_budget.BudgetSet.test_an_old_server_keeps_the_cache_and_says_so_once  # #247: fcntl lock
-core@3.14 test_investigation_budget.BudgetSet.test_errors_name_the_fix  # #247: fcntl lock
-core@3.14 test_investigation_budget.BudgetSet.test_refusals_change_nothing  # #247: fcntl lock
 core@3.14 test_investigation_budget.BudgetSet.test_set_records_the_direction_on_the_supervisors_own_investigation  # #247: fcntl lock
-core@3.14 test_investigation_budget.BudgetSet.test_uncalibrated_default_since_and_replace  # #247: fcntl lock
 core@3.14 test_investigation_budget.Cache.test_lock_link_and_shape  # #247: fcntl lock
-core@3.14 test_investigation_budget.Cache.test_show  # #247: fcntl lock
-core@3.14 test_investigation_budget.Cache.test_spool_union_through_the_listing  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_a_cache_only_direction_is_recorded_once_the_server_can  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_a_definite_refusal_never_locks_the_page  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_a_lost_cache_is_rebuilt_from_the_records  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_a_lost_cache_that_cannot_be_read_back_refuses  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_a_new_session_gets_the_direction_first_and_a_verdict_its_firing  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_a_retroactive_mark_must_cite_a_worker_event  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_a_retry_resends_the_exact_body  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_amend_past_the_live_cap_is_refused  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_amend_puts_new_milestones_in_dropped_places_and_refuses_past_the_cap  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_an_ambiguous_failure_keeps_the_body  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_bounds  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_set_retry_is_the_same_direction_when_the_head_moved  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_since_seq_behind_the_cursor  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_stale_batch_and_busy_cursor_name_the_fix  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_storyboards_unavailable_is_the_old_server_path  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_the_retry_hash_leaves_out_session_and_client  # #247: fcntl lock
-core@3.14 test_investigation_budget.PageSizeSweep.test_wingbeat_at_every_page_size  # #247: fcntl lock
-core@3.14 test_investigation_budget.Passes.test_estimator_and_stepback_copies  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_budget.Passes.test_no_measured_pace  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_budget.Review.test_a_cardinal_without_the_capability_is_not_called  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_a_crash_after_the_write_replays_without_recharging  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_a_failed_write_leaves_the_cursor_and_the_retry_is_idempotent  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_a_fire  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_a_page_without_worker_events_needs_no_tags  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_a_pass_with_no_firing  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_old_server_commits_and_says_once  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_the_event_limit_keeps_the_cache_and_commits  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_the_review_key_and_subject_grant  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_untagged_refuses_and_leaves_the_cursor  # #247: fcntl lock
-core@3.14 test_investigation_budget.Review.test_without_a_direction_reviewed_is_unchanged  # #247: fcntl lock
-core@3.14 test_investigation_budget.VerdictsAndClose.test_calibrate_counts_only_misses_under_current_thresholds  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_budget.VerdictsAndClose.test_calibrate_moves_T  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_budget.VerdictsAndClose.test_verdict_outcome_close_and_calibrate  # #247: fcntl lock
-core@3.14 test_investigation_budget.WingbeatThroughReviewed.test_fires_like_the_engine  # #247: fcntl lock
-core@3.14 test_investigation_consumer.ConsumerTests.test_bad_watermark_does_not_store_pending  # #247: fcntl lock
-core@3.14 test_investigation_consumer.ConsumerTests.test_empty_page_does_not_pin_polling_and_hidden_rows_can_commit  # #247: fcntl lock
-core@3.14 test_investigation_consumer.ConsumerTests.test_error_does_not_advance_and_other_grant_cannot_reuse_cursor  # #247: fcntl lock
 core@3.14 test_investigation_consumer.ConsumerTests.test_pending_replayed_after_restart_then_explicitly_committed  # #247: fcntl lock
 core@3.14 test_investigation_consumer.ConsumerTests.test_private_credentials_reject_symlink_public_mode_and_missing_token  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_consumer.ConsumerTests.test_timeout_after_acceptance_retries_same_key_and_no_author_session  # #247: fcntl lock
 core@3.14 test_investigation_events.BindingStore.test_bind_writes_a_private_file_and_resume_keeps_the_cursor  # #247: POSIX mode bits asserted
-core@3.14 test_investigation_gate.CLI.test_all_five_commands_and_worker_explicit_review  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_ack_scan_cap_persists_proofs_and_resumes_fixed_head  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_all_registered_control_types_are_applicable  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_another_session_or_principal_ack_does_not_count  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_chunk_lossless_unicode_bound_attribution_and_explicit_coverage  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_fault_after_worker_commit_never_replays_unhandled_work  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_fault_before_review_commit_leaves_pending_and_proofs_replayable  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_faults_around_scan_progress_preserve_old_head  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_faults_before_and_after_pending_and_delivery_persistence  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_hidden_tail_self_wrong_peer_and_route_skip_deterministically  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_incomplete_ack_scan_and_failed_response_marker_do_not_advance  # #247: private-file check
 core@3.14 test_investigation_gate.Engine.test_missing_capability_errors_identity_and_policy_epochs  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_opt_in_quiet_freshness_and_disable_preserves  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_owner_authority_kept_and_invalid_envelope_cannot_skip  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_owner_type_from_other_person_stays_advisory  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_parallel_checks_have_no_shared_permit  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_partial_snapshot_resumes_old_bound_and_never_allows  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_peer_after_snapshot_is_found_after_review  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_pending_exact_replay_and_delivery_does_not_advance  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_response_returning_after_deadline_never_allows  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_server_committed_closed_challenge_ack_is_sufficient  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_stdout_stays_quiet_for_malformed_coordination_help  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_timeout_cap_deadline_and_lock_contention_defer  # #247: private-file check
-core@3.14 test_investigation_gate.Engine.test_viewer_change_and_private_state_tampering_never_clear  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_all_semantic_revisions_and_retractions_are_selected  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_cli_cannot_substitute_empty_response_cache  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_crash_after_existing_guard_commit_reconciles_exact_intent  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_different_budget_path_requires_epoch  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_required_post_timeout_keeps_batch_and_retries_same_body  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_required_tags_refuse_and_callback_crash_retains_pending  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_requires_guard_and_unresolved_outbox_blocks  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_review_intent_faults_never_run_guard_before_persistence  # #247: private-file check
-core@3.14 test_investigation_gate.Supervisor.test_unguarded_cursor_commit_is_detected  # #247: private-file check
-core@3.14 test_investigation_gate_runtime.Runtime.test_delivery_notifies_normally_except_during_explicit_batch_handling  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_gate_runtime.Runtime.test_incoming_wait_interrupts_on_assignment  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_gate_runtime.Runtime.test_legacy_cursor_never_suppresses_explicit_catchup  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_gate_runtime.Runtime.test_missing_intent_capability_and_missing_active_state_never_clear  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_gate_runtime.Runtime.test_new_feedback_is_bounded_and_requires_explicit_review  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_gate_runtime.Runtime.test_new_request_uses_purpose_without_action_categories  # #255: unclassified
-core@3.14 test_investigation_gate_runtime.Runtime.test_route_lock_contention_does_not_drain_feedback  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_gate_runtime.Runtime.test_sync_from_any_process_has_no_mode_probes_or_action_policy  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_gate_runtime.Runtime.test_timeout_retains_requirement_and_restarts_without_request_id  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_gate_runtime.Runtime.test_wait_interrupts_on_feedback_and_never_treats_delivery_as_acceptance  # #247: os.O_NOFOLLOW
 core@3.14 test_investigation_lifecycle.BootstrapTests.test_context_survives_failed_bootstrap_and_preserves_the_first_repo_on_resume  # #247: POSIX mode bits asserted
-core@3.14 test_investigation_lifecycle.PollerTests.test_backs_off_silently_after_a_failure  # #248: process handling
-core@3.14 test_investigation_lifecycle.PollerTests.test_fresh_needs_a_recent_poll_that_found_nothing  # #248: process handling
-core@3.14 test_investigation_lifecycle.PollerTests.test_once_retries_a_due_bootstrap_then_polls  # #248: process handling
-core@3.14 test_investigation_lifecycle.PruneTests.test_prunes_only_long_idle_sessions_once_a_day  # #255: unclassified
-core@3.14 test_investigation_naming.Naming.test_missed_start_guidance_is_recovered_at_tool_boundary_once  # #255: unclassified
-core@3.14 test_investigation_naming.Naming.test_next_prompt_retries_even_when_previous_stop_was_missed  # #247: fcntl lock
-core@3.14 test_investigation_naming.Naming.test_nonblocking_runtime_reminds_at_next_prompt_and_stated_status_silences_it  # #247: fcntl lock
-core@3.14 test_investigation_naming.Naming.test_stop_revisits_title_once_without_an_infinite_stop_loop  # #247: fcntl lock
-core@3.14 test_investigation_requests.AutomaticConsumers.test_explicit_new_command_cannot_discard_journal_budget  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_requests.AutomaticConsumers.test_missing_indexed_route_and_orphan_activation_deny  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_requests.AutomaticConsumers.test_same_path_successor_replays_and_retains_pinned_budget  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_requests.AutomaticConsumers.test_same_token_copy_does_not_retire_a_live_pinned_consumer  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_requests.AutomaticConsumers.test_unrelated_replacement_never_releases_old_consumer  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_requests.Requests.test_arbitrary_intent_survives_restart_and_unrelated_work_stays_available  # #247: private-file check
-core@3.14 test_investigation_requests.Requests.test_complete_needs_exact_acceptance_after_feedback_review  # #247: private-file check
-core@3.14 test_investigation_requests.Requests.test_fresh_read_failure_retains_requirement  # #247: private-file check
-core@3.14 test_investigation_requests.Requests.test_identical_later_request_is_new_but_uncertain_retry_keeps_identity  # #247: private-file check
-core@3.14 test_investigation_requests.Requests.test_legacy_request_selected_explicitly_is_durable_without_action_matching  # #247: private-file check
-core@3.14 test_investigation_requests.Requests.test_missing_or_foreign_requirement_never_clears_intent  # #247: private-file check
-core@3.14 test_investigation_supervision.CLIForms.test_member_outbox_identity_none_and_refused_key_combination  # #247: fcntl lock
-core@3.14 test_investigation_supervision.CLIForms.test_post_failed_outbox_retry_hint  # #247: fcntl lock
 core@3.14 test_investigation_supervision.FailureDetection.test_marker_exit_three_throttle_clear_and_never_usage  # #247: POSIX mode bits asserted
-core@3.14 test_investigation_supervision.FollowReader.test_cursor_requires_grant_partial_display_never_skips  # #247: fcntl lock
-core@3.14 test_investigation_supervision.FollowReader.test_watch_max_1_returns_with_the_whole_first_page_from_a_server  # #247: fcntl lock
-core@3.14 test_investigation_supervision.FollowReader.test_watch_refuses_another_investigations_cursor  # #247: fcntl lock
-core@3.14 test_investigation_supervision.FollowReader.test_watch_signals_a_pending_page_until_it_is_committed  # #247: fcntl lock
-core@3.14 test_investigation_supervision.FollowReader.test_watch_starts_at_committed_review_and_never_writes  # #247: fcntl lock
-core@3.14 test_investigation_supervision.FollowReader.test_watch_without_a_cursor_file_starts_at_0_and_creates_nothing  # #247: os.O_NOFOLLOW
 core@3.14 test_investigation_supervision.GrantReservation.test_definite_failures_delete_and_allow_retry_ambiguous_preserves  # #247: POSIX mode bits asserted
-core@3.14 test_investigation_supervision.GrantReservation.test_grant_file_contains_token_but_stdout_does_not  # #247: os.O_NOFOLLOW
+core@3.14 test_investigation_supervision.GrantReservation.test_no_output_file_export_and_failure_notice  # #247: test asserts the POSIX command text
+core@3.14 test_investigation_text.GrantPrintsTheWatchLine.test_one_watch_line_on_stderr_stdout_unchanged  # #247: test asserts the POSIX command text
 core@3.14 test_investigation_text.GrantPrintsTheWatchLine.test_with_out_the_watch_line_names_the_credential_file  # #255: unclassified
-core@3.14 test_investigation_text.OtherRuntimes.test_describe_is_session_text_with_the_wirings_command  # #247: os.O_NOFOLLOW
-core@3.14 test_investigation_text.OtherRuntimes.test_describe_says_prompts_are_recorded_only_when_they_are  # #247: os.O_NOFOLLOW
 core@3.14 test_investigation_text.WatchGuidance.test_the_watch_command  # #255: unclassified
-core@3.14 test_investigation_turn.AgentWrappers.test_codex_turn_end_blocks_with_the_adapters_command  # #255: unclassified
-core@3.14 test_investigation_turn.AgentWrappers.test_deliver_for_a_subagent_does_nothing  # #255: unclassified
-core@3.14 test_investigation_turn.AgentWrappers.test_gemini_turn_end_stages_and_prompt_delivers_with_the_adapters_command  # #255: unclassified
-core@3.14 test_investigation_turn.AtTool.test_another_org_gets_nothing_none_is_not_checked  # #255: unclassified
-core@3.14 test_investigation_turn.AtTool.test_staged_first_then_the_inbox  # #255: unclassified
 core@3.14 test_investigation_turn.OwnerInputContract.test_cursor_capture_requires_consent  # #247: POSIX mode bits asserted
-core@3.14 test_investigation_turn.TurnEndBlock.test_claude_and_codex_block_with_the_inbox  # #255: unclassified
 core@3.14 test_investigation_turn.TurnEndBlock.test_gemini_cursor_and_copilot_never_block_they_stage_for_the_next_boundary  # #247: POSIX mode bits asserted
-core@3.14 test_investigation_turn.TurnEndBlock.test_no_deliverable_of_any_kind_ever_blocks_gemini_cursor_or_copilot  # #255: unclassified
 core@3.14 test_owner_input.NeverQueued.test_400_drops_that_prompt_only  # #247: POSIX mode bits asserted
 core@3.14 test_owner_input.NeverQueued.test_401_403_drop_and_turn_off  # #247: POSIX mode bits asserted
 core@3.14 test_owner_input.NeverQueued.test_an_older_server_without_the_route  # #247: POSIX mode bits asserted
@@ -242,10 +112,8 @@ core@3.14 test_owner_input.NeverQueued.test_owner_input_disabled  # #247: POSIX 
 core@3.14 test_owner_input.NeverQueued.test_the_investigation_cap_drops_never_queues  # #247: POSIX mode bits asserted
 core@3.14 test_owner_input.Transient.test_5xx_queues_0600_and_the_next_prompt_drains_in_order  # #247: POSIX mode bits asserted
 core@3.14 test_owner_input.Transient.test_a_trickling_server_is_cut_off_at_the_budget  # #247: POSIX mode bits asserted
-core@3.14 test_owner_input.Transient.test_never_an_unlocked_outbox_write  # #255: unclassified
 core@3.14 test_owner_relay.Deferred.test_a_typed_approve_is_confirmed_then_sent_and_shown_once  # #247: POSIX mode bits asserted
 core@3.14 test_owner_relay.Deferred.test_scheduled_peer_and_unconfirmable_prompts_are_never_sent  # #247: POSIX mode bits asserted
-core@3.14 test_owner_relay.ReviewFixes.test_a_locked_store_counts_nothing_as_fresh  # #255: unclassified
 core@3.14 test_owner_relay.Store.test_file_is_private_ids_are_dp_hex_and_entries_hash_their_text  # #247: POSIX mode bits asserted
 core@3.14 test_owner_relay.Targets.test_supervising_registers_lists_renames_and_removes  # #247: POSIX mode bits asserted
 core@3.14 test_storyboard_agent.SessionLineTests.test_auto_context_wording  # #245: test asserts the POSIX command text
@@ -254,27 +122,11 @@ core@3.14 test_storyboard_authoring.PreviewTests.test_the_card_renders_cover_and
 core@3.14 test_storyboard_authoring.TokenTests.test_a_successful_mcp_checkpoint_holds_the_sessions_evidence  # #247: POSIX mode bits asserted
 core@3.14 test_storyboard_files.StoryboardFilesTests.test_file_mode_and_directory_mode  # #247: POSIX mode bits asserted
 core@3.14 test_storyboard_session_visualization.SessionVisualizationTests.test_codex_preview_renders_reveal_steps_under_its_own_home  # #251: local preview
-core@3.14 test_supervision_friction.Friction.test_generated_outbox_timeout_retry_reuses_key_without_numbering  # #247: private-file check
+core@3.14 test_supervision_friction.Friction.test_generated_directories_reject_public_mode_and_symlinks  # #247: POSIX mode bits asserted
 core@3.14 test_supervision_friction.Friction.test_immutable_snapshot_replay_and_explicit_review  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_new_cli_commands_work_in_legacy_and_shared_adapters  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_renewal_discards_pending_without_committing_it  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_renewal_failure_leaves_state_byte_equal  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_review_holds_cursor_during_budget_application  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_self_only_advances_without_review_and_mixed_page_stays_pending  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_self_skip_is_bounded  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_self_skip_rejects_gaps_trailing_hidden_owner_and_unknown  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_signal_watch_never_mutates_cursor_or_emits_event_text  # #247: fcntl lock
 core@3.14 test_supervision_friction.Friction.test_snapshot_rejects_symlink_and_wrong_identity  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_tampered_snapshot_fails_before_budget_writes  # #247: fcntl lock
-core@3.14 test_supervision_verdicts.ChallengesCli.test_a_revised_verdict_is_marked  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.ChallengesCli.test_dirty_snapshots_mismatch_or_are_unbound  # #247: os.O_NOFOLLOW
 core@3.14 test_supervision_verdicts.ChallengesCli.test_heads_are_checked_only_on_trusted_hosts  # #255: POSIX program in a test (WinError 2)
-core@3.14 test_supervision_verdicts.ChallengesCli.test_next_action_matched  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.ChallengesCli.test_next_action_mismatched  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.ChallengesCli.test_next_action_unbound  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.ChallengesCli.test_next_action_unverifiable  # #247: os.O_NOFOLLOW
 core@3.14 test_supervision_verdicts.ChallengesCli.test_rows_with_next_actions_and_heads  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.ChallengesCli.test_without_gh_heads_are_unchecked  # #247: os.O_NOFOLLOW
 core@3.14 test_supervision_verdicts.CheckpointRevision.test_a_definite_refusal_drops_the_outbox_and_auto_outside_a_worktree_is_usage  # #255: unclassified
 core@3.14 test_supervision_verdicts.CheckpointRevision.test_a_dirty_submodule_leaves_the_snapshot_unbound  # #255: POSIX program in a test (WinError 2)
 core@3.14 test_supervision_verdicts.CheckpointRevision.test_a_failing_filter_leaves_the_snapshot_unbound_and_the_checkpoint_succeeds  # #255: POSIX program in a test (WinError 2)
@@ -285,23 +137,6 @@ core@3.14 test_supervision_verdicts.CheckpointRevision.test_resolve_records_what
 core@3.14 test_supervision_verdicts.CheckpointRevision.test_the_snapshot_is_seeded_from_the_real_index  # #255: POSIX program in a test (WinError 2)
 core@3.14 test_supervision_verdicts.CheckpointRevision.test_two_dirty_snapshots_at_the_same_head_have_different_trees  # #255: POSIX program in a test (WinError 2)
 core@3.14 test_supervision_verdicts.CheckpointRevision.test_untracked_files_count_whatever_the_config_says  # #255: POSIX program in a test (WinError 2)
-core@3.14 test_supervision_verdicts.Succession.test_an_uncertain_answer_keeps_the_reservation_and_a_retry_completes  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.Succession.test_an_unreadable_old_grant_mints_nothing  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.Succession.test_gated_on_the_capability_and_on_resolved_outboxes  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.Succession.test_predecessor_succeeded_is_never_final  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.Succession.test_refusals  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.Succession.test_succession_mints_renews_the_cursor_then_deletes_the_old_file  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_a_correction_above_the_review_watermark_is_refused  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_a_cursor_of_another_grant_is_refused  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_a_retried_supersede_already_applied_is_success  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_a_verdict_is_sent_from_an_outbox_written_before_the_first_post  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_an_identical_stored_verdict_is_success_and_names_its_grant  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_an_older_server_says_verdicts_are_unsupported  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_correction_is_required_for_a_challenge_and_refused_on_a_claim  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_refusals_are_said_in_words  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_scope_never_wider_than_its_subject  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_supersedes_revises_your_own_verdict_and_a_409_names_the_flag  # #247: os.O_NOFOLLOW
-core@3.14 test_supervision_verdicts.VerdictCli.test_the_revision_cap_counts_per_chain  # #247: os.O_NOFOLLOW
 core@3.14 test_supervision_verdicts.VerdictRevision.test_merge_readiness_refuses_a_dirty_tree_before_sending  # #247: os.O_NOFOLLOW
 core@3.14 test_supervision_verdicts.VerdictRevision.test_revision_auto_binds_the_supervisors_dirty_snapshot  # #247: os.O_NOFOLLOW
 core@3.14 test_tls.TlsTest.test_pin_store_layout_and_bundle  # #247: POSIX mode bits asserted
@@ -311,53 +146,6 @@ core@3.9 test_checks_install.CliTests.test_registration_probe_per_runtime  # #24
 core@3.9 test_checks_install.InstallTests.test_enabled_json_is_private  # #247: POSIX mode bits asserted
 core@3.9 test_decisions.ResolvePrTest.test_miss_is_rechecked_sooner  # #255: unclassified
 core@3.9 test_decisions.ResolvePrTest.test_resolves_and_caches  # #255: unclassified
-core@3.9 test_delegated_supervision.AckCli.test_a_directive_takes_accepted_or_conflicts_with_an_owner_seq  # #247: os.fchmod
-core@3.9 test_delegated_supervision.AckCli.test_accepting_starts_resurfacing_at_once  # #247: os.fchmod
-core@3.9 test_delegated_supervision.AckCli.test_an_older_cardinal_decides_itself  # #247: os.fchmod
-core@3.9 test_delegated_supervision.AckCli.test_noted_on_a_challenge_is_refused_before_anything_is_sent  # #247: os.fchmod
-core@3.9 test_delegated_supervision.AckCli.test_server_refusals_are_said_in_words  # #247: os.fchmod
-core@3.9 test_delegated_supervision.AgentGuidance.test_codex_delivery_counts_and_resurfaces  # #247: os.fchmod
-core@3.9 test_delegated_supervision.AgentGuidance.test_session_start_names_the_precedence_only_with_the_capability  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Deliverable.test_a_ruling_reaches_only_the_session_that_got_its_challenge  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Deliverable.test_an_acknowledged_directive_is_not_delivered_again  # #247: os.fchmod
-core@3.9 test_delegated_supervision.GrantAndEvents.test_events_shows_each_challenges_status  # #247: os.fchmod
-core@3.9 test_delegated_supervision.GrantAndEvents.test_supervise_implies_read_and_advise  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Render.test_a_challenge_asks_for_a_position_never_noted  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Render.test_a_periodic_reminder_is_a_compact_pointer_and_stop_keeps_the_full_form  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Render.test_a_withdrawn_ruling_is_informational  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Render.test_an_older_cardinal_keeps_the_old_challenge_wording  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Render.test_an_upheld_ruling_is_a_directive_with_the_precedence  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Render.test_forged_directive_text_stays_one_json_string  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Render.test_only_a_server_stamped_grantee_ruling_is_a_directive  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Resurfacing.test_a_boundary_that_delivers_something_only_counts  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Resurfacing.test_a_joined_session_tracks_nothing  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Resurfacing.test_an_accepted_challenge_comes_back_every_five_boundaries_until_a_checkpoint_cites_it  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Resurfacing.test_at_most_one_block_per_boundary_newest_first  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Resurfacing.test_bindings_without_supervision_are_not_rewritten_with_it  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Resurfacing.test_directive_then_accepted_then_addressed  # #247: os.fchmod
-core@3.9 test_delegated_supervision.Resurfacing.test_the_owner_overrules_and_nothing_is_owed  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_a_later_position_reopens_a_compacted_directive_addressed  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_a_ruling_for_another_session_is_never_tracked  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_an_accepted_challenge_can_be_upheld_and_the_text_says_so  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_an_addressed_challenge_evicted_by_the_cap_can_still_be_upheld  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_an_older_cardinal_answering_401_is_told_apart_from_a_bad_grant  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_an_older_cardinal_never_resurfaces  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_an_owner_web_grant_is_not_revocable_with_the_key  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_closed_targets_take_any_disposition  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_compaction_never_loses_a_live_challenge  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_compaction_order  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_conflicts_cite_an_owner_decision_never_owner_input  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_final_challenges_go_first_and_leave_no_stub  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_resurfacing_backs_off_after_ten_showings  # #247: os.fchmod
-core@3.9 test_delegated_supervision.ReviewFixes.test_ten_addressed_challenges_need_no_compaction  # #247: os.fchmod
-core@3.9 test_delegated_supervision.RuleCli.test_rule_needs_a_grant_token  # #247: os.fchmod
-core@3.9 test_delegated_supervision.RuleCli.test_rule_posts_issue_ruling_with_the_grant  # #247: os.fchmod
-core@3.9 test_delegated_supervision.RuleCli.test_rule_refusals  # #247: os.fchmod
-core@3.9 test_delegated_supervision.RuleCli.test_ruling_payload_checks  # #247: os.fchmod
-core@3.9 test_delegated_supervision.StopBlock.test_a_directive_delivered_at_stop_has_had_its_block  # #247: os.fchmod
-core@3.9 test_delegated_supervision.StopBlock.test_an_accepted_challenge_never_blocks_stop  # #247: os.fchmod
-core@3.9 test_delegated_supervision.StopBlock.test_an_open_directive_blocks_stop_once  # #247: os.fchmod
-core@3.9 test_delegated_supervision.StopBlock.test_each_directive_blocks_once_newest_first  # #247: os.fchmod
 core@3.9 test_evidence.CaptureTests.test_capture_writes_a_scrubbed_private_entry  # #247: POSIX mode bits asserted
 core@3.9 test_evidence.EntryTests.test_concurrent_writes_into_a_new_session_all_land  # #247: POSIX mode bits asserted
 core@3.9 test_evidence.EntryTests.test_loose_permissions_are_tightened  # #247: POSIX mode bits asserted
@@ -382,475 +170,54 @@ core@3.9 test_evidence_guarded.GuardedCaptureTests.test_budget_exhausted_is_a_wi
 core@3.9 test_evidence_hold.SetHoldTests.test_marker_is_private_atomic_json_within_retention  # #247: POSIX mode bits asserted
 core@3.9 test_evidence_local_paths.SessionTmpAndEncodedPathTests.test_the_realpath_of_cwd_is_encoded_too  # #250: evidence gate paths
 core@3.9 test_evidence_spool_bounds.SpoolBoundsTests.test_size_cap_holds_when_one_pass_cannot_list_the_whole_spool  # #255: unclassified
-core@3.9 test_investigation_budget.BudgetSet.test_amend_replans_and_rearms  # #247: os.fchmod
-core@3.9 test_investigation_budget.BudgetSet.test_an_old_server_keeps_the_cache_and_says_so_once  # #247: os.fchmod
-core@3.9 test_investigation_budget.BudgetSet.test_errors_name_the_fix  # #247: os.fchmod
-core@3.9 test_investigation_budget.BudgetSet.test_refusals_change_nothing  # #247: os.fchmod
 core@3.9 test_investigation_budget.BudgetSet.test_set_records_the_direction_on_the_supervisors_own_investigation  # #247: os.fchmod
-core@3.9 test_investigation_budget.BudgetSet.test_uncalibrated_default_since_and_replace  # #247: os.fchmod
 core@3.9 test_investigation_budget.Cache.test_lock_link_and_shape  # #247: os.fchmod
-core@3.9 test_investigation_budget.Cache.test_show  # #247: os.fchmod
-core@3.9 test_investigation_budget.Cache.test_spool_union_through_the_listing  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_a_cache_only_direction_is_recorded_once_the_server_can  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_a_definite_refusal_never_locks_the_page  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_a_lost_cache_is_rebuilt_from_the_records  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_a_lost_cache_that_cannot_be_read_back_refuses  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_a_new_session_gets_the_direction_first_and_a_verdict_its_firing  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_a_retroactive_mark_must_cite_a_worker_event  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_a_retry_resends_the_exact_body  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_amend_past_the_live_cap_is_refused  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_amend_puts_new_milestones_in_dropped_places_and_refuses_past_the_cap  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_an_ambiguous_failure_keeps_the_body  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_bounds  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_set_retry_is_the_same_direction_when_the_head_moved  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_since_seq_behind_the_cursor  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_stale_batch_and_busy_cursor_name_the_fix  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_storyboards_unavailable_is_the_old_server_path  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_the_read_route_takes_the_supervision_class  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_the_retry_hash_leaves_out_session_and_client  # #247: os.fchmod
-core@3.9 test_investigation_budget.PageSizeSweep.test_engine_sweep_both_fixtures  # #247: os.fchmod
-core@3.9 test_investigation_budget.PageSizeSweep.test_wingbeat_at_every_page_size  # #247: os.fchmod
-core@3.9 test_investigation_budget.Passes.test_estimator_and_stepback_copies  # #247: os.fchmod
-core@3.9 test_investigation_budget.Passes.test_no_measured_pace  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_a_cardinal_without_the_capability_is_not_called  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_a_crash_after_the_write_replays_without_recharging  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_a_failed_write_leaves_the_cursor_and_the_retry_is_idempotent  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_a_fire  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_a_page_without_worker_events_needs_no_tags  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_a_pass_with_no_firing  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_old_server_commits_and_says_once  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_the_event_limit_keeps_the_cache_and_commits  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_the_review_key_and_subject_grant  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_untagged_refuses_and_leaves_the_cursor  # #247: os.fchmod
-core@3.9 test_investigation_budget.Review.test_without_a_direction_reviewed_is_unchanged  # #247: os.fchmod
-core@3.9 test_investigation_budget.VerdictsAndClose.test_calibrate_counts_only_misses_under_current_thresholds  # #247: os.fchmod
-core@3.9 test_investigation_budget.VerdictsAndClose.test_calibrate_moves_T  # #247: os.fchmod
-core@3.9 test_investigation_budget.VerdictsAndClose.test_verdict_outcome_close_and_calibrate  # #247: os.fchmod
-core@3.9 test_investigation_budget.WingbeatThroughReviewed.test_fires_like_the_engine  # #247: os.fchmod
-core@3.9 test_investigation_checkpoint.Compatibility.test_a_mixed_page_delivers_only_the_challenge_and_moves_past_everything  # #247: os.fchmod
-core@3.9 test_investigation_checkpoint.Compatibility.test_an_independent_reader_sees_both_classes_in_order  # #247: os.fchmod
-core@3.9 test_investigation_checkpoint.Compatibility.test_deliverable_ignores_every_semantic_type  # #247: os.fchmod
-core@3.9 test_investigation_checkpoint.Compatibility.test_only_semantic_events_poll_to_nothing_and_advance_the_cursor  # #247: os.fchmod
-core@3.9 test_investigation_checkpoint.Compatibility.test_the_inbox_delivers_the_challenge_between_semantic_events  # #247: os.fchmod
-core@3.9 test_investigation_consumer.ConsumerTests.test_bad_watermark_does_not_store_pending  # #247: fcntl lock
-core@3.9 test_investigation_consumer.ConsumerTests.test_empty_page_does_not_pin_polling_and_hidden_rows_can_commit  # #247: fcntl lock
-core@3.9 test_investigation_consumer.ConsumerTests.test_error_does_not_advance_and_other_grant_cannot_reuse_cursor  # #247: fcntl lock
 core@3.9 test_investigation_consumer.ConsumerTests.test_pending_replayed_after_restart_then_explicitly_committed  # #247: fcntl lock
 core@3.9 test_investigation_consumer.ConsumerTests.test_private_credentials_reject_symlink_public_mode_and_missing_token  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_consumer.ConsumerTests.test_timeout_after_acceptance_retries_same_key_and_no_author_session  # #247: fcntl lock
-core@3.9 test_investigation_events.BindingStore.test_a_malformed_binding_binds_nothing  # #247: os.fchmod
 core@3.9 test_investigation_events.BindingStore.test_bind_writes_a_private_file_and_resume_keeps_the_cursor  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_a_fresh_binding_skips_acknowledged_and_own_events  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_a_page_too_large_to_read_halves_the_next_page_until_it_delivers  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_a_spoofed_producer_session_is_still_delivered  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_addressed_to_another_session_is_not_delivered_but_consumed  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_an_old_server_emits_nothing_and_backs_off  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_an_unknown_class_is_never_delivered_and_the_cursor_moves_past_it  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_an_unknown_class_row_is_never_delivered_and_the_cursor_moves_past_it  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_class_filter_is_sent_and_checked  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_delivers_once_and_resume_does_not_redeliver  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_emit_failure_keeps_the_cursor  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_empty_inbox_emits_nothing  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_malformed_answers_keep_the_cursor  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_network_failure_emits_nothing_and_keeps_the_cursor  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_paginates_to_the_head  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_permanent_refusals_back_off_for_ten_minutes  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_stop_blocks_at_most_three_consecutive_times  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_the_cursor_moves_past_rows_the_server_scanned_but_does_not_show  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_tool_boundaries_are_throttled  # #247: os.fchmod
-core@3.9 test_investigation_events.Check.test_unbound_or_unconnected_does_nothing  # #247: os.fchmod
-core@3.9 test_investigation_gate.CLI.test_all_five_commands_and_worker_explicit_review  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_ack_scan_cap_persists_proofs_and_resumes_fixed_head  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_all_registered_control_types_are_applicable  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_another_session_or_principal_ack_does_not_count  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_chunk_lossless_unicode_bound_attribution_and_explicit_coverage  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_fault_after_worker_commit_never_replays_unhandled_work  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_fault_before_review_commit_leaves_pending_and_proofs_replayable  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_faults_around_scan_progress_preserve_old_head  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_faults_before_and_after_pending_and_delivery_persistence  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_hidden_tail_self_wrong_peer_and_route_skip_deterministically  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_incomplete_ack_scan_and_failed_response_marker_do_not_advance  # #247: private-file check
 core@3.9 test_investigation_gate.Engine.test_missing_capability_errors_identity_and_policy_epochs  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_opt_in_quiet_freshness_and_disable_preserves  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_owner_authority_kept_and_invalid_envelope_cannot_skip  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_owner_type_from_other_person_stays_advisory  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_parallel_checks_have_no_shared_permit  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_partial_snapshot_resumes_old_bound_and_never_allows  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_peer_after_snapshot_is_found_after_review  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_pending_exact_replay_and_delivery_does_not_advance  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_response_returning_after_deadline_never_allows  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_server_committed_closed_challenge_ack_is_sufficient  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_stdout_stays_quiet_for_malformed_coordination_help  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_timeout_cap_deadline_and_lock_contention_defer  # #247: private-file check
-core@3.9 test_investigation_gate.Engine.test_viewer_change_and_private_state_tampering_never_clear  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_all_semantic_revisions_and_retractions_are_selected  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_cli_cannot_substitute_empty_response_cache  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_crash_after_existing_guard_commit_reconciles_exact_intent  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_different_budget_path_requires_epoch  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_required_post_timeout_keeps_batch_and_retries_same_body  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_required_tags_refuse_and_callback_crash_retains_pending  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_requires_guard_and_unresolved_outbox_blocks  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_review_intent_faults_never_run_guard_before_persistence  # #247: private-file check
-core@3.9 test_investigation_gate.Supervisor.test_unguarded_cursor_commit_is_detected  # #247: private-file check
-core@3.9 test_investigation_gate_runtime.Runtime.test_delivery_notifies_normally_except_during_explicit_batch_handling  # #247: os.fchmod
-core@3.9 test_investigation_gate_runtime.Runtime.test_incoming_wait_interrupts_on_assignment  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_gate_runtime.Runtime.test_legacy_cursor_never_suppresses_explicit_catchup  # #247: os.fchmod
-core@3.9 test_investigation_gate_runtime.Runtime.test_missing_intent_capability_and_missing_active_state_never_clear  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_gate_runtime.Runtime.test_new_feedback_is_bounded_and_requires_explicit_review  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_gate_runtime.Runtime.test_new_request_uses_purpose_without_action_categories  # #255: unclassified
-core@3.9 test_investigation_gate_runtime.Runtime.test_route_lock_contention_does_not_drain_feedback  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_gate_runtime.Runtime.test_sync_from_any_process_has_no_mode_probes_or_action_policy  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_gate_runtime.Runtime.test_timeout_retains_requirement_and_restarts_without_request_id  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_gate_runtime.Runtime.test_wait_interrupts_on_feedback_and_never_treats_delivery_as_acceptance  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_lifecycle.AuthorshipTests.test_a_join_without_an_answer_counts_as_not_the_author  # #255: unclassified
-core@3.9 test_investigation_lifecycle.AuthorshipTests.test_joining_someone_elses_investigation_is_not_authoring_it  # #255: unclassified
-core@3.9 test_investigation_lifecycle.AuthorshipTests.test_own_session_investigation_is_authored  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_a_refresh_that_fails_keeps_the_binding_or_turns_capabilities_off  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_a_reused_binding_is_refreshed_once_per_start_off_the_session_start_path  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_another_org_is_not_reused  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_context_optout_clears_snapshot_and_context_does_not_cross_orgs  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_context_retries_only_an_older_servers_exact_unknown_key_refusal  # #255: unclassified
 core@3.9 test_investigation_lifecycle.BootstrapTests.test_context_survives_failed_bootstrap_and_preserves_the_first_repo_on_resume  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_creates_once_then_reuses_without_a_request  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_failures_back_off_and_record_a_fixed_reason  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_older_session_acquires_context_on_resume_and_refreshes_without_creating_again  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_resume_keeps_the_cursor  # #255: unclassified
-core@3.9 test_investigation_lifecycle.BootstrapTests.test_the_binding_keeps_what_the_server_advertises_and_an_older_server_advertises_nothing  # #255: unclassified
-core@3.9 test_investigation_lifecycle.InboxTests.test_a_failed_emit_keeps_the_cursor  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.InboxTests.test_a_failed_read_raises_and_halves_the_page  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.InboxTests.test_a_full_inbox_stops_fetching  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.InboxTests.test_a_stale_inbox_is_dropped  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.InboxTests.test_an_ack_fetched_later_withdraws_the_event  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.InboxTests.test_deliverable_events_wait_in_the_inbox_until_rendered  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.InboxTests.test_events_for_another_session_or_own_are_not_deliverable  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.InboxTests.test_nothing_deliverable_advances_the_cursor_without_an_inbox  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.InboxTests.test_stop_blocks_at_most_three_times_from_the_inbox  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.PollerTests.test_backs_off_silently_after_a_failure  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.PollerTests.test_disconnected_means_no_requests  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.PollerTests.test_exits_when_the_anchor_is_gone_and_after_its_lifetime  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.PollerTests.test_fresh_needs_a_recent_poll_that_found_nothing  # #247: os.fchmod
-core@3.9 test_investigation_lifecycle.PollerTests.test_once_retries_a_due_bootstrap_then_polls  # #248: process handling
-core@3.9 test_investigation_lifecycle.PollerTests.test_refreshes_capabilities_once_even_while_idle_and_backs_off_on_failure  # #248: process handling
-core@3.9 test_investigation_lifecycle.PruneTests.test_prunes_only_long_idle_sessions_once_a_day  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_explicit_other_investigation_does_not_mark_this_session_named  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_failed_request_keeps_title_pending_for_retry  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_missed_start_guidance_is_recovered_at_tool_boundary_once  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_next_prompt_retries_even_when_previous_stop_was_missed  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_nonblocking_runtime_reminds_at_next_prompt_and_stated_status_silences_it  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_server_refresh_recovers_status_after_external_naming  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_stop_revisits_title_once_without_an_infinite_stop_loop  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_success_updates_environment_session_before_json_return  # #247: os.fchmod
-core@3.9 test_investigation_naming.Naming.test_unknown_status_joined_subagent_and_other_org_are_silent  # #247: os.fchmod
-core@3.9 test_investigation_requests.AutomaticConsumers.test_explicit_new_command_cannot_discard_journal_budget  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_requests.AutomaticConsumers.test_missing_indexed_route_and_orphan_activation_deny  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_requests.AutomaticConsumers.test_same_path_successor_replays_and_retains_pinned_budget  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_requests.AutomaticConsumers.test_same_token_copy_does_not_retire_a_live_pinned_consumer  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_requests.AutomaticConsumers.test_unrelated_replacement_never_releases_old_consumer  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_requests.Requests.test_arbitrary_intent_survives_restart_and_unrelated_work_stays_available  # #247: private-file check
-core@3.9 test_investigation_requests.Requests.test_complete_needs_exact_acceptance_after_feedback_review  # #247: private-file check
-core@3.9 test_investigation_requests.Requests.test_fresh_read_failure_retains_requirement  # #247: private-file check
-core@3.9 test_investigation_requests.Requests.test_identical_later_request_is_new_but_uncertain_retry_keeps_identity  # #247: private-file check
-core@3.9 test_investigation_requests.Requests.test_legacy_request_selected_explicitly_is_durable_without_action_matching  # #247: private-file check
-core@3.9 test_investigation_requests.Requests.test_missing_or_foreign_requirement_never_clears_intent  # #247: private-file check
-core@3.9 test_investigation_supervision.CLIForms.test_ack_and_post_help_explain_response_and_event_type  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_ack_both_forms_and_default_bound_inv  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_claude_legacy_environment_token_preserves_post_parity_without_key_fallback  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_explicit_member_reads_need_no_binding_and_page_without_target  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_local_usage_errors_never_emit_the_recording_failure_marker  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_member_outbox_identity_none_and_refused_key_combination  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_post_failed_outbox_retry_hint  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_post_member_broadcast_and_session  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_recording_network_errors_are_exit_three_for_all_four_writes  # #247: os.fchmod
-core@3.9 test_investigation_supervision.CLIForms.test_scoped_requires_outbox_and_target_and_no_author_key  # #247: os.fchmod
-core@3.9 test_investigation_supervision.DecisionDelivery.test_a_free_text_or_unknown_intent_decision_renders_as_before  # #247: os.fchmod
-core@3.9 test_investigation_supervision.DecisionDelivery.test_a_story_request_renders_its_intent_explicitly  # #247: os.fchmod
-core@3.9 test_investigation_supervision.DecisionDelivery.test_advisory_header_never_calls_an_unverified_decider_the_owner  # #247: os.fchmod
-core@3.9 test_investigation_supervision.DecisionDelivery.test_author_vs_joined_rendering_and_principal_name  # #247: os.fchmod
-core@3.9 test_investigation_supervision.DecisionDelivery.test_background_inbox_ack_reconciliation  # #247: os.fchmod
-core@3.9 test_investigation_supervision.DecisionDelivery.test_one_cursor_pending_cap_reminders_and_cli_ack_removal  # #247: os.fchmod
-core@3.9 test_investigation_supervision.DecisionDelivery.test_only_same_author_session_ack_suppresses_owner_control_unchanged  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FailureDetection.test_every_runtime_shell_tool_is_observed  # #247: os.fchmod
 core@3.9 test_investigation_supervision.FailureDetection.test_marker_exit_three_throttle_clear_and_never_usage  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FailureDetection.test_other_tools_and_read_commands_never_count_or_clear  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_compact_fields_and_names  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_cursor_filters_cannot_auto_commit_hidden_events  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_cursor_requires_grant_partial_display_never_skips  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_in_memory_follow_cursor_and_server_filters  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_self_needs_principal_and_session_grantee_principal_and_never_decisions  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_watch_max_1_returns_with_the_whole_first_page_from_a_server  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_watch_refuses_another_investigations_cursor  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_watch_signals_a_pending_page_until_it_is_committed  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_watch_starts_at_committed_review_and_never_writes  # #247: os.fchmod
-core@3.9 test_investigation_supervision.FollowReader.test_watch_without_a_cursor_file_starts_at_0_and_creates_nothing  # #247: os.fchmod
 core@3.9 test_investigation_supervision.GrantReservation.test_definite_failures_delete_and_allow_retry_ambiguous_preserves  # #247: os.fchmod
-core@3.9 test_investigation_supervision.GrantReservation.test_evidence_scope_requires_read  # #247: os.fchmod
-core@3.9 test_investigation_supervision.GrantReservation.test_grant_file_contains_token_but_stdout_does_not  # #247: os.fchmod
 core@3.9 test_investigation_supervision.GrantReservation.test_no_output_file_export_and_failure_notice  # #247: os.fchmod
-core@3.9 test_investigation_supervision.GrantReservation.test_send_phase_distinguishes_connect_timeout_from_partial_write  # #247: os.fchmod
-core@3.9 test_investigation_supervision.GrantReservation.test_transport_classification  # #247: os.fchmod
-core@3.9 test_investigation_supervision.ReceiptReader.test_checkpoint_promotions_share_ledger_and_local_resolution  # #247: os.fchmod
-core@3.9 test_investigation_supervision.ReceiptReader.test_old_server_degrades_and_new_server_rows_forward  # #247: os.fchmod
-core@3.9 test_investigation_supervision.ReceiptReader.test_readonly_promotion_map_does_not_prevent_a_checkpoint  # #247: os.fchmod
-core@3.9 test_investigation_supervision.ReceiptReader.test_scoped_receipt_pins_investigation_without_machine_fallback  # #247: os.fchmod
-core@3.9 test_investigation_supervision.ReceiptReader.test_standalone_receipt_uses_latest_matching_binding  # #247: os.fchmod
-core@3.9 test_investigation_supervision.Structured.test_artifact_paths_hashes_roles_and_gates  # #247: os.fchmod
-core@3.9 test_investigation_supervision.Structured.test_stripping_precedes_default_key_and_experiment_revision_gate  # #247: os.fchmod
-core@3.9 test_investigation_supervision.Structured.test_verify_match_mismatch_missing_and_symlink_escape  # #247: os.fchmod
 core@3.9 test_investigation_text.GrantPrintsTheWatchLine.test_one_watch_line_on_stderr_stdout_unchanged  # #247: os.fchmod
 core@3.9 test_investigation_text.GrantPrintsTheWatchLine.test_with_out_the_watch_line_names_the_credential_file  # #247: os.fchmod
-core@3.9 test_investigation_text.OtherRuntimes.test_describe_is_session_text_with_the_wirings_command  # #247: os.O_NOFOLLOW
-core@3.9 test_investigation_text.OtherRuntimes.test_describe_says_prompts_are_recorded_only_when_they_are  # #247: os.O_NOFOLLOW
 core@3.9 test_investigation_text.WatchGuidance.test_the_watch_command  # #255: unclassified
-core@3.9 test_investigation_turn.AgentWrappers.test_codex_turn_end_blocks_with_the_adapters_command  # #247: os.fchmod
-core@3.9 test_investigation_turn.AgentWrappers.test_deliver_for_a_subagent_does_nothing  # #247: os.fchmod
-core@3.9 test_investigation_turn.AgentWrappers.test_gemini_turn_end_stages_and_prompt_delivers_with_the_adapters_command  # #247: os.fchmod
-core@3.9 test_investigation_turn.AgentWrappers.test_nothing_for_another_org  # #247: os.fchmod
-core@3.9 test_investigation_turn.AtTool.test_a_subagent_gets_nothing_and_changes_nothing  # #247: os.fchmod
-core@3.9 test_investigation_turn.AtTool.test_another_org_gets_nothing_none_is_not_checked  # #247: os.fchmod
-core@3.9 test_investigation_turn.AtTool.test_staged_first_then_the_inbox  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_a_non_empty_agent_id_refuses_capture_on_every_runtime  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_a_real_detached_process_posts_it  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_a_repeat_is_skipped_only_within_the_window  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_capture_sends_the_normalized_text_and_skips_the_unsure  # #247: os.fchmod
 core@3.9 test_investigation_turn.OwnerInputContract.test_cursor_capture_requires_consent  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_detached_takes_the_turn_now_and_queues_for_the_detached_post  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_detached_without_a_process_stays_queued  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_only_gemini_skips_repeats  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_the_disclosure_can_be_marked_only_after_it_was_shown  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_the_kill_switch_drops_the_outbox_and_forgets_the_disclosure  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_the_others_disclose_on_the_first_prompt_which_is_not_captured  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_the_same_prompt_again_within_a_turn_is_deduped  # #247: os.fchmod
-core@3.9 test_investigation_turn.OwnerInputContract.test_turn_end_flush_posts_or_deletes  # #247: os.fchmod
-core@3.9 test_investigation_turn.Staging.test_a_huge_item_is_kept_alone  # #247: os.fchmod
-core@3.9 test_investigation_turn.Staging.test_bounded_oldest_first_out  # #247: os.fchmod
-core@3.9 test_investigation_turn.TurnEndBlock.test_another_orgs_binding_gets_no_supervision_block  # #247: os.fchmod
-core@3.9 test_investigation_turn.TurnEndBlock.test_claude_and_codex_block_with_the_inbox  # #247: os.fchmod
 core@3.9 test_investigation_turn.TurnEndBlock.test_gemini_cursor_and_copilot_never_block_they_stage_for_the_next_boundary  # #247: os.fchmod
-core@3.9 test_investigation_turn.TurnEndBlock.test_no_deliverable_of_any_kind_ever_blocks_gemini_cursor_or_copilot  # #247: os.fchmod
-core@3.9 test_investigation_turn.TurnEndBlock.test_the_owner_input_flush_runs_with_the_deadline_whatever_happened  # #247: os.fchmod
-core@3.9 test_investigation_turn.TurnEndBlock.test_the_turn_end_ends_the_owner_input_turn  # #247: os.fchmod
-core@3.9 test_investigation_turn.TurnEndBlock.test_who_may_block  # #247: os.fchmod
-core@3.9 test_owner_input.CapabilityOff.test_a_join_never_records  # #247: os.fchmod
-core@3.9 test_owner_input.CapabilityOff.test_ensure_with_the_capability_off_forgets_the_disclosure  # #247: os.fchmod
-core@3.9 test_owner_input.CapabilityOff.test_flush_deletes_it  # #247: os.fchmod
-core@3.9 test_owner_input.CapabilityOff.test_refresh_capabilities_deletes_it  # #247: os.fchmod
-core@3.9 test_owner_input.CapabilityOff.test_the_next_prompt_deletes_it  # #247: os.fchmod
-core@3.9 test_owner_input.Gate.test_capability_absent_an_older_cardinal  # #247: os.fchmod
-core@3.9 test_owner_input.Gate.test_capability_false_or_malformed  # #247: os.fchmod
-core@3.9 test_owner_input.Gate.test_forget_disclosure  # #247: os.fchmod
-core@3.9 test_owner_input.Gate.test_mark_disclosed_only_when_enabled  # #247: os.fchmod
-core@3.9 test_owner_input.Gate.test_never_with_a_grant_token  # #247: os.fchmod
-core@3.9 test_owner_input.Gate.test_no_key_no_request_nothing_queued  # #247: os.fchmod
-core@3.9 test_owner_input.Gate.test_not_disclosed_captures_nothing  # #247: os.fchmod
-core@3.9 test_owner_input.Gate.test_not_the_author  # #247: os.fchmod
-core@3.9 test_owner_input.Grantee.test_never_this_sessions_own_and_kept_through_the_inbox  # #247: os.fchmod
-core@3.9 test_owner_input.NeverDelivered.test_never_deliverable_and_never_kept_in_the_inbox  # #247: os.fchmod
 core@3.9 test_owner_input.NeverQueued.test_400_drops_that_prompt_only  # #247: os.fchmod
 core@3.9 test_owner_input.NeverQueued.test_401_403_drop_and_turn_off  # #247: os.fchmod
-core@3.9 test_owner_input.NeverQueued.test_a_404_while_draining_drops_the_whole_outbox  # #247: os.fchmod
 core@3.9 test_owner_input.NeverQueued.test_an_older_server_without_the_route  # #247: os.fchmod
 core@3.9 test_owner_input.NeverQueued.test_no_principal_drops_and_turns_off  # #247: os.fchmod
 core@3.9 test_owner_input.NeverQueued.test_owner_input_disabled  # #247: os.fchmod
 core@3.9 test_owner_input.NeverQueued.test_the_investigation_cap_drops_never_queues  # #247: os.fchmod
-core@3.9 test_owner_input.Posting.test_a_replay_is_success  # #247: os.fchmod
-core@3.9 test_owner_input.Posting.test_records_each_prompt_with_the_next_turn  # #247: os.fchmod
-core@3.9 test_owner_input.Transient.test_429_and_network_queue  # #247: os.fchmod
 core@3.9 test_owner_input.Transient.test_5xx_queues_0600_and_the_next_prompt_drains_in_order  # #247: os.fchmod
 core@3.9 test_owner_input.Transient.test_a_trickling_server_is_cut_off_at_the_budget  # #247: os.fchmod
-core@3.9 test_owner_input.Transient.test_flush_is_bounded_too  # #247: os.fchmod
-core@3.9 test_owner_input.Transient.test_flush_posts_while_enabled  # #247: os.fchmod
-core@3.9 test_owner_input.Transient.test_never_an_unlocked_outbox_write  # #247: os.fchmod
-core@3.9 test_owner_input.Transient.test_the_outbox_is_bounded  # #247: os.fchmod
-core@3.9 test_owner_input.TurnRenumbering.test_a_key_conflict_does_not_block_the_queue  # #247: os.fchmod
-core@3.9 test_owner_input.TurnRenumbering.test_a_key_conflict_renumbers_past_the_conflicted_turn  # #247: os.fchmod
-core@3.9 test_owner_input.TurnRenumbering.test_a_lost_binding_renumbers_past_the_servers_top_turn  # #247: os.fchmod
-core@3.9 test_owner_input.TurnRenumbering.test_repeated_key_conflicts_move_on_each_time  # #247: os.fchmod
-core@3.9 test_owner_relay.Decide.test_a_retry_reuses_its_relay_key_and_refusals_are_plain  # #247: os.fchmod
-core@3.9 test_owner_relay.Decide.test_decide_relays_the_owners_words_verbatim  # #247: os.fchmod
-core@3.9 test_owner_relay.Decide.test_gemini_refire_repeats_a_final_outcome_but_retries_a_transient_one  # #247: os.fchmod
-core@3.9 test_owner_relay.Decide.test_names_choose_the_target_and_ambiguity_lists_them  # #247: os.fchmod
-core@3.9 test_owner_relay.Decide.test_refusals_before_anything_is_sent  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_a_blocked_or_subagent_prompt_takes_no_outcome  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_a_draft_made_after_the_approving_prompt_is_not_approved  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_a_peer_message_arrives_bare_and_only_its_transcript_entry_refuses_it  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_a_scheduled_prompt_never_makes_a_draft_from_its_own_turn_fresh  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_a_target_changed_while_confirming_is_not_sent  # #247: os.fchmod
 core@3.9 test_owner_relay.Deferred.test_a_typed_approve_is_confirmed_then_sent_and_shown_once  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_a_verifier_that_never_reports_is_reported_once  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_entry_origin_allows_only_known_human_sources  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_immediate_answers_send_nothing  # #247: os.fchmod
 core@3.9 test_owner_relay.Deferred.test_scheduled_peer_and_unconfirmable_prompts_are_never_sent  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_stop_waits_for_a_pending_outcome  # #247: os.fchmod
-core@3.9 test_owner_relay.Deferred.test_the_first_prompt_of_a_session_waits_for_the_transcript_to_exist  # #247: os.fchmod
-core@3.9 test_owner_relay.Matching.test_bare_form_needs_exactly_one_pending  # #247: os.fchmod
-core@3.9 test_owner_relay.Matching.test_gemini_hook_context_is_removed_before_matching  # #247: os.fchmod
-core@3.9 test_owner_relay.Matching.test_non_matching_prompts_are_untouched  # #247: os.fchmod
-core@3.9 test_owner_relay.Matching.test_reject_removes_and_sends_nothing  # #247: os.fchmod
-core@3.9 test_owner_relay.Matching.test_shapes  # #247: os.fchmod
-core@3.9 test_owner_relay.Matching.test_subagent_and_machine_prompts_are_refused  # #247: os.fchmod
-core@3.9 test_owner_relay.Matching.test_unknown_id_says_what_is_pending  # #247: os.fchmod
-core@3.9 test_owner_relay.Propose.test_proposals_lists_and_withdraw_removes  # #247: os.fchmod
-core@3.9 test_owner_relay.Propose.test_refuses_a_grant_token_or_credential_file  # #247: os.fchmod
-core@3.9 test_owner_relay.Propose.test_refuses_without_binding_as_joiner_on_own_investigation_and_without_capability  # #247: os.fchmod
-core@3.9 test_owner_relay.Propose.test_stores_and_prints_the_instruction_never_sends  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_a_slow_server_is_bounded  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_duplicate_counts_as_relayed  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_gemini_refire_repeats_the_outcome_without_relaying_twice  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_no_answer_may_have_been_sent_keeps_it_and_retries_with_the_same_key  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_no_relay_without_a_usable_key_or_as_a_joiner  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_not_enabled_keeps_it_and_shows_the_settings_link  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_other_refusals_drop_it_with_a_plain_reason  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_rejecting_or_withdrawing_an_uncertain_draft_warns_it_may_be_delivered  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_success_posts_the_contract_and_removes_the_proposal  # #247: os.fchmod
-core@3.9 test_owner_relay.Relay.test_unavailable_is_not_stored_and_keeps_the_draft  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_a_bare_decide_after_the_target_changed_is_refused_once  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_a_locked_store_counts_nothing_as_fresh  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_a_name_held_by_another_investigation_moves_only_with_replace  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_a_named_decide_after_that_name_moved_is_refused_once  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_a_question_mark_only_refuses_a_sentence_that_ends_with_one  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_control_characters_are_refused_and_a_pasted_crlf_is_a_newline  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_invisible_formatting_characters_are_refused  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_new_server_refusals_are_one_clear_line  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_one_decision_at_a_time_and_never_a_question  # #247: os.fchmod
-core@3.9 test_owner_relay.ReviewFixes.test_propose_shows_what_answers_points_at_and_refuses_a_ruling  # #247: os.fchmod
-core@3.9 test_owner_relay.Store.test_a_locked_store_refuses_instead_of_racing  # #247: os.fchmod
-core@3.9 test_owner_relay.Store.test_expiry_and_cap_keep_the_newest_five  # #247: os.fchmod
 core@3.9 test_owner_relay.Store.test_file_is_private_ids_are_dp_hex_and_entries_hash_their_text  # #247: os.fchmod
-core@3.9 test_owner_relay.Store.test_validation  # #247: os.fchmod
-core@3.9 test_owner_relay.SupervisorSeesWhichRelaysItSent.test_reads_mark_relays_this_session_sent  # #247: os.fchmod
-core@3.9 test_owner_relay.Targets.test_cap_names_and_refusals  # #247: os.fchmod
 core@3.9 test_owner_relay.Targets.test_supervising_registers_lists_renames_and_removes  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_a_decision_with_a_credential_is_never_sent  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_a_question_is_not_sent_and_an_unknown_word_is_an_ordinary_prompt  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_a_session_that_never_supervised_stays_silent_on_a_bare_approve  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_an_expired_draft_says_so  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_bare_approve_only_for_a_draft_made_since_the_owners_previous_prompt  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_capabilities_keep_the_callers_setting  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_registration_reports_ready_disabled_and_unknown_in_json_and_text  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_supervising_says_when_relay_is_off_for_the_owner  # #247: os.fchmod
-core@3.9 test_owner_relay.UxRules.test_worker_render_shows_what_it_answers  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_a_session_id_with_a_trailing_newline_is_refused  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_an_older_cardinal_is_retried_once_without_the_fields  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_another_invalid_body_is_a_real_refusal  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_client_refuses_bad_supervisor_bodies  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_invalid_body_without_a_supervisor_is_not_retried  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_never_for_a_grant_without_supervise  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_never_when_the_session_names_the_granted_investigation  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_only_an_explicit_session_is_linked  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_supervise_grant_sends_the_supervisor  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_supervisor_invalid_fails_clearly  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_the_retry_is_once  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_unusable_bindings_mint_without_the_link_and_say_so  # #247: os.fchmod
-core@3.9 test_session_links.GrantSupervisorTests.test_zod_v4_message_is_an_older_cardinal_too  # #247: os.fchmod
-core@3.9 test_session_links.SavedContextReplayTests.test_a_stale_cache_is_retried_once_without_repo_host  # #255: unclassified
-core@3.9 test_session_links.SavedContextReplayTests.test_caps_2_sends_it  # #255: unclassified
-core@3.9 test_session_links.SavedContextReplayTests.test_unknown_caps_strips_repo_host_at_send_time  # #255: unclassified
-core@3.9 test_session_repos.SessionReposTests.test_all_runtimes_replay_every_saved_repo_and_preserve_the_original_context  # #255: unclassified
-core@3.9 test_session_repos.SessionReposTests.test_edits_arriving_during_a_refresh_keep_the_marker  # #255: unclassified
-core@3.9 test_session_repos.SessionReposTests.test_explicit_tool_workdir_is_observed_without_parsing_shell_commands  # #255: unclassified
-core@3.9 test_session_repos.SessionReposTests.test_opt_out_non_author_org_change_cap_and_deduplication  # #255: unclassified
-core@3.9 test_session_repos.SessionReposTests.test_successful_edits_in_two_repos_stage_labels_in_every_adapter  # #255: unclassified
 core@3.9 test_storyboard_agent.SessionLineTests.test_auto_context_wording  # #245: test asserts the POSIX command text
 core@3.9 test_storyboard_agent.SessionLineTests.test_names_the_id_and_the_cli  # #245: test asserts the POSIX command text
 core@3.9 test_storyboard_authoring.PreviewTests.test_the_card_renders_cover_and_mock_in_the_runtimes_dir  # #251: local preview
 core@3.9 test_storyboard_authoring.TokenTests.test_a_successful_mcp_checkpoint_holds_the_sessions_evidence  # #247: POSIX mode bits asserted
 core@3.9 test_storyboard_files.StoryboardFilesTests.test_file_mode_and_directory_mode  # #247: POSIX mode bits asserted
 core@3.9 test_storyboard_session_visualization.SessionVisualizationTests.test_codex_preview_renders_reveal_steps_under_its_own_home  # #251: local preview
-core@3.9 test_supervision_friction.Friction.test_compact_preserves_long_resolution_and_lists  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_filtered_auto_review_rejected_before_hidden_challenge_read  # #247: os.fchmod
 core@3.9 test_supervision_friction.Friction.test_generated_directories_reject_public_mode_and_symlinks  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_generated_outbox_timeout_retry_reuses_key_without_numbering  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_help_exposes_budget_semantics  # #247: os.fchmod
 core@3.9 test_supervision_friction.Friction.test_immutable_snapshot_replay_and_explicit_review  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_new_cli_commands_work_in_legacy_and_shared_adapters  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_renewal_discards_pending_without_committing_it  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_renewal_failure_leaves_state_byte_equal  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_review_holds_cursor_during_budget_application  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_self_only_advances_without_review_and_mixed_page_stays_pending  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_self_skip_is_bounded  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_self_skip_rejects_gaps_trailing_hidden_owner_and_unknown  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_signal_watch_never_mutates_cursor_or_emits_event_text  # #247: os.fchmod
 core@3.9 test_supervision_friction.Friction.test_snapshot_rejects_symlink_and_wrong_identity  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_tampered_snapshot_fails_before_budget_writes  # #247: os.fchmod
-core@3.9 test_supervision_review.ArtifactHistory.test_all_artifact_revisions_newest_first  # #247: os.fchmod
-core@3.9 test_supervision_review.ArtifactHistory.test_maestro_path_characters  # #247: os.fchmod
-core@3.9 test_supervision_review.Detection.test_claude_success_shape_clears_with_runtime_signal  # #247: os.fchmod
-core@3.9 test_supervision_review.Detection.test_executable_command_words_and_line_markers  # #247: os.fchmod
-core@3.9 test_supervision_review.Detection.test_question_and_stdout_status_are_not_runtime_status  # #247: os.fchmod
-core@3.9 test_supervision_review.Detection.test_real_failure_only_structured_success_clears  # #247: os.fchmod
-core@3.9 test_supervision_review.Detection.test_write_edit_payloads_never_alarm_or_clear  # #247: os.fchmod
-core@3.9 test_supervision_review.OwnerBoundary.test_every_provenance_field_and_explicit_author_required  # #247: os.fchmod
-core@3.9 test_supervision_review.OwnerBoundary.test_malformed_acks_and_wrong_class_cannot_remove_pending  # #247: os.fchmod
-core@3.9 test_supervision_review.OwnerBoundary.test_reminders_ignore_forged_event_text  # #247: os.fchmod
-core@3.9 test_supervision_review.ProtocolAndBinding.test_cached_claude_link_queues_refresh_without_a_network_request  # #247: os.fchmod
-core@3.9 test_supervision_review.ProtocolAndBinding.test_link_refreshes_cached_capabilities  # #247: os.fchmod
-core@3.9 test_supervision_review.ProtocolAndBinding.test_link_restores_wanted_and_no_missing_poller_spawn  # #247: os.fchmod
-core@3.9 test_supervision_review.ProtocolAndBinding.test_malformed_2xx_grant_keeps_reservation  # #247: os.fchmod
-core@3.9 test_supervision_review.ProtocolAndBinding.test_no_binding_receipt_has_actionable_message  # #247: os.fchmod
-core@3.9 test_supervision_review.ProtocolAndBinding.test_only_transport_failures_exit_three  # #247: os.fchmod
-core@3.9 test_supervision_review.ProtocolAndBinding.test_refused_gate_refreshes_capabilities_once  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.ChallengesCli.test_a_revised_verdict_is_marked  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.ChallengesCli.test_dirty_snapshots_mismatch_or_are_unbound  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.ChallengesCli.test_heads_are_checked_only_on_trusted_hosts  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.ChallengesCli.test_next_action_matched  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.ChallengesCli.test_next_action_mismatched  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.ChallengesCli.test_next_action_unbound  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.ChallengesCli.test_next_action_unverifiable  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.ChallengesCli.test_rows_with_next_actions_and_heads  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.ChallengesCli.test_without_gh_heads_are_unchecked  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_a_definite_refusal_drops_the_outbox_and_auto_outside_a_worktree_is_usage  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_a_dirty_submodule_leaves_the_snapshot_unbound  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_a_failing_filter_leaves_the_snapshot_unbound_and_the_checkpoint_succeeds  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_an_unread_status_is_dirty_and_unbound_never_clean  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_an_untracked_nested_repository_leaves_the_snapshot_unbound  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.CheckpointRevision.test_auto_is_stripped_without_the_capability  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_auto_resolves_once_and_a_retry_resends_the_identical_batch  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.CheckpointRevision.test_capability_off_strips_revision_with_a_warning  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_resolve_records_what_is_true  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.CheckpointRevision.test_revision_shape  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.CheckpointRevision.test_status_takes_no_optional_locks  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_the_snapshot_is_seeded_from_the_real_index  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.CheckpointRevision.test_tree_only_with_dirty  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_two_dirty_snapshots_at_the_same_head_have_different_trees  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.CheckpointRevision.test_untracked_files_count_whatever_the_config_says  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.CheckpointRevision.test_without_the_real_index_the_snapshot_is_unbound  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.EventsRendering.test_compact_and_legacy_lines  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Fuzz.test_a_directive_trace_at_the_default_cap  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Fuzz.test_a_partial_drop_never_promotes_a_leftover_summary  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Fuzz.test_compaction_never_changes_a_derivation  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.LocalTracking.test_a_rejection_of_a_replaced_correction_answers_nothing  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.LocalTracking.test_a_stubbed_challenge_keeps_only_citing_events_that_change_it  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.LocalTracking.test_essential_events_keep_every_input_of_the_fold  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.LocalTracking.test_slim_keeps_what_the_fold_reads  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.LocalTracking.test_verdicts_survive_compaction  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.StatusMirror.test_a_verdict_answered_by_ref_must_be_earlier  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.StatusMirror.test_rejected_and_directive_rejected_still_owe_work  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.StatusMirror.test_the_report_names_the_correction_and_every_verdict  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Succession.test_an_uncertain_answer_keeps_the_reservation_and_a_retry_completes  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Succession.test_an_unreadable_old_grant_mints_nothing  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Succession.test_gated_on_the_capability_and_on_resolved_outboxes  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Succession.test_predecessor_succeeded_is_never_final  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Succession.test_refusals  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.Succession.test_succession_mints_renews_the_cursor_then_deletes_the_old_file  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_a_correction_above_the_review_watermark_is_refused  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_a_cursor_of_another_grant_is_refused  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_a_retried_supersede_already_applied_is_success  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_a_verdict_is_sent_from_an_outbox_written_before_the_first_post  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_an_identical_stored_verdict_is_success_and_names_its_grant  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_an_older_server_says_verdicts_are_unsupported  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_correction_is_required_for_a_challenge_and_refused_on_a_claim  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_refusals_are_said_in_words  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_scope_never_wider_than_its_subject  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_supersedes_revises_your_own_verdict_and_a_409_names_the_flag  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.VerdictCli.test_the_revision_cap_counts_per_chain  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.VerdictRevision.test_merge_readiness_refuses_a_dirty_tree_before_sending  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.VerdictRevision.test_revision_auto_binds_the_supervisors_dirty_snapshot  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.WorkerDelivery.test_a_directive_rejection_says_so_while_its_challenge_is_a_stub  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.WorkerDelivery.test_a_rejected_directive_correction_blocks_stop_once_more  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.WorkerDelivery.test_a_rejection_is_delivered_and_resurfaces_until_a_new_correction  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.WorkerDelivery.test_a_verdict_on_a_challenge_this_session_never_received_is_not_delivered  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.WorkerDelivery.test_a_verdict_takes_only_noted  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.WorkerDelivery.test_a_verdict_with_an_unknown_scope_counts_for_nothing  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.WorkerDelivery.test_revision_guidance_only_with_a_challenge_and_the_capability  # #247: os.fchmod
-core@3.9 test_supervision_verdicts.WorkerDelivery.test_verified_and_unverifiable_are_delivered_once  # #247: os.fchmod
 core@3.9 test_tls.TlsTest.test_pin_store_layout_and_bundle  # #247: POSIX mode bits asserted

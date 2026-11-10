@@ -335,7 +335,8 @@ def _write_private(path: Path, text: str) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     os.chmod(str(tmp), 0o600)
-    os.replace(str(tmp), str(path))
+    from .paths import replace  # here, not at import: this module stays cheap to import
+    replace(str(tmp), str(path))
 
 
 # ---------------------------------------------------------------------------

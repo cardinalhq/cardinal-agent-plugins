@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .paths import AgentPaths, script_command
+from .paths import replace as _replace
 
 RUNTIMES = ("claude", "codex", "cursor", "gemini", "copilot")
 DISPLAY = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "gemini": "Gemini CLI",
@@ -196,7 +197,7 @@ def set_enabled(runtime: str, enabled: bool, home: Optional[Path] = None) -> Non
             stream.write(json.dumps({"enabled": bool(enabled), "updated_at": time.time()}) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(tmp, path)
+        _replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -282,7 +283,7 @@ def install(root: Path, dest: Path) -> bool:
     (staging / MARKER).write_text(json.dumps({"template_sha256": digest}) + "\n", encoding="utf-8")
     if dest.exists():
         shutil.rmtree(dest)
-    os.replace(staging, dest)
+    _replace(staging, dest)
     return True
 
 

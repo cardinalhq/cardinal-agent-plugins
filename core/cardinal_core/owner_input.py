@@ -106,6 +106,7 @@ from typing import Any, Mapping, Optional
 from . import investigation_events as ie
 from . import investigation_state as ist
 from . import investigation_state_sync as sync
+from .paths import replace as _replace
 
 TYPE = ie.OWNER_INPUT_TYPES[0]               # owner_input.recorded
 CLASS = ie.OWNER_INPUT                       # owner_input
@@ -371,7 +372,7 @@ def _log(home: Path, sid: str, what: str, **fields: Any) -> None:
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(old + line)
-        os.replace(str(tmp), str(path))
+        _replace(str(tmp), str(path))
 
 
 # ---------------------------------------------------------------------------

@@ -1182,17 +1182,9 @@ class CLI:
         # Persist both new credential and successor directory entries before
         # deleting the old credential. Never lose both sides on power failure.
         for directory in {args.out.parent, old_path.parent}:
-            fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            consumer.fsync_directory(directory)
         old_path.unlink()
-        fd = os.open(old_path.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        consumer.fsync_directory(old_path.parent)
         shown = {k: v for k, v in out.items() if k != "token"}
         shown.update(credential_file=str(args.out), succeeded=old["grant_id"])
         if renewed is not None:
