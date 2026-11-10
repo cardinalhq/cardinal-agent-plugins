@@ -1,8 +1,11 @@
 #!/bin/sh
 # Run one suite under the Windows Python in Wine (windows-wine.yml).
-# Wine can exit 0 after the interpreter aborts, so the run passes only if
-# run_suite.py wrote 0 to its status file, which is the last thing it does.
-status="${RUNNER_TEMP:-/tmp}/suite-$1.status"
-rm -f "$status"
-wine "$WINPY" tests/windows/run_suite.py "$1" "$(winepath -w "$status")"
-[ "$(cat "$status" 2>/dev/null)" = 0 ]
+# Wine can lose the interpreter's last output and exit 0 after it aborts, so
+# the run passes only if Wine exited 0 and run_suite.py finished its report,
+# whose last line is the exit code.
+report="${RUNNER_TEMP:-/tmp}/suite-$1.report"
+rm -f "$report"
+wine "$WINPY" tests/windows/run_suite.py "$1" "$(winepath -w "$report")"
+rc=$?
+cat "$report" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(tail -n 1 "$report" 2>/dev/null)" = "exit 0" ]

@@ -1,4 +1,3 @@
 # Tests that fail under a Windows Python (Wine CI job, windows-wine.yml).
-# Format: <suite> <test id>  # <issue that fixes it>
-# `<suite>@3.9` limits a line to one Python minor version.
+# Format: <suite>@<python minor> <test id>  # <issue that fixes it>
 # run_suite.py fails when a listed test passes: the PR that fixes it removes its line.
