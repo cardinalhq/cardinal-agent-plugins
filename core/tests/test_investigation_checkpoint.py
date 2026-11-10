@@ -649,6 +649,23 @@ class AgentMilestones(unittest.TestCase):
                          "  warning: title says \"API\": use plain words\n"
                          "milestone not written: m-x (quota_exceeded): used up")
 
+    def test_the_line_says_what_cardinal_marked_and_passes_on_its_reminder(self):
+        out = {"events": [{"seq": 9, "type": "finding.retracted", "payload": {"semantic_id": "finding_prep"}}],
+               "milestones": [{"index": 0, "milestone_id": "m-finding_prep", "created": False, "state": "ruled_out",
+                               "replaced": [], "warnings": [], "withdrawn": True}],
+               "milestone_errors": [],
+               "milestone_hint": "Cardinal marked \"m-finding_prep\" as no longer holding.\nIf the work has changed "
+                                 "direction, write ONE milestone … Open act: \"m-a\" (First idea); \"m-b\" (Second)"}
+        self.assertEqual(ie.checkpoint_line(out),
+                         "checkpointed #9 (finding.retracted finding_prep)\n"
+                         "milestone marked as no longer holding: m-finding_prep (ruled_out)\n"
+                         "Cardinal marked \"m-finding_prep\" as no longer holding. If the work has changed "
+                         "direction, write ONE milestone … Open act: \"m-a\" (First idea); \"m-b\" (Second)")
+        # A hint that is not text, or is empty, prints nothing; a long one is cut.
+        for hint in (None, 7, "  "):
+            self.assertEqual(ie.milestone_lines({"milestone_hint": hint}), "")
+        self.assertEqual(len(ie.milestone_lines({"milestone_hint": "x" * 5000})), 1 + ie.MAX_MILESTONE_HINT)
+
     def test_a_refused_milestone_says_every_issue_in_full(self):
         long = "the open act already has 8 milestones and a story holds at most 8: merge related ones " + "x" * 400
         err = sync.ServerError(422, {"error": "milestone_invalid", "message": "Nothing was recorded.",
