@@ -1,0 +1,86 @@
+name: Windows Python under Wine
+
+# The core, Copilot adapter and behavior suites under the official Windows
+# CPython builds, run with Wine on a Linux runner: a real os.name == "nt"
+# interpreter (msvcrt and no fcntl, ntpath, Windows os.kill / os.replace).
+# Wine approximates Windows, and Copilot CLI itself is not run: a pass here
+# is necessary, not sufficient. CI only; there is no local path.
+#
+# tests/windows/known-failures.txt lists the tests that fail today, each
+# with the issue that fixes it. A new failure or a listed test that now
+# passes fails the job.
+
+on:
+  pull_request:
+    paths:
+      - 'core/**'
+      - 'common/behavior/**'
+      - 'adapters/copilot/**'
+      - 'build/vendor.py'
+      - 'tests/windows/**'
+      - '.github/workflows/windows-wine.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-wine-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wine:
+    name: Windows Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9.13', '3.14.10']  # the oldest supported, and one with os.fchmod on Windows (3.13+)
+    env:
+      WINEDEBUG: -all
+      WINEDLLOVERRIDES: mscoree,mshtml=  # no Mono / Gecko install prompts
+      GIT_FOR_WINDOWS: v2.56.0.windows.4/MinGit-2.56.0.4-64-bit.zip
+    steps:
+      - uses: actions/checkout@v4
+      # WineHQ's build: Ubuntu 24.04's Wine 9.0 lacks CopyFile2, which Python
+      # 3.12+ calls to copy a file. Its packages need the i386 architecture.
+      - name: Install Wine
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo mkdir -pm755 /etc/apt/keyrings
+          sudo wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+          sudo wget -qNP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
+          sudo apt-get update -q
+          sudo apt-get install -y -q --install-recommends winehq-stable
+          wine --version
+      - name: Install Windows CPython (official NuGet build) and Git for Windows
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/python.nupkg" "https://www.nuget.org/api/v2/package/python/${{ matrix.python }}"
+          unzip -q "$RUNNER_TEMP/python.nupkg" -d "$RUNNER_TEMP/winpy"
+          curl -fsSL -o "$RUNNER_TEMP/mingit.zip" "https://github.com/git-for-windows/git/releases/download/$GIT_FOR_WINDOWS"
+          unzip -q "$RUNNER_TEMP/mingit.zip" -d "$RUNNER_TEMP/mingit"
+          wineboot --init
+          wineserver -w
+          echo "WINEPATH=$(winepath -w "$RUNNER_TEMP/mingit/cmd")" >> "$GITHUB_ENV"
+          echo "WINPY=$RUNNER_TEMP/winpy/tools/python.exe" >> "$GITHUB_ENV"
+      - name: Interpreter is a Windows one
+        run: |
+          wine "$WINPY" -c "import os, sys, msvcrt; assert os.name == 'nt'; print(sys.version); print(sys.executable)"
+          wine "$WINPY" -c "import subprocess; print(subprocess.run(['git', '--version'], capture_output=True, text=True))"
+      - name: Vendor cardinal_core into the Copilot adapter
+        run: python3 build/vendor.py copilot
+      - name: The runner's own tests
+        run: python3 -m unittest discover -s tests/windows -v
+      - name: A crashed run cannot pass
+        run: |
+          if sh tests/windows/wine-suite.sh crash; then echo "a run with no status file passed"; exit 1; fi
+      - name: Core suite
+        if: always()
+        run: sh tests/windows/wine-suite.sh core
+      - name: Behavior suite
+        if: always()
+        run: sh tests/windows/wine-suite.sh behavior
+      # Adapter suites need 3.11+, as in investigation-tests.yml.
+      - name: Copilot adapter suite
+        if: always() && !startsWith(matrix.python, '3.9.')
+        run: sh tests/windows/wine-suite.sh copilot
