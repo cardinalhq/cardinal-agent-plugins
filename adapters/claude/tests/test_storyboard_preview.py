@@ -1098,6 +1098,50 @@ def _canvas_text() -> str:
     return CANVAS_SKILL.read_text() + "\n" + CANVAS_CORE.read_text()
 
 
+@unittest.skipUnless(os.environ.get("CARDINAL_CHROMIUM_SMOKE") == "1",
+                     "real-Chrome smoke test: set CARDINAL_CHROMIUM_SMOKE=1")
+class RealChromeFromJsonTests(unittest.TestCase):
+    """--from-json end to end with a real browser and no Cardinal: the
+    bundle page comes from a local stub, the PNGs from Chrome or Edge. With
+    CARDINAL_PREVIEW_SMOKE_OUT set, the PNGs and the renderer's stdout are
+    copied there (the Windows native job uploads them)."""
+
+    def test_from_json_fetches_the_bundle_and_writes_pngs(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "empty-bin").mkdir()
+            body = (f'<!doctype html><body style="margin:0">{SMOKE_HOST}<iframe id="cv" sandbox="allow-scripts" '
+                    'style="border:0;width:1280px;height:800px;background:#246" srcdoc="preview"></iframe></body>'
+                    ).encode("utf-8")
+            maestro = StubMaestro({"rhythm": body})
+            try:
+                write_settings(home, maestro.origin)
+                result = preview_result([{"id": "rhythm", "ok": True, "preview_bundle": bundle_ref("rhythm", body)}])
+                src = home / "preview.json"
+                src.write_text(json.dumps(result), encoding="utf-8")
+                env = hermetic_env(home, USERPROFILE=str(home), PATH=os.environ.get("PATH", ""))
+                if os.environ.get("CARDINAL_CHROMIUM"):
+                    env["CARDINAL_CHROMIUM"] = os.environ["CARDINAL_CHROMIUM"]
+                res, lines = run_renderer(["--from-json", str(src)], env, timeout=600)
+                keep = os.environ.get("CARDINAL_PREVIEW_SMOKE_OUT")
+                if keep:
+                    Path(keep).mkdir(parents=True, exist_ok=True)
+                    (Path(keep) / "from-json.stdout.jsonl").write_text(res.stdout, encoding="utf-8")
+                    (Path(keep) / "from-json.stderr.txt").write_text(res.stderr, encoding="utf-8")
+                self.assertEqual(res.returncode, 0, res.stderr[-2000:] + res.stdout[-2000:])
+                steps = [ln for ln in lines if ln.get("scene_id") == "rhythm"]
+                self.assertEqual([s["step"] for s in steps], [0, 1])
+                for s in steps:
+                    png = Path(s["png"]).read_bytes()
+                    self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n") and len(png) > 1000, len(png))
+                    self.assertIsNone(s["error"])
+                    if keep:
+                        shutil.copy(s["png"], Path(keep) / Path(s["png"]).name)
+                self.assertEqual(lines[-1]["summary"]["rendered"], 2)
+            finally:
+                maestro.close()
+
+
 class CanvasSkillTests(unittest.TestCase):
     def test_renderer_locator_never_searches_the_working_directory(self):
         text = CANVAS_SKILL.read_text()

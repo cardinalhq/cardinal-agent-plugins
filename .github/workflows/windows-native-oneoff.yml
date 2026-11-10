@@ -2,15 +2,14 @@ name: Windows native (one-off)
 
 # A real Windows runner, for what Wine and the simulation cannot show (#244
 # allows "a one-off windows-latest run"). Not part of the required checks:
-# it runs when asked for, and on a pull request that changes this file or the
-# storyboard preview renderer. It does not run Copilot CLI.
+# it runs when asked for (workflow_dispatch), and on a pull request that
+# changes this file, which is how it first ran. It does not run Copilot CLI.
 
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - '.github/workflows/windows-native-oneoff.yml'
-      - 'common/storyboard/scripts/render_preview.py'
 
 permissions:
   contents: read
@@ -69,3 +68,18 @@ jobs:
           if (Test-Path out.png) { $bytes = [System.IO.File]::ReadAllBytes("out.png"); "png bytes: $($bytes.Length), signature: $([System.BitConverter]::ToString($bytes[0..7]))" }
           if ($code -ne 0 -or -not (Test-Path out.png)) { exit 1 }
           if ([System.BitConverter]::ToString($bytes[0..7]) -ne "89-50-4E-47-0D-0A-1A-0A") { exit 1 }
+      - name: Real-browser renders, --html and --from-json with a local bundle stub (needs 3.11+)
+        if: always() && matrix.python != '3.9'
+        working-directory: adapters/claude
+        env:
+          CARDINAL_CHROMIUM_SMOKE: '1'
+          CARDINAL_PREVIEW_SMOKE_OUT: ${{ runner.temp }}/preview-smoke
+        run: python -m unittest discover tests -p "test_storyboard_preview.py" -k RealChrome -v
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.python != '3.9'
+        with:
+          name: preview-smoke
+          path: |
+            ${{ runner.temp }}/preview-smoke
+            out.png
+          if-no-files-found: warn
