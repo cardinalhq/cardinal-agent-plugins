@@ -81,6 +81,43 @@ class WindowsFlockTests(unittest.TestCase):
         self.assertEqual(self.flock(w.LOCK_UN), ([0], []))
 
 
+class FileWriteTests(unittest.TestCase):
+    """Found by the Wine job: a held destination and newline translation."""
+
+    def test_replace_retries_on_windows_while_the_destination_is_open(self):
+        from compilation import files
+        calls = []
+
+        def busy_twice(source, destination):
+            calls.append((source, destination))
+            if len(calls) < 3:
+                raise PermissionError(13, 'Access denied')
+
+        with mock.patch.object(files.os, 'replace', busy_twice):
+            files.replace('a.tmp', 'a', windows=True, sleep=lambda s: None)
+        self.assertEqual(len(calls), 3)
+        with mock.patch.object(files.os, 'replace', side_effect=PermissionError(13, 'denied')) as once:
+            with self.assertRaises(PermissionError):
+                files.replace('a.tmp', 'a', windows=False)
+        self.assertEqual(once.call_count, 1)
+
+    def test_written_bytes_are_the_text_on_every_os(self):
+        from compilation import files, storage
+        with tempfile.TemporaryDirectory() as d:
+            text = Path(d) / 'a.txt'
+            files.private_text(text, 'one\ntwo\n')
+            self.assertEqual(text.read_bytes(), b'one\ntwo\n')
+            storage.write(Path(d) / 'b.json', {'k': 'v'})
+            self.assertNotIn(b'\r', (Path(d) / 'b.json').read_bytes())
+
+    def test_the_server_tolerates_streams_without_reconfigure(self):
+        import io
+        import server
+        source = Path(server.__file__).read_text(encoding='utf-8')
+        self.assertIn("if hasattr(stream, 'reconfigure')", source)
+        self.assertFalse(hasattr(io.StringIO(), 'reconfigure'))
+
+
 class WorkerRunningTests(unittest.TestCase):
     """The callers that ask whether a range worker holds its lock, without fcntl."""
 

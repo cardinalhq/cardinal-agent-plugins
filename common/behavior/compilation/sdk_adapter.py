@@ -31,7 +31,7 @@ class SDK:
         if not out.resolve().is_relative_to(self.root.resolve()) or out == self.root:
             raise ValueError('invalid compilation name')
         out.mkdir()
-        (out / 'program.py').write_text(source, encoding='utf-8')
+        (out / 'program.py').write_bytes(source.encode('utf-8'))  # exactly the source: no newline translation
         write(out / 'plan.json', plan)
         store = ArtifactStore(out / 'artifacts')
         config = CompilerConfig(model='supplied-source', model_version='1', max_revisions=0,
