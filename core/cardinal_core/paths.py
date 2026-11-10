@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -66,6 +67,17 @@ def state_home(home: Path, environ: Any = None) -> Path:
     if is_sandboxed_home(home):
         return home
     return sandboxed_home(home) if in_seatbelt_sandbox(environ) else home
+
+
+def script_command(script: Any, posix: str, windows: Any = None) -> str:
+    """How to run a plugin script in a command shown to the agent or the
+    user: `posix` as given, except on Windows. There a script has no shebang
+    and `python3` is often missing or the Microsoft Store stub, so the
+    command names the running interpreter, in PowerShell syntax (the shell
+    Copilot CLI uses on Windows)."""
+    if not (os.name == "nt" if windows is None else windows):
+        return posix
+    return "& " + " ".join("'" + str(word).replace("'", "''") + "'" for word in (sys.executable, script))
 
 
 def safe_session(session_id: str) -> str:

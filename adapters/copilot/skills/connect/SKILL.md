@@ -5,6 +5,8 @@ description: Connect GitHub Copilot CLI to Cardinal by running the device-code f
 
 # Cardinal Connect
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 Use this skill when the user asks to connect Copilot CLI to Cardinal, enable Cardinal telemetry, enable Cardinal MCP tools, rotate a Cardinal connection, or run Cardinal setup.
 
 The script is `scripts/cardinal-connect` in the Cardinal plugin directory (two levels up from this skill's directory). Run it with that absolute path, not a similarly named file in the workspace:

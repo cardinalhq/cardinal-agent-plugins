@@ -5,7 +5,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event sessionStart || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event sessionStart; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event sessionStart; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -16,7 +16,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event userPromptSubmitted || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event userPromptSubmitted; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event userPromptSubmitted; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -27,7 +27,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preToolUse || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preToolUse; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preToolUse; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -38,7 +38,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -47,7 +47,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse --role authoring || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse --role authoring; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUse --role authoring; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -59,7 +59,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUseFailure || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUseFailure; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event postToolUseFailure; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -70,7 +70,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event agentStop || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event agentStop; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event agentStop; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -81,7 +81,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStart || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStart; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStart; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -92,7 +92,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStop || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStop; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event subagentStop; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },
@@ -103,7 +103,7 @@
       {
         "type": "command",
         "bash": "python3 \"$CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preCompact || true",
-        "powershell": "python3 \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preCompact; exit 0",
+        "powershell": "$ErrorActionPreference = 'SilentlyContinue'; foreach ($c in 'python3', 'python', 'py -3') { $t = @(-split $c); $o = & $t[0] $t[1..2] \"$env:CARDINAL_COPILOT_PLUGIN_ROOT/hooks/cardinal-copilot-telemetry.py\" --event preCompact; if ($LASTEXITCODE -eq 0) { $o; break } }; exit 0",
         "env": {
           "CARDINAL_COPILOT_PLUGIN_ROOT": "${PLUGIN_ROOT}"
         },

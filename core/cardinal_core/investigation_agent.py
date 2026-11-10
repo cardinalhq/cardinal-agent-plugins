@@ -24,6 +24,7 @@ from . import investigation_grants as grants
 from . import investigation_poller as poller
 from . import investigation_text as text
 from . import investigation_turn as turn
+from .paths import script_command
 
 
 def home(wiring) -> Path:
@@ -35,7 +36,7 @@ def enabled(wiring) -> bool:
 
 
 def command(wiring) -> str:
-    return f"{shlex.quote(sys.executable)} {shlex.quote(wiring.cli)} investigation"
+    return script_command(wiring.cli, f"{shlex.quote(sys.executable)} {shlex.quote(wiring.cli)}") + " investigation"
 
 
 def runtime(wiring) -> str:

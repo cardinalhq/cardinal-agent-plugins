@@ -51,7 +51,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .paths import AgentPaths
+from .paths import AgentPaths, script_command
 
 RUNTIMES = ("claude", "codex", "cursor", "gemini", "copilot")
 DISPLAY = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "gemini": "Gemini CLI",
@@ -168,8 +168,9 @@ def repair_command(runtime: str, root: Path) -> Optional[str]:
     Codex: --repair-hooks; Cursor, Gemini CLI and Copilot CLI: a re-run without --rotate."""
     if _runtime(runtime) == "claude":
         return None
-    script = shlex.quote(str(Path(root) / "scripts" / "cardinal-connect"))
-    return f"python3 {script} --repair-hooks" if runtime == "codex" else f"python3 {script}"
+    script = Path(root) / "scripts" / "cardinal-connect"
+    command = script_command(script, f"python3 {shlex.quote(str(script))}")
+    return f"{command} --repair-hooks" if runtime == "codex" else command
 
 
 # --- opt-in ---------------------------------------------------------------

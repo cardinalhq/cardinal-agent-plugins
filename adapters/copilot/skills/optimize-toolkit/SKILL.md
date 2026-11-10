@@ -5,6 +5,8 @@ description: Mine this engineer's own session telemetry for capability-fit recom
 
 # Cardinal Optimize Toolkit
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 Use this skill when the user explicitly asks Copilot CLI to optimize their
 toolkit, mine their own session history for capability-fit
 recommendations, or review whether a recurring inline pattern should

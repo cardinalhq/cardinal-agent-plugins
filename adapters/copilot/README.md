@@ -68,6 +68,11 @@ pattern Copilot's own bundled plugins use), and ends in `|| true`: Copilot
 **denies** a tool call when a `preToolUse` hook exits non-zero, so the script
 can never be why a tool fails.
 
+The `powershell` form of each entry runs the same script with the first of
+`python3`, `python` and `py -3` that works (a python.org install has no
+`python3`, and the Microsoft Store's `python3` can be a stub that only prints
+an install hint), prints only that run's output, and ends in `exit 0`.
+
 | Event | What the plugin does |
 | --- | --- |
 | `sessionStart` | Initiative branch-naming convention, spend-limit standing, decision-capture instructions, the Investigation bootstrap + guidance + poller, related storyboards, Checks rule (`additionalContext`) |

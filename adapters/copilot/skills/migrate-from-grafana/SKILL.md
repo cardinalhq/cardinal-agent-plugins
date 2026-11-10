@@ -5,6 +5,8 @@ description: Migrate Grafana dashboards and alert rules into Cardinal (Maestro d
 
 # Cardinal Migrate from Grafana
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 This SKILL.md is the **Copilot CLI-specific** part of the skill: where the scripts
 live, how to connect, and what to say about restarting. The workflow itself — what
 to ask for, credentials, steps 0–6 — lives in `CORE.md`, co-located in this

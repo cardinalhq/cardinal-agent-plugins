@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional
 
 from . import storyboard_context, storyboard_discovery, storyboard_files
-from .paths import AgentPaths
+from .paths import AgentPaths, script_command
 
 SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}\Z")
 COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}\Z")
@@ -210,7 +210,7 @@ def session_line(session_id: Optional[str], cli: Optional[str], auto_context: bo
     line = (f"Cardinal session id for this session: {session_id}. When you call Cardinal's "
             f"storyboard__create, storyboard__add_act or storyboard__find, pass it as session_id")
     if cli:
-        cmd = f'python3 "{cli}" context --bare --session-id {session_id}'
+        cmd = script_command(cli, f'python3 "{cli}"') + f" context --bare --session-id {session_id}"
         if auto_context:
             line += (f"; the plugin fills session_id and context when you leave them out, and "
                      f"`{cmd}` prints that context object (where this storyboard is written from), "

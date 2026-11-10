@@ -1,5 +1,6 @@
-"""cardinal_core in an interpreter that looks like Windows (winsim.py):
-no fcntl, no os.fchmod / getuid / O_NOFOLLOW / killpg, no signal.SIGALRM.
+"""cardinal_core's Windows branches, on any OS: in an interpreter that looks
+like Windows (winsim.py: no fcntl, no os.fchmod / getuid / O_NOFOLLOW /
+killpg, no signal.SIGALRM), or called with `windows=True`.
 
 A test marked expectedFailure names the issue that fixes it; that fix
 removes the mark.
@@ -8,9 +9,11 @@ removes the mark.
 from __future__ import annotations
 
 import pkgutil
+import sys
 import unittest
 from pathlib import Path
 
+from cardinal_core import paths
 from tests import winsim
 
 CORE = Path(__file__).resolve().parents[1]
@@ -43,6 +46,17 @@ class FileHandlingTests(WindowsSimCase):
                        "    events.write_json(path, {'cursor': 0})\n"
                        "    print(json.loads(path.read_text(encoding='utf-8')))\n")
         self.assertEqual(out.strip(), "{'cursor': 0}")
+
+
+class ScriptCommandTests(unittest.TestCase):
+    def test_the_windows_form_is_powershell_naming_the_running_interpreter(self):
+        script = r"C:\Users\it's me\plugin\scripts\cardinal-storyboard"
+        self.assertEqual(paths.script_command(script, "python3 x", windows=True),
+                         f"& '{sys.executable}' " + r"'C:\Users\it''s me\plugin\scripts\cardinal-storyboard'")
+
+    def test_elsewhere_the_command_is_the_callers(self):
+        self.assertEqual(paths.script_command("/p/cardinal-storyboard", 'python3 "/p/cardinal-storyboard"',
+                                              windows=False), 'python3 "/p/cardinal-storyboard"')
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ description: Disconnect GitHub Copilot CLI from Cardinal by revoking keys and re
 
 # Cardinal Disconnect
 
+**Windows.** Where a command here says `python3`, use `python` (or `py -3`) if `python3` is not found.
+
 Use this skill when the user asks to disconnect Cardinal, remove Cardinal telemetry or MCP tools from Copilot CLI, or revoke Cardinal keys.
 
 The script is `scripts/cardinal-disconnect` in the Cardinal plugin directory (two levels up from this skill's directory):
