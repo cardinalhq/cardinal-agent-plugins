@@ -142,9 +142,17 @@ class WindowsFlockTests(unittest.TestCase):
 
     def test_a_held_lock_is_blocking_io_error_and_other_errors_pass_through(self):
         from cardinal_core import _winfcntl as w
-        for held in (PermissionError(errno.EACCES, "held"), OSError(0, "Error")):  # the second is Wine's report
-            with self.subTest(error=held), self.assertRaises(BlockingIOError):  # what flock raises, callers catch
-                self.flock(w.LOCK_EX | w.LOCK_NB, held)
+        with self.assertRaises(BlockingIOError):  # the class flock raises and callers catch
+            self.flock(w.LOCK_EX | w.LOCK_NB, PermissionError(errno.EACCES, "held"))
+        # Wine reports a held byte with errno 0: contention there, an error on Windows itself.
+        import ctypes
+        wine = mock.Mock(ntdll=mock.Mock(spec=["wine_get_version"]))
+        windows = mock.Mock(ntdll=mock.Mock(spec=[]))
+        with mock.patch.object(ctypes, "windll", wine, create=True), self.assertRaises(BlockingIOError):
+            self.flock(w.LOCK_EX | w.LOCK_NB, OSError(0, "Error"))
+        with mock.patch.object(ctypes, "windll", windows, create=True), self.assertRaises(OSError) as native:
+            self.flock(w.LOCK_EX | w.LOCK_NB, OSError(0, "Error"))
+        self.assertEqual((type(native.exception), native.exception.errno), (OSError, 0))
         with self.assertRaises(OSError) as raised:
             self.flock(w.LOCK_EX | w.LOCK_NB, OSError(errno.EINVAL, "bad handle"))
         self.assertEqual((type(raised.exception), raised.exception.errno), (OSError, errno.EINVAL))
