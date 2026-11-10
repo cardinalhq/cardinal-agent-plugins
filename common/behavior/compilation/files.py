@@ -2,9 +2,13 @@
 import json
 import os
 import tempfile
-import fcntl
 from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows: the same calls on msvcrt.locking
+    from . import winfcntl as fcntl
 
 
 def private_text(path: Path, value: str) -> None:

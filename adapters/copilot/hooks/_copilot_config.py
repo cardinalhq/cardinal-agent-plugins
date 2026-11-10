@@ -81,11 +81,16 @@ def build_mcp_entry(mcp_url: str, api_key: str, plugin_version: str) -> dict:
 
 
 def build_behavior_entry(script: Path, windows: Optional[bool] = None) -> dict:
-    """On Windows the command is the interpreter running cardinal-connect:
-    `python3` is often missing there, or is the Microsoft Store stub."""
+    """On Windows the command is the interpreter running cardinal-connect
+    (`python3` is often missing there, or is the Microsoft Store stub), in
+    UTF-8 mode: before Python 3.15 its files and pipes default to the ANSI
+    code page, and the server's files and the MCP transport are UTF-8."""
+    if os.name == "nt" if windows is None else windows:
+        return {"type": "stdio", "command": sys.executable,
+                "args": ["-X", "utf8", str(script), "--runtime", "copilot"], "tools": ["*"]}
     return {
         "type": "stdio",
-        "command": sys.executable if (os.name == "nt" if windows is None else windows) else "python3",
+        "command": "python3",
         "args": [str(script), "--runtime", "copilot"],
         "tools": ["*"],
     }
