@@ -47,6 +47,7 @@ class WindowsGateTests(unittest.TestCase):
             ('powershell -NoP -Com "gci env:"', "cmd.env-dump"), ('powershell /c "dir env:"', "cmd.env-dump"),
             ("powershell Get-ChildItem Env:", "cmd.env-dump"),
             ('powershell -ExecutionPolicy Bypass -Command "gci env:"', "cmd.env-dump"),
+            ("powershell -a 1 -b 2 -d 3 -f 4 -g 5 -h 6 -i 7 -j 8 -k 9 -l 10 -Command gci env:", "cmd.env-dump"),
             ("pwsh -NoProfile -WorkingDirectory C:\\src Get-ChildItem Env:", "cmd.env-dump"),
             ("[environment]::getenvironmentvariables()", "cmd.env-dump"),
         ):

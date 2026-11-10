@@ -960,12 +960,14 @@ def _inner_commands(argv: list) -> list:
         # The script follows -Command, or is the first word that is not a
         # parameter or a parameter's value (-Command is the default). Which
         # parameters take a value is not tracked: every such tail is checked.
-        for j, a in enumerate(argv[1:9], 1):
+        tails = 0
+        for j, a in enumerate(argv[1:], 1):
             if _ps_param(a, "command"):
                 out.append(" ".join(argv[j + 1:]))
                 break
-            if not _ps_param(a):
+            if not _ps_param(a) and tails < 8:  # the scan for -Command goes on past this cap
                 out.append(" ".join(argv[j:]))
+                tails += 1
     if cmd in _SHELLS or cmd in ("eval", "source", "."):
         for j, a in enumerate(argv[1:], 1):
             if a == "<<<" and j + 1 < len(argv):
