@@ -397,8 +397,9 @@ def run_renderer(renderer: Path, runtime: str, result: Optional[dict], budget: f
     # holds the Cardinal key.
     cmd = ([sys.executable, "-I", str(renderer), "--from-json", "-", "--timeout", str(render_timeout),
             "--runtime", runtime] + list(extra or []))
+    from .paths import detached  # here, not at import: this module stays cheap to import
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, start_new_session=True)
+                            text=True, **detached())
     timed_out = False
     err = ""
     try:
@@ -410,7 +411,9 @@ def run_renderer(renderer: Path, runtime: str, result: Optional[dict], budget: f
         for sig in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
             try:
                 os.killpg(proc.pid, sig)
-            except (OSError, AttributeError):
+            except AttributeError:  # Windows has no killpg: end the renderer itself (not what it started)
+                proc.kill()
+            except OSError:
                 pass
             try:
                 out, err = proc.communicate(timeout=KILL_GRACE_S)

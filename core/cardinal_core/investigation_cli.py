@@ -16,6 +16,7 @@ from . import investigation_grants as gr
 from . import investigation_text
 from . import owner_relay
 from . import supervision_status as sv
+from .paths import detached as popen_detached
 
 EXIT_USAGE = 2
 
@@ -736,7 +737,7 @@ class CLI:
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                             close_fds=True,
-                            start_new_session=True,
+                            **popen_detached(),
                         )
                 except Exception:
                     pass

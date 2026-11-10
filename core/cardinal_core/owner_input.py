@@ -107,6 +107,7 @@ from . import investigation_events as ie
 from . import investigation_state as ist
 from . import investigation_state_sync as sync
 from .paths import replace as _replace
+from .paths import detached as popen_detached
 
 TYPE = ie.OWNER_INPUT_TYPES[0]               # owner_input.recorded
 CLASS = ie.OWNER_INPUT                       # owner_input
@@ -1178,7 +1179,7 @@ def spawn_flush(home: Path, sid: str, conn: dict, client: str) -> bool:
         root = str(Path(__file__).resolve().parent.parent)
         proc = subprocess.Popen([sys.executable, "-I", "-c", _DETACHED_CODE, root], stdin=subprocess.PIPE,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
-                                start_new_session=True)
+                                **popen_detached())
         try:
             proc.stdin.write(json.dumps({"home": str(home), "sid": sid, "conn": conn, "client": client}).encode())
         finally:
