@@ -5,12 +5,15 @@ keeps the calls it makes on POSIX. The lock is one byte at offset 0 of the
 lock file. A Windows region lock is always exclusive, so LOCK_SH behaves as
 LOCK_EX; like flock, it conflicts between two opens of the file even in one
 process, and the system drops it when the holder exits.
+
+Only what cardinal_core uses: a non-blocking lock (each caller runs its own
+bounded wait) and unlock. msvcrt.locking raises OSError when the byte is
+held, as flock does, and any other error reaches the caller unchanged.
 """
 
 from __future__ import annotations
 
 import os
-import time
 
 LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
 
@@ -18,16 +21,7 @@ LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
 def flock(fd: int, operation: int) -> None:
     import msvcrt  # Windows only; imported here so this module imports anywhere
 
+    if not operation & (LOCK_UN | LOCK_NB):
+        raise NotImplementedError("a blocking lock: pass LOCK_NB and wait in the caller")
     os.lseek(fd, 0, os.SEEK_SET)
-    if operation & LOCK_UN:
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-    elif operation & LOCK_NB:
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # OSError when held, as flock raises
-    else:
-        while True:  # LK_LOCK gives up after ten seconds; flock waits
-            try:
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                return
-            except OSError:
-                time.sleep(0.05)
-                os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & LOCK_UN else msvcrt.LK_NBLCK, 1)

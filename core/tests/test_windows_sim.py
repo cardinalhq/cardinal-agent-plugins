@@ -8,6 +8,7 @@ removes the mark.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import pkgutil
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 from cardinal_core import paths
@@ -99,6 +101,41 @@ class Utf8Tests(unittest.TestCase):
                              input=self.TEXT.encode("utf-8"), capture_output=True, cwd=str(CORE),
                              env={**os.environ, "PYTHONIOENCODING": "cp1252"}, timeout=60)
         self.assertEqual((res.returncode, res.stdout.decode("utf-8")), (0, self.TEXT), res.stderr)
+
+
+class WindowsFlockTests(unittest.TestCase):
+    """_winfcntl.flock against a stand-in msvcrt."""
+
+    def flock(self, operation: int, error: Optional[OSError] = None) -> list:
+        from cardinal_core import _winfcntl
+        calls = []
+
+        def locking(fd, mode, nbytes):
+            calls.append((mode, nbytes))
+            if error:
+                raise error
+
+        fake = mock.Mock(LK_UNLCK=0, LK_NBLCK=2, locking=locking)
+        with tempfile.TemporaryFile() as f, mock.patch.dict(sys.modules, {"msvcrt": fake}):
+            _winfcntl.flock(f.fileno(), operation)
+        return calls
+
+    def test_lock_and_unlock_are_one_byte_region_calls(self):
+        from cardinal_core import _winfcntl as w
+        self.assertEqual(self.flock(w.LOCK_EX | w.LOCK_NB), [(2, 1)])
+        self.assertEqual(self.flock(w.LOCK_UN), [(0, 1)])
+
+    def test_a_held_lock_and_any_other_error_reach_the_caller_at_once(self):
+        from cardinal_core import _winfcntl as w
+        for code in (errno.EACCES, errno.EINVAL):
+            with self.subTest(errno=code), self.assertRaises(OSError) as raised:
+                self.flock(w.LOCK_EX | w.LOCK_NB, OSError(code, "locking failed"))
+            self.assertEqual(raised.exception.errno, code)
+
+    def test_a_blocking_lock_is_refused_not_waited_for(self):
+        from cardinal_core import _winfcntl as w
+        with self.assertRaises(NotImplementedError):
+            self.flock(w.LOCK_EX)
 
 
 class AtomicReplaceTests(unittest.TestCase):
