@@ -29,6 +29,7 @@ MISSING_SIGNAL = ("ITIMER_REAL", "SIGALRM", "SIGHUP", "SIGUSR1", "alarm", "setit
 def _fake_msvcrt():
     """msvcrt.locking on the host's flock (which, like a Windows region
     lock, conflicts between two opens in one process), so lock code runs here."""
+    import errno
     import fcntl
     import types
 
@@ -36,7 +37,10 @@ def _fake_msvcrt():
     module.LK_UNLCK, module.LK_LOCK, module.LK_NBLCK = 0, 1, 2
 
     def locking(fd: int, mode: int, nbytes: int) -> None:
-        fcntl.flock(fd, fcntl.LOCK_UN if mode == module.LK_UNLCK else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN if mode == module.LK_UNLCK else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise PermissionError(errno.EACCES, "Permission denied") from None  # as msvcrt reports a held region
 
     module.locking = locking
     return module

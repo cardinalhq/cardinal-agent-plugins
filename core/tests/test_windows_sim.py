@@ -80,6 +80,21 @@ class FileHandlingTests(WindowsSimCase):
                        "    consumer.fsync_directory(directory)\n")
         self.assertEqual(out.strip(), "{'after': 4}")
 
+    def test_a_second_holder_of_a_consumer_lock_gets_blocking_io_error(self):
+        out = self.sim("import pathlib, tempfile\n"
+                       "from cardinal_core import investigation_consumer as consumer\n"
+                       "with tempfile.TemporaryDirectory() as d:\n"
+                       "    path = pathlib.Path(d) / 'cursor.json'\n"
+                       "    with consumer.locked(path):\n"
+                       "        try:\n"
+                       "            with consumer.locked(path):\n"
+                       "                print('second holder got in')\n"
+                       "        except BlockingIOError:\n"
+                       "            print('held')\n"
+                       "    with consumer.locked(path):\n"
+                       "        print('free')\n")
+        self.assertEqual(out.split(), ["held", "free"])
+
 
 class Utf8Tests(unittest.TestCase):
     """State files are UTF-8 whatever the default encoding is (cp1252 on
@@ -125,12 +140,15 @@ class WindowsFlockTests(unittest.TestCase):
         self.assertEqual(self.flock(w.LOCK_EX | w.LOCK_NB), [(2, 1)])
         self.assertEqual(self.flock(w.LOCK_UN), [(0, 1)])
 
-    def test_a_held_lock_and_any_other_error_reach_the_caller_at_once(self):
+    def test_a_held_lock_is_blocking_io_error_and_other_errors_pass_through(self):
         from cardinal_core import _winfcntl as w
-        for code in (errno.EACCES, errno.EINVAL):
-            with self.subTest(errno=code), self.assertRaises(OSError) as raised:
-                self.flock(w.LOCK_EX | w.LOCK_NB, OSError(code, "locking failed"))
-            self.assertEqual(raised.exception.errno, code)
+        with self.assertRaises(BlockingIOError):  # the class flock raises and callers catch
+            self.flock(w.LOCK_EX | w.LOCK_NB, PermissionError(errno.EACCES, "held"))
+        with self.assertRaises(OSError) as raised:
+            self.flock(w.LOCK_EX | w.LOCK_NB, OSError(errno.EINVAL, "bad handle"))
+        self.assertEqual((type(raised.exception), raised.exception.errno), (OSError, errno.EINVAL))
+        with self.assertRaises(PermissionError):  # unlock errors are not contention
+            self.flock(w.LOCK_UN, PermissionError(errno.EACCES, "not locked"))
 
     def test_a_blocking_lock_is_refused_not_waited_for(self):
         from cardinal_core import _winfcntl as w

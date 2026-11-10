@@ -7,12 +7,14 @@ LOCK_EX; like flock, it conflicts between two opens of the file even in one
 process, and the system drops it when the holder exits.
 
 Only what cardinal_core uses: a non-blocking lock (each caller runs its own
-bounded wait) and unlock. msvcrt.locking raises OSError when the byte is
-held, as flock does, and any other error reaches the caller unchanged.
+bounded wait) and unlock. A held byte (EACCES from msvcrt.locking) is raised
+as BlockingIOError, the class flock raises and callers catch; any other
+error reaches the caller unchanged.
 """
 
 from __future__ import annotations
 
+import errno
 import os
 
 LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
@@ -24,4 +26,9 @@ def flock(fd: int, operation: int) -> None:
     if not operation & (LOCK_UN | LOCK_NB):
         raise NotImplementedError("a blocking lock: pass LOCK_NB and wait in the caller")
     os.lseek(fd, 0, os.SEEK_SET)
-    msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & LOCK_UN else msvcrt.LK_NBLCK, 1)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK if operation & LOCK_UN else msvcrt.LK_NBLCK, 1)
+    except OSError as error:
+        if operation & LOCK_UN or error.errno not in (errno.EACCES, errno.EDEADLK):
+            raise
+        raise BlockingIOError(errno.EWOULDBLOCK, "the lock is held") from error  # what flock raises
