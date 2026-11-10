@@ -21,8 +21,8 @@ from pathlib import Path
 MISSING_MODULES = ("fcntl", "grp", "pwd", "resource", "termios")
 # os.fchmod exists on Windows from Python 3.13; hidden to model 3.9 to 3.12.
 MISSING_OS = ("O_NOFOLLOW", "fchmod", "fchown", "getegid", "geteuid", "getgid", "getpgid", "getuid", "killpg",
-              "setsid", "uname")
-# signal.SIGKILL is missing on Windows too, but the host's subprocess module needs it.
+              "setsid")
+# os.uname and signal.SIGKILL are missing on Windows too, but the host's ctypes and subprocess need them.
 MISSING_SIGNAL = ("ITIMER_REAL", "SIGALRM", "SIGHUP", "SIGUSR1", "alarm", "setitimer")
 
 

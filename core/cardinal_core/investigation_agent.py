@@ -24,7 +24,7 @@ from . import investigation_grants as grants
 from . import investigation_poller as poller
 from . import investigation_text as text
 from . import investigation_turn as turn
-from .paths import script_command
+from .paths import detached, script_command
 
 
 def home(wiring) -> Path:
@@ -104,7 +104,7 @@ def spawn_poller(wiring, sid: str, script: str) -> None:
         return
     subprocess.Popen([sys.executable, script, "--session", sid, "--anchor", str(os.getppid())],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     close_fds=True, start_new_session=True)
+                     close_fds=True, **detached())
 
 
 def _bound(wiring, sid: str) -> Optional[dict]:

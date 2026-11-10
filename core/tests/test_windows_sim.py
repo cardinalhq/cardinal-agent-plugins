@@ -165,6 +165,47 @@ class WindowsFlockTests(unittest.TestCase):
             self.flock(w.LOCK_EX)
 
 
+class ProcessTests(unittest.TestCase):
+    """Issue #248: liveness, the poller's anchor and detached children."""
+
+    def test_alive_never_signals_on_windows(self):
+        from cardinal_core import _winproc, investigation_poller as poller
+        with mock.patch.object(poller, "WINDOWS", True), mock.patch.object(poller.os, "kill") as kill, \
+                mock.patch.object(_winproc, "alive", return_value=True) as probe:
+            self.assertTrue(poller.alive(4242))
+        kill.assert_not_called()
+        probe.assert_called_once_with(4242)
+
+    def test_the_anchor_skips_powershell_cmd_and_the_py_launcher(self):
+        from cardinal_core import investigation_poller as poller
+        tree = {50: (40, "python.exe"), 40: (30, "py.exe"), 30: (20, "PowerShell.EXE"), 20: (10, "cmd.exe"),
+                10: (4, "copilot.exe")}
+        with mock.patch.object(poller, "WINDOWS", True):
+            self.assertEqual(poller.resolve_anchor(40, tree.get), 10)
+            self.assertEqual(poller.resolve_anchor(10, tree.get), 10)
+        self.assertEqual(poller.resolve_anchor(30, tree.get), 30)  # elsewhere PowerShell is not a shell to skip
+
+    def test_detached_children(self):
+        self.assertEqual(paths.detached(windows=False), {"start_new_session": True})
+        # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW; start_new_session does nothing on Windows
+        self.assertEqual(paths.detached(windows=True), {"creationflags": 0x08000200})
+
+    @unittest.skipUnless(os.name == "nt", "kernel32, under a Windows Python")
+    def test_kernel32_liveness_and_parent(self):
+        from cardinal_core import _winproc
+        self.assertTrue(_winproc.alive(os.getpid()))
+        self.assertEqual(_winproc.parent(os.getpid())[0], os.getppid())
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+        try:
+            self.assertTrue(_winproc.alive(child.pid))
+            ppid, exe = _winproc.parent(child.pid)
+            self.assertEqual((ppid, exe.lower().startswith("python")), (os.getpid(), True))
+        finally:
+            child.stdin.close()
+            child.wait(timeout=30)
+        self.assertFalse(_winproc.alive(child.pid))
+
+
 class AtomicReplaceTests(unittest.TestCase):
     def test_windows_retries_while_the_destination_is_open_elsewhere(self):
         calls = []

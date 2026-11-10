@@ -87,6 +87,16 @@ def replace(src: Any, dst: Any, windows: Any = None) -> None:
             time.sleep(0.05)
 
 
+def detached(windows: Any = None) -> dict:
+    """subprocess.Popen arguments for a child the caller does not wait for
+    and that must outlive it: its own session on POSIX. `start_new_session`
+    does nothing on Windows; there the child gets its own process group and
+    no console window."""
+    if not (os.name == "nt" if windows is None else windows):
+        return {"start_new_session": True}
+    return {"creationflags": 0x00000200 | 0x08000000}  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+
+
 def powershell_literal(text: Any) -> str:
     """`text` as a PowerShell single-quoted literal. PowerShell also ends a
     literal at the typographic quotes U+2018 to U+201B, so each of those is

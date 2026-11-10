@@ -76,7 +76,7 @@ try:
         is_git_repo,
         resolve_initiative,
     )
-    from cardinal_core.paths import AgentPaths, script_command, utf8_stdio  # noqa: E402
+    from cardinal_core.paths import AgentPaths, detached, script_command, utf8_stdio  # noqa: E402
 except Exception:
     # An install without its vendored core: exit 0 with no output, so a
     # preToolUse hook never denies a tool call on its account.
@@ -895,7 +895,7 @@ def spawn_background(job: dict[str, Any]) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **detached(),
             close_fds=True,
         )
     except OSError:
