@@ -16,7 +16,7 @@ import os
 import time
 
 LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
-HELD = (errno.EACCES, errno.EDEADLK)
+HELD = (errno.EACCES, errno.EDEADLK, 0)  # 0: how Wine's C runtime reports it (seen in the Wine CI job)
 
 
 def flock(file, operation, sleep=time.sleep):
