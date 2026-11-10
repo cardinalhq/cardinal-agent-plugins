@@ -6,7 +6,11 @@ a test listed in known-failures.txt must fail, anything else must pass. A
 listed test that passes fails the run too, so the fix that makes it pass
 removes its line.
 
-Usage: python tests/windows/run_suite.py core|copilot|behavior
+Usage: python tests/windows/run_suite.py core|copilot|behavior [status file]
+
+The exit code is also written to the status file, last: wine-suite.sh trusts
+that file, not Wine's exit status. The suite name `crash` exits 0 without
+writing it, for the CI step that checks a crashed run cannot pass.
 """
 
 from __future__ import annotations
@@ -50,7 +54,9 @@ def test_id(test) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in SUITES:
+    if sys.argv[1:2] == ["crash"]:
+        os._exit(0)
+    if len(sys.argv) not in (2, 3) or sys.argv[1] not in SUITES:
         sys.exit(__doc__)
     suite = sys.argv[1]
     version = "%d.%d" % sys.version_info[:2]
@@ -67,9 +73,15 @@ def main() -> int:
     new = sorted(set(failed) - known)
     stale = sorted(known - set(failed))
 
+    # A module that does not import, or a class whose setUpClass fails, hides
+    # every test in it: count those apart from tests whose bodies ran.
+    blocked = sorted(name for name in failed if name.startswith(("unittest.loader._FailedTest", "setUp")))
     print(f"\n{suite} on {sys.platform} Python {version}: ran {result.testsRun}, "
           f"failed {len(failed)} ({len(known) - len(stale)} known, {len(new)} new), "
-          f"{len(stale)} listed as failing but passed")
+          f"{len(stale)} listed as failing but passed, {len(result.skipped)} skipped, "
+          f"{len(blocked)} modules or classes did not run at all")
+    for name in blocked:
+        print(f"=== DID NOT RUN {name}")
     for name in new:
         print(f"\n=== NEW FAILURE {name}\n{failed[name]}")
     if new:
@@ -82,4 +94,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    status_file = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else None  # before main() changes directory
+    code = main()
+    if status_file:
+        status_file.write_text(str(code), encoding="utf-8")
+    sys.exit(code)

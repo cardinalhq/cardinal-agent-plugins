@@ -38,11 +38,17 @@ jobs:
       GIT_FOR_WINDOWS: v2.56.0.windows.4/MinGit-2.56.0.4-64-bit.zip
     steps:
       - uses: actions/checkout@v4
+      # WineHQ's build, 64-bit only: Ubuntu 24.04's Wine 9.0 lacks CopyFile2,
+      # which Python 3.12+ calls to copy a file.
       - name: Install Wine
         run: |
+          sudo mkdir -pm755 /etc/apt/keyrings
+          sudo wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+          sudo wget -qNP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends wine wine64
-          wine --version
+          sudo apt-get install -y -q --no-install-recommends wine-stable-amd64
+          echo /opt/wine-stable/bin >> "$GITHUB_PATH"
+          /opt/wine-stable/bin/wine --version
       - name: Install Windows CPython (official NuGet build) and Git for Windows
         run: |
           curl -fsSL -o "$RUNNER_TEMP/python.nupkg" "https://www.nuget.org/api/v2/package/python/${{ matrix.python }}"
@@ -59,13 +65,16 @@ jobs:
           wine "$WINPY" -c "import subprocess; print(subprocess.run(['git', '--version'], capture_output=True, text=True))"
       - name: Vendor cardinal_core into the Copilot adapter
         run: python3 build/vendor.py copilot
+      - name: A crashed run cannot pass
+        run: |
+          if sh tests/windows/wine-suite.sh crash; then echo "a run with no status file passed"; exit 1; fi
       - name: Core suite
         if: always()
-        run: wine "$WINPY" tests/windows/run_suite.py core
+        run: sh tests/windows/wine-suite.sh core
       - name: Behavior suite
         if: always()
-        run: wine "$WINPY" tests/windows/run_suite.py behavior
+        run: sh tests/windows/wine-suite.sh behavior
       # Adapter suites need 3.11+, as in investigation-tests.yml.
       - name: Copilot adapter suite
         if: always() && !startsWith(matrix.python, '3.9.')
-        run: wine "$WINPY" tests/windows/run_suite.py copilot
+        run: sh tests/windows/wine-suite.sh copilot

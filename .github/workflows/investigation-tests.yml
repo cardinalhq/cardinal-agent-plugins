@@ -43,4 +43,6 @@ jobs:
         run: python3 build/vendor.py gemini && (cd adapters/gemini && python3 -m unittest discover tests)
       - name: Copilot CLI adapter unittest suite
         if: matrix.python-version != '3.9'
+        env:
+          CARDINAL_REQUIRE_PWSH: '1'  # the powershell hook commands run under the runner's pwsh; never skipped here
         run: python3 build/vendor.py copilot && (cd adapters/copilot && python3 -m unittest discover tests)
