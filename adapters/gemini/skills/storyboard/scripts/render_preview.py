@@ -291,13 +291,19 @@ def chromium_candidates(env: dict, system: str, home: Path, which=shutil.which, 
             out.append(("path", p))
     elif system == "Windows":
         # Machine-wide installs, then per-user ones, then PATH. Edge ships with Windows.
-        for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
-            if env.get(var):
+        upper = {k.upper(): v for k, v in env.items()}  # a copy of os.environ has upper-case names on Windows
+        for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            if upper.get(var):
                 for app in WINDOWS_APPS:
-                    out.append(("app", ntpath.join(env[var], app)))
+                    out.append(("app", ntpath.join(upper[var], app)))
+        # shutil.which looks in the current directory first on Windows. The
+        # renderer holds the Cardinal key: never take a browser from the
+        # workspace, and never fall back to a bare name.
+        here = ntpath.normcase(ntpath.abspath(os.getcwd())) + "\\"
         for cmd in WINDOWS_COMMANDS:
             found = which(cmd)
-            out.append(("PATH", found or cmd))
+            if found and ntpath.isabs(found) and not ntpath.normcase(ntpath.abspath(found)).startswith(here):
+                out.append(("PATH", found))
     for p in _cache_candidates(home, system):
         out.append(("cache", p))
     return out

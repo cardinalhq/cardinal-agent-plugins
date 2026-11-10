@@ -90,23 +90,32 @@ class PowerShellCommandTests(HookCase):
                 self.assertEqual((res.returncode, res.stdout), (0, b""), res.stderr)
 
     def fake_path(self, name: str, programs: dict) -> str:
-        """A PATH directory holding only the given programs (name -> sh script body)."""
+        """A PATH directory holding only the given programs (name -> kind):
+        `real` runs this interpreter, `stub` prints the Microsoft Store hint
+        and fails, `py` is the launcher (requires -3, then runs this
+        interpreter). sh scripts, or .cmd files under a Windows Python."""
+        hint = "Python was not found; run without arguments to install from the Microsoft Store"
         bin_dir = self.base / name
         bin_dir.mkdir()
-        for program, body in programs.items():
-            (bin_dir / program).write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
-            (bin_dir / program).chmod(0o755)
+        for program, kind in programs.items():
+            if os.name == "nt":
+                body = {"real": f'@"{sys.executable}" %*', "stub": f"@echo {hint}\r\n@exit /b 49",
+                        "py": f'@if not "%1"=="-3" exit /b 2\r\n@"{sys.executable}" %2 %3 %4 %5 %6 %7 %8 %9'}[kind]
+                (bin_dir / (program + ".cmd")).write_text(body + "\r\n", encoding="utf-8")
+            else:
+                body = {"real": f'exec "{sys.executable}" "$@"', "stub": f'echo "{hint}"; exit 49',
+                        "py": f'[ "$1" = -3 ] || exit 2; shift; exec "{sys.executable}" "$@"'}[kind]
+                (bin_dir / program).write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+                (bin_dir / program).chmod(0o755)
         return str(bin_dir)
 
     def test_the_first_interpreter_that_works_runs_the_hook(self):
         # python.org installs have no python3; the Microsoft Store stub is a
         # python3 that prints a message and fails; the py launcher takes -3.
-        real = f'exec "{sys.executable}" "$@"'
-        stub = 'echo "Python was not found; run without arguments to install from the Microsoft Store"; exit 49'
         cases = {
-            "python-only": {"python": real},
-            "store-stub-then-python": {"python3": stub, "python": real},
-            "py-launcher-only": {"py": f'[ "$1" = -3 ] || exit 2; shift; {real}'},
+            "python-only": {"python": "real"},
+            "store-stub-then-python": {"python3": "stub", "python": "real"},
+            "py-launcher-only": {"py": "py"},
         }
         payload = self.tool(args={"command": TEXT})
         for label, programs in cases.items():
@@ -248,7 +257,7 @@ class PreviewDiscoveryTests(unittest.TestCase):
                                      r"C:\Program Files\Chromium\Application\chrome.exe"])
         self.assertIn(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", paths)
         self.assertIn(r"C:\Users\a\AppData\Local\Google\Chrome\Application\chrome.exe", paths)
-        self.assertEqual([path for source, path in found if source == "PATH"], ["chrome", "msedge", "chromium"])
+        self.assertEqual([path for source, path in found if source == "PATH"], [])  # nothing on PATH: no bare names
 
     def test_the_explicit_binary_is_the_only_candidate(self):
         env = dict(self.ENV, CARDINAL_CHROMIUM=r"D:\tools\chrome.exe")
@@ -262,16 +271,28 @@ class PreviewDiscoveryTests(unittest.TestCase):
 
     def test_the_first_existing_browser_is_used(self):
         with TemporaryDirectory() as d:
-            edge = Path(d) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
-            edge.parent.mkdir(parents=True)
-            edge.write_text("")
-            edge.chmod(0o755)
-            join = self.render.ntpath.join
-            with mock.patch.object(self.render.ntpath, "join", lambda root, app: str(Path(root, *app.split("\\")))):
-                found, searched = self.render.find_chromium({"ProgramFiles": d}, "Windows", Path("/nonexistent-home"),
-                                                            which=lambda c: None, version_of=lambda p: None)
-            self.assertEqual((found["path"], found["source"]), (str(edge), "app"), searched)
-            self.assertTrue(callable(join))
+            # ntpath.join, as the renderer builds it: nested folders on Windows, one odd file name elsewhere.
+            edge = self.render.ntpath.join(d, self.render.WINDOWS_APPS[1])
+            os.makedirs(os.path.dirname(edge), exist_ok=True)
+            Path(edge).write_text("")
+            os.chmod(edge, 0o755)
+            found, searched = self.render.find_chromium({"ProgramFiles": d}, "Windows", Path("/nonexistent-home"),
+                                                        which=lambda c: None, version_of=lambda p: None)
+            self.assertEqual((found["path"], found["source"]), (edge, "app"), searched)
+
+    def test_a_browser_in_the_workspace_or_a_bare_name_is_never_taken_from_path(self):
+        here = self.render.ntpath.abspath(os.getcwd())
+        planted = self.render.ntpath.join(here, "chrome.exe")
+        elsewhere = r"C:\Tools\Chromium\chrome.exe"
+        for which, expected in ((lambda c: planted, []), (lambda c: "chrome.exe", []), (lambda c: None, []),
+                                (lambda c: elsewhere, [elsewhere] * 3)):
+            found = self.render.chromium_candidates({}, "Windows", Path("/nonexistent-home"), which=which)
+            self.assertEqual([path for source, path in found if source == "PATH"], expected)
+
+    def test_environment_names_are_matched_in_any_case(self):
+        found = self.render.chromium_candidates({"PROGRAMFILES(X86)": r"C:\Program Files (x86)"}, "Windows",
+                                                Path("/nonexistent-home"), which=lambda c: None)
+        self.assertIn(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", [p for _, p in found])
 
 
 if __name__ == "__main__":
