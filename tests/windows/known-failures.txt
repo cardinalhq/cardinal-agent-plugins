@@ -91,12 +91,10 @@ core@3.14 test_evidence_local_paths.SessionTmpAndEncodedPathTests.test_the_realp
 core@3.14 test_evidence_spool_bounds.SpoolBoundsTests.test_size_cap_holds_when_one_pass_cannot_list_the_whole_spool  # #255: unclassified
 core@3.14 test_investigation_budget.BudgetSet.test_set_records_the_direction_on_the_supervisors_own_investigation  # #247: fcntl lock
 core@3.14 test_investigation_budget.Cache.test_lock_link_and_shape  # #247: fcntl lock
-core@3.14 test_investigation_budget.FixRound.test_stale_batch_and_busy_cursor_name_the_fix  # #247: fcntl lock
 core@3.14 test_investigation_consumer.ConsumerTests.test_pending_replayed_after_restart_then_explicitly_committed  # #247: fcntl lock
 core@3.14 test_investigation_consumer.ConsumerTests.test_private_credentials_reject_symlink_public_mode_and_missing_token  # #247: os.O_NOFOLLOW
 core@3.14 test_investigation_events.BindingStore.test_bind_writes_a_private_file_and_resume_keeps_the_cursor  # #247: POSIX mode bits asserted
 core@3.14 test_investigation_gate.Engine.test_missing_capability_errors_identity_and_policy_epochs  # #247: private-file check
-core@3.14 test_investigation_gate_runtime.Runtime.test_route_lock_contention_does_not_drain_feedback  # #247: os.O_NOFOLLOW
 core@3.14 test_investigation_lifecycle.BootstrapTests.test_context_survives_failed_bootstrap_and_preserves_the_first_repo_on_resume  # #247: POSIX mode bits asserted
 core@3.14 test_investigation_supervision.FailureDetection.test_marker_exit_three_throttle_clear_and_never_usage  # #247: POSIX mode bits asserted
 core@3.14 test_investigation_supervision.GrantReservation.test_definite_failures_delete_and_allow_retry_ambiguous_preserves  # #247: POSIX mode bits asserted
@@ -126,7 +124,6 @@ core@3.14 test_storyboard_files.StoryboardFilesTests.test_file_mode_and_director
 core@3.14 test_storyboard_session_visualization.SessionVisualizationTests.test_codex_preview_renders_reveal_steps_under_its_own_home  # #251: local preview
 core@3.14 test_supervision_friction.Friction.test_generated_directories_reject_public_mode_and_symlinks  # #247: POSIX mode bits asserted
 core@3.14 test_supervision_friction.Friction.test_immutable_snapshot_replay_and_explicit_review  # #247: fcntl lock
-core@3.14 test_supervision_friction.Friction.test_review_holds_cursor_during_budget_application  # #247: fcntl lock
 core@3.14 test_supervision_friction.Friction.test_snapshot_rejects_symlink_and_wrong_identity  # #247: fcntl lock
 core@3.14 test_supervision_verdicts.ChallengesCli.test_heads_are_checked_only_on_trusted_hosts  # #255: POSIX program in a test (WinError 2)
 core@3.14 test_supervision_verdicts.ChallengesCli.test_rows_with_next_actions_and_heads  # #247: os.O_NOFOLLOW
@@ -175,12 +172,10 @@ core@3.9 test_evidence_local_paths.SessionTmpAndEncodedPathTests.test_the_realpa
 core@3.9 test_evidence_spool_bounds.SpoolBoundsTests.test_size_cap_holds_when_one_pass_cannot_list_the_whole_spool  # #255: unclassified
 core@3.9 test_investigation_budget.BudgetSet.test_set_records_the_direction_on_the_supervisors_own_investigation  # #247: os.fchmod
 core@3.9 test_investigation_budget.Cache.test_lock_link_and_shape  # #247: os.fchmod
-core@3.9 test_investigation_budget.FixRound.test_stale_batch_and_busy_cursor_name_the_fix  # #247: os.fchmod
 core@3.9 test_investigation_consumer.ConsumerTests.test_pending_replayed_after_restart_then_explicitly_committed  # #247: fcntl lock
 core@3.9 test_investigation_consumer.ConsumerTests.test_private_credentials_reject_symlink_public_mode_and_missing_token  # #247: os.O_NOFOLLOW
 core@3.9 test_investigation_events.BindingStore.test_bind_writes_a_private_file_and_resume_keeps_the_cursor  # #247: os.fchmod
 core@3.9 test_investigation_gate.Engine.test_missing_capability_errors_identity_and_policy_epochs  # #247: private-file check
-core@3.9 test_investigation_gate_runtime.Runtime.test_route_lock_contention_does_not_drain_feedback  # #247: os.O_NOFOLLOW
 core@3.9 test_investigation_lifecycle.BootstrapTests.test_context_survives_failed_bootstrap_and_preserves_the_first_repo_on_resume  # #255: unclassified
 core@3.9 test_investigation_supervision.FailureDetection.test_marker_exit_three_throttle_clear_and_never_usage  # #247: os.fchmod
 core@3.9 test_investigation_supervision.GrantReservation.test_definite_failures_delete_and_allow_retry_ambiguous_preserves  # #247: os.fchmod
@@ -210,7 +205,6 @@ core@3.9 test_storyboard_files.StoryboardFilesTests.test_file_mode_and_directory
 core@3.9 test_storyboard_session_visualization.SessionVisualizationTests.test_codex_preview_renders_reveal_steps_under_its_own_home  # #251: local preview
 core@3.9 test_supervision_friction.Friction.test_generated_directories_reject_public_mode_and_symlinks  # #247: os.fchmod
 core@3.9 test_supervision_friction.Friction.test_immutable_snapshot_replay_and_explicit_review  # #247: os.fchmod
-core@3.9 test_supervision_friction.Friction.test_review_holds_cursor_during_budget_application  # #247: os.fchmod
 core@3.9 test_supervision_friction.Friction.test_snapshot_rejects_symlink_and_wrong_identity  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.ChallengesCli.test_heads_are_checked_only_on_trusted_hosts  # #247: os.fchmod
 core@3.9 test_supervision_verdicts.ChallengesCli.test_rows_with_next_actions_and_heads  # #247: os.fchmod
