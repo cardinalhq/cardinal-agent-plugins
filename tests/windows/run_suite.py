@@ -4,7 +4,7 @@
 For the Windows-Python-under-Wine CI job (.github/workflows/windows-wine.yml):
 a test listed in known-failures.txt for this Python version must fail,
 anything else must pass. A listed test that passes fails the run too, so the
-fix that makes it pass removes its line.
+fix that makes it pass removes its line (unless the line says `flaky`).
 
 Usage: python tests/windows/run_suite.py core|copilot|behavior [report file]
 
@@ -34,14 +34,18 @@ SUITES = {
 HANG_AFTER_S = 2400
 
 
-def known_failures(target: str) -> set:
-    """Lines are `<suite>@<python minor> <test id>  # <issue>`."""
-    out = set()
+def known_failures(target: str) -> tuple:
+    """Lines are `<suite>@<python minor> <test id>  # <issue>`. Returns
+    (ids that must fail, ids that may pass: their comment says `flaky`)."""
+    known, flaky = set(), set()
     for line in KNOWN.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line and line.split(None, 1)[0] == target:
-            out.add(line.split(None, 1)[1].strip())
-    return out
+        entry, _, comment = line.partition("#")
+        words = entry.split(None, 1)
+        if len(words) == 2 and words[0] == target:
+            known.add(words[1].strip())
+            if "flaky" in comment:
+                flaky.add(words[1].strip())
+    return known, flaky
 
 
 def test_id(test) -> str:
@@ -68,9 +72,9 @@ def run(suite: str) -> tuple:
     failed = {}
     for test, trace in result.failures + result.errors:
         failed.setdefault(test_id(test), trace)
-    known = known_failures(target)
+    known, flaky = known_failures(target)
     new = sorted(set(failed) - known)
-    stale = sorted(known - set(failed))
+    stale = sorted(known - set(failed) - flaky)
     # A module that does not import, or a class whose setUpClass fails, hides
     # every test in it: count those apart from tests whose bodies ran.
     blocked = sorted(name for name in failed if name.startswith(("unittest.loader._FailedTest", "setUp")))

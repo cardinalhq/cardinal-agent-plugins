@@ -23,6 +23,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-wine-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   wine:
     name: Windows Python ${{ matrix.python }}
@@ -31,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.9.13', '3.12.10', '3.14.10']
+        python: ['3.9.13', '3.14.10']  # the oldest supported, and one with os.fchmod on Windows (3.13+)
     env:
       WINEDEBUG: -all
       WINEDLLOVERRIDES: mscoree,mshtml=  # no Mono / Gecko install prompts

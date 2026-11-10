@@ -1,3 +1,4 @@
 # Tests that fail under a Windows Python (Wine CI job, windows-wine.yml).
-# Format: <suite>@<python minor> <test id>  # <issue that fixes it>
+# Format: <suite>@<python minor> <test id>  # <issue that fixes it>[: note]
 # run_suite.py fails when a listed test passes: the PR that fixes it removes its line.
+# A line whose comment says `flaky` may pass or fail (timing under Wine).

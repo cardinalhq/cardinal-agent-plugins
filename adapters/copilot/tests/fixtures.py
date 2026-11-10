@@ -77,6 +77,7 @@ def clean_env(home: Path, **extra: str) -> dict:
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("CARDINAL_") and k != "COPILOT_HOME"}
     env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)  # what Path.home() reads on Windows
     env.update(extra)
     return env
 
