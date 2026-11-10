@@ -113,7 +113,7 @@ _CODEX_BEHAVIOR_TABLE_RE = re.compile(
 
 def _json_servers(path: Path) -> dict:
     try:
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     servers = data.get("mcpServers") if isinstance(data, dict) else None
@@ -138,7 +138,7 @@ def behavior_registered(runtime: str, home: Optional[Path] = None) -> bool:
     agent = agent_paths(runtime, home).home
     if runtime == "codex":
         try:
-            return bool(_CODEX_BEHAVIOR_TABLE_RE.search((agent / "config.toml").read_text()))
+            return bool(_CODEX_BEHAVIOR_TABLE_RE.search((agent / "config.toml").read_text(encoding="utf-8")))
         except (OSError, UnicodeDecodeError):
             return False
     if runtime == "cursor":
@@ -177,7 +177,7 @@ def repair_command(runtime: str, root: Path) -> Optional[str]:
 
 def is_enabled(runtime: str, home: Optional[Path] = None) -> bool:
     try:
-        data = json.loads((state_dir(runtime, home) / "enabled.json").read_text())
+        data = json.loads((state_dir(runtime, home) / "enabled.json").read_text(encoding="utf-8"))
         return isinstance(data, dict) and data.get("enabled") is True
     except (OSError, ValueError):
         return False
@@ -220,7 +220,7 @@ def skills_dir(runtime: str, root: Path, home: Optional[Path] = None) -> Optiona
         return Path(root) / "skills"
     ext = gemini_extension_dir(home)
     try:
-        manifest = json.loads((ext / "gemini-extension.json").read_text())
+        manifest = json.loads((ext / "gemini-extension.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not (isinstance(manifest, dict) and manifest.get("cardinalManaged")):
@@ -250,7 +250,7 @@ def installed_digest(dest: Optional[Path]) -> Optional[str]:
     if dest is None:
         return None
     try:
-        data = json.loads((Path(dest) / MARKER).read_text())
+        data = json.loads((Path(dest) / MARKER).read_text(encoding="utf-8"))
         return data.get("template_sha256") if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
@@ -279,7 +279,7 @@ def install(root: Path, dest: Path) -> bool:
     if staging.exists():
         shutil.rmtree(staging)
     shutil.copytree(template_dir(root), staging, ignore=shutil.ignore_patterns("__pycache__"))
-    (staging / MARKER).write_text(json.dumps({"template_sha256": digest}) + "\n")
+    (staging / MARKER).write_text(json.dumps({"template_sha256": digest}) + "\n", encoding="utf-8")
     if dest.exists():
         shutil.rmtree(dest)
     os.replace(staging, dest)

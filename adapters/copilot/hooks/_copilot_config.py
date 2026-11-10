@@ -54,7 +54,7 @@ def load(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"{path} is not valid JSON ({exc})") from exc
     if not isinstance(data, dict):

@@ -141,7 +141,7 @@ def _settings_env(paths: AgentPaths, runtime: str) -> dict:
     if runtime != "claude":
         return {}
     try:
-        env = json.loads((paths.home / "settings.json").read_text()).get("env", {})
+        env = json.loads((paths.home / "settings.json").read_text(encoding="utf-8")).get("env", {})
     except (OSError, ValueError, AttributeError):
         return {}
     return env if isinstance(env, dict) else {}

@@ -215,7 +215,9 @@ class HookCase(unittest.TestCase):
             argv += ["--event", event]
         argv += list(args)
         stdin = raw if raw is not None else json.dumps(payload if payload is not None else {})
-        res = subprocess.run(argv, input=stdin, capture_output=True, text=True, env=self.env(**env),
+        # encoding: what Copilot sends is UTF-8; the default would be the ANSI code page under a Windows Python,
+        # where a character it lacks kills the writer and leaves the hook waiting on stdin.
+        res = subprocess.run(argv, input=stdin, capture_output=True, encoding="utf-8", env=self.env(**env),
                              cwd=str(cwd or self.repo), timeout=60)
         self.assertEqual(res.returncode, 0, res.stderr)
         return res

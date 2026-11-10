@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional
 
 from . import storyboard_context, storyboard_discovery, storyboard_files
+from . import paths as paths_module
 from .paths import AgentPaths, script_command
 
 SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}\Z")
@@ -246,7 +247,7 @@ def hooks_file_registers(path: Path, event: str, needle: str) -> bool:
     """registered_hook_group over the `hooks` map of the JSON file at path;
     False when it is missing or unreadable."""
     try:
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
         return False
     return registered_hook_group(data.get("hooks") if isinstance(data, dict) else None, event, needle)
@@ -547,6 +548,7 @@ def launcher_main(runtime: str, agent: str, home_name: str, version_fn: Callable
     """The body of an adapter's scripts/cardinal-storyboard: exits via
     os._exit (discover may leave an abandoned request thread behind its
     deadline)."""
+    paths_module.utf8_stdio()
     code = 0
     try:
         try:

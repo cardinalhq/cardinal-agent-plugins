@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import checks_install
-from .paths import script_command
+from .paths import script_command, utf8_stdio
 
 EXIT_USAGE = 2
 EXIT_REFUSED = 3
@@ -283,6 +283,7 @@ def main(runtime: str, argv: Optional[List[str]] = None, *, plugin_root: Path,
          home: Optional[Path] = None) -> int:
     if runtime not in checks_install.RUNTIMES:
         raise ValueError(f"unknown runtime {runtime!r}")
+    utf8_stdio()
     cli = Cli(runtime, plugin_root, home)
     parser = build_parser(cli)
     args = parser.parse_args(argv)
