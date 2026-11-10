@@ -517,6 +517,11 @@ def paths_in(s: str, cwd: Optional[str], home: Optional[str], budget: Optional["
         toks = toks + _brace_words(s)
     if "\\" in s or ":/" in s:
         toks = toks + [w for w in map(windows_path, toks) if w]
+        # A Windows path holding spaces (C:\Users\Alice Smith\...) arrives whole as a
+        # tool argument: convert it before the split, so its parts are POSIX paths.
+        whole = None if prose else windows_path(s.strip().strip("\"'"))
+        if whole and whole not in toks:
+            toks = toks + _TOKEN_SPLIT.split(whole)
     for tok in toks:
         if tok and _path_like(tok, prose, cwd, budget):
             p = _norm(tok, cwd, home)
@@ -989,6 +994,9 @@ def _inner_commands(argv: list) -> list:
     return out
 
 
+_QUOTED = re.compile(r"\"([^\"\n]+)\"|'([^'\n]+)'")
+
+
 def check_command(s: str, rules: Rules, depth: int = 0, count: Optional[list] = None, *, cwd: Optional[str] = None,
                   home: Optional[str] = None, budget: Optional[_Budget] = None) -> Optional[Withheld]:
     """Every simple command in a string, through wrappers, `sh -c`, eval,
@@ -1032,7 +1040,8 @@ def check_command(s: str, rules: Rules, depth: int = 0, count: Optional[list] = 
                         if w:
                             return w
                 if "\\" in seg:  # Windows paths as written: the POSIX unquoting above ate their separators
-                    for tok in _TOKEN_SPLIT.split(seg[:4096])[:MAX_SEGMENTS]:
+                    quoted = [q for pair in _QUOTED.findall(seg[:4096]) for q in pair if q]
+                    for tok in (quoted + _TOKEN_SPLIT.split(seg[:4096]))[:MAX_SEGMENTS]:
                         if windows_path(tok):
                             w = check_paths(tok, cwd, home, rules, budget)
                             if w:

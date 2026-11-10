@@ -69,6 +69,21 @@ class WindowsGateTests(unittest.TestCase):
             with self.subTest(path=text):
                 self.assertIsNone(self.path(text), text)
 
+    def test_profile_paths_with_spaces_through_the_public_check(self):
+        key = r"C:\Users\Alice Smith\.ssh\id_rsa"
+        for tool, tool_input in (("view", {"path": key}), ("Read", {"file_path": key}),
+                                 ("powershell", {"command": f'Get-Content "{key}"'}),
+                                 ("powershell", {"command": f"gc '{key}'"}),
+                                 ("powershell", {"command": "Write-Output ${env:GITHUB_TOKEN}"}),
+                                 ("view", {"path": r"C:\Users\Alice Smith\my app\.env"})):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                self.assertIsNotNone(gate.check(tool, tool_input, cwd="/repo", home=HOME, rules=self.rules))
+        for tool, tool_input in (("view", {"path": r"C:\Users\Alice Smith\my app\main.py"}),
+                                 ("powershell", {"command": r'Get-Content "C:\Users\Alice Smith\notes for me.txt"'}),
+                                 ("powershell", {"command": r"cd 'C:\Program Files\Git'; git status"})):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                self.assertIsNone(gate.check(tool, tool_input, cwd="/repo", home=HOME, rules=self.rules))
+
     def test_long_path_prefixes_and_on_windows_any_backslash_path(self):
         self.assertIsNotNone(self.path("\\\\?\\C:\\Users\\alice\\.ssh\\id_rsa"))
         relative = (r"app\.env", r"..\.ssh\id_rsa", r".\secrets\prod.json")
