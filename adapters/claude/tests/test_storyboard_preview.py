@@ -1119,7 +1119,8 @@ class RealChromeFromJsonTests(unittest.TestCase):
                 result = preview_result([{"id": "rhythm", "ok": True, "preview_bundle": bundle_ref("rhythm", body)}])
                 src = home / "preview.json"
                 src.write_text(json.dumps(result), encoding="utf-8")
-                env = hermetic_env(home, USERPROFILE=str(home), PATH=os.environ.get("PATH", ""))
+                # HOME is where the renderer looks; the real profile and PATH stay, as the browser needs them.
+                env = hermetic_env(home, PATH=os.environ.get("PATH", ""))
                 if os.environ.get("CARDINAL_CHROMIUM"):
                     env["CARDINAL_CHROMIUM"] = os.environ["CARDINAL_CHROMIUM"]
                 res, lines = run_renderer(["--from-json", str(src)], env, timeout=600)

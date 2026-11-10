@@ -181,7 +181,8 @@ def note(msg: str) -> None:
 def _write_private(path: Path, data: bytes) -> None:
     """Write `data` to `path` with mode 0600, replacing any existing file."""
     tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_BINARY: without it Windows opens the descriptor in text mode and os.write turns each \n of a PNG into \r\n.
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
     try:
         view = memoryview(data)
         while view:

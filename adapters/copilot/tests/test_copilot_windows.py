@@ -295,5 +295,95 @@ class PreviewDiscoveryTests(unittest.TestCase):
         self.assertIn(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", [p for _, p in found])
 
 
+# A bundle page that speaks the preview protocol: two steps, each settling after a moment.
+PREVIEW_PAGE = """<!doctype html><body style="margin:0"><script>
+window.cardinalPreview = {version: 1, steps: 2, state: "loading", step: null, errors: [],
+  reveal(n) { return new Promise((r) => setTimeout(() => { this.state = "settled"; this.step = n; r(); }, 300)); },
+  abort(reason) { this.aborted = reason; },
+  report() { return {state: this.state, step: this.step, steps: 2, height: 800, error: null, frameErrors: [],
+                     protocolErrors: this.aborted ? [this.aborted] : []}; }};
+</script><iframe id="cv" sandbox="allow-scripts" style="border:0;width:1280px;height:800px;background:#246"
+srcdoc="preview"></iframe></body>"""
+
+
+@unittest.skipUnless(os.environ.get("CARDINAL_CHROMIUM_SMOKE") == "1",
+                     "real-browser smoke test: set CARDINAL_CHROMIUM_SMOKE=1")
+class RealBrowserPreviewTests(unittest.TestCase):
+    """`render_preview.py --runtime copilot --from-json` with a real browser,
+    a Copilot-format connection (~/.copilot/cardinal.json + cardinal-secrets.json)
+    and a local stub serving the bundle page: issue #251's check, without
+    Cardinal. With CARDINAL_PREVIEW_SMOKE_OUT set, the PNGs and the
+    renderer's output are copied there."""
+
+    def test_copilot_from_json_writes_pngs(self):
+        import hashlib
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        key, org, sb = "test-mcp-key", "0f0f0f0f-0000-4000-8000-000000000001", "sb_0123456789abcdef01234567"
+        body = PREVIEW_PAGE.encode("utf-8")
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                ok = "/scenes/rhythm/" in self.path and self.headers.get("X-CardinalHQ-API-Key") == key
+                self.send_response(200 if ok else 404)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body) if ok else 2))
+                self.end_headers()
+                self.wfile.write(body if ok else b"{}")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".copilot").mkdir()
+            origin = f"http://127.0.0.1:{server.server_address[1]}"
+            (home / ".copilot" / "cardinal.json").write_text(json.dumps(
+                {"schema_version": 1, "mcp_url": f"{origin}/api/orgs/{org}/mcp"}), encoding="utf-8")
+            (home / ".copilot" / "cardinal-secrets.json").write_text(json.dumps({"mcp_api_key": key}),
+                                                                     encoding="utf-8")
+            result = {
+                "storyboard_id": sb, "revision": 3, "ok": True, "errors": [], "warnings": [], "materialization": [],
+                "scenes": [{"id": "rhythm", "ok": True, "preview_bundle": {
+                    "path": f"/api/orgs/{org}/storyboards/{sb}/scenes/rhythm/preview.html?revision=3",
+                    "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(), "revision": 3}}],
+                "local_preview": {"contract": "test", "viewport": {"width": 1280, "height": 800,
+                                                                  "device_scale_factor": 2},
+                                  "ready_timeout_ms": 10000, "settle_timeout_ms": 5000,
+                                  "max_bundle_bytes": 33554432},
+                "view_url": f"https://app.example/storyboards/{sb}",
+            }
+            src = home / "preview.json"
+            src.write_text(json.dumps(result), encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("CARDINAL_") or k == "CARDINAL_CHROMIUM"}
+            env["HOME"] = str(home)  # where the renderer looks; the real profile stays, as the browser needs it
+            res = subprocess.run([sys.executable, str(ADAPTER / "skills" / "storyboard" / "scripts" / "render_preview.py"),
+                                  "--runtime", "copilot", "--from-json", str(src)], capture_output=True,
+                                 encoding="utf-8", env=env, timeout=600)
+            keep = os.environ.get("CARDINAL_PREVIEW_SMOKE_OUT")
+            if keep:
+                Path(keep).mkdir(parents=True, exist_ok=True)
+                (Path(keep) / "copilot-from-json.stdout.jsonl").write_text(res.stdout, encoding="utf-8")
+                (Path(keep) / "copilot-from-json.stderr.txt").write_text(res.stderr, encoding="utf-8")
+            self.assertEqual(res.returncode, 0, res.stderr[-2000:] + res.stdout[-2000:])
+            lines = [json.loads(line) for line in res.stdout.splitlines() if line.strip()]
+            steps = [ln for ln in lines if ln.get("scene_id") == "rhythm"]
+            self.assertEqual([s["step"] for s in steps], [0, 1])
+            out_dir = home / ".copilot" / "cardinal" / "storyboards" / sb / "r3"
+            for step in steps:
+                png = Path(step["png"])
+                self.assertEqual(png.parent, out_dir)
+                data = png.read_bytes()
+                self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 1000, data[:16])
+                self.assertIsNone(step["error"])
+                if keep:
+                    shutil.copy(str(png), str(Path(keep) / ("copilot-" + png.name)))
+            self.assertEqual(lines[-1]["summary"]["rendered"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

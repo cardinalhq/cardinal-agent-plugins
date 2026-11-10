@@ -75,6 +75,13 @@ jobs:
           CARDINAL_CHROMIUM_SMOKE: '1'
           CARDINAL_PREVIEW_SMOKE_OUT: ${{ runner.temp }}/preview-smoke
         run: python -m unittest discover tests -p "test_storyboard_preview.py" -k RealChrome -v
+      - name: Real-browser render, --runtime copilot --from-json with a Copilot connection fixture (needs 3.11+)
+        if: always() && matrix.python != '3.9'
+        working-directory: adapters/copilot
+        env:
+          CARDINAL_CHROMIUM_SMOKE: '1'
+          CARDINAL_PREVIEW_SMOKE_OUT: ${{ runner.temp }}/preview-smoke
+        run: python -m unittest discover tests -p "test_copilot_windows.py" -k RealBrowser -v
       - uses: actions/upload-artifact@v4
         if: always() && matrix.python != '3.9'
         with:
