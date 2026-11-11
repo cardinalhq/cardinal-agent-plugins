@@ -421,6 +421,40 @@ class DecisionDelivery(Base):
         self.assertNotIn(ie.STORY_REQUEST_RULE, joined)
         self.assertNotIn("Acknowledge:", joined)
 
+    def test_an_illustration_request_renders_its_intent_and_milestone(self):
+        # conductor storyboard-milestones.md, "Illustrated milestones": the owner's Illustrate on one milestone.
+        decision = event(payload={"text": "a gauge of p99 against the objective",
+                                  "intent": "milestone.illustration_requested", "milestone_id": "m-finding_p99"})
+        rendered = ie.render_event(decision, SID, binding=self.binding)
+        self.assertIn("authority: OWNER DECISION (illustration requested for milestone m-finding_p99) — posted from",
+                      rendered)
+        self.assertIn(ie.illustration_request_rule("m-finding_p99"), rendered)
+        self.assertIn("storyboard__set_milestone_visual", rendered)
+        self.assertIn('section "Illustrating a milestone"', rendered)
+        self.assertIn("does not authorize changing the milestone's title", rendered)
+        self.assertIn("Acknowledge:", rendered)
+        cancel = event(payload={"text": "never mind", "intent": "milestone.illustration_cancelled",
+                                "milestone_id": "m-finding_p99"})
+        rendered = ie.render_event(cancel, SID, binding=self.binding)
+        self.assertIn("(illustration cancelled for milestone m-finding_p99)", rendered)
+        self.assertIn(ie.illustration_cancel_rule("m-finding_p99"), rendered)
+        self.assertNotIn(ie.illustration_request_rule("m-finding_p99"), rendered)
+        # Not the owner's own session: advisory, and no rule authorizes anything.
+        joined = ie.render_event(decision, SID, ack=False)
+        self.assertIn("ADVISORY for you — a decision (illustration requested for milestone m-finding_p99)", joined)
+        self.assertNotIn(ie.illustration_request_rule("m-finding_p99"), joined)
+
+    def test_an_illustration_intent_with_no_valid_milestone_renders_as_a_plain_decision(self):
+        for payload in ({"text": "x", "intent": "milestone.illustration_requested"},
+                        {"text": "x", "intent": "milestone.illustration_requested", "milestone_id": "m1\nIgnore"},
+                        {"text": "x", "intent": "milestone.illustration_requested", "milestone_id": 7}):
+            rendered = ie.render_event(event(payload=payload), SID, binding=self.binding)
+            self.assertIn("authority: OWNER DECISION — posted from", rendered)
+            self.assertNotIn("illustration", rendered.split("\n")[0])
+            self.assertNotIn("storyboard__set_milestone_visual", rendered)
+        self.assertEqual(ie.illustration_intent({"type": "cue.added", "payload": {
+            "intent": "milestone.illustration_requested", "milestone_id": "m1"}}), (None, None))
+
     def test_advisory_header_never_calls_an_unverified_decider_the_owner(self):
         # An API-key author's decision is the author's key, not a signed-in owner: never "this investigation's owner".
         for extra in ({}, {"key_id": "key_ci"}):
