@@ -4,6 +4,12 @@ A Canvas is the visual of one storyboard scene: a surface's JavaScript source ru
 sandboxed iframe (`sandbox="allow-scripts"` only, no network) and receives **only** the
 evidence bindings maestro resolved. You own every pixel; you own none of the numbers.
 
+On an investigation's storyboard, a milestone's Canvas is drawn only as the
+illustration its owner asked for (see "Illustrating a milestone" below):
+`storyboard__upsert_scene` refuses any other Canvas on it, and the viewer shows
+Cardinal's card instead of one written before. Free-form surfaces are for
+storyboards with no investigation.
+
 ## Fetch the guide first
 
 Before you write or revise a surface, call `storyboard__describe_grammar {section:
