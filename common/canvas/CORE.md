@@ -6,8 +6,8 @@ evidence bindings maestro resolved. You own every pixel; you own none of the num
 
 On an investigation's storyboard, a milestone's Canvas is drawn only as the
 illustration its owner asked for (see "Illustrating a milestone" below):
-`storyboard__upsert_scene` refuses any other Canvas on it, and the viewer shows
-Cardinal's card instead of one written before. Free-form surfaces are for
+`storyboard__upsert_scene` refuses any other Canvas on it, and the viewer shows a
+milestone no visual until it is illustrated. Free-form surfaces are for
 storyboards with no investigation.
 
 ## Fetch the guide first
@@ -90,7 +90,7 @@ another milestone, never publish or share.
    revise with `set_milestone_visual`, repeat until the point is obvious in five seconds.
 8. **Acknowledge** the owner decision (`accepted`, with a note naming the machine you
    drew), and stop. The owner sees it on the milestone, and can **Redraw** or
-   **Revert to card**.
+   **Remove illustration**.
 
 Refusals: `milestone_published` (409: its act is final; tell the owner), `canvas_not_allowed`
 (422: the storyboard is prefab-only; tell the owner), `milestone_not_found` (422: merged or
