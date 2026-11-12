@@ -371,7 +371,7 @@ class StoryboardSkillTextTests(unittest.TestCase):
 
     def test_canvas_skill_exemplars_exist(self):
         named = set(re.findall(r"`exemplars/([a-z0-9-]+\.js)`", _canvas_text()))
-        self.assertEqual(named, {"scalar-and-series.js", "roof-and-timeline.js", "cohort-rows.js"})
+        self.assertEqual(named, {"scalar-and-series.js", "roof-and-timeline.js", "cohort-rows.js", "iso-gauge.js"})
         for name in named:
             self.assertTrue((CANVAS_SKILL.parent / "exemplars" / name).is_file(), name)
 
