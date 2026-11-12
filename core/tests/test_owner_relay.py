@@ -1198,6 +1198,13 @@ class Worker(unittest.TestCase):
         self.assertNotIn(ie.STORY_REQUEST_RULE, out)
         self.assertNotIn("story requested", out)
 
+    def test_a_relay_never_carries_an_illustration_request(self):
+        e = relayed()
+        e["payload"].update({"intent": "milestone.illustration_requested", "milestone_id": "m1"})
+        out = ie.render_event(e, WORKER_SID, binding=self.AUTHOR)
+        self.assertNotIn("storyboard__set_milestone_visual", out)
+        self.assertNotIn("illustration requested", out)
+
     def test_delivery_and_pending_reminders_like_an_owner_decision(self):
         e = relayed()
         self.assertEqual(ie.deliverable([e], WORKER_SID, WORKER_INV, self.AUTHOR), [e])
