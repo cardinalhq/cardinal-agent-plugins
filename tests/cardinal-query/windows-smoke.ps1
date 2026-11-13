@@ -61,6 +61,7 @@ try {
                     $response.ContentType = 'text/event-stream'
                     $writer.WriteLine('data: {"type":"heartbeat","data":{"status":"waiting"}}')
                     $writer.WriteLine()
+                    $writer.Flush()
                     $records = @()
                     if ($payload.q.Contains('count_over_time')) {
                         if ($payload.step -ne 60) { throw 'Incorrect Issues bucket size' }
@@ -114,7 +115,7 @@ try {
     }
     if (-not (Test-Path -LiteralPath $ready)) { throw 'Fixture server did not start.' }
 
-    $env:PATH = "$env:SystemRoot\System32\WindowsPowerShell\v1.0;$env:SystemRoot\System32;$env:SystemRoot"
+    $env:PATH = "$env:SystemRoot\System32\WindowsPowerShell\v1.0"
     if (Get-Command python.exe,py.exe,pwsh.exe -ErrorAction SilentlyContinue) {
         throw 'Python or PowerShell 7 is on the test PATH.'
     }
@@ -122,18 +123,35 @@ try {
     $env:CARDINAL_QUERY_API_KEY = 'fixture-only'
     $base = "-Start '2026-06-01T12:00:00Z' -End '2026-06-01T12:05:00Z'"
     $quotedScript = "'" + ($installedScript.Replace("'", "''")) + "'"
-    $errorFile = Join-Path $tempDir 'stderr'
     function Invoke-InstalledSkill([string]$Arguments, [string]$ExpectedError) {
-        # Match the documented -Command install path, including literal arrays.
-        $output = & powershell.exe -NoProfile -NonInteractive -Command "& $quotedScript $Arguments" 2>$errorFile
-        $errors = Get-Content -LiteralPath $errorFile -Raw
-        if ($ExpectedError) {
-            if ($LASTEXITCODE -eq 0 -or $errors -notmatch $ExpectedError -or $output -or
-                $errors.Contains($env:CARDINAL_QUERY_API_KEY)) { throw "Expected $ExpectedError with no results or key. Got $errors" }
-            return
+        # Invoke an independent Windows PowerShell process with the same command
+        # syntax an agent uses. Encode the command to preserve Windows quoting.
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& $quotedScript $Arguments"))
+        $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'powershell.exe'),
+            "-NoProfile -NonInteractive -EncodedCommand $encoded")
+        $info.UseShellExecute = $false
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $info.StandardOutputEncoding = [Text.Encoding]::UTF8
+        $process = [Diagnostics.Process]::Start($info)
+        try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(20000)) {
+                $process.Kill()
+                throw 'Skill subprocess did not exit.'
+            }
+            $output = $stdout.Result
+            $errors = $stderr.Result
+            if ($ExpectedError) {
+                if ($process.ExitCode -eq 0 -or $errors -notmatch $ExpectedError -or $output -or
+                    $errors.Contains($env:CARDINAL_QUERY_API_KEY)) { throw "Expected $ExpectedError with no results or key. Got $errors" }
+                return
+            }
+            if ($process.ExitCode -ne 0) { throw "Skill failed: $errors" }
+            ConvertFrom-Json -InputObject $output
         }
-        if ($LASTEXITCODE -ne 0) { throw "Skill failed: $errors" }
-        ConvertFrom-Json -InputObject ($output -join "`n")
+        finally { $process.Dispose() }
     }
     $logs = Invoke-InstalledSkill "logs $base -Service checkout -Level error -Label 'deployment_environment=test' -Contains @('Timeout','::') -NotContains 'health' -Grep 'db|cache' -NotGrep 'debug$' -Limit 1"
     if ($logs.returned -ne 1 -or -not $logs.limit_reached -or $logs.logs[0].timestamp_ns -ne 1780315260000000001L -or
@@ -158,10 +176,11 @@ try {
     if ($empty.returned -ne 0 -or $empty.logs.Count -ne 0) { throw 'Unexpected empty result.' }
     Invoke-InstalledSkill "logs $base -Service partial" 'Results may be incomplete'
     Invoke-InstalledSkill "logs $base -Service cut" 'ended before completion'
-    Invoke-InstalledSkill "logs $base -Service slow -Timeout 1" 'timed out'
     Invoke-InstalledSkill "issues -Since 10s -End '2026-06-01T12:00:30Z'" 'no completed bucket'
     $env:CARDINAL_QUERY_API_KEY = 'invalid-key'
     Invoke-InstalledSkill "logs $base" 'HTTP 401'
+    $env:CARDINAL_QUERY_API_KEY = 'fixture-only'
+    Invoke-InstalledSkill "logs $base -Service slow -Timeout 1" 'timed out'
     'PASS: installed skill ran log filters, Issues, fingerprint drill-down, and API error handling with Windows PowerShell 5.1 and no Python or pwsh on PATH.'
 }
 finally {
