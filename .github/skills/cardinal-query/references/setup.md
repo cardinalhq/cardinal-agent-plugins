@@ -9,7 +9,9 @@ Every environment that runs the skill needs Python 3.9 or newer and network acce
 | `CARDINAL_QUERY_URL` | Your HTTPS Data Lake Query API base URL, such as `https://query.example.com`, or the full URL ending in `/api/v1/logs/query`. |
 | `CARDINAL_QUERY_API_KEY` | The organization-scoped Data Lake key issued for that endpoint. |
 
-For Cardinal-hosted workspaces, use the direct Data Lake Query API URL supplied for your workspace. The `app.cardinalhq.io` dashboard requires its own authentication.
+For a self-hosted Data Lake, use the internal HTTPS Query API URL for your workspace. The skill connects directly to that URL with your organization's key. For a Cardinal-hosted Data Lake, use the direct Query API URL supplied for your workspace. The `app.cardinalhq.io` dashboard requires its own authentication.
+
+For a private endpoint, the environment running Python needs network access to the host and must trust its TLS certificate. With Copilot CLI and a local IntelliJ Agent session, this usually means connecting the workstation to your corporate network or VPN. If your deployment uses an internal certificate authority, configure the Python runtime to trust it.
 
 ## Get a Query API key
 
@@ -37,7 +39,11 @@ Commit the skill folder to a repository branch that the Copilot agent can use. I
 
 Allow the Query API host in the repository's Copilot **Internet access** settings, and ensure the selected agent environment can reach it. Start a **Copilot agent session** on that repository and select the branch containing the skill. If you start in the older GitHub.com chat experience, open the repository's **Agents** tab to start the session with a shell.
 
+For a private Query API, run the web agent in an environment that can reach your internal network. An Actions-backed session on an approved self-hosted runner is one option. The Copilot internet allowlist controls outbound requests from the agent environment. It does not provide access to your corporate network.
+
 [GitHub's agent session guide](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/use-cloud-agent-on-github) · [Agents secrets and variables](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/configure-secrets-and-variables) · [Copilot internet access settings](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-the-firewall)
+
+[GitHub's self-hosted runner setup](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/customize-the-agent-environment#using-self-hosted-github-actions-runners)
 
 ## Try it
 
