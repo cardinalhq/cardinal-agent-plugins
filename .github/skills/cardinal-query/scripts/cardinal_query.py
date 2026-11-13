@@ -172,18 +172,13 @@ def stream_selector(args, levels=None, fingerprint=None):
 
 
 def line_filters(args, ignore_case=False):
-    contains = args.contains
-    excludes = args.not_contains
-    grep = args.grep
-    not_grep = args.not_grep
-    if ignore_case:
-        grep = [f"(?i){literal_regex(value)}" for value in contains] + grep
-        not_grep = [f"(?i){literal_regex(value)}" for value in excludes] + not_grep
-        contains = []
-        excludes = []
+    # Keep literal substring semantics across Query API token-search modes.
+    flags = "is" if ignore_case else "s"
+    contains = [f"(?{flags}:.*{literal_regex(value)}.*)" for value in args.contains]
+    excludes = [f"(?{flags}:.*{literal_regex(value)}.*)" for value in args.not_contains]
     return "".join(
         f" {operator} {logql_string(value)}"
-        for operator, values in (("|=", contains), ("!=", excludes), ("|~", grep), ("!~", not_grep))
+        for operator, values in (("|~", contains + args.grep), ("!~", excludes + args.not_grep))
         for value in values
     )
 
@@ -253,6 +248,9 @@ def issue_patterns(client, args, payload, start, end):
     trends = defaultdict(lambda: dict.fromkeys(LEVELS, 0))
     start_ms = int(start.timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
+    step_ms = step * 1000
+    if start_ms // step_ms == end_ms // step_ms:
+        raise QueryError("The Issues window has no completed bucket. Use a wider window or search raw logs.")
 
     for point in issue_points(client, payload, selector, filters, step, query_ids):
         bucket_end = point["timestamp"]
