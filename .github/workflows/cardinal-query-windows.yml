@@ -1,0 +1,22 @@
+name: Cardinal Query on Windows
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/skills/cardinal-query/**'
+      - '.github/workflows/cardinal-query-windows.yml'
+      - 'tests/cardinal-query/windows-smoke.ps1'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the installed skill on Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/cardinal-query/windows-smoke.ps1

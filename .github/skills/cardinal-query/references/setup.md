@@ -2,7 +2,7 @@
 
 Extract the skill ZIP and copy the entire `cardinal-query` folder into `.github/skills/cardinal-query` at the root of the repository where you use Copilot. For a personal CLI install, copy it to `~/.copilot/skills/cardinal-query` instead.
 
-Every environment that runs the skill needs Python 3.9 or newer and network access to the Cardinal Data Lake Query API. Configure these two values in the environment where Copilot runs commands.
+The skill runs with the built-in Windows PowerShell 5.1 on Windows. Linux and macOS use Python 3.9 or newer. Configure these two values in the environment where Copilot runs commands.
 
 | Name | Value |
 | --- | --- |
@@ -11,7 +11,7 @@ Every environment that runs the skill needs Python 3.9 or newer and network acce
 
 For a self-hosted Data Lake, use the internal HTTPS Query API URL for your workspace. The skill connects directly to that URL with your organization's key. For a Cardinal-hosted Data Lake, use the direct Query API URL supplied for your workspace. The `app.cardinalhq.io` dashboard requires its own authentication.
 
-For a private endpoint, the environment running Python needs network access to the host and must trust its TLS certificate. With Copilot CLI and a local IntelliJ Agent session, this usually means connecting the workstation to your corporate network or VPN. If your deployment uses an internal certificate authority, configure the Python runtime to trust it.
+For a private endpoint, the environment running the skill needs network access to the host and must trust its TLS certificate. With Copilot CLI and a local IntelliJ Agent session, this usually means connecting the workstation to your corporate network or VPN. If your deployment uses an internal certificate authority, use your organization's approved trust configuration.
 
 ## Get a Query API key
 
@@ -23,7 +23,7 @@ For an active Data Lake integration in Cardinal UI, an organization owner can al
 
 ## Copilot CLI
 
-Set both variables in the terminal session using your organization's secret manager and start `copilot` from the repository. If the CLI is already running, restart it to pick up environment changes. Run `/skills list` to confirm that `cardinal-query` appears. Allow the skill's Python command when prompted.
+Set both variables in the terminal session using your organization's secret manager and start `copilot` from the repository. If the CLI is already running, restart it to pick up environment changes. Run `/skills list` to confirm that `cardinal-query` appears. Allow the skill command when prompted.
 
 [GitHub's CLI skill installation guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills)
 
@@ -49,7 +49,16 @@ For a private Query API, run the web agent in an environment that can reach your
 
 Ask Copilot “Use cardinal-query to find checkout logs containing timeout in the last 30 minutes.” Then ask “Show the top Cardinal Issues for checkout in the same window, grouped by severity and recurring pattern.”
 
-With the variables set, you can also run the same commands directly from the repository root.
+With the variables set, you can also run the same commands directly from the repository root. From Windows PowerShell 5.1:
+
+```powershell
+& '.github/skills/cardinal-query/scripts/cardinal_query.ps1' logs -Service checkout -Since 30m -Contains timeout
+& '.github/skills/cardinal-query/scripts/cardinal_query.ps1' issues -Service checkout -Since 30m
+```
+
+Use arrays for multiple PowerShell filters, for example `-Contains @('timeout','database')` or `-Label @('deployment_environment=prod','region=east')`. From another shell on Windows, invoke `powershell.exe -NoProfile -NonInteractive -Command` with a PowerShell command string containing the call above. If workstation policy requires signed scripts, install the skill through your organization's approved distribution process.
+
+On Linux or macOS:
 
 ```sh
 python3 .github/skills/cardinal-query/scripts/cardinal_query.py logs --service checkout --since 30m --contains timeout
