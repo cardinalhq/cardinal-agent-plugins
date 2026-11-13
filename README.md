@@ -139,6 +139,11 @@ your home only, allow) rules go in `~/.cardinal/evidence-rules.json`. See
 [docs/specs/generic-evidence-capture.md](docs/specs/generic-evidence-capture.md)
 for the per-runtime hook wiring.
 
+The standalone [Cardinal Query skill](.github/skills/cardinal-query/SKILL.md)
+uses the Data Lake Query API for logs and Issues in Copilot CLI, IntelliJ
+and GitHub.com agent sessions. See the [setup guide](.github/skills/cardinal-query/references/setup.md)
+for installation and Query API credentials.
+
 The [GitHub Copilot CLI](adapters/copilot/README.md) plugin installs from its mirror's
 plugin marketplace (`copilot plugin marketplace add cardinalhq/cardinal-copilot-plugin`,
 then `copilot plugin install cardinal@cardinal-copilot-plugin`). Its hooks ship in the
