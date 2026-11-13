@@ -52,11 +52,11 @@ Ask Copilot “Use cardinal-query to find checkout logs containing timeout in th
 With the variables set, you can also run the same commands directly from the repository root. From Windows PowerShell 5.1:
 
 ```powershell
-& '.github/skills/cardinal-query/scripts/cardinal_query.ps1' logs -Service checkout -Since 30m -Contains timeout
-& '.github/skills/cardinal-query/scripts/cardinal_query.ps1' issues -Service checkout -Since 30m
+& '.\.github\skills\cardinal-query\scripts\cardinal_query.ps1' logs -Service checkout -Since 30m -Contains timeout
+& '.\.github\skills\cardinal-query\scripts\cardinal_query.ps1' issues -Service checkout -Since 30m
 ```
 
-Use arrays for multiple PowerShell filters, for example `-Contains @('timeout','database')` or `-Label @('deployment_environment=prod','region=east')`. From another shell on Windows, invoke `powershell.exe -NoProfile -NonInteractive -Command` with a PowerShell command string containing the call above. If workstation policy requires signed scripts, install the skill through your organization's approved distribution process.
+Use arrays for multiple PowerShell filters, for example `-Contains @('timeout','database')` or `-Label @('deployment_environment=prod','region=east')`. From another shell on Windows, invoke `powershell.exe -NoProfile -NonInteractive -Command` with a PowerShell command string containing the call above. If Windows blocks a downloaded script, ask your administrator to approve or distribute the skill under your organization's script policy.
 
 On Linux or macOS:
 

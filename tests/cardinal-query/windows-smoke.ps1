@@ -182,6 +182,13 @@ try {
     $env:CARDINAL_QUERY_API_KEY = 'fixture-only'
     Invoke-InstalledSkill "logs $base -Service slow -Timeout 1" 'timed out'
     'PASS: installed skill ran log filters, Issues, fingerprint drill-down, and API error handling with Windows PowerShell 5.1 and no Python or pwsh on PATH.'
+
+    if ($env:CARDINAL_QUERY_HTTPS_SMOKE_URL) {
+        $env:CARDINAL_QUERY_URL = $env:CARDINAL_QUERY_HTTPS_SMOKE_URL
+        $env:CARDINAL_QUERY_API_KEY = 'invalid-windows-smoke-key'
+        Invoke-InstalledSkill "logs $base -Timeout 10" 'HTTP 401'
+        'PASS: Windows PowerShell 5.1 reached the hosted Query API over HTTPS.'
+    }
 }
 finally {
     if ($server) { Stop-Job -Job $server; Remove-Job -Job $server -Force }

@@ -19,4 +19,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test the installed skill on Windows PowerShell 5.1
         shell: powershell
+        env:
+          CARDINAL_QUERY_HTTPS_SMOKE_URL: https://lakerunner-query-api.global.aws.cardinalhq.io
         run: ./tests/cardinal-query/windows-smoke.ps1
