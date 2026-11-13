@@ -9,6 +9,8 @@ Every environment that runs the skill needs Python 3.9 or newer and network acce
 | `CARDINAL_QUERY_URL` | Your HTTPS Data Lake Query API base URL, such as `https://query.example.com`, or the full URL ending in `/api/v1/logs/query`. |
 | `CARDINAL_QUERY_API_KEY` | The organization-scoped Data Lake key issued for that endpoint. |
 
+For Cardinal-hosted workspaces, use the direct Data Lake Query API URL supplied for your workspace. The `app.cardinalhq.io` dashboard requires its own authentication.
+
 ## Get a Query API key
 
 Ask your Cardinal Data Lake administrator for your organization's Query API URL and a dedicated organization API key for Copilot. If Cardinal manages your deployment, ask your Cardinal contact to arrange the key. The Data Lake administrator can create it with `POST /api/v1/organizations/{org_id}/api-keys` on the Data Lake Admin API, using a name such as `copilot-query`. The response contains the secret in `full_key`. Save it in your organization's secret manager and use that value for `CARDINAL_QUERY_API_KEY`.
