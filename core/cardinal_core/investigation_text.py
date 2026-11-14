@@ -98,16 +98,22 @@ MILESTONE_LINE = (
     "shows, why it matters>\"}. A hypothesis proposed or question opened may carry an open one (\"Looking into "
     "whether …\"); the event that resolves it rewrites it. Cardinal writes it into the private draft at once, with "
     "no model run: it is not authoring visuals, needs no consent and publishes nothing. Its state follows the "
-    "event; supported or ruled out needs the evidence cited on the event. A finding, an answered question or a "
-    "finished experiment reads supported, but a decision stays open until the owner approves it: record work you "
-    "finished and verified (a change made, its tests passing) as a finding.proposed citing that evidence, not as a "
-    "decision. Supported means the evidence backs the milestone's text, not that work is done: work still under way "
-    "(a fix started, a change not yet tested) is an open milestone, say on the question.opened it answers, rewritten "
-    "by the event that finishes it. A story holds at most 8 milestones: when "
+    "event; supported or ruled out needs the evidence cited on the event. A story holds at most 8 milestones: when "
     "the checkpoint is refused as full, merge with \"replaces\":[\"<milestone ids>\"] (dead ends become one "
     "\"ruled out …\"). When the work changes direction, write ONE milestone that says what was tried first and "
     "why it was left, with \"replaces\" listing every milestone of the earlier direction. No jargon, code names, "
     "internal ids or event numbers in milestone text.")
+
+# agent_milestones version 2 (maestro: milestone.progress, apart from the
+# state). A version-1 server refuses `progress`, so only version 2 is told.
+MILESTONE_PROGRESS_VERSION = 2
+MILESTONE_PROGRESS_LINE = (
+    "A milestone's state is what the evidence backs; its progress is whether the work is done, and readers see both "
+    "as one status. A finding, an answered question or a finished experiment citing evidence reads supported; a "
+    "decision reads Decided until the owner approves it, so record work you finished and verified (a change made, "
+    "its tests passing) as a finding.proposed citing that evidence, not as a decision. When work continues after "
+    "the event (a bug found whose fix has not started), add \"progress\":\"in_progress\" to its milestone; the "
+    "event that finishes it rewrites it.")
 
 SKILL_LINE = ("The storyboard skill authors this storyboard's visualization ({sb}) after the user's consent; "
               "never storyboard__create another for this session. "
@@ -227,6 +233,8 @@ def session_text(sid: str, binding: dict, *, cmd: str = CLAUDE_CMD, target: str 
     parts.append(CHECKPOINT_LINE.replace("{cmd}", cmd).replace("{sid}", sid))
     if ie.capability(binding, MILESTONE_CAPABILITY):
         parts.append(MILESTONE_LINE)
+        if ie.capability_version(binding, MILESTONE_CAPABILITY) >= MILESTONE_PROGRESS_VERSION:
+            parts.append(MILESTONE_PROGRESS_LINE)
     if runtime in SANDBOXED:
         parts.append(SANDBOX_LINE.replace("{cmd}", cmd))
     return " ".join(parts)

@@ -92,13 +92,35 @@ class ClaudeText(unittest.TestCase):
         self.assertIn("needs no consent and publishes nothing", it.MILESTONE_LINE)
         # A change of direction is one merged milestone, not a second story.
         self.assertIn("When the work changes direction, write ONE milestone", it.MILESTONE_LINE)
-        # Finished, verified work is a finding: a decision's milestone reads
-        # Open until the owner approves it (maestro agent-milestones).
-        self.assertIn("a decision stays open until the owner approves it", it.MILESTONE_LINE)
-        self.assertIn("as a finding.proposed citing that evidence, not as a decision", it.MILESTONE_LINE)
-        # Supported is what the evidence backs, not "done": unfinished work stays open.
-        self.assertIn("work still under way", it.MILESTONE_LINE)
-        self.assertIn("is an open milestone", it.MILESTONE_LINE)
+        # A version-1 server refuses milestone.progress: it never hears of it.
+        self.assertNotIn(it.MILESTONE_PROGRESS_LINE, text)
+        self.assertNotIn("progress", it.MILESTONE_LINE)
+
+    def test_progress_guidance_only_on_a_server_that_takes_milestone_progress(self):
+        def caps(version):
+            return {"delegated_supervision": {"enabled": True}, "agent_milestones": {"enabled": True, "version": version}}
+        v2 = claude(binding(capabilities=caps(2)))
+        self.assertIn(it.MILESTONE_LINE, v2)
+        self.assertIn(it.MILESTONE_PROGRESS_LINE, v2)
+        self.assertIn(it.MILESTONE_PROGRESS_LINE, claude(binding(capabilities=caps(3))))
+        self.assertNotIn(it.MILESTONE_PROGRESS_LINE, claude(binding(capabilities=caps(1))))
+        self.assertNotIn("\n", v2)
+        # Finished, verified work is a finding; a decision is not done work;
+        # work that continues says so.
+        self.assertIn("a decision reads Decided until the owner approves it", it.MILESTONE_PROGRESS_LINE)
+        self.assertIn("as a finding.proposed citing that evidence, not as a decision", it.MILESTONE_PROGRESS_LINE)
+        self.assertIn('"progress":"in_progress"', it.MILESTONE_PROGRESS_LINE)
+
+    def test_capability_version(self):
+        def v(value):
+            return ie.capability_version({"capabilities": {"agent_milestones": value}}, "agent_milestones")
+        self.assertEqual(v({"enabled": True, "version": 2}), 2)
+        self.assertEqual(v({"enabled": True}), 1)
+        self.assertEqual(v(True), 1)
+        self.assertEqual(v({"enabled": True, "version": "2"}), 1)
+        self.assertEqual(v({"enabled": True, "version": True}), 1)
+        self.assertEqual(v({"enabled": False, "version": 2}), 0)
+        self.assertEqual(ie.capability_version({}, "agent_milestones"), 0)
 
     def test_claude_gives_links_when_asked_and_is_not_sandboxed(self):
         text = claude()

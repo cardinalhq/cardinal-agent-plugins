@@ -926,6 +926,15 @@ def capability(binding: dict, name: str) -> bool:
     return value is True or (isinstance(value, dict) and value.get("enabled") is True)
 
 
+def capability_version(binding: dict, name: str) -> int:
+    """An enabled capability's advertised version (1 when it gives none); 0 when it is off."""
+    if not capability(binding, name):
+        return 0
+    value = (binding.get("capabilities") or {}).get(name)
+    version = value.get("version") if isinstance(value, dict) else None
+    return version if isinstance(version, int) and not isinstance(version, bool) and version >= 1 else 1
+
+
 def refresh_binding_capabilities(home, sid, conn, client, *, opener=None):
     """Refresh on explicit link or a refused client gate; keep stale data on transient errors."""
     from . import investigation_bootstrap as boot
