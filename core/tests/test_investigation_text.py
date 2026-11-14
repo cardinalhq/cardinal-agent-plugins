@@ -92,6 +92,13 @@ class ClaudeText(unittest.TestCase):
         self.assertIn("needs no consent and publishes nothing", it.MILESTONE_LINE)
         # A change of direction is one merged milestone, not a second story.
         self.assertIn("When the work changes direction, write ONE milestone", it.MILESTONE_LINE)
+        # Finished, verified work is a finding: a decision's milestone reads
+        # Open until the owner approves it (maestro agent-milestones).
+        self.assertIn("a decision stays open until the owner approves it", it.MILESTONE_LINE)
+        self.assertIn("as a finding.proposed citing that evidence, not as a decision", it.MILESTONE_LINE)
+        # Supported is what the evidence backs, not "done": unfinished work stays open.
+        self.assertIn("work still under way", it.MILESTONE_LINE)
+        self.assertIn("is an open milestone", it.MILESTONE_LINE)
 
     def test_claude_gives_links_when_asked_and_is_not_sandboxed(self):
         text = claude()
