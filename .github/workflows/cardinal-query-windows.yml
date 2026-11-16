@@ -6,7 +6,7 @@ on:
     paths:
       - '.github/skills/cardinal-query/**'
       - '.github/workflows/cardinal-query-windows.yml'
-      - 'tests/cardinal-query/windows-smoke.ps1'
+      - 'tests/cardinal-query/**'
 
 permissions:
   contents: read
@@ -22,3 +22,15 @@ jobs:
         env:
           CARDINAL_QUERY_HTTPS_SMOKE_URL: https://lakerunner-query-api.global.aws.cardinalhq.io
         run: ./tests/cardinal-query/windows-smoke.ps1
+
+  python:
+    # The Linux and macOS client, on the oldest Python the skill supports.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Test the Python client against the fixture API
+        run: python -m unittest discover -s tests/cardinal-query -p 'test_*.py' -v
