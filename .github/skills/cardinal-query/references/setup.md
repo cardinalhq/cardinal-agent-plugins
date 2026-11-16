@@ -47,13 +47,15 @@ For a private Query API, run the web agent in an environment that can reach your
 
 ## Try it
 
-Ask Copilot “Use cardinal-query to find checkout logs containing timeout in the last 30 minutes.” Then ask “Show the top Cardinal Issues for checkout in the same window, grouped by severity and recurring pattern.”
+Ask Copilot “Use cardinal-query to find checkout logs containing timeout in the last 30 minutes.” Then ask “Show the top Cardinal Issues for checkout in the same window, grouped by severity and recurring pattern.” To check what you can filter on, ask “Which log labels does checkout have, and what values does k8s_namespace_name take?”
 
 With the variables set, you can also run the same commands directly from the repository root. From Windows PowerShell 5.1:
 
 ```powershell
 & '.\.github\skills\cardinal-query\scripts\cardinal_query.ps1' logs -Service checkout -Since 30m -Contains timeout
 & '.\.github\skills\cardinal-query\scripts\cardinal_query.ps1' issues -Service checkout -Since 30m
+& '.\.github\skills\cardinal-query\scripts\cardinal_query.ps1' tags -Service checkout -Since 30m
+& '.\.github\skills\cardinal-query\scripts\cardinal_query.ps1' values -Tag k8s_namespace_name -Service checkout -Since 30m
 ```
 
 Use arrays for multiple PowerShell filters, for example `-Contains @('timeout','database')` or `-Label @('deployment_environment=prod','region=east')`. From another shell on Windows, invoke `powershell.exe -NoProfile -NonInteractive -Command` with a PowerShell command string containing the call above. If Windows blocks a downloaded script, ask your administrator to approve or distribute the skill under your organization's script policy.
@@ -63,4 +65,6 @@ On Linux or macOS:
 ```sh
 python3 .github/skills/cardinal-query/scripts/cardinal_query.py logs --service checkout --since 30m --contains timeout
 python3 .github/skills/cardinal-query/scripts/cardinal_query.py issues --service checkout --since 30m
+python3 .github/skills/cardinal-query/scripts/cardinal_query.py tags --service checkout --since 30m
+python3 .github/skills/cardinal-query/scripts/cardinal_query.py values --tag k8s_namespace_name --service checkout --since 30m
 ```
