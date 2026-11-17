@@ -139,9 +139,11 @@ try {
                             $writer.Write('invalid query expression: parse error at 1:5')
                         }
                         else {
-                            $names = if ($payload.q -ceq '{service_name="checkout"}') { @('service_name','level','message','chq_fingerprint','http_route') }
-                                     elseif (-not $payload.q) { @('service_name','k8s_namespace_name','message','chq_fingerprint') }
-                                     else { @() }
+                            # Assign inside each branch: an if statement that outputs @() yields AutomationNull,
+                            # which Windows PowerShell 5.1 ConvertTo-Json writes as {} rather than [].
+                            $names = @()
+                            if ($payload.q -ceq '{service_name="checkout"}') { $names = @('service_name','level','message','chq_fingerprint','http_route') }
+                            elseif (-not $payload.q) { $names = @('service_name','k8s_namespace_name','message','chq_fingerprint') }
                             $response.ContentType = 'application/json'
                             $writer.Write((ConvertTo-Json -InputObject @{tags=$names} -Compress))
                         }
