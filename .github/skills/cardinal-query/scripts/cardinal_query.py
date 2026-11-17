@@ -11,13 +11,14 @@ import math
 import os
 import random
 import re
+import shlex
 import socket
 import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 
 API_PATH = "/api/v1"
@@ -28,11 +29,47 @@ LEVELS = {"fatal": "fatal", "error": "error", "warn": "warn|warning"}
 # The Query API stores dotted OpenTelemetry names with underscores.
 LABEL = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 CORE_FIELDS = ("service_name", "level", "message", "chq_fingerprint")
+# Fields returned for raw rows and exemplars unless --field or --all-fields says otherwise.
+ROW_FIELDS = ["message", "service_name", "level", "chq_fingerprint"]
 MAX_TAG_VALUES = 1000
 MAX_VALUE_CHARS = 256
+MESSAGE_CHARS = 300
+# --full-message raises the per-message cap for raw rows.
+FULL_MESSAGE_CHARS = 8000
+MAX_FIELDS = 50
+MAX_NAME_CHARS = 256
+DEFAULT_ROWS = 20
+DEFAULT_PATTERNS = 10
+MAX_LOG_LIMIT = 200
+# One newest-first fetch picks exemplars; patterns it misses get their own query.
+EXEMPLARS = 10
+EXEMPLAR_ROWS = 50
+MAX_SERVICES = 10
+# Long count windows use day buckets, at most this many.
+MAX_BUCKETS = 120
+# Output budget, in bytes of stdout: compact JSON with keys sorted by UTF-16 code unit
+# and only ASCII, so every byte is one character in both clients, plus a newline (CRLF
+# on Windows). The budget measures everything it prints. Only next[].run differs by
+# platform, so each is measured as RUN_BYTES long, and a longer command is replaced by
+# a short hint. Both clients therefore make the same decisions.
+MAX_OUTPUT_BYTES = 16384
+OUTPUT_LIMIT = MAX_OUTPUT_BYTES - 2
+RUN_BYTES = 1024
+RUN_PLACEHOLDER = "x" * (RUN_BYTES - 2)
+# An echoed query or scope longer than this many bytes of JSON text is shortened.
+ECHO_BYTES = 2048
+ECHO_FIELDS = ("query", "scope")
+# Budget counters are measured at this value until their real value is known.
+COUNTER_RESERVE = 9999999999
+BUDGET_CAPS = (200, 100)
+BUDGET_LISTS = ("logs", "patterns", "values", "tags", "service_counts", "trend", "warnings")
+BUDGET_KEEP = frozenset(("fingerprint", "chq_fingerprint", "service", "service_name", "severity", "level",
+                         "first_seen", "last_seen", "timestamp", "timestamp_ns"))
+BUDGET_FAILED = "The result does not fit the output budget. Narrow the filters or the window."
 DURATION = re.compile(r"([1-9][0-9]*)([smhdw])")
 DURATION_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 UTC = timezone.utc
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 TIMED_OUT = "Query timed out. Try a shorter time range."
 # Transient failures: rate limiting and gateway errors. HTTP 500 is a query error.
 RETRY_STATUSES = (429, 502, 503, 504)
@@ -86,6 +123,14 @@ def retry_after(value):
     return int(value) if re.fullmatch(r"[0-9]{1,9}", value) else None
 
 
+def query_id(value, default):
+    # Report a server query ID only when it is a UUID, as the PowerShell client does.
+    try:
+        return str(UUID(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def sort_key(value):
     # Order strings by UTF-16 code unit, as the PowerShell client's ordinal sort does.
     return value.encode("utf-16-be", "surrogatepass")
@@ -127,7 +172,7 @@ class QueryAPI:
             response = build_opener(NoRedirects()).open(request, timeout=remaining)
         except HTTPError as error:
             with error:
-                request_id = error.headers.get("X-CardinalHQ-Query-Id", request_id)
+                request_id = query_id(error.headers.get("X-CardinalHQ-Query-Id"), request_id)
                 message = f"Query API returned HTTP {error.code}."
                 retry = wait = None
                 if error.code in (401, 403):
@@ -143,7 +188,7 @@ class QueryAPI:
             raise QueryError(message, retry, wait, request_id) from None
         except (ValueError, OSError, http.client.HTTPException) as error:
             raise self.failure(error, request_id) from None
-        return response, response.headers.get("X-CardinalHQ-Query-Id", request_id)
+        return response, query_id(response.headers.get("X-CardinalHQ-Query-Id"), request_id)
 
     def failure(self, error, request_id):
         """Classify a transport exception as a QueryError."""
@@ -278,8 +323,14 @@ def timestamp(value):
     return parsed.astimezone(UTC)
 
 
+def current_time():
+    # Undocumented test hook: a fixed current time.
+    value = os.environ.get("CARDINAL_QUERY_NOW", "").strip()
+    return timestamp(value) if value else datetime.now(UTC)
+
+
 def time_range(args):
-    end = timestamp(args.end) if args.end else datetime.now(UTC)
+    end = timestamp(args.end) if args.end else current_time()
     if args.start:
         start = timestamp(args.start)
     else:
@@ -297,6 +348,14 @@ def time_range(args):
 
 def iso(value):
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def iso_ms(value):
+    return iso(EPOCH + timedelta(milliseconds=value))
+
+
+def epoch_ms(value):
+    return (value - EPOCH) // timedelta(milliseconds=1)
 
 
 def logql_string(value):
@@ -354,14 +413,29 @@ def list_tags(client, args, payload):
     }
     if not scope:
         result["note"] = ("Unscoped names come from a daily rollup for the whole organization and may include "
-                          "fields with no logs in this window. Scope with --service or --label for names on "
+                          "fields with no logs in this window. Scope to a service, label or level for names on "
                           "matching rows.")
     return result
 
 
-def shorten(value):
+def shorten(value, limit=MAX_VALUE_CHARS):
     """Shorten a long value for display, counting Unicode code points."""
-    return value[:MAX_VALUE_CHARS] + "\u2026" if len(value) > MAX_VALUE_CHARS else value
+    return value[:limit] + "\u2026" if len(value) > limit else value
+
+
+def row_tags(row):
+    tags = row.get("tags")
+    return tags if isinstance(tags, dict) else {}
+
+
+def sample_of(row):
+    """An exemplar row's message and time, with the message cut to MESSAGE_CHARS code points."""
+    message = row_tags(row).get("message")
+    sample = {"message": message, "timestamp": row.get("timestamp")}
+    if isinstance(message, str) and len(message) > MESSAGE_CHARS:
+        sample["message"] = shorten(message, MESSAGE_CHARS)
+        sample["message_chars"] = len(message)
+    return sample
 
 
 def list_tag_values(client, args, payload):
@@ -402,19 +476,25 @@ def list_tag_values(client, args, payload):
         result["shortened_values"] = shortened
     if rollup:
         result["note"] = ("Unscoped values usually come from a daily rollup for the whole organization and may "
-                          "include values with no logs in this window. Scope with --service or --label for values "
-                          "on matching rows.")
+                          "include values with no logs in this window. Scope to a service, label or level for "
+                          "values on matching rows.")
     return result
 
 
-def line_filters(args, ignore_case=False):
+def filter_patterns(args, ignore_case=False):
+    """Return the include and exclude RE2 patterns for the message filters."""
     # Keep literal substring semantics across Query API token-search modes.
     flags = "is" if ignore_case else "s"
     contains = [f"(?{flags}:.*{literal_regex(value)}.*)" for value in args.contains]
     excludes = [f"(?{flags}:.*{literal_regex(value)}.*)" for value in args.not_contains]
+    return contains + args.grep, excludes + args.not_grep
+
+
+def line_filters(args, ignore_case=False):
+    includes, excludes = filter_patterns(args, ignore_case)
     return "".join(
         f" {operator} {logql_string(value)}"
-        for operator, values in (("|~", contains + args.grep), ("!~", excludes + args.not_grep))
+        for operator, values in (("|~", includes), ("!~", excludes))
         for value in values
     )
 
@@ -428,40 +508,180 @@ def fetch_logs(client, payload, selector, limit, fields=None):
     return records, query_ids
 
 
-def raw_logs(client, args, payload):
-    if args.query and (args.service or args.level or args.label):
-        raise ValueError("Put service, level and label matchers in --query when using a raw selector.")
-    if args.query and not args.query.lstrip().startswith("{"):
-        raise ValueError("--query expects a raw LogQL stream selector beginning with '{'.")
-    selector = (args.query or stream_selector(args, args.level)) + line_filters(args)
-    rows, query_ids = fetch_logs(client, payload, selector, args.limit, args.field)
-    return {
-        "query": selector,
-        "query_ids": query_ids,
-        "limit": args.limit,
-        "returned": len(rows),
-        "limit_reached": len(rows) >= args.limit,
-        "logs": rows,
-    }
+def sample_rows(client, payload, selectors, query_ids):
+    """Fetch the newest row for each selector, four at a time. Return a row, None or a QueryError for each."""
+    def one(selector):
+        try:
+            return fetch_logs(client, payload, selector, 1, ROW_FIELDS)
+        except QueryError as error:
+            return error
+
+    results = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for outcome in pool.map(one, selectors):
+            if isinstance(outcome, QueryError):
+                results.append(outcome)
+            else:
+                rows, ids = outcome
+                query_ids.extend(ids)
+                results.append(rows[0] if rows else None)
+    return results
 
 
-def issue_step(seconds):
+def command_line(command, payload, options):
+    """The exact follow-up command for this platform, with the same absolute window."""
+    words = ["python3", os.path.abspath(__file__), command, "--start", payload["s"], "--end", payload["e"]]
+    for flag, value in options:
+        words.append(flag)
+        if value is not None:
+            words.append(value)
+    return " ".join(shlex.quote(word) for word in words)
+
+
+# The stream selector at the start of a raw query, and an exact service_name matcher in it.
+SELECTOR = re.compile(r'\s*\{(?:[^}"`]|"(?:[^"\\]|\\.)*"|`[^`]*`)*\}')
+PINNED_SERVICE = re.compile(r'(?<![A-Za-z0-9_.])service_name\s*=(?![=~])')
+
+
+def pins_service(query):
+    """Whether a raw query's stream selector has an exact service_name matcher."""
+    selector = SELECTOR.match(query)
+    return bool(selector and PINNED_SERVICE.search(selector.group()))
+
+
+def with_matchers(query, matchers):
+    """Add matchers to the front of a raw stream selector."""
+    if not matchers:
+        return query
+    rest = query.lstrip()[1:]
+    separator = "" if rest.lstrip().startswith("}") else ", "
+    return "{" + ", ".join(matchers) + separator + rest
+
+
+def pattern_matchers(args, fingerprint=None, service=None):
+    """Matchers that narrow a raw query to one pattern: its fingerprint, and its service
+    unless the selector already pins one."""
+    matchers = []
+    if fingerprint:
+        matchers.append(f"chq_fingerprint={logql_string(fingerprint)}")
+    if service and not pins_service(args.query):
+        matchers.append(f"service_name={logql_string(service)}")
+    return matchers
+
+
+def log_options(args, service=None, fingerprint=None, raw=False):
+    """Options that repeat this logs search, optionally narrowed to one pattern."""
+    options = []
+    if args.query:
+        options.append(("--query", with_matchers(args.query, pattern_matchers(args, service=service))))
+    else:
+        if service or args.service:
+            options.append(("--service", service or args.service))
+        if args.level_name:
+            options.append(("--level", args.level_name))
+        options.extend(("--label", f"{key}={value}") for key, value in args.label)
+    for flag, values in (("--contains", args.contains), ("--not-contains", args.not_contains),
+                         ("--grep", args.grep), ("--not-grep", args.not_grep)):
+        options.extend((flag, value) for value in values)
+    if fingerprint or args.fingerprint:
+        options.append(("--fingerprint", fingerprint or args.fingerprint))
+    if raw:
+        options.append(("--raw", None))
+    return options
+
+
+def hint(why, *runs):
+    """A follow-up with the first run whose JSON text fits in RUN_BYTES. The last run is a short text."""
+    for run in runs:
+        if len(dumps(run)) <= RUN_BYTES:
+            break
+    return {"why": why, "run": run}
+
+
+def pattern_hint(args, payload, service, fingerprint):
+    """The drill-down into one pattern's rows."""
+    if args.query:
+        extra = ""
+        if service and not pins_service(args.query):
+            extra = f", adding service_name={logql_string(service)} to --query"
+        short = f"Run the same logs command with --fingerprint {fingerprint} --raw{extra}."
+    else:
+        extra = f" --service {shlex.quote(service)}" if service and service != args.service else ""
+        short = f"Run the same logs command with{extra} --fingerprint {fingerprint} --raw."
+    return hint("Rows for the top pattern, newest first.",
+                command_line("logs", payload, log_options(args, service, fingerprint, raw=True)), short,
+                "Run the same logs command with the top pattern's service and fingerprint, and --raw.")
+
+
+def log_selector(args, fingerprint=None, service=None):
+    if args.query:
+        return with_matchers(args.query, pattern_matchers(args, fingerprint, service))
+    scope = argparse.Namespace(service=service or args.service, label=args.label)
+    return stream_selector(scope, args.level, fingerprint)
+
+
+def count_step(seconds):
     # Conductor Explore uses these same distribution steps to bound the
     # number of buckets. The count window and step must be the same length.
     for max_minutes, step in ((30, 60), (120, 300), (480, 1200), (1440, 3600),
                               (4320, 7200), (10080, 21600)):
         if seconds <= max_minutes * 60:
             return step
-    return 86400
+    # Longer windows use whole days, at most MAX_BUCKETS of them, so trend stays bounded.
+    return 86400 * max(1, math.ceil(seconds / (86400 * MAX_BUCKETS)))
 
 
-def issue_query(selector, step):
-    return f"sum by (service_name, level, chq_fingerprint)(count_over_time({selector}[{step}s]))"
+def count_window(start, end, open_end, message):
+    """Return the bucket step, the window bounds and the end to query, in milliseconds.
+
+    The Query API stamps each bucket at its end and leaves out the bucket that straddles
+    the query end. When the window ends now, query up to the next bucket boundary so the
+    newest bucket is counted: nothing exists after now, so the counts stay exact."""
+    step = count_step((end - start).total_seconds())
+    step_ms = step * 1000
+    start_ms = epoch_ms(start)
+    end_ms = epoch_ms(end)
+    query_end_ms = -(-end_ms // step_ms) * step_ms if open_end else end_ms
+    if start_ms // step_ms == query_end_ms // step_ms:
+        raise QueryError(message)
+    return step, start_ms, end_ms, query_end_ms
 
 
-def issue_points(client, payload, selector, filters, step, query_ids):
-    query = issue_query(selector + filters, step)
-    points = client.logs({**payload, "q": query, "step": step}, query_ids)
+def bucket_note(step, start_ms, end_ms, open_end):
+    clauses = []
+    if start_ms % (step * 1000):
+        clauses.append("the bucket that straddles the start is counted in full")
+    if open_end:
+        clauses.append("the newest bucket runs to now")
+    elif end_ms % (step * 1000):
+        clauses.append("the bucket that straddles the end is left out")
+    note = f"Counts are totals in fixed {step}-second buckets"
+    if clauses:
+        note += ": " + " and ".join(clauses)
+    return note + ". first_seen and last_seen are bucket bounds. Use raw rows for exact boundaries."
+
+
+def bucket_count(point, start_ms, end_ms):
+    """Return a point's rounded count, or None outside the window or when invalid."""
+    # The Query API stamps a count_over_time point at the end of its bucket.
+    bucket = point.get("timestamp")
+    if not isinstance(bucket, (int, float)) or not start_ms < bucket <= end_ms:
+        return None
+    count = point.get("value")
+    if not isinstance(count, (int, float)) or not math.isfinite(count) or count <= 0:
+        return None
+    return round(count)
+
+
+def unfingerprinted(fingerprint):
+    return fingerprint in (None, "", 0, "0")
+
+
+def count_points(client, payload, selector, filters, step, query_ids, labels):
+    def query(pipeline):
+        return f"sum by ({', '.join(labels)})(count_over_time({pipeline}[{step}s]))"
+
+    points = client.logs({**payload, "q": query(selector + filters), "step": step}, query_ids)
     for point in points:
         yield point
         yield from points
@@ -469,94 +689,443 @@ def issue_points(client, payload, selector, filters, step, query_ids):
     if not filters:
         # An installation can have raw logs for a window with no fingerprint
         # rollups. A match-all message predicate makes the API scan raw logs.
-        query = issue_query(selector + ' |~ "(?s:.*)"', step)
-        yield from client.logs({**payload, "q": query, "step": step}, query_ids)
+        yield from client.logs({**payload, "q": query(selector + ' |~ "(?s:.*)"'), "step": step}, query_ids)
 
 
-def issue_patterns(client, args, payload, start, end):
+def log_limit(args):
+    requested = args.limit or (DEFAULT_ROWS if args.raw else DEFAULT_PATTERNS)
+    return min(requested, MAX_LOG_LIMIT), requested
+
+
+def search_logs(client, args, payload, start, end, open_end):
+    """Return the result and a follow-up to add if the output budget trims it."""
+    if args.query and (args.service or args.level or args.label):
+        raise ValueError("Put service, level and label matchers in --query when using a raw selector.")
+    if args.query and not args.query.lstrip().startswith("{"):
+        raise ValueError("--query expects a raw LogQL stream selector beginning with '{'.")
+    if args.field and args.all_fields:
+        raise ValueError("Use either --field or --all-fields.")
+    if args.field and len(args.field) > MAX_FIELDS:
+        raise ValueError(f"Use at most {MAX_FIELDS} --field options.")
+    # Projection and full messages apply to rows.
+    args.raw = args.raw or bool(args.field) or args.all_fields or args.full_message
+    limit, requested = log_limit(args)
+    filters = line_filters(args)
+    selector = log_selector(args, args.fingerprint) + filters
+    if args.raw:
+        result, budget_hint = raw_logs(client, args, payload, selector, limit)
+    else:
+        result, budget_hint = log_patterns(client, args, payload, start, end, open_end, selector, filters, limit)
+    if limit < requested:
+        result["limit_clamped_from"] = requested
+    return result, budget_hint
+
+
+def raw_logs(client, args, payload, selector, limit):
+    fields = None if args.all_fields else (args.field or list(ROW_FIELDS))
+    rows, query_ids = fetch_logs(client, payload, selector, limit, fields)
+    cap = FULL_MESSAGE_CHARS if args.full_message else MESSAGE_CHARS
+    truncated = 0
+    for row in rows:
+        tags = row_tags(row)
+        message = tags.get("message")
+        if isinstance(message, str) and len(message) > cap:
+            tags["message"] = shorten(message, cap)
+            row["message_chars"] = len(message)
+            truncated += 1
+    result = {
+        "mode": "raw",
+        "query": selector,
+        "query_ids": query_ids,
+        "fields": fields,
+        "limit": limit,
+        "returned": len(rows),
+        "limit_reached": len(rows) >= limit,
+        "logs": rows,
+    }
+    if truncated:
+        result["truncated_messages"] = truncated
+    patterns = hint("Count every match in the window by pattern.",
+                    command_line("logs", payload, log_options(args)),
+                    "Run the same logs command without --raw, --field, --all-fields or --full-message.")
+    if result["limit_reached"]:
+        result["next"] = [patterns]
+    return result, patterns
+
+
+def log_patterns(client, args, payload, start, end, open_end, selector, filters, limit):
+    step, start_ms, end_ms, query_end_ms = count_window(
+        start, end, open_end, "The window has no completed bucket for pattern counts. Use a wider window or --raw.")
+    query_ids = []
+    counts = defaultdict(int)
+    seen = {}
+    total = missing = 0
+    base = log_selector(args, args.fingerprint)
+    for point in count_points(client, dict(payload, e=iso_ms(query_end_ms)), base, filters, step, query_ids,
+                              ("service_name", "chq_fingerprint")):
+        count = bucket_count(point, start_ms, query_end_ms)
+        if count is None:
+            continue
+        total += count
+        tags = row_tags(point)
+        fingerprint = tags.get("chq_fingerprint")
+        if unfingerprinted(fingerprint):
+            missing += count
+            continue
+        key = (tags.get("service_name") or None, str(fingerprint))
+        counts[key] += count
+        first, last = seen.get(key, (point["timestamp"], point["timestamp"]))
+        seen[key] = (min(first, point["timestamp"]), max(last, point["timestamp"]))
+
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], sort_key(item[0][0] or ""), sort_key(item[0][1])))
+    patterns = []
+    for (service, fingerprint), count in ranked[:limit]:
+        first, last = seen[(service, fingerprint)]
+        patterns.append({
+            "fingerprint": fingerprint, "service": service, "count": count,
+            "first_seen": iso_ms(first - step * 1000),
+            # The newest bucket can end after now; the window ends at now.
+            "last_seen": iso_ms(min(last, end_ms)),
+        })
+
+    warnings = []
+    targets = patterns[:EXEMPLARS]
+    if targets:
+        rows = []
+        try:
+            rows, ids = fetch_logs(client, payload, selector, EXEMPLAR_ROWS, ROW_FIELDS)
+            query_ids.extend(ids)
+        except QueryError as error:
+            warnings.append(f"Could not load exemplars: {error}")
+        newest = {}
+        for row in rows:
+            tags = row_tags(row)
+            if not unfingerprinted(tags.get("chq_fingerprint")):
+                newest.setdefault((tags.get("service_name") or None, str(tags["chq_fingerprint"])), row)
+        for pattern in targets:
+            row = newest.get((pattern["service"], pattern["fingerprint"]))
+            if row:
+                pattern["exemplar"] = sample_of(row)
+        missing_rows = [pattern for pattern in targets if "exemplar" not in pattern]
+        selectors = [log_selector(args, pattern["fingerprint"], pattern["service"]) + filters
+                     for pattern in missing_rows]
+        for pattern, row in zip(missing_rows, sample_rows(client, payload, selectors, query_ids)):
+            if isinstance(row, QueryError):
+                warnings.append(f"Could not load exemplar for {pattern['fingerprint']}: {row}")
+            elif row:
+                pattern["exemplar"] = sample_of(row)
+
+    unlisted = ranked[limit:]
+    result = {
+        "mode": "patterns",
+        "query": selector,
+        "query_ids": query_ids,
+        "step_seconds": step,
+        "total": total,
+        "unfingerprinted": missing,
+        "matched_patterns": len(ranked),
+        "limit": limit,
+        "unlisted_patterns": len(unlisted),
+        "unlisted_events": sum(count for _, count in unlisted),
+        "patterns": patterns,
+        "warnings": warnings,
+        "note": bucket_note(step, start_ms, end_ms, open_end),
+    }
+    if patterns:
+        result["next"] = [pattern_hint(args, payload, patterns[0]["service"], patterns[0]["fingerprint"])]
+    elif total:
+        result["next"] = [hint("Matching rows, newest first.",
+                               command_line("logs", payload, log_options(args, raw=True)),
+                               "Run the same logs command with --raw.")]
+    return result, None
+
+
+def issue_patterns(client, args, payload, start, end, open_end):
     levels = LEVELS[args.severity] if args.severity else "|".join(LEVELS.values())
-    step = issue_step((end - start).total_seconds())
+    step, start_ms, end_ms, query_end_ms = count_window(
+        start, end, open_end, "The Issues window has no completed bucket. Use a wider window or search raw logs.")
     filters = line_filters(args, ignore_case=True)
     selector = stream_selector(args, levels, args.fingerprint)
     query_ids = []
     totals = defaultdict(int)
     services = defaultdict(lambda: dict.fromkeys(LEVELS, 0))
     trends = defaultdict(lambda: dict.fromkeys(LEVELS, 0))
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
-    step_ms = step * 1000
-    if start_ms // step_ms == end_ms // step_ms:
-        raise QueryError("The Issues window has no completed bucket. Use a wider window or search raw logs.")
 
-    for point in issue_points(client, payload, selector, filters, step, query_ids):
-        bucket_end = point["timestamp"]
-        # The Query API stamps a count_over_time point at the end of its bucket.
-        if not start_ms < bucket_end <= end_ms:
-            continue
-        tags = point["tags"]
+    for point in count_points(client, dict(payload, e=iso_ms(query_end_ms)), selector, filters, step, query_ids,
+                              ("service_name", "level", "chq_fingerprint")):
+        count = bucket_count(point, start_ms, query_end_ms)
+        tags = row_tags(point)
         service = tags.get("service_name")
         severity = str(tags.get("level", "")).lower()
         if severity == "warning":
             severity = "warn"
-        if not service or severity not in LEVELS:
+        if count is None or not service or severity not in LEVELS:
             continue
-        count = point.get("value")
-        if not isinstance(count, (int, float)) or not math.isfinite(count) or count <= 0:
-            continue
-        count = round(count)
         fingerprint = tags.get("chq_fingerprint")
-        if fingerprint not in (None, "", 0, "0"):
+        if not unfingerprinted(fingerprint):
             totals[(service, severity, str(fingerprint))] += count
         services[service][severity] += count
-        trends[bucket_end][severity] += count
+        trends[point["timestamp"]][severity] += count
 
-    ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+    ranked = sorted(totals.items(), key=lambda item: (-item[1], *(sort_key(part) for part in item[0])))
     patterns = [
         {"service": service, "severity": severity, "fingerprint": fingerprint, "count": count}
         for (service, severity, fingerprint), count in ranked[:args.limit]
     ]
 
-    def sample(pattern):
-        pattern_args = argparse.Namespace(service=pattern["service"], label=args.label)
-        selector = stream_selector(
-            pattern_args, LEVELS[pattern["severity"]], pattern["fingerprint"]
-        ) + filters
-        return fetch_logs(
-            client, payload, selector, 1,
-            ["message", "service_name", "level", "chq_fingerprint"],
-        )
-
     warnings = []
-    if args.samples:
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            samples = patterns[:args.samples]
-            for pattern, future in zip(samples, [pool.submit(sample, row) for row in samples]):
-                try:
-                    rows, sample_ids = future.result()
-                    query_ids.extend(sample_ids)
-                    if rows:
-                        row = rows[0]
-                        pattern["sample"] = {
-                            "message": row["tags"].get("message"),
-                            "timestamp": row["timestamp"],
-                        }
-                except QueryError as error:
-                    warnings.append(f"Could not load sample for {pattern['fingerprint']}: {error}")
+    samples = patterns[:args.samples]
+    selectors = [stream_selector(argparse.Namespace(service=pattern["service"], label=args.label),
+                                 LEVELS[pattern["severity"]], pattern["fingerprint"]) + filters
+                 for pattern in samples]
+    for pattern, row in zip(samples, sample_rows(client, payload, selectors, query_ids)):
+        if isinstance(row, QueryError):
+            warnings.append(f"Could not load sample for {pattern['fingerprint']}: {row}")
+        elif row:
+            pattern["sample"] = sample_of(row)
 
-    service_counts = [
-        {"service": service, **counts, "total": sum(counts.values())}
-        for service, counts in services.items()
-    ]
-    return {
+    service_counts = sorted(
+        ({"service": service, **counts, "total": sum(counts.values())} for service, counts in services.items()),
+        key=lambda row: (-row["total"], sort_key(row["service"])))
+    unlisted = ranked[args.limit:]
+    result = {
         "query_ids": query_ids,
         "step_seconds": step,
         "total": sum(row["total"] for row in service_counts),
-        "service_counts": sorted(service_counts, key=lambda row: (-row["total"], row["service"])),
+        "service_counts": service_counts[:MAX_SERVICES],
         "trend": [{"timestamp": bucket, **trends[bucket]} for bucket in sorted(trends)],
         "matched_patterns": len(ranked),
+        "unlisted_patterns": len(unlisted),
+        "unlisted_events": sum(count for _, count in unlisted),
         "patterns": patterns,
         "warnings": warnings,
     }
+    rest = service_counts[MAX_SERVICES:]
+    if rest:
+        result["service_counts_other"] = {
+            "services": len(rest), **{level: sum(row[level] for row in rest) for level in LEVELS},
+            "total": sum(row["total"] for row in rest)}
+    if patterns:
+        top = patterns[0]
+        includes, excludes = filter_patterns(args, ignore_case=True)
+        options = [("--service", top["service"]), ("--level", top["severity"])]
+        options += [("--label", f"{key}={value}") for key, value in args.label]
+        options += [("--grep", value) for value in includes] + [("--not-grep", value) for value in excludes]
+        options += [("--fingerprint", top["fingerprint"]), ("--raw", None)]
+        result["next"] = [hint(
+            "Rows for the top pattern, newest first.", command_line("logs", payload, options),
+            f"Run logs with the same window and filters and --service {shlex.quote(top['service'])} "
+            f"--level {top['severity']} --fingerprint {top['fingerprint']} --raw.",
+            "Run logs with the same window and filters and the top pattern's service, level and fingerprint, "
+            "and --raw.")]
+    return result
+
+
+def canonical(value):
+    """Sort object keys by UTF-16 code unit, as the PowerShell client's ordinal sort does."""
+    if isinstance(value, dict):
+        return {key: canonical(value[key]) for key in sorted(value, key=sort_key)}
+    if isinstance(value, list):
+        return [canonical(item) for item in value]
+    return value
+
+
+def dumps(value):
+    # ASCII-only compact JSON: the printed size in bytes equals its length.
+    return json.dumps(canonical(value), ensure_ascii=True, separators=(",", ":"))
+
+
+def escaped_bytes(char):
+    """Bytes of JSON text that dumps writes for one code point."""
+    if char in '"\\\b\f\n\r\t':
+        return 2
+    code = ord(char)
+    if 0x20 <= code < 0x7F:
+        return 1
+    return 6 if code < 0x10000 else 12
+
+
+def shorten_bytes(value, room):
+    """Shorten value so its JSON text, without quotes, is at most room bytes, ending in an ellipsis."""
+    sizes = [escaped_bytes(char) for char in value]
+    if sum(sizes) <= room:
+        return value
+    if room < 6:
+        return ""
+    used, keep = 6, 0  # The ellipsis is written as ….
+    for size in sizes:
+        if used + size > room:
+            break
+        used += size
+        keep += 1
+    return value[:keep] + "…"
+
+
+def shorten_copy(value, cap, keep, key=None):
+    """Copy value, shortening strings longer than cap code points unless their key is in keep.
+    Return the copy and the number of strings shortened."""
+    if isinstance(value, str):
+        if key not in keep and len(value) > cap:
+            return shorten(value, cap), 1
+        return value, 0
+    if isinstance(value, dict):
+        copy, count = {}, 0
+        for name, item in value.items():
+            copy[name], changed = shorten_copy(item, cap, keep, name)
+            count += changed
+        return copy, count
+    if isinstance(value, list):
+        copy, count = [], 0
+        for item in value:
+            item, changed = shorten_copy(item, cap, keep, key)
+            copy.append(item)
+            count += changed
+        return copy, count
+    return value, 0
+
+
+def default_fields(row):
+    """The row with only the default fields in its tags, or None if it has no others."""
+    tags = row.get("tags") if isinstance(row, dict) else None
+    if not isinstance(tags, dict) or all(name in ROW_FIELDS for name in tags):
+        return None
+    return dict(row, tags={name: value for name, value in tags.items() if name in ROW_FIELDS})
+
+
+def measure(result):
+    """The printed size, counting each next[].run as RUN_BYTES."""
+    hints = result.get("next")
+    if hints:
+        result = dict(result, next=[dict(item, run=RUN_PLACEHOLDER) for item in hints])
+    return len(dumps(result))
+
+
+def shorten_message(result):
+    """With --full-message, shorten the one kept row's message to fit the budget."""
+    row = result["logs"][0] if result.get("logs") else None
+    tags = row.get("tags") if isinstance(row, dict) else None
+    message = tags.get("message") if isinstance(tags, dict) else None
+    if not isinstance(message, str):
+        return
+    if "message_chars" not in row:
+        row["message_chars"] = len(message)
+        result["truncated_messages"] = result.get("truncated_messages", 0) + 1
+    result["shortened_strings"] = result.get("shortened_strings", 0) + 1
+    tags["message"] = ""
+    tags["message"] = shorten_bytes(message, OUTPUT_LIMIT - measure(result))
+
+
+def fit_output(result, budget_hint=None, full_message=False):
+    """Serialize the result within OUTPUT_LIMIT bytes.
+
+    Shorten an echoed query or scope over ECHO_BYTES. Then, only until the result fits:
+    shorten strings in lists to 200 and then 100 code points, never identifiers, and never
+    messages with --full-message; keep the leading items of each list that fit, where raw
+    rows keep only the default fields from the first row that does not fit with all of its
+    fields; with --full-message, keep the first row and shorten its message to fit."""
+    for name in ECHO_FIELDS:
+        value = result.get(name)
+        if isinstance(value, str) and len(dumps(value)) > ECHO_BYTES:
+            result[name] = shorten_bytes(value, ECHO_BYTES - 2)
+            result[name + "_chars"] = len(value)
+    if measure(result) <= OUTPUT_LIMIT:
+        return dumps(result)
+    result["budget_applied"] = True
+    if budget_hint and budget_hint not in result.get("next", []):
+        result["next"] = result.get("next", []) + [budget_hint]
+    keep = BUDGET_KEEP | {"message"} if full_message else BUDGET_KEEP
+    names = [name for name in BUDGET_LISTS if isinstance(result.get(name), list) and result[name]]
+    source = {name: result[name] for name in names}
+    rows = "logs" if result.get("mode") == "raw" and "logs" in source else None
+    cache = {}
+
+    def item(name, index, cap, strip=False):
+        """One list item shortened at cap: (value, size, strings shortened, fields dropped)."""
+        key = (name, index, cap, strip)
+        if key not in cache:
+            value = source[name][index]
+            stripped = default_fields(value) if strip else None
+            value, count = shorten_copy(stripped or value, cap, keep, name)
+            cache[key] = (value, len(dumps(value)), count, stripped is not None)
+        return cache[key]
+
+    def whole(name, cap):
+        return [item(name, index, cap) for index in range(len(source[name]))]
+
+    def size(entries):
+        return sum(entry[1] for entry in entries) + max(len(entries) - 1, 0)
+
+    # Measure everything but the list items once, with every counter at its largest value.
+    for name in names:
+        result[name] = []
+    omitted = {name: len(source[name]) for name in names}
+    if rows:
+        omitted["fields"] = len(source[rows])
+    fixed = measure(dict(result, shortened_strings=COUNTER_RESERVE, omitted=omitted))
+
+    def fits(cap):
+        total = fixed
+        for name in names:
+            for index in range(len(source[name])):
+                total += item(name, index, cap)[1] + (1 if index else 0)
+                if total > OUTPUT_LIMIT:
+                    return False
+        return True
+
+    chosen = {}
+    for cap in BUDGET_CAPS:
+        if fits(cap):
+            chosen = {name: whole(name, cap) for name in names}
+            break
+    else:
+        for position, name in enumerate(names):
+            total = fixed + sum(size(chosen[other]) for other in names[:position])
+            total += sum(size(whole(other, cap)) for other in names[position + 1:])
+            kept, strip = [], False
+            for index in range(len(source[name])):
+                comma = 1 if kept else 0
+                entry = item(name, index, cap, strip)
+                if name == rows and not strip and total + comma + entry[1] > OUTPUT_LIMIT:
+                    strip = True
+                    entry = item(name, index, cap, strip)
+                if total + comma + entry[1] > OUTPUT_LIMIT:
+                    if full_message and name == rows and not kept:
+                        kept.append(entry)
+                        total += entry[1]
+                    break
+                kept.append(entry)
+                total += comma + entry[1]
+            chosen[name] = kept
+            if total <= OUTPUT_LIMIT:
+                for other in names[position + 1:]:
+                    chosen[other] = whole(other, cap)
+                break
+
+    omitted = {}
+    shortened = 0
+    for name in names:
+        result[name] = [entry[0] for entry in chosen[name]]
+        shortened += sum(entry[2] for entry in chosen[name])
+        if len(chosen[name]) < len(source[name]):
+            omitted[name] = len(source[name]) - len(chosen[name])
+    if rows and any(entry[3] for entry in chosen[rows]):
+        omitted["fields"] = sum(1 for entry in chosen[rows] if entry[3])
+    if omitted:
+        result["omitted"] = omitted
+    if shortened:
+        result["shortened_strings"] = shortened
+    if full_message and rows and measure(result) > OUTPUT_LIMIT:
+        shorten_message(result)
+    if measure(result) > OUTPUT_LIMIT:
+        # Reached when identifiers the shrink steps never shorten (service names,
+        # fingerprints, timestamps) are too long on their own: drop every list item.
+        for name in names:
+            result[name] = []
+        result["omitted"] = {name: len(source[name]) for name in names}
+        result.pop("shortened_strings", None)
+        if measure(result) > OUTPUT_LIMIT:
+            result = {"start": result["start"], "end": result["end"], "budget_applied": True, "error": BUDGET_FAILED}
+    return dumps(result)
 
 
 def label_filter(value):
@@ -567,7 +1136,7 @@ def label_filter(value):
 
 
 def tag_name(value):
-    if not LABEL.fullmatch(value):
+    if not LABEL.fullmatch(value) or len(value) > MAX_NAME_CHARS:
         raise argparse.ArgumentTypeError("Expected a label name such as service_name or k8s_namespace_name.")
     return value
 
@@ -580,7 +1149,7 @@ def fingerprint_id(value):
 
 def positive_int(value):
     number = int(value)
-    if number <= 0:
+    if number <= 0 or number > 2147483647:
         raise argparse.ArgumentTypeError("Expected a positive integer.")
     return number
 
@@ -602,7 +1171,7 @@ def tag_value_limit(value):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    logs = commands.add_parser("logs", help="Search raw logs, newest first.")
+    logs = commands.add_parser("logs", help="Rank log patterns by count, or return raw rows with --raw.")
     issues = commands.add_parser("issues", help="Rank warning, error and fatal patterns.")
     tags = commands.add_parser("tags", help="Discover log label names to filter, group or project by.")
     values = commands.add_parser("values", help="List the values one log label takes.")
@@ -631,12 +1200,20 @@ def parse_args():
         command.add_argument("--not-contains", action="append", default=[])
         command.add_argument("--grep", action="append", default=[], help="RE2 message regex.")
         command.add_argument("--not-grep", action="append", default=[])
-        command.add_argument("--limit", type=positive_int, default=20)
+        command.add_argument("--fingerprint", type=fingerprint_id)
+    logs.add_argument("--limit", type=positive_int,
+                      help=f"Patterns (default {DEFAULT_PATTERNS}) or --raw rows (default {DEFAULT_ROWS}); "
+                           f"at most {MAX_LOG_LIMIT}.")
     logs.add_argument("--query", help="Raw LogQL stream selector and optional line filters.")
-    logs.add_argument("--field", action="append", help="Return only the specified log tag. Repeatable.")
+    logs.add_argument("--raw", action="store_true", help="Return matching rows, newest first.")
+    logs.add_argument("--field", action="append", type=tag_name,
+                      help=f"Return rows with only this log tag (implies --raw). Repeatable, up to {MAX_FIELDS}.")
+    logs.add_argument("--all-fields", action="store_true", help="Return rows with every log tag (implies --raw).")
+    logs.add_argument("--full-message", action="store_true",
+                      help=f"Return rows with messages up to {FULL_MESSAGE_CHARS} characters (implies --raw).")
     logs.add_argument("--level", choices=LEVELS, help="Filter by normalized severity.")
+    issues.add_argument("--limit", type=positive_int, default=20)
     issues.add_argument("--severity", choices=LEVELS)
-    issues.add_argument("--fingerprint", type=fingerprint_id)
     issues.add_argument("--samples", type=int, default=5, help="Load exemplars for the first N patterns (0–20).")
     args = parser.parse_args()
     if args.command == "issues" and not 0 <= args.samples <= 20:
@@ -654,18 +1231,23 @@ def main():
         if "\r" in key or "\n" in key:
             raise QueryError("CARDINAL_QUERY_API_KEY must be a single line.")
         start, end = time_range(args)
+        # Without --end the window ends now, and counts include the newest, partial bucket.
+        open_end = not args.end
         client = QueryAPI(url, key, args.timeout, args.retries)
         payload = {"s": iso(start), "e": iso(end)}
+        budget_hint = None
+        full_message = False
         if args.command == "logs":
-            args.level = LEVELS.get(args.level)
-            result = raw_logs(client, args, payload)
+            args.level_name, args.level = args.level, LEVELS.get(args.level)
+            result, budget_hint = search_logs(client, args, payload, start, end, open_end)
+            full_message = args.full_message
         elif args.command == "tags":
             result = list_tags(client, args, payload)
         elif args.command == "values":
             result = list_tag_values(client, args, payload)
         else:
-            result = issue_patterns(client, args, payload, start, end)
-        print(json.dumps({"start": payload["s"], "end": payload["e"], **result}, ensure_ascii=True))
+            result = issue_patterns(client, args, payload, start, end, open_end)
+        print(fit_output({"start": payload["s"], "end": payload["e"], **result}, budget_hint, full_message))
     except (QueryError, ValueError, OverflowError, KeyError, TypeError) as error:
         print(f"cardinal-query: {error}", file=sys.stderr)
         return 1

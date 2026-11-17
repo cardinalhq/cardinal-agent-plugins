@@ -47,9 +47,9 @@ For a private Query API, run the web agent in an environment that can reach your
 
 ## Try it
 
-Ask Copilot “Use cardinal-query to find checkout logs containing timeout in the last 30 minutes.” Then ask “Show the top Cardinal Issues for checkout in the same window, grouped by severity and recurring pattern.” To check what you can filter on, ask “Which log labels does checkout have, and what values does k8s_namespace_name take?”
+Ask Copilot “Use cardinal-query to find the top checkout log patterns containing timeout in the last 30 minutes, then show the newest rows for the top pattern.” Then ask “Show the top Cardinal Issues for checkout in the same window, grouped by severity and recurring pattern.” To check what you can filter on, ask “Which log labels does checkout have, and what values does k8s_namespace_name take?”
 
-With the variables set, you can also run the same commands directly from the repository root. From Windows PowerShell 5.1:
+With the variables set, you can also run the same commands directly from the repository root. `logs` ranks matching log patterns with counts for the whole window; add `-Raw` or `--raw` for individual rows. From Windows PowerShell 5.1:
 
 ```powershell
 & '.\.github\skills\cardinal-query\scripts\cardinal_query.ps1' logs -Service checkout -Since 30m -Contains timeout
